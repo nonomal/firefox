@@ -12,12 +12,10 @@ import mozilla.components.support.test.any
 import mozilla.components.support.test.argumentCaptor
 import mozilla.components.support.test.mock
 import mozilla.components.support.test.robolectric.testContext
-import mozilla.components.support.test.rule.MainCoroutineRule
 import mozilla.components.support.test.whenever
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.spy
@@ -27,9 +25,6 @@ import org.mockito.Mockito.verify
 @RunWith(AndroidJUnit4::class)
 class UnsupportedAddonsAdapterTest {
 
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
-
     @Test
     fun `removing successfully notifies the adapter item changed`() {
         val addonManager: AddonManager = mock()
@@ -38,13 +33,14 @@ class UnsupportedAddonsAdapterTest {
         val addonTwo = Addon("id2")
         val unsupportedAddons = listOf(addonOne, addonTwo)
 
-        val adapter = spy(
-            UnsupportedAddonsAdapter(
-                addonManager,
-                unsupportedAddonsAdapterDelegate,
-                unsupportedAddons,
-            ),
-        )
+        val adapter =
+            spy(
+                UnsupportedAddonsAdapter(
+                    addonManager,
+                    unsupportedAddonsAdapterDelegate,
+                    unsupportedAddons,
+                )
+            )
 
         adapter.removeUninstalledAddon(addonOne)
         verify(unsupportedAddonsAdapterDelegate, times(1)).onUninstallSuccess()
@@ -64,33 +60,37 @@ class UnsupportedAddonsAdapterTest {
     @Test
     fun `uninstalling action disables all remove buttons`() {
         val removeButtonOne = ImageButton(testContext)
-        val unsupportedViewHolderOne = UnsupportedAddonsAdapter.UnsupportedAddonViewHolder(
-            view = mock(),
-            iconView = mock(),
-            titleView = mock(),
-            removeButton = removeButtonOne,
-        )
+        val unsupportedViewHolderOne =
+            UnsupportedAddonsAdapter.UnsupportedAddonViewHolder(
+                view = mock(),
+                iconView = mock(),
+                titleView = mock(),
+                removeButton = removeButtonOne,
+            )
         val removeButtonTwo = ImageButton(testContext)
-        val unsupportedViewHolderTwo = UnsupportedAddonsAdapter.UnsupportedAddonViewHolder(
-            view = mock(),
-            iconView = mock(),
-            titleView = mock(),
-            removeButton = removeButtonTwo,
-        )
+        val unsupportedViewHolderTwo =
+            UnsupportedAddonsAdapter.UnsupportedAddonViewHolder(
+                view = mock(),
+                iconView = mock(),
+                titleView = mock(),
+                removeButton = removeButtonTwo,
+            )
         val addonManager: AddonManager = mock()
         val addonOne = Addon("id1")
         val addonTwo = Addon("id2")
-        val unsupportedAddons = mapOf(
-            unsupportedViewHolderOne to addonOne,
-            unsupportedViewHolderTwo to addonTwo,
-        )
-        val adapter = spy(
-            UnsupportedAddonsAdapter(
-                addonManager,
-                mock(),
-                unsupportedAddons.values.toList(),
-            ),
-        )
+        val unsupportedAddons =
+            mapOf(
+                unsupportedViewHolderOne to addonOne,
+                unsupportedViewHolderTwo to addonTwo,
+            )
+        val adapter =
+            spy(
+                UnsupportedAddonsAdapter(
+                    addonManager,
+                    mock(),
+                    unsupportedAddons.values.toList(),
+                )
+            )
 
         // mock the adapter.notifyDataSetChanged() behavior
         whenever(adapter.notifyDataSetChanged()).thenAnswer {

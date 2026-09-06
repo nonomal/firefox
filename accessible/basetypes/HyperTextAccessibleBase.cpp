@@ -1,14 +1,13 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "HyperTextAccessibleBase.h"
 
-#include "mozilla/a11y/Accessible.h"
-#include "nsAccUtils.h"
 #include "TextLeafRange.h"
 #include "TextRange.h"
+#include "mozilla/a11y/Accessible.h"
+#include "nsAccUtils.h"
 
 namespace mozilla::a11y {
 
@@ -640,12 +639,21 @@ int32_t HyperTextAccessibleBase::CaretLineNumber() {
     return -1;
   }
 
-  TextLeafPoint firstPointInThis = TextLeafPoint(Acc(), 0);
-  int32_t lineNumber = 1;
-  for (TextLeafPoint line = point; line && firstPointInThis < line;
+  // Walk forward by line from the start of the container.
+  TextLeafPoint line = TextLeafPoint(Acc(), 0);
+  int32_t lineNumber = 0;
+  for (; line && line < point;
        line = line.FindBoundary(nsIAccessibleText::BOUNDARY_LINE_START,
-                                eDirPrevious)) {
-    lineNumber++;
+                                eDirNext)) {
+    ++lineNumber;
+  }
+  // The caret might be right at the start of a line, in which case we should
+  // increment the line number. We shouldn't do that if the caret is at the end
+  // of a line or container, though.
+  if (line == point && !point.mIsEndOfLineInsertionPoint &&
+      point.mOffset <
+          static_cast<int32_t>(nsAccUtils::TextLength(point.mAcc))) {
+    ++lineNumber;
   }
 
   return lineNumber;

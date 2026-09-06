@@ -7,6 +7,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BackupService: "resource:///modules/backup/BackupService.sys.mjs",
   ERRORS: "chrome://browser/content/backup/backup-constants.mjs",
+  E10SUtils: "resource://gre/modules/E10SUtils.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", function () {
@@ -34,6 +35,13 @@ export class BackupUIParent extends JSWindowActorParent {
   #bs;
 
   /**
+   * Observer for "backup-service-status-updated" notifications.
+   * We want each BackupUIParent actor instance to be notified separately and
+   * to forward the state to its child.
+   */
+  #obs;
+
+  /**
    * Create a BackupUIParent instance. If a BackupUIParent is instantiated
    * before BrowserGlue has a chance to initialize the BackupService, this
    * constructor will cause it to initialize first.
@@ -44,6 +52,13 @@ export class BackupUIParent extends JSWindowActorParent {
     // about:preferences before the service has had a chance to init itself
     // via BrowserGlue.
     this.#bs = lazy.BackupService.init();
+
+    // Define the observer function to capture our this.
+    this.#obs = (_subject, topic) => {
+      if (topic == "backup-service-status-updated") {
+        this.sendState();
+      }
+    };
   }
 
   /**
@@ -51,7 +66,7 @@ export class BackupUIParent extends JSWindowActorParent {
    */
   actorCreated() {
     this.#bs.addEventListener("BackupService:StateUpdate", this);
-    Services.obs.addObserver(this.sendState, "backup-service-status-updated");
+    Services.obs.addObserver(this.#obs, "backup-service-status-updated");
     // Note that loadEncryptionState is an async function.
     // This function is no-op if the encryption state was already loaded.
     this.#bs.loadEncryptionState();
@@ -62,10 +77,7 @@ export class BackupUIParent extends JSWindowActorParent {
    */
   didDestroy() {
     this.#bs.removeEventListener("BackupService:StateUpdate", this);
-    Services.obs.removeObserver(
-      this.sendState,
-      "backup-service-status-updated"
-    );
+    Services.obs.removeObserver(this.#obs, "backup-service-status-updated");
   }
 
   /**
@@ -110,15 +122,48 @@ export class BackupUIParent extends JSWindowActorParent {
    *   Returns either a success object, a file details object, or null.
    */
   async receiveMessage(message) {
+    let windowGlobal = this.manager;
+    // The backup spotlights can be embedded in less privileged content pages, so let's
+    // make sure that any messages from content are coming from the privileged
+    // about content process type
+    if (
+      !windowGlobal ||
+      (!windowGlobal.isInProcess &&
+        windowGlobal.remoteType != lazy.E10SUtils.PRIVILEGEDABOUT_REMOTE_TYPE)
+    ) {
+      lazy.logConsole.debug(
+        "BackupUIParent: received message from the wrong content process type."
+      );
+      return null;
+    }
+
     if (message.name == "RequestState") {
       this.sendState();
     } else if (message.name == "TriggerCreateBackup") {
       return await this.#triggerCreateBackup({ reason: "manual" });
     } else if (message.name == "EnableScheduledBackups") {
       try {
-        let { parentDirPath, password } = message.data;
-        if (parentDirPath) {
-          this.#bs.setParentDirPath(parentDirPath);
+        let { password, source } = message.data;
+
+        // Persist the default backup directory path to the pref if the user
+        // hasn't explicitly chosen one. We do this here rather than in
+        // actorCreated() to avoid mutating the browser.backup.location pref
+        // as a side effect of opening about:preferences.
+        if (!this.#bs.state.backupDirPath) {
+          let defaultPath = lazy.BackupService.DEFAULT_PARENT_DIR_PATH;
+          if (defaultPath) {
+            await this.#bs.setParentDirPath(defaultPath);
+          }
+        }
+
+        if (!this.#bs.state.backupDirPath) {
+          lazy.logConsole.error(
+            "No backup directory path set when enabling scheduled backups."
+          );
+          return {
+            success: false,
+            errorCode: lazy.ERRORS.UNKNOWN,
+          };
         }
 
         if (password) {
@@ -131,23 +176,22 @@ export class BackupUIParent extends JSWindowActorParent {
           await this.#bs.enableEncryption(password);
           Glean.browserBackup.passwordAdded.record();
         }
-        this.#bs.setScheduledBackups(true);
+        this.#bs.setScheduledBackups(true, source);
       } catch (e) {
         lazy.logConsole.error(`Failed to enable scheduled backups`, e);
         return { success: false, errorCode: e.cause || lazy.ERRORS.UNKNOWN };
       }
-      /**
-       * TODO: (Bug 1900125) we should create a backup at the specified dir path once we turn on
-       * scheduled backups. The backup folder in the chosen directory should contain
-       * the archive file, which we create using BackupService.createArchive implemented in
-       * Bug 1897498.
-       */
+
+      // Don't block the return on createBackup
+      this.#triggerCreateBackup({ reason: "first" });
       return { success: true };
     } else if (message.name == "DisableScheduledBackups") {
+      let { source } = message.data;
       await this.#bs.cleanupBackupFiles();
-      this.#bs.setScheduledBackups(false);
+      this.#bs.setScheduledBackups(false, source);
     } else if (message.name == "ShowFilepicker") {
-      let { win, filter, existingBackupPath } = message.data;
+      let { win, filter, existingBackupPath, alsoDeleteLastBackup } =
+        message.data;
 
       let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
 
@@ -162,12 +206,16 @@ export class BackupUIParent extends JSWindowActorParent {
 
       if (existingBackupPath) {
         try {
-          let folder = (await IOUtils.getFile(existingBackupPath)).parent;
-          if (folder.exists()) {
-            fp.displayDirectory = folder;
+          let parentPath = PathUtils.parent(existingBackupPath);
+          if (await IOUtils.exists(parentPath)) {
+            let dir = Cc["@mozilla.org/file/local;1"].createInstance(
+              Ci.nsIFile
+            );
+            dir.initWithPath(parentPath);
+            fp.displayDirectory = dir;
           }
         } catch (_) {
-          // If the file can not be found we will skip setting the displayDirectory.
+          // If the path isn't valid, don't bother setting the displayDirectory.
         }
       }
 
@@ -181,30 +229,75 @@ export class BackupUIParent extends JSWindowActorParent {
       let iconURL = this.#bs.getIconFromFilePath(path);
       let filename = PathUtils.filename(path);
 
+      if (filter) {
+        // Strictly update path picked from the file picker. No other message actions
+        // should be able to set the backup file to restore path.
+        this.#bs.setBackupFileToRestore(path);
+      } else {
+        if (alsoDeleteLastBackup) {
+          try {
+            await this.#bs.deleteLastBackup();
+          } catch (e) {
+            lazy.logConsole.error(
+              "Error deleting last backup while editing the backup location.",
+              e
+            );
+          }
+        }
+        await this.#bs.setParentDirPath(path);
+      }
+
       return {
         path,
         filename,
         iconURL,
       };
     } else if (message.name == "GetBackupFileInfo") {
-      let { backupFile } = message.data;
-      try {
-        await this.#bs.getBackupFileInfo(backupFile);
-      } catch (e) {
-        /**
-         * TODO: (Bug 1905156) display a localized version of error in the restore dialog.
-         */
+      let backupFile = this.#bs.state.backupFileToRestore;
+      if (backupFile) {
+        try {
+          await this.#bs.loadBackupFileInfo(backupFile);
+        } catch (e) {
+          /**
+           * TODO: (Bug 1905156) display a localized version of error in the restore dialog.
+           */
+        }
       }
+    } else if (message.name == "FindBackupsInWellKnownLocations") {
+      let { source } = message.data;
+      await this.#bs.findBackupsInWellKnownLocations({
+        source,
+      });
+    } else if (message.name == "ProbeDefaultBackupDir") {
+      let readAccessGranted = await this.#bs.probeDefaultDirAccess(
+        this.#bs.state.embeddedComponentPersistentData?.path || undefined
+      );
+      return { readAccessGranted };
+    } else if (message.name == "PrepareRestoreDialog") {
+      let { source } = message.data;
+      let result = await this.#bs.findBackupsInWellKnownLocations({
+        source,
+      });
+      return result;
     } else if (message.name == "RestoreFromBackupChooseFile") {
       const window = this.browsingContext.topChromeWindow;
       this.#bs.filePickerForRestore(window);
     } else if (message.name == "RestoreFromBackupFile") {
-      let { backupFile, backupPassword } = message.data;
+      let { backupPassword, restoreType, source } = message.data;
+      let backupFile = this.#bs.state.backupFileToRestore;
+      if (!backupFile) {
+        lazy.logConsole.error("No backup file to restore from in state.");
+        return { success: false, errorCode: lazy.ERRORS.UNKNOWN };
+      }
       try {
         await this.#bs.recoverFromBackupArchive(
           backupFile,
           backupPassword,
-          true /* shouldLaunch */
+          true /* shouldLaunchOrQuit */,
+          undefined,
+          undefined,
+          restoreType === "replace" /* replaceCurrentProfile */,
+          source
         );
       } catch (e) {
         lazy.logConsole.error(`Failed to restore file: ${backupFile}`, e);
@@ -214,8 +307,13 @@ export class BackupUIParent extends JSWindowActorParent {
       return { success: true };
     } else if (message.name == "EnableEncryption") {
       try {
+        let wasEncrypted = this.#bs.state.encryptionEnabled;
         await this.#bs.enableEncryption(message.data.password);
-        Glean.browserBackup.passwordAdded.record();
+        if (wasEncrypted) {
+          Glean.browserBackup.passwordChanged.record();
+        } else {
+          Glean.browserBackup.passwordAdded.record();
+        }
       } catch (e) {
         lazy.logConsole.error(`Failed to enable encryption`, e);
         return { success: false, errorCode: e.cause || lazy.ERRORS.UNKNOWN };
@@ -232,24 +330,8 @@ export class BackupUIParent extends JSWindowActorParent {
       }
 
       return await this.#triggerCreateBackup({ reason: "encryption" });
-    } else if (message.name == "RerunEncryption") {
-      try {
-        let { password } = message.data;
-
-        await this.#bs.disableEncryption();
-        await this.#bs.enableEncryption(password);
-        Glean.browserBackup.passwordChanged.record();
-      } catch (e) {
-        lazy.logConsole.error(`Failed to rerun encryption`, e);
-        return { success: false, errorCode: e.cause || lazy.ERRORS.UNKNOWN };
-      }
-
-      return await this.#triggerCreateBackup({ reason: "encryption" });
     } else if (message.name == "ShowBackupLocation") {
       this.#bs.showBackupLocation();
-    } else if (message.name == "EditBackupLocation") {
-      const window = this.browsingContext.topChromeWindow;
-      this.#bs.editBackupLocation(window);
     } else if (message.name == "QuitCurrentProfile") {
       // Notify windows that a quit has been requested.
       let cancelQuit = Cc["@mozilla.org/supports-PRBool;1"].createInstance(

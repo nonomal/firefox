@@ -1,5 +1,4 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -55,7 +54,7 @@ var gPageStyleMenu = {
         menuItem.setAttribute("type", "radio");
         menuItem.setAttribute("label", currentStyleSheet.title);
         menuItem.setAttribute("data", currentStyleSheet.title);
-        menuItem.setAttribute(
+        menuItem.toggleAttribute(
           "checked",
           !currentStyleSheet.disabled && !styleDisabled
         );
@@ -69,8 +68,11 @@ var gPageStyleMenu = {
       }
     }
 
-    noStyle.setAttribute("checked", styleDisabled);
-    persistentOnly.setAttribute("checked", !altStyleSelected && !styleDisabled);
+    noStyle.toggleAttribute("checked", styleDisabled);
+    persistentOnly.toggleAttribute(
+      "checked",
+      !altStyleSelected && !styleDisabled
+    );
     persistentOnly.hidden = styleSheetInfo.preferredStyleSheetSet
       ? haveAltSheets
       : false;

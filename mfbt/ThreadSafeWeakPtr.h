@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -245,9 +243,7 @@ class ThreadSafeWeakPtr {
   // that any future upgrade will be successful.
   bool IsDead() const { return IsNull() || size_t(mRef->mStrongCnt) == 0; }
 
-  bool operator==(const ThreadSafeWeakPtr& aOther) const {
-    return mRef == aOther.mRef;
-  }
+  bool operator==(const ThreadSafeWeakPtr& aOther) const = default;
 
   bool operator==(const RefPtr<T>& aOther) const {
     return *this == aOther.get();

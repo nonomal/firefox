@@ -12,11 +12,11 @@
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <utility>
 
 #include "absl/functional/any_invocable.h"
-#include "api/array_view.h"
 #include "api/audio_options.h"
 #include "api/call/transport.h"
 #include "api/media_stream_interface.h"
@@ -174,14 +174,14 @@ MediaChannelUtil::TransportForMediaChannels::TranslatePacketOptions(
   rtc_options.info_signaled_after_sent.included_in_allocation =
       options.included_in_allocation;
   rtc_options.info_signaled_after_sent.is_media = options.is_media;
-  rtc_options.ecn_1 = options.send_as_ect1;
+  rtc_options.ect_1 = options.send_as_ect1;
   rtc_options.batchable = options.batchable;
   rtc_options.last_packet_in_batch = options.last_packet_in_batch;
   return rtc_options;
 }
 
 bool MediaChannelUtil::TransportForMediaChannels::SendRtcp(
-    ArrayView<const uint8_t> packet,
+    std::span<const uint8_t> packet,
     const PacketOptions& options) {
   auto send = [this, packet = CopyOnWriteBuffer(packet, kMaxRtpPacketLen),
                options]() mutable {
@@ -197,7 +197,7 @@ bool MediaChannelUtil::TransportForMediaChannels::SendRtcp(
 }
 
 bool MediaChannelUtil::TransportForMediaChannels::SendRtp(
-    ArrayView<const uint8_t> packet,
+    std::span<const uint8_t> packet,
     const PacketOptions& options) {
   auto send = [this, packet = CopyOnWriteBuffer(packet, kMaxRtpPacketLen),
                options]() mutable {

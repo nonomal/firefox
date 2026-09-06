@@ -158,7 +158,7 @@ def vendor(
         new_files_only,
     )
 
-    sys.exit(0)
+    return 0
 
 
 def check_modified_files(command_context):
@@ -178,9 +178,7 @@ def check_modified_files(command_context):
 {files}
 
 Please commit or stash these changes before vendoring, or re-run with `--ignore-modified`.
-""".format(
-                files="\n".join(sorted(modified))
-            ),
+""".format(files="\n".join(sorted(modified))),
         )
         sys.exit(1)
 

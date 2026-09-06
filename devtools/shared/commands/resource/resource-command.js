@@ -12,6 +12,13 @@ function cacheKey(resourceType, resourceId) {
   return `${resourceType}:${resourceId}`;
 }
 
+loader.lazyGetter(this, "logger", function () {
+  return console.createInstance({
+    prefix: "devtools_resourcecommand",
+    maxLogLevel: "Warn",
+  });
+});
+
 class ResourceCommand {
   #destroyed = false;
 
@@ -190,6 +197,8 @@ class ResourceCommand {
       }
     }
 
+    logger.debug("Start watching: " + resources.join(", "));
+
     // Copy the array in order to avoid the callsite to modify the list of watched resources by mutating the array.
     // You have to call (un)watchResources to update the list of resources being watched!
     resources = [...resources];
@@ -294,6 +303,8 @@ class ResourceCommand {
         );
       }
     }
+
+    logger.debug("Stop watching: " + resources.join(", "));
 
     // Unregister the callbacks from the watchers registries.
     // Check _watchers for the fully initialized watchers, as well as
@@ -703,6 +714,10 @@ class ResourceCommand {
           resource.resourceId = `auto:${++gLastResourceId}`;
         }
 
+        logger.debug(
+          `Received resource available from backend: type=${resource.resourceType}, resourceId=${resource.resourceId}`
+        );
+
         // Only consider top level document, and ignore remote iframes top document
         let isWillNavigate = false;
         if (resourceType == DOCUMENT_EVENT) {
@@ -831,6 +846,10 @@ class ResourceCommand {
         nestedResourceUpdates,
       } = update;
 
+      logger.debug(
+        `Received resource update from backend: type=${resourceType}, resourceId=${resourceId}`
+      );
+
       if (!resourceId) {
         console.warn(`Expected resource ${resourceType} to have a resourceId`);
       }
@@ -871,15 +890,13 @@ class ResourceCommand {
       }
 
       if (nestedResourceUpdates) {
-        for (const { path, value } of nestedResourceUpdates) {
-          let target = existingResource;
-
-          for (let i = 0; i < path.length - 1; i++) {
-            target = target[path[i]];
-          }
-
-          target[path[path.length - 1]] = value;
+        const processor = NestedUpdateProcessors[resourceType];
+        if (!processor) {
+          throw new Error(
+            `Receiving 'nestedResourceUpdates' without any processor for this resource type '${resourceType}'`
+          );
         }
+        processor({ resource: existingResource, nestedResourceUpdates });
       }
       this._queueResourceEvent("updated", resourceType, [
         {
@@ -908,6 +925,10 @@ class ResourceCommand {
   async _onResourceDestroyed({ targetFront }, resources) {
     for (const resource of resources) {
       const { resourceType, resourceId } = resource;
+      logger.debug(
+        `Received resource destroyed from backend: type=${resourceType}, resourceId=${resourceId}`
+      );
+
       this._cache.delete(cacheKey(resourceType, resourceId));
       if (!resource.targetFront) {
         resource.targetFront = targetFront;
@@ -941,6 +962,15 @@ class ResourceCommand {
     for (const watcherEntry of this._watchers) {
       const { onAvailable, onUpdated, onDestroyed, pendingEvents } =
         watcherEntry;
+
+      if (!pendingEvents.length) {
+        // Bail out early if there are no events to handle.
+        continue;
+      }
+
+      logger.debug(
+        `Notify a ResourceCommand listener for ${pendingEvents.length} pendingEvents`
+      );
       // Immediately clear the buffer in order to avoid possible races, where an event listener
       // would end up somehow adding a new throttled resource
       watcherEntry.pendingEvents = [];
@@ -1286,7 +1316,9 @@ ResourceCommand.TYPES = ResourceCommand.prototype.TYPES = {
   ROOT_NODE: "root-node",
   STYLESHEET: "stylesheet",
   NETWORK_EVENT: "network-event",
+  NETWORK_EVENT_DECODED_BODY_SIZE: "network-event-decoded-body-size",
   WEBSOCKET: "websocket",
+  WEBTRANSPORT: "webtransport",
   COOKIE: "cookies",
   LOCAL_STORAGE: "local-storage",
   SESSION_STORAGE: "session-storage",
@@ -1300,6 +1332,7 @@ ResourceCommand.TYPES = ResourceCommand.prototype.TYPES = {
   JSTRACER_TRACE: "jstracer-trace",
   JSTRACER_STATE: "jstracer-state",
   SERVER_SENT_EVENT: "server-sent-event",
+  SESSION_HISTORY: "session-history",
   LAST_PRIVATE_CONTEXT_EXIT: "last-private-context-exit",
 };
 ResourceCommand.ALL_TYPES = ResourceCommand.prototype.ALL_TYPES = Object.values(
@@ -1443,4 +1476,14 @@ loader.lazyRequireGetter(
   ResourceTransformers,
   ResourceCommand.TYPES.THREAD_STATE,
   "resource://devtools/shared/commands/resource/transformers/thread-states.js"
+);
+
+// Mandatory modules for any ressource using "nestedResourceUpdates",
+// to validate and apply the update packet.
+const NestedUpdateProcessors = {};
+
+loader.lazyRequireGetter(
+  NestedUpdateProcessors,
+  ResourceCommand.TYPES.STYLESHEET,
+  "resource://devtools/shared/commands/resource/nested-update-processors/stylesheet.js"
 );

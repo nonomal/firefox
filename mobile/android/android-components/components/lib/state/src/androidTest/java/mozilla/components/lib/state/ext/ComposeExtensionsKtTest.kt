@@ -4,7 +4,9 @@
 
 package mozilla.components.lib.state.ext
 
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import kotlinx.coroutines.flow.map
 import mozilla.components.lib.state.Action
 import mozilla.components.lib.state.State
 import mozilla.components.lib.state.Store
@@ -13,15 +15,15 @@ import org.junit.Rule
 import org.junit.Test
 
 class ComposeExtensionsKtTest {
-    @get:Rule
-    val rule = createComposeRule()
+    @get:Rule val rule = createComposeRule()
 
     @Test
     fun usingInitialValue() {
-        val store = Store(
-            initialState = TestState(counter = 42),
-            reducer = ::reducer,
-        )
+        val store =
+            Store(
+                initialState = TestState(counter = 42),
+                reducer = ::reducer,
+            )
 
         var value: Int? = null
 
@@ -35,10 +37,11 @@ class ComposeExtensionsKtTest {
 
     @Test
     fun receivingUpdates() {
-        val store = Store(
-            initialState = TestState(counter = 42),
-            reducer = ::reducer,
-        )
+        val store =
+            Store(
+                initialState = TestState(counter = 42),
+                reducer = ::reducer,
+            )
 
         var value: Int? = null
 
@@ -58,18 +61,17 @@ class ComposeExtensionsKtTest {
     fun usingInitialValueWithUpdates() {
         val loading = "Loading"
         val content = "Content"
-        val store = Store(
-            initialState = TestState(counter = 0),
-            reducer = ::reducer,
-        )
+        val store =
+            Store(
+                initialState = TestState(counter = 0),
+                reducer = ::reducer,
+            )
 
         val value = mutableListOf<String>()
+        val mappedFlow = store.stateFlow.map { if (it.counter < 5) loading else content }
 
         rule.setContent {
-            val composeState = store.observeAsState(
-                initialValue = loading,
-                map = { if (it.counter < 5) loading else content },
-            )
+            val composeState = mappedFlow.collectAsState(initial = loading)
             value.add(composeState.value)
         }
 
@@ -100,18 +102,20 @@ class ComposeExtensionsKtTest {
 
     @Test
     fun receivingUpdatesForPartialStateUpdateOnly() {
-        val store = Store(
-            initialState = TestState(counter = 42),
-            reducer = ::reducer,
-        )
+        val store =
+            Store(
+                initialState = TestState(counter = 42),
+                reducer = ::reducer,
+            )
 
         var value: Int? = null
 
         rule.setContent {
-            val composeState = store.observeAsComposableState(
-                map = { state -> state.counter * 2 },
-                observe = { state -> state.text },
-            )
+            val composeState =
+                store.observeAsComposableState(
+                    map = { state -> state.counter * 2 },
+                    observe = { state -> state.text },
+                )
             value = composeState.value
         }
 
@@ -154,12 +158,13 @@ class ComposeExtensionsKtTest {
     }
 }
 
-fun reducer(state: TestState, action: TestAction): TestState = when (action) {
-    is TestAction.IncrementAction -> state.copy(counter = state.counter + 1)
-    is TestAction.DecrementAction -> state.copy(counter = state.counter - 1)
-    is TestAction.SetValueAction -> state.copy(counter = action.value)
-    is TestAction.SetTextAction -> state.copy(text = action.text)
-}
+fun reducer(state: TestState, action: TestAction): TestState =
+    when (action) {
+        is TestAction.IncrementAction -> state.copy(counter = state.counter + 1)
+        is TestAction.DecrementAction -> state.copy(counter = state.counter - 1)
+        is TestAction.SetValueAction -> state.copy(counter = action.value)
+        is TestAction.SetTextAction -> state.copy(text = action.text)
+    }
 
 data class TestState(
     val counter: Int,
@@ -168,7 +173,10 @@ data class TestState(
 
 sealed class TestAction : Action {
     object IncrementAction : TestAction()
+
     object DecrementAction : TestAction()
+
     data class SetValueAction(val value: Int) : TestAction()
+
     data class SetTextAction(val text: String) : TestAction()
 }

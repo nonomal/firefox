@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -29,7 +28,9 @@
 #include "nsIWeakReferenceUtils.h"
 #include "nsQueryObject.h"
 
+#include "nsGlobalWindowOuter.h"
 #include "nsPIDOMWindow.h"
+#include "nsPIDOMWindowInlines.h"
 
 #include "nsIStringBundle.h"
 
@@ -74,18 +75,6 @@ void GetURIStringFromRequest(nsIRequest* request, nsACString& name) {
 }
 #endif /* DEBUG */
 
-void nsDocLoader::RequestInfoHashInitEntry(PLDHashEntryHdr* entry,
-                                           const void* key) {
-  // Initialize the entry with placement new
-  new (entry) nsRequestInfo(key);
-}
-
-void nsDocLoader::RequestInfoHashClearEntry(PLDHashTable* table,
-                                            PLDHashEntryHdr* entry) {
-  nsRequestInfo* info = static_cast<nsRequestInfo*>(entry);
-  info->~nsRequestInfo();
-}
-
 // this is used for mListenerInfoList.Contains()
 template <>
 class nsDefaultComparator<nsDocLoader::nsListenerInfo,
@@ -102,11 +91,6 @@ class nsDefaultComparator<nsDocLoader::nsListenerInfo,
 // Localization for "netwerk/necko.ftl" status messages
 static mozilla::StaticRefPtr<mozilla::intl::Localization> sL10n;
 
-/* static */ const PLDHashTableOps nsDocLoader::sRequestInfoHashOps = {
-    PLDHashTable::HashVoidPtrKeyStub, PLDHashTable::MatchEntryStub,
-    PLDHashTable::MoveEntryStub, nsDocLoader::RequestInfoHashClearEntry,
-    nsDocLoader::RequestInfoHashInitEntry};
-
 nsDocLoader::nsDocLoader(bool aNotifyAboutBackgroundRequests)
     : mParent(nullptr),
       mProgressStateFlags(0),
@@ -114,7 +98,6 @@ nsDocLoader::nsDocLoader(bool aNotifyAboutBackgroundRequests)
       mMaxSelfProgress(0),
       mCurrentTotalProgress(0),
       mMaxTotalProgress(0),
-      mRequestInfoHash(&sRequestInfoHashOps, sizeof(nsRequestInfo)),
       mCompletedTotalProgress(0),
       mIsLoadingDocument(false),
       mIsRestoringDocument(false),
@@ -133,7 +116,7 @@ nsresult nsDocLoader::SetDocLoaderParent(nsDocLoader* aParent) {
 }
 
 nsresult nsDocLoader::Init() {
-  RefPtr<net::nsLoadGroup> loadGroup = new net::nsLoadGroup();
+  RefPtr loadGroup = MakeRefPtr<net::nsLoadGroup>();
   nsresult rv = loadGroup->Init();
   if (NS_FAILED(rv)) return rv;
 
@@ -149,7 +132,7 @@ nsresult nsDocLoader::Init() {
 
 nsresult nsDocLoader::InitWithBrowsingContext(
     BrowsingContext* aBrowsingContext) {
-  RefPtr<net::nsLoadGroup> loadGroup = new net::nsLoadGroup();
+  RefPtr loadGroup = MakeRefPtr<net::nsLoadGroup>();
   if (!aBrowsingContext->GetRequestContextId()) {
     return NS_ERROR_NOT_AVAILABLE;
   }
@@ -756,8 +739,12 @@ void nsDocLoader::DocLoaderIsEmpty(bool aFlushLayout,
        alive long enough to survive this function call. */
     nsCOMPtr<nsIDocumentLoader> kungFuDeathGrip(this);
 
+    nsCOMPtr<Document> doc = do_GetInterface(GetAsSupports(this));
+    const bool forceInitialSyncLoad = doc && doc->ShouldForceInitialSyncLoad();
+    MOZ_ASSERT_IF(forceInitialSyncLoad, !mIsFlushingLayout);
+
     // Don't flush layout if we're still busy.
-    if (IsBusy()) {
+    if (IsBusy() && !forceInitialSyncLoad) {
       return;
     }
 
@@ -792,8 +779,10 @@ void nsDocLoader::DocLoaderIsEmpty(bool aFlushLayout,
     //
     // Note, mDocumentRequest can be null while mDocumentOpenedButNotLoaded is
     // false if the flushing above re-entered this method.
-    if (IsBusy() || (!mDocumentRequest && !mDocumentOpenedButNotLoaded &&
-                     !mIsLoadingJavascriptURI)) {
+    const bool hasActiveLoad = mDocumentRequest ||
+                               mDocumentOpenedButNotLoaded ||
+                               mIsLoadingJavascriptURI;
+    if ((IsBusy() && !forceInitialSyncLoad) || !hasActiveLoad) {
       return;
     }
 
@@ -1576,10 +1565,7 @@ bool nsDocLoader::RefreshAttempted(nsIWebProgress* aWebProgress, nsIURI* aURI,
 }
 
 nsresult nsDocLoader::AddRequestInfo(nsIRequest* aRequest) {
-  if (!mRequestInfoHash.Add(aRequest, mozilla::fallible)) {
-    return NS_ERROR_OUT_OF_MEMORY;
-  }
-
+  mRequestInfoHash.LookupOrInsert(aRequest);
   return NS_OK;
 }
 
@@ -1589,20 +1575,18 @@ void nsDocLoader::RemoveRequestInfo(nsIRequest* aRequest) {
 
 nsDocLoader::nsRequestInfo* nsDocLoader::GetRequestInfo(
     nsIRequest* aRequest) const {
-  return static_cast<nsRequestInfo*>(mRequestInfoHash.Search(aRequest));
+  return mRequestInfoHash.Lookup(aRequest).DataPtrOrNull();
 }
 
 void nsDocLoader::ClearRequestInfoHash(void) { mRequestInfoHash.Clear(); }
 
 int64_t nsDocLoader::CalculateMaxProgress() {
   int64_t max = mCompletedTotalProgress;
-  for (auto iter = mRequestInfoHash.Iter(); !iter.Done(); iter.Next()) {
-    auto info = static_cast<const nsRequestInfo*>(iter.Get());
-
-    if (info->mMaxProgress < info->mCurrentProgress) {
+  for (const nsRequestInfo& info : mRequestInfoHash.Values()) {
+    if (info.mMaxProgress < info.mCurrentProgress) {
       return int64_t(-1);
     }
-    max += info->mMaxProgress;
+    max += info.mMaxProgress;
   }
   return max;
 }

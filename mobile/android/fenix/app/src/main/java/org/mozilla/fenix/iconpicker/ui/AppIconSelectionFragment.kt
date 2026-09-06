@@ -4,6 +4,7 @@
 
 package org.mozilla.fenix.iconpicker.ui
 
+import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.os.Build
 import android.os.Bundle
@@ -15,24 +16,26 @@ import androidx.navigation.fragment.findNavController
 import mozilla.components.lib.state.helpers.StoreProvider.Companion.storeProvider
 import mozilla.components.support.base.feature.UserInteractionHandler
 import org.mozilla.fenix.R
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.iconpicker.AppIconMiddleware
 import org.mozilla.fenix.iconpicker.AppIconRepository
 import org.mozilla.fenix.iconpicker.AppIconState
 import org.mozilla.fenix.iconpicker.AppIconStore
+import org.mozilla.fenix.iconpicker.AppIconTelemetryMiddleware
 import org.mozilla.fenix.iconpicker.AppIconUpdater
 import org.mozilla.fenix.iconpicker.DefaultAppIconRepository
 import org.mozilla.fenix.iconpicker.DefaultPackageManagerWrapper
+import org.mozilla.fenix.iconpicker.SearchWidgetsUpdater
 import org.mozilla.fenix.theme.FirefoxTheme
 import org.mozilla.fenix.utils.ShortcutManagerWrapperDefault
 import org.mozilla.fenix.utils.ShortcutsUpdaterDefault
 import org.mozilla.fenix.utils.changeAppLauncherIcon
+import org.mozilla.gecko.search.SearchWidgetProvider
 
-/**
- * Fragment that displays a list of alternative app icons.
- */
-class AppIconSelectionFragment : Fragment(), UserInteractionHandler {
+/** Fragment that displays a list of alternative app icons. */
+class AppIconSelectionFragment : Fragment(), UserInteractionHandler, SystemInsetsPaddedFragment {
 
     private val appIconRepository: AppIconRepository by lazy {
         DefaultAppIconRepository(
@@ -48,19 +51,25 @@ class AppIconSelectionFragment : Fragment(), UserInteractionHandler {
     ) = content {
         FirefoxTheme {
             AppIconSelection(
-                store = storeProvider.get { restoredState ->
-                    AppIconStore(
-                        initialState = restoredState ?: AppIconState(
-                            currentAppIcon = appIconRepository.selectedAppIcon,
-                            groupedIconOptions = appIconRepository.groupedAppIcons,
-                        ),
-                        middleware = listOf(
-                            AppIconMiddleware(
-                                updateAppIcon = updateAppIcon(),
-                            ),
-                        ),
-                    )
-                },
+                store =
+                    storeProvider.get { restoredState ->
+                        AppIconStore(
+                            initialState =
+                                restoredState
+                                    ?: AppIconState(
+                                        currentAppIcon = appIconRepository.selectedAppIcon,
+                                        groupedIconOptions = appIconRepository.groupedAppIcons,
+                                    ),
+                            middleware =
+                                listOf(
+                                    AppIconMiddleware(
+                                        updateAppIcon = updateAppIcon(),
+                                        updateSearchWidgets = updateSearchWidgets(),
+                                    ),
+                                    AppIconTelemetryMiddleware(),
+                                ),
+                        )
+                    },
                 shortcutRemovalWarning = { shouldWarnAboutShortcutRemoval() },
             )
         }
@@ -77,6 +86,11 @@ class AppIconSelectionFragment : Fragment(), UserInteractionHandler {
                 crashReporter = components.analytics.crashReporter,
             )
         }
+    }
+
+    private fun updateSearchWidgets(): SearchWidgetsUpdater = SearchWidgetsUpdater {
+        val appWidgetManager = AppWidgetManager.getInstance(requireContext())
+        SearchWidgetProvider.updateAllWidgets(requireContext(), appWidgetManager)
     }
 
     private fun shouldWarnAboutShortcutRemoval(): Boolean {

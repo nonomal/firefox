@@ -41,8 +41,8 @@ tbody tr {
 }
 
 tbody tr:hover {
-  background-color: var(--in-content-item-hover);
-  color: var(--in-content-item-hover-text);
+  background-color: var(--background-color-list-item-hover);
+  color: var(--text-color-list-item-hover);
 }
 
 th,
@@ -113,7 +113,9 @@ tbody:nth-child(4n + 1) {
 
 .content-style {
   background-color: var(--background-color-box);
-  color: var(--blue-50);
+  /* In lieu of syntax highlighting, the code contents are given their own text color. */
+  /* stylelint-disable-next-line stylelint-plugin-mozilla/no-base-design-tokens */
+  color: var(--color-blue-50);
 }
 
 tbody.collapsible td {
@@ -145,4 +147,15 @@ tbody.collapsible td {
 .no-specified-policies-message,
 .inactive-service-message {
   padding: 1rem;
+}
+
+/*
+ * A policy whose name is flagged in the Active tab was only partially
+ * applied: at least one of its operations failed. The Errors tab has the
+ * details.
+ */
+.policy-failure-marker {
+  color: var(--text-color-deemphasized);
+  display: block;
+  font-size: smaller;
 }

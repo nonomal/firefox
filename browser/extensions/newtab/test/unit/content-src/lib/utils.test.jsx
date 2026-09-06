@@ -4,8 +4,9 @@ import {
   useIntersectionObserver,
   getActiveCardSize,
   getActiveColumnLayout,
+  getCardColumn,
+  getNovaColumnLayout,
   useConfetti,
-  selectWeatherPlacement,
 } from "content-src/lib/utils.jsx";
 
 // Test component to use the useIntersectionObserver
@@ -136,11 +137,6 @@ describe("getActiveCardSize", () => {
     assert.equal(result, "medium-card");
   });
 
-  it("returns 'medium-card' for col-1-small at 500px (edge case)", () => {
-    const result = getActiveCardSize(500, "col-1-small col-1-position-0", true);
-    assert.equal(result, "medium-card");
-  });
-
   it("returns null when no matching card type is found (edge case)", () => {
     const result = getActiveCardSize(
       1200,
@@ -164,6 +160,126 @@ describe("getActiveCardSize", () => {
     const result = getActiveCardSize(null, null, false, 123);
     assert.equal(result, "spoc");
   });
+
+  it("uses columnLayout override instead of screenWidth when provided", () => {
+    const result = getActiveCardSize(
+      1400,
+      "col-4-large col-3-medium col-2-small col-1-small",
+      true,
+      null,
+      "col-3"
+    );
+    assert.equal(result, "medium-card");
+  });
+
+  it("returns correct size with columnLayout and no screenWidth", () => {
+    const result = getActiveCardSize(
+      null,
+      "col-3-large col-2-medium col-1-small",
+      true,
+      null,
+      "col-3"
+    );
+    assert.equal(result, "large-card");
+  });
+});
+
+describe("getNovaColumnLayout", () => {
+  it("returns null when el is null", () => {
+    assert.isNull(getNovaColumnLayout(null));
+  });
+
+  it("returns null when --sections-col-count is not set", () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    assert.isNull(getNovaColumnLayout(el));
+    el.remove();
+  });
+
+  it("returns the correct col-N string when --sections-col-count is set", () => {
+    const el = document.createElement("div");
+    el.style.setProperty("--sections-col-count", "3");
+    document.body.appendChild(el);
+    assert.equal(getNovaColumnLayout(el), "col-3");
+    el.remove();
+  });
+});
+
+describe("getCardColumn", () => {
+  const COL_WIDTH = 100;
+  const GAP = 10;
+  let grid;
+
+  function buildGrid(columnCount) {
+    grid = document.createElement("div");
+    grid.className = "ds-section-grid";
+    grid.style.display = "grid";
+    grid.style.gridTemplateColumns = `repeat(${columnCount}, ${COL_WIDTH}px)`;
+    grid.style.gap = `${GAP}px`;
+    grid.style.width = `${columnCount * COL_WIDTH + (columnCount - 1) * GAP}px`;
+    grid.style.setProperty("--sections-col-count", `${columnCount}`);
+    document.body.appendChild(grid);
+    return grid;
+  }
+
+  function addCard(span = 1) {
+    const card = document.createElement("article");
+    card.style.gridColumn = `span ${span}`;
+    card.style.height = "20px";
+    grid.appendChild(card);
+    return card;
+  }
+
+  afterEach(() => {
+    grid?.remove();
+    grid = null;
+    document.dir = "ltr";
+  });
+
+  it("returns null for a card with no layout", () => {
+    buildGrid(4);
+    const card = addCard();
+    card.style.display = "none";
+    assert.isNull(getCardColumn(card));
+  });
+
+  it("reports each column across a full row", () => {
+    buildGrid(4);
+    const cards = [addCard(), addCard(), addCard(), addCard()];
+    assert.deepEqual(
+      cards.map(card => getCardColumn(card)),
+      [1, 2, 3, 4]
+    );
+  });
+
+  it("reports the leftmost column for a card spanning several", () => {
+    buildGrid(4);
+    const wide = addCard(2);
+    const next = addCard();
+    const last = addCard();
+    assert.equal(getCardColumn(wide), 1);
+    assert.equal(getCardColumn(next), 3);
+    assert.equal(getCardColumn(last), 4);
+  });
+
+  it("counts columns from the inline start under RTL", () => {
+    document.dir = "rtl";
+    buildGrid(3);
+    const cards = [addCard(), addCard(), addCard()];
+    assert.deepEqual(
+      cards.map(card => getCardColumn(card)),
+      [1, 2, 3]
+    );
+  });
+
+  it("resolves the grid item from an element inside the card", () => {
+    buildGrid(2);
+    addCard();
+    const card = addCard();
+    const inner = document.createElement("span");
+    card.appendChild(inner);
+    assert.equal(getCardColumn(inner), 2);
+  });
 });
 
 describe("getActiveColumnLayout", () => {
@@ -184,6 +300,11 @@ describe("getActiveColumnLayout", () => {
 
   it("returns 'col-1' for screen width 500", () => {
     const result = getActiveColumnLayout(500);
+    assert.equal(result, "col-1");
+  });
+
+  it("returns 'col-1' when screen width is missing", () => {
+    const result = getActiveColumnLayout(undefined);
     assert.equal(result, "col-1");
   });
 });
@@ -249,107 +370,5 @@ describe("useConfetti hook", () => {
     assert.ok(fakeContext.clearRect.notCalled);
     assert.ok(fakeContext.fillRect.notCalled);
     assert.ok(rafStub.notCalled);
-  });
-});
-
-describe("selectWeatherPlacement", () => {
-  // literal URL used inside the selector
-  const FEED_URL =
-    "https://merino.services.mozilla.com/api/v1/curated-recommendations";
-
-  function mockState({
-    placement,
-    pocketEnabled = true,
-    systemEnabled = true,
-    dailyBriefEnabled = true,
-    sectionId = "daily_brief",
-    blocked = false,
-    sections = [
-      { sectionKey: "daily_brief", receivedRank: 0 },
-      { sectionKey: "other", receivedRank: 1 },
-    ],
-  } = {}) {
-    return {
-      Prefs: {
-        values: {
-          // intent pref
-          "weather.placement": placement,
-          // story feed prefs used by selector in this file
-          "feeds.section.topstories": pocketEnabled,
-          "feeds.system.topstories": systemEnabled,
-          // daily brief prefs; selector uses trainhopConfig first, falls back to these
-          "discoverystream.dailyBrief.enabled": dailyBriefEnabled,
-          "discoverystream.dailyBrief.sectionId": sectionId,
-          // include trainhopConfig for parity with production (optional)
-          trainhopConfig: {
-            dailyBriefing: {
-              enabled: dailyBriefEnabled,
-              sectionId,
-            },
-          },
-        },
-      },
-      DiscoveryStream: {
-        sectionPersonalization: {
-          [sectionId]: { isBlocked: blocked },
-        },
-        feeds: {
-          data: {
-            [FEED_URL]: {
-              data: { sections },
-            },
-          },
-        },
-      },
-    };
-  }
-
-  it("returns 'header' when placement pref is missing or 'header'", () => {
-    const invalidPlacement = mockState({ placement: undefined });
-
-    console.log(
-      "TESTSTATE: ",
-      invalidPlacement.Prefs.values["weather.placement"]
-    );
-    const headerPLacement = mockState({ placement: "header" });
-    assert.equal(selectWeatherPlacement(invalidPlacement), "header");
-    assert.equal(selectWeatherPlacement(headerPLacement), "header");
-  });
-
-  it("returns 'section' when placement is 'section' and daily brief is enabled, unblocked, and at top", () => {
-    const state = mockState({ placement: "section" });
-    assert.equal(selectWeatherPlacement(state), "section");
-  });
-
-  it("returns 'header' when DB section is not at the top (receivedRank !== 0 || index !== 0)", () => {
-    const state = mockState({
-      placement: "section",
-      sections: [
-        { sectionKey: "other", receivedRank: 0 },
-        { sectionKey: "daily_brief", receivedRank: 1 },
-      ],
-    });
-    assert.equal(selectWeatherPlacement(state), "header");
-  });
-
-  it("returns 'header' when DB section is blocked", () => {
-    const state = mockState({ blocked: true, placement: "section" });
-    assert.equal(selectWeatherPlacement(state), "header");
-  });
-
-  it("returns 'header' when Pocket/topstories is disabled", () => {
-    const state = mockState({
-      placement: "section",
-      pocketEnabled: false,
-    });
-    assert.equal(selectWeatherPlacement(state), "header");
-  });
-
-  it("returns 'header' when sections have not loaded yet", () => {
-    const state = mockState({
-      placement: "section",
-      sections: [], // simulate no feed yet
-    });
-    assert.equal(selectWeatherPlacement(state), "header");
   });
 });

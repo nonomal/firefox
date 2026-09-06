@@ -27,7 +27,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import org.mozilla.fenix.R
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.theme.FirefoxTheme
 
 /**
@@ -58,18 +58,15 @@ fun ExpandableListHeader(
     actions: @Composable () -> Unit = {},
 ) {
     Row(
-        modifier = when (onClick != null) {
-            true -> Modifier.clickable { onClick() }
-            false -> Modifier
-        }.then(
-            Modifier.fillMaxWidth(),
-        ),
+        modifier =
+            when (onClick != null) {
+                true -> Modifier.clickable { onClick() }
+                false -> Modifier
+            }.then(Modifier.fillMaxWidth()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
-            modifier = Modifier
-                .weight(1f)
-                .padding(contentPadding),
+            modifier = Modifier.weight(1f).padding(contentPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -85,14 +82,21 @@ fun ExpandableListHeader(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 Icon(
-                    painter = painterResource(
-                        if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
-                    ),
-                    contentDescription = if (expanded) {
-                        collapseActionContentDescription
-                    } else {
-                        expandActionContentDescription
-                    },
+                    painter =
+                        painterResource(
+                            id =
+                                if (expanded) {
+                                    iconsR.drawable.mozac_ic_chevron_up_24
+                                } else {
+                                    iconsR.drawable.mozac_ic_chevron_down_24
+                                }
+                        ),
+                    contentDescription =
+                        if (expanded) {
+                            collapseActionContentDescription
+                        } else {
+                            expandActionContentDescription
+                        },
                     modifier = Modifier.size(20.dp),
                     tint = iconTint,
                 )
@@ -136,12 +140,12 @@ private fun HeaderWithClickableIconPreview() {
         Box(Modifier.background(MaterialTheme.colorScheme.surface)) {
             ExpandableListHeader(headerText = "Section title") {
                 Box(
-                    modifier = Modifier
-                        .clickable(onClick = { println("delete clicked") })
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    modifier =
+                        Modifier.clickable(onClick = { println("delete clicked") })
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_delete),
+                        painter = painterResource(iconsR.drawable.mozac_ic_delete_24),
                         contentDescription = "click me",
                         modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -162,12 +166,12 @@ private fun CollapsibleHeaderWithClickableIconPreview() {
                 expanded = true,
             ) {
                 Box(
-                    modifier = Modifier
-                        .clickable(onClick = { println("delete clicked") })
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    modifier =
+                        Modifier.clickable(onClick = { println("delete clicked") })
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_delete),
+                        painter = painterResource(iconsR.drawable.mozac_ic_delete_24),
                         contentDescription = "click me",
                         modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,

@@ -1,14 +1,12 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "mozilla/dom/ReadableByteStreamController.h"
-
 #include <algorithm>  // std::min
 
 #include "ReadIntoRequest.h"
+#include "ReadableByteStreamControllerAbstract.h"
+#include "ReadableStreamAbstract.h"
 #include "js/ArrayBuffer.h"
 #include "js/ErrorReport.h"
 #include "js/Exception.h"
@@ -25,7 +23,6 @@
 #include "mozilla/dom/Promise-inl.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/ReadableByteStreamControllerBinding.h"
-#include "mozilla/dom/ReadableStream.h"
 #include "mozilla/dom/ReadableStreamBYOBReader.h"
 #include "mozilla/dom/ReadableStreamBYOBRequest.h"
 #include "mozilla/dom/ReadableStreamControllerBase.h"
@@ -829,6 +826,10 @@ MOZ_CAN_RUN_SCRIPT void ReadableByteStreamControllerFillReadRequestFromQueue(
   // byte offset, entry’s byte length »).
   aRv.MightThrowJSException();
   JS::Rooted<JSObject*> buffer(aCx, entry->Buffer());
+  if (!JS_WrapObject(aCx, &buffer)) {
+    aRv.StealExceptionFromJSContext(aCx);
+    return;
+  }
   JS::Rooted<JSObject*> view(
       aCx, JS_NewUint8ArrayWithBuffer(aCx, buffer, entry->ByteOffset(),
                                       int64_t(entry->ByteLength())));
@@ -1448,14 +1449,15 @@ static void ReadableByteStreamControllerRespondInReadableState(
       return;
     }
 
+    RefPtr<ReadableStream> stream(aController->Stream());
+
     // Step 3.3. For each filledPullInto of filledPullIntos,
     for (auto& filledPullInto : filledPullIntos) {
       // Step 3.3.1. Perform !
       // ReadableByteStreamControllerCommitPullIntoDescriptor(controller.[[stream]],
       // filledPullInto).
       ReadableByteStreamControllerCommitPullIntoDescriptor(
-          aCx, MOZ_KnownLive(aController->Stream()),
-          MOZ_KnownLive(filledPullInto), aRv);
+          aCx, stream, MOZ_KnownLive(filledPullInto), aRv);
       if (aRv.Failed()) {
         return;
       }

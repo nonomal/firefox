@@ -32,6 +32,7 @@ task-defaults:
               type: directory
     run-on-repo-type: [hg]
     run:
+        clone-with: hg
         using: mozharness
         script: "mozharness/scripts/fx_desktop_build.py"
         secrets: true
@@ -41,6 +42,8 @@ task-defaults:
         toolchain:
             - android-ndk-linux
             - android-sdk-linux
+            - linux64-embedded-uniffi-bindgen
+            - linux64-nimbus-fml
             - linux64-jdk
             - linux64-rust-android
             - linux64-rust-size

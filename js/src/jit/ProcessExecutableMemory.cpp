@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -17,7 +15,6 @@
 #include <errno.h>
 
 #include "jsfriendapi.h"
-#include "jsmath.h"
 
 #include "gc/Memory.h"
 #include "jit/FlushICache.h"  // js::jit::FlushICache
@@ -26,6 +23,7 @@
 #include "threading/Mutex.h"
 #include "util/Memory.h"
 #include "util/Poison.h"
+#include "util/RandomSeed.h"
 #include "util/WindowsWrapper.h"
 #include "vm/MutexIDs.h"
 
@@ -44,10 +42,6 @@
 
 #ifdef MOZ_VALGRIND
 #  include <valgrind/valgrind.h>
-#endif
-
-#if defined(XP_IOS)
-#  include <BrowserEngineCore/BEMemory.h>
 #endif
 
 using namespace js;
@@ -998,22 +992,14 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
   return true;
 }
 
-#ifdef JS_USE_APPLE_FAST_WX
+#if defined(JS_USE_APPLE_FAST_WX) && !defined(XP_IOS)
 void js::jit::AutoMarkJitCodeWritableForThread::markExecutable(
     bool executable) {
-#  if defined(XP_IOS)
-  if (executable) {
-    be_memory_inline_jit_restrict_rwx_to_rx_with_witness();
-  } else {
-    be_memory_inline_jit_restrict_rwx_to_rw_with_witness();
-  }
-#  else
   if (__builtin_available(macOS 11.0, *)) {
     pthread_jit_write_protect_np(executable);
   } else {
     MOZ_CRASH("pthread_jit_write_protect_np must be available");
   }
-#  endif
 }
 #endif
 

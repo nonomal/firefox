@@ -7,6 +7,7 @@ import { HeuristicsRegExp } from "resource://gre/modules/shared/HeuristicsRegExp
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
+  AutofillDataTypes: "resource://gre/modules/shared/AutofillDataTypes.sys.mjs",
   CreditCard: "resource://gre/modules/CreditCard.sys.mjs",
   CreditCardRulesets: "resource://gre/modules/shared/CreditCardRuleset.sys.mjs",
   FieldDetail: "resource://gre/modules/shared/FieldScanner.sys.mjs",
@@ -28,6 +29,27 @@ const MULTI_N_FIELD_NAMES = {
 const CC_TYPE = 1;
 const ADDR_TYPE = 2;
 
+// Regular expression to match a word of text.
+const WORD_RE = /\s*([\p{L}\p{N}]+)/u;
+
+const ADJACENT_BEFORE_PREFIX = "bb";
+const ADJACENT_AFTER_PREFIX = "aa";
+
+// Max characters kept from each side of a <select>'s option-value range token
+// (see tokenizeSelectOptionRange).
+const SELECT_OPTION_RANGE_MAX = 16;
+
+// Only emit a "**maxlen<N>" token for explicit small maxlength values (below
+// this cap); larger/unset limits carry little field-type signal and add noise
+// (see tokenizeInputAttributes).
+const INPUT_MAXLENGTH_CAP = 16;
+
+// A "pattern" made only of a digit character class plus quantifiers/anchors is
+// treated as a numeric hint; a bare "{N}" quantifier gives a fixed length. Any
+// other (rarer) pattern is ignored.
+const DIGIT_PATTERN_RE =
+  /^\^?(?:\\d|\[0-9\]|\[\\d\])(?:(\{(\d+)(?:,\d*)?\})|[+*])?\$?$/;
+
 /**
  * Returns the autocomplete information of fields according to heuristics.
  */
@@ -37,6 +59,10 @@ export const FormAutofillHeuristics = {
 
   CREDIT_CARD_FIELDNAMES: [],
   ADDRESS_FIELDNAMES: [],
+  PASSPORT_FIELDNAMES: [],
+
+  useTestYear: null, // set by tests to the current year to use
+
   /**
    * Try to find a contiguous sub-array within an array.
    *
@@ -104,7 +130,7 @@ export const FormAutofillHeuristics = {
     const options = [...element.options];
     // A normal expiration year select should contain at least the last three years
     // in the list.
-    const curYear = new Date().getFullYear();
+    const curYear = this.useTestYear || new Date().getFullYear();
     const desiredValues = Array(3)
       .fill(0)
       .map((v, i) => v + curYear + i);
@@ -347,15 +373,25 @@ export const FormAutofillHeuristics = {
       }
     }
 
-    // If the previous parsed field is a "tel" field, run heuristic to see
-    // if the current field is a "tel-extension" field
     const field = scanner.getFieldDetailByIndex(scanner.parsingIndex);
-    if (field && field.reason != "autocomplete") {
+    if (field) {
       const prev = scanner.getFieldDetailByIndex(scanner.parsingIndex - 1);
+
+      // If there is a country code, then the next field should be
+      // 'tel-national' not 'tel'.
       if (
-        prev &&
-        lazy.FormAutofillUtils.getCategoryFromFieldName(prev.fieldName) == "tel"
+        prev?.fieldName == "tel-country-code" &&
+        field.fieldName == "tel" &&
+        field.reason != "autocomplete"
       ) {
+        scanner.updateFieldName(scanner.parsingIndex, "tel-national");
+        scanner.parsingIndex++;
+      } else if (
+        prev &&
+        lazy.AutofillDataTypes.fieldToSubCategory[prev.fieldName] == "tel"
+      ) {
+        // If the previous parsed field is a "tel" field, run heuristic to see
+        // if the current field is a "tel-extension" field
         const regExpTelExtension = new RegExp(
           "\\bext|ext\\b|extension|ramal", // pt-BR, pt-PT
           "iug"
@@ -382,6 +418,14 @@ export const FormAutofillHeuristics = {
   _parseHouseNumberFields(scanner, fieldDetail) {
     if (fieldDetail?.fieldName == "address-housenumber") {
       const savedIndex = scanner.parsingIndex;
+
+      // A house number suffix immediately afterwards implies that this
+      // really is a house number field.
+      const nextDetail = scanner.getFieldDetailByIndex(savedIndex + 1);
+      if (nextDetail?.fieldName == "address-extra-housesuffix") {
+        return false;
+      }
+
       for (let idx = 0; !scanner.parsingFinished; idx++) {
         const detail = scanner.getFieldDetailByIndex(idx);
         if (!detail) {
@@ -429,6 +473,7 @@ export const FormAutofillHeuristics = {
     // during the update.
     const fields = [];
     const fieldIndicies = [];
+
     for (let idx = scanner.parsingIndex; !scanner.parsingFinished; idx++) {
       const detail = scanner.getFieldDetailByIndex(idx);
 
@@ -450,6 +495,7 @@ export const FormAutofillHeuristics = {
 
       if (detail?.isLookup) {
         lookupFieldsCount++;
+
         continue; // Skip address lookup fields
       }
 
@@ -497,7 +543,15 @@ export const FormAutofillHeuristics = {
             }
           }
 
-          if (canUpdate) {
+          // If the address-line1 field was not found, we promote `address-line2`
+          // to `address-line1`. If the address-line1 field is a lookup field, we don't
+          // want to promote another field since it does exist but is not fillable.
+          if (
+            canUpdate &&
+            !scanner.getFieldsMatching(
+              field => field.fieldName == "address-line1" && field.isLookup
+            ).length
+          ) {
             scanner.updateFieldName(fieldIndicies[0], "address-line1");
           }
         }
@@ -618,7 +672,7 @@ export const FormAutofillHeuristics = {
     for (let idx = scanner.parsingIndex - 1; ; idx--) {
       const detail = scanner.getFieldDetailByIndex(idx);
       if (
-        lazy.FormAutofillUtils.getCategoryFromFieldName(detail?.fieldName) !=
+        lazy.AutofillDataTypes.fieldToSubCategory[detail?.fieldName] !=
         "creditCard"
       ) {
         break;
@@ -723,7 +777,7 @@ export const FormAutofillHeuristics = {
     for (let idx = scanner.parsingIndex - 1; ; idx--) {
       const detail = scanner.getFieldDetailByIndex(idx);
       if (
-        lazy.FormAutofillUtils.getCategoryFromFieldName(detail?.fieldName) !=
+        lazy.AutofillDataTypes.fieldToSubCategory[detail?.fieldName] !=
         "creditCard"
       ) {
         break;
@@ -739,12 +793,12 @@ export const FormAutofillHeuristics = {
         // For updates we only check subsequent fields that are not of type address or do not have an
         // alternative field name that is of type address, to avoid falsely updating address
         // form name fields to cc-*-name.
-        lazy.FormAutofillUtils.getCategoryFromFieldName(detail?.fieldName) !=
+        lazy.AutofillDataTypes.fieldToSubCategory[detail?.fieldName] !=
           "creditCard" ||
         (detail?.alternativeFieldName !== undefined &&
-          lazy.FormAutofillUtils.getCategoryFromFieldName(
+          lazy.AutofillDataTypes.fieldToSubCategory[
             detail?.alternativeFieldName
-          ) != "creditCard")
+          ] != "creditCard")
       ) {
         break;
       }
@@ -823,6 +877,198 @@ export const FormAutofillHeuristics = {
     }
   },
 
+  //
+  // Functions related to ML inference
+  //
+
+  tokenizeWords(text, words) {
+    if (!text) {
+      return;
+    }
+
+    text = text.toLowerCase().replace(/\s+/g, " ");
+
+    let match = text.match(WORD_RE);
+    if (!match) {
+      return;
+    }
+
+    while (match) {
+      let word = match[1];
+      // Ignore short words
+      if (word.length >= 3) {
+        words.push(word);
+      }
+
+      text = text.substring(match.index + match[0].length);
+      match = text.match(WORD_RE);
+    }
+  },
+
+  splitMixedCase(text) {
+    // For ids and names, we try to split mixed case words
+    // (such as addressLine) into two separate words.
+    return text.replaceAll(/([\p{Lower}\p{N}]*)(\p{Upper}*)/gu, "$1 $2");
+  },
+
+  tokenizeAttributes(element, words) {
+    //    stringText.add(element.autocompleteInfo.fieldName, prefix);
+    this.tokenizeWords(this.splitMixedCase(element.id), words);
+    this.tokenizeWords(this.splitMixedCase(element.name), words);
+    this.tokenizeWords(element.placeholder, words);
+
+    const labels = this._getElementLabelStrings(element);
+    for (const label of labels) {
+      this.tokenizeWords(label, words);
+    }
+
+    let elementType = element.type;
+    if (elementType != "text") {
+      words.push("**" + elementType);
+    }
+
+    const features = FormAutofill.mlFeatures;
+    if (features.has("select_option")) {
+      this.tokenizeSelectOptionRange(element, words);
+    }
+
+    if (features.has("input_attributes")) {
+      this.tokenizeInputAttributes(element, words);
+    }
+  },
+
+  /**
+   * Append discrete input-attribute tokens that carry field-type signal but are
+   * otherwise lost by word tokenization: a small explicit maxlength and a
+   * non-text inputmode. The most common digit-only "pattern" values are mapped
+   * onto these two signals (numeric inputmode, plus a fixed {N} length when
+   * maxlength is not set); rarer patterns are ignored. Especially useful for the
+   * split telephone subfields (area code=3, prefix=3, suffix=4, country code).
+   *
+   * @param {Element} element The field element being tokenized.
+   * @param {Array<string>} words The token list to append to.
+   */
+  tokenizeInputAttributes(element, words) {
+    // maxLength is -1 when unset (and undefined for elements without it).
+    let maxLength = element.maxLength;
+    // inputMode reflects the inputmode content attribute ("" when unset).
+    let inputMode = (element.inputMode || "").toLowerCase();
+
+    // Map the common digit-only patterns onto inputmode/maxLength; ignore the
+    // rest so we don't emit noisy free-form pattern tokens.
+    const pattern = element.getAttribute?.("pattern")?.trim();
+    if (pattern) {
+      const match = pattern.match(DIGIT_PATTERN_RE);
+      if (match) {
+        if (!inputMode) {
+          inputMode = "numeric";
+        }
+        // A fixed "{N}" length fills in for a missing maxlength attribute.
+        if (match[2] && !(maxLength > 0)) {
+          maxLength = parseInt(match[2], 10);
+        }
+      }
+    }
+
+    if (inputMode && inputMode != "text") {
+      words.push("**inputmode" + inputMode);
+    }
+
+    if (maxLength > 0 && maxLength < INPUT_MAXLENGTH_CAP) {
+      words.push("**maxlen" + maxLength);
+    }
+  },
+
+  /**
+   * For a <select>, append a single token describing its option-value range:
+   * "<first>...<last>", built from each option's visible text (falling back to
+   * its value), lowercased and truncated to SELECT_OPTION_RANGE_MAX chars per
+   * side. This surfaces the field's value domain (e.g. a month dropdown ->
+   * "1...12") in the exported mlData. No-op for non-selects or empty selects.
+   *
+   * @param {Element} element The field element being tokenized.
+   * @param {Array<string>} words The token list to append to.
+   */
+  tokenizeSelectOptionRange(element, words) {
+    if (!HTMLSelectElement.isInstance(element)) {
+      return;
+    }
+    const options = element.options;
+    if (!options?.length) {
+      return;
+    }
+    // Collapse all internal whitespace so the range stays a single token: the
+    // aa/bb neighbor-context system space-joins and re-splits token lists, so a
+    // token containing a space would fragment (and lose its prefix) in
+    // neighbors' context.
+    const label = option =>
+      (option?.text || option?.value || "")
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .slice(0, SELECT_OPTION_RANGE_MAX);
+    // Skip leading/trailing options that are blank after normalization (both
+    // text and value empty) -- e.g. the placeholder <option value=""></option>
+    // most dropdowns start with, which would otherwise waste half the range
+    // token. Non-blank placeholders ("please select") are kept, since their
+    // text can still carry signal.
+    let lo = 0;
+    let hi = options.length - 1;
+    while (lo < hi && !label(options[lo])) {
+      lo++;
+    }
+    while (hi > lo && !label(options[hi])) {
+      hi--;
+    }
+    const first = label(options[lo]);
+    const last = label(options[hi]);
+    if (first || last) {
+      words.push(`${first}...${last}`);
+    }
+  },
+
+  tokenizeElements(elements) {
+    // If ML inference is disabled or not yet ready, revert to heuristics.
+    if (
+      !lazy.FormAutofillUtils.useMLInference ||
+      !lazy.FormAutofillUtils.isMLUsedAlready
+    ) {
+      return null;
+    }
+
+    let elementDataList = [];
+    for (let element of elements) {
+      let words = [];
+      this.tokenizeAttributes(element, words);
+
+      elementDataList.push({ element, words });
+    }
+
+    let resultsMap = new Map();
+
+    // Each field's tokens plus its immediate neighbors' tokens, prefixed "bb"
+    // (previous) and "aa" (next) so the model can tell own vs adjacent context.
+    for (let e = 0; e < elementDataList.length; e++) {
+      let words = elementDataList[e].words.copyWithin();
+
+      if (e > 0) {
+        words = words.concat(
+          elementDataList[e - 1].words.map(
+            text => ADJACENT_BEFORE_PREFIX + text
+          )
+        );
+      }
+      if (e < elementDataList.length - 1) {
+        words = words.concat(
+          elementDataList[e + 1].words.map(text => ADJACENT_AFTER_PREFIX + text)
+        );
+      }
+
+      resultsMap.set(elementDataList[e].element, words.join(" "));
+    }
+
+    return resultsMap;
+  },
+
   /**
    * This function should provide all field details of a form which are placed
    * in the belonging section. The details contain the autocomplete info
@@ -839,6 +1085,12 @@ export const FormAutofillHeuristics = {
     const elements = Array.from(formLike.elements).filter(element =>
       lazy.FormAutofillUtils.isCreditCardOrAddressFieldType(element)
     );
+
+    // Because we include information about the adjacent fields, it is
+    // easier to  perform all of the tokenization at once and insert the
+    // results into a map first, keyed by element. The tokens can then be
+    // retrieved later within inferFieldInfo.
+    let mlTokensMap = this.tokenizeElements(elements);
 
     const fieldDetails = [];
     for (let idx = 0; idx < elements.length; idx++) {
@@ -858,7 +1110,12 @@ export const FormAutofillHeuristics = {
         continue;
       }
 
-      const [fieldName, inferInfo] = this.inferFieldInfo(element, elements);
+      const [fieldName, inferInfo, mlData] = this.inferFieldInfo(
+        element,
+        elements,
+        mlTokensMap
+      );
+
       const attributes = this.parseAdditionalAttributes(element, fieldName);
 
       fieldDetails.push(
@@ -867,6 +1124,7 @@ export const FormAutofillHeuristics = {
           fathomConfidence: inferInfo.fathomConfidence,
           isVisible,
           isLookup: attributes.isLookup,
+          mlData,
         })
       );
     }
@@ -956,6 +1214,7 @@ export const FormAutofillHeuristics = {
     if (!isAutoCompleteOff || FormAutofill.creditCardsAutocompleteOff) {
       fieldNames.push(...this.CREDIT_CARD_FIELDNAMES);
     }
+
     if (!isAutoCompleteOff || FormAutofill.addressesAutocompleteOff) {
       fieldNames.push(...this.ADDRESS_FIELDNAMES);
     }
@@ -998,16 +1257,51 @@ export const FormAutofillHeuristics = {
   },
 
   /**
+   * Get the subset of `fieldNames` the regexp-based heuristics should try to
+   * match for an element.
+   *
+   * Without ML the heuristics classify every field type they can. When the ML
+   * model classifies the form, they only run for the field types the model is
+   * not trusted with, so a bad prediction for one field type can be avoided
+   * without giving up ML for the whole form.
+   *
+   * Note that `_findMatchedFieldNames` tries the rules in the order of the
+   * names it is given, so dropping a name also drops the shadowing it did:
+   * with only "tel" left, the broad tel rule claims a field that
+   * "tel-country-code" would otherwise have matched. Related field types
+   * therefore belong on the list together.
+   *
+   * @param {Array<string>} fieldNames
+   *        The field names this element could be, see `_getPossibleFieldNames`.
+   * @param {boolean} useML
+   *        Whether the ML model classifies this element.
+   * @returns {Array<string>}
+   *        The field names to match with the regexp heuristics. Empty means no
+   *        regexp heuristic should run for this element.
+   */
+  _getRegexpHeuristicFieldNames(fieldNames, useML) {
+    if (!useML) {
+      return fieldNames;
+    }
+
+    return fieldNames.filter(fieldName =>
+      lazy.FormAutofillUtils.mlIgnoreFieldTypes.includes(fieldName)
+    );
+  },
+
+  /**
    * Get inferred information about an input element using autocomplete info, fathom and regex-based heuristics.
    *
    * @param {HTMLElement} element - The input element to infer information about.
    * @param {Array<HTMLElement>} elements - See `getFathomField` for details
+   * @param {Map} mlTokens map of elements to words to use for ml inference.
    * @returns {Array} - An array containing:
    *                    [0]the inferred field name
    *                    [1]information collected during the inference process. The possible values includes:
    *                       'autocompleteInfo' and 'fathomConfidence'.
+   *                    [2] tokens used for ML inference.
    */
-  inferFieldInfo(element, elements = []) {
+  inferFieldInfo(element, elements = [], mlTokens) {
     const inferredInfo = {};
     const autocompleteInfo = element.getAutocompleteInfo();
 
@@ -1027,7 +1321,7 @@ export const FormAutofillHeuristics = {
     // "email" type of input is accurate for heuristics to determine its Email
     // field or not. However, "tel" type is used for ZIP code for some web site
     // (e.g. HomeDepot, BestBuy), so "tel" type should be not used for "tel"
-    // prediction.
+    // prediction. We also allow this in ML mode since email is likely correct.
     if (element.type == "email" && fields.includes("email")) {
       return ["email", inferredInfo];
     }
@@ -1069,17 +1363,44 @@ export const FormAutofillHeuristics = {
       // valid cc form; hence both cc-number & cc-name are identified.
     }
 
+    // Passport fields are not covered by the ML model yet, so detect them with
+    // a dedicated regex heuristic. This runs before the ML path on purpose, so
+    // passport detection works whether or not ML is enabled.
+    const passportFieldName = this._inferPassportField(element);
+    if (passportFieldName) {
+      return [passportFieldName, inferredInfo];
+    }
+
+    const regexpFields = this._getRegexpHeuristicFieldNames(fields, !!mlTokens);
+    if (!regexpFields.length) {
+      // No regexp heuristic runs for this element, leave it to the model.
+      return [matchedFieldNames, inferredInfo, mlTokens?.get(element)];
+    }
+
+    // Whether the checks below should consider `fieldName` for this element.
+    // Only the ML path restricts this, so the regexp-only path keeps
+    // considering every field type it did before.
+    const shouldCheck = fieldName =>
+      !mlTokens || regexpFields.includes(fieldName);
+
     // Check every select for options that
     // match credit card network names in value or label.
     if (HTMLSelectElement.isInstance(element)) {
-      if (this._isExpirationMonthLikely(element)) {
+      if (
+        shouldCheck("cc-exp-month") &&
+        this._isExpirationMonthLikely(element)
+      ) {
         return ["cc-exp-month", inferredInfo];
-      } else if (this._isExpirationYearLikely(element)) {
+      } else if (
+        shouldCheck("cc-exp-year") &&
+        this._isExpirationYearLikely(element)
+      ) {
         return ["cc-exp-year", inferredInfo];
       }
 
       const options = Array.from(element.querySelectorAll("option"));
       if (
+        shouldCheck("cc-type") &&
         options.find(
           option =>
             lazy.CreditCard.getNetworkFromName(option.value) ||
@@ -1094,6 +1415,7 @@ export const FormAutofillHeuristics = {
       // options rather than the first, as selects often start with a non-country display option.
       const countryDisplayNames = Array.from(FormAutofill.countries.values());
       if (
+        (shouldCheck("country") || shouldCheck("tel-country-code")) &&
         options.length >= 2 &&
         options
           .slice(-2)
@@ -1103,25 +1425,50 @@ export const FormAutofillHeuristics = {
               countryDisplayNames.includes(option.text)
           )
       ) {
-        return ["country", inferredInfo];
+        // Now that it is likely a country dropdown field, check if it is
+        // a telephone country prefix or a separate country field. The check
+        // above only tells us the field is one of the two, so make sure the
+        // one we settled on is a field name we may match.
+        const fieldName = this._findMatchedFieldNames(element, [
+          "tel-country-code",
+        ])?.length
+          ? "tel-country-code"
+          : "country";
+        if (shouldCheck(fieldName)) {
+          return [fieldName, inferredInfo];
+        }
       }
     }
 
     // Find a matched field name using regexp-based heuristics
     const heuristicMatchedFieldNames = this._findMatchedFieldNames(
       element,
-      fields,
+      regexpFields,
       fathomFoundType
     );
     matchedFieldNames.push(...heuristicMatchedFieldNames);
 
     // If regular expression based heuristics doesn't find any matched field name,
     // and the input type is "tel", just use "tel" as the field name.
-    if (!matchedFieldNames.length && element.type == "tel") {
+    if (
+      !matchedFieldNames.length &&
+      element.type == "tel" &&
+      shouldCheck("tel")
+    ) {
       return ["tel", inferredInfo];
     }
 
-    return [matchedFieldNames, inferredInfo];
+    // Withholding the tokens keeps a field the heuristics classified out of
+    // the model's batch. `#applyResults` would skip it anyway because it has a
+    // name, so this only saves encoding it. Note it asks whether the regexp
+    // heuristics matched rather than whether the field has a name, because
+    // `matchedFieldNames` may hold a name fathom found.
+    const classifiedByRegexp = !!heuristicMatchedFieldNames.length;
+    return [
+      matchedFieldNames,
+      inferredInfo,
+      classifiedByRegexp ? undefined : mlTokens?.get(element),
+    ];
   },
 
   /**
@@ -1270,6 +1617,12 @@ export const FormAutofillHeuristics = {
           yield* lazy.LabelUtils.extractLabelStrings(label);
         }
 
+        // If no labels were found, look for nearby text that could
+        // be used as a label.
+        if (!labels.length) {
+          yield lazy.LabelUtils.findNearbyText(element);
+        }
+
         const ariaLabels = element.getAttribute("aria-label");
         if (ariaLabels) {
           yield* [ariaLabels];
@@ -1365,6 +1718,32 @@ export const FormAutofillHeuristics = {
     }
 
     return matchedFieldNames;
+  },
+
+  /**
+   * Infer a passport field name from an element using the passport regexp
+   * rules from HeuristicsRegExp. Only runs when passport autofill is available;
+   * returns the first matching passport field name (in PASSPORT_FIELDNAMES
+   * order), or null when nothing matches.
+   *
+   * @param {HTMLElement} element The input element to classify.
+   * @returns {?string} A passport field name, or null.
+   */
+  _inferPassportField(element) {
+    if (
+      !FormAutofill.isAutofillTypeAvailable(lazy.AutofillDataTypes.PASSPORT)
+    ) {
+      return null;
+    }
+
+    // TODO: This regexp-based passport detection is temporary and should be
+    // removed once the ML model supports passport fields.
+    for (const fieldName of this.PASSPORT_FIELDNAMES) {
+      if (this._matchRegexp(element, this.RULES[fieldName])) {
+        return fieldName;
+      }
+    }
+    return null;
   },
 
   /**
@@ -1535,6 +1914,15 @@ ChromeUtils.defineLazyGetter(FormAutofillHeuristics, "ADDRESS_FIELDNAMES", () =>
   Object.keys(FormAutofillHeuristics.RULES).filter(name =>
     lazy.FormAutofillUtils.isAddressField(name)
   )
+);
+
+ChromeUtils.defineLazyGetter(
+  FormAutofillHeuristics,
+  "PASSPORT_FIELDNAMES",
+  () =>
+    Object.keys(FormAutofillHeuristics.RULES).filter(name =>
+      lazy.FormAutofillUtils.isPassportField(name)
+    )
 );
 
 export default FormAutofillHeuristics;

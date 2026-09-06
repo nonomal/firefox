@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -7,14 +5,13 @@
 #ifndef mozilla_WinHeaderOnlyUtils_h
 #define mozilla_WinHeaderOnlyUtils_h
 
+#include <objbase.h>
+#include <shlwapi.h>
 #include <windows.h>
 #include <winerror.h>
 #include <winnt.h>
 #include <winternl.h>
-#include <objbase.h>
-#include <shlwapi.h>
 #undef ParseURL
-#include <stdlib.h>
 #include <tuple>
 
 #include "mozilla/Assertions.h"
@@ -168,13 +165,7 @@ class WindowsError final {
     return Nothing();
   }
 
-  constexpr bool operator==(const WindowsError& aOther) const {
-    return mHResult == aOther.mHResult;
-  }
-
-  constexpr bool operator!=(const WindowsError& aOther) const {
-    return mHResult != aOther.mHResult;
-  }
+  constexpr bool operator==(const WindowsError& aOther) const = default;
 
   static DWORD NtStatusToWin32Error(NTSTATUS aNtStatus) {
     static const StaticDynamicallyLinkedFunctionPtr<

@@ -89,11 +89,11 @@ struct ConduitControlState : public AudioConduitControlInterface,
                              public VideoConduitControlInterface {
   ConduitControlState(RTCRtpTransceiver* aTransceiver, RTCRtpSender* aSender,
                       RTCRtpReceiver* aReceiver)
-      : mTransceiver(new nsMainThreadPtrHolder<RTCRtpTransceiver>(
+      : mTransceiver(MakeAndAddRef<nsMainThreadPtrHolder<RTCRtpTransceiver>>(
             "ConduitControlState::mTransceiver", aTransceiver, false)),
-        mSender(new nsMainThreadPtrHolder<dom::RTCRtpSender>(
+        mSender(MakeAndAddRef<nsMainThreadPtrHolder<dom::RTCRtpSender>>(
             "ConduitControlState::mSender", aSender, false)),
-        mReceiver(new nsMainThreadPtrHolder<dom::RTCRtpReceiver>(
+        mReceiver(MakeAndAddRef<nsMainThreadPtrHolder<dom::RTCRtpReceiver>>(
             "ConduitControlState::mReceiver", aReceiver, false)) {}
 
   const nsMainThreadPtrHandle<RTCRtpTransceiver> mTransceiver;
@@ -263,13 +263,13 @@ void RTCRtpTransceiver::Init(const RTCRtpTransceiverInit& aInit,
     return;
   }
 
-  mReceiver = new RTCRtpReceiver(mWindow, mPrincipalPrivacy, mPc,
-                                 mTransportHandler, mCallWrapper->mCallThread,
-                                 mStsThread, mConduit, this, trackingId);
+  mReceiver = MakeRefPtr<RTCRtpReceiver>(
+      mWindow, mPrincipalPrivacy, mPc, mTransportHandler,
+      mCallWrapper->mCallThread, mStsThread, mConduit, this, trackingId);
 
-  mSender = new RTCRtpSender(mWindow, mPc, mTransportHandler,
-                             mCallWrapper->mCallThread, mStsThread, mConduit,
-                             mSendTrack, aInit.mSendEncodings, this);
+  mSender = MakeRefPtr<RTCRtpSender>(
+      mWindow, mPc, mTransportHandler, mCallWrapper->mCallThread, mStsThread,
+      mConduit, mSendTrack, aInit.mSendEncodings, this);
 
   if (mConduit) {
     InitConduitControl();
@@ -334,10 +334,14 @@ void RTCRtpTransceiver::InitVideo(const TrackingId& aRecvTrackingId) {
       std::max(0, Preferences::GetInt(
                       "media.peerconnection.video.min_bitrate_estimate", 0) *
                       1000);
-  options.mSpatialLayers = std::max(
-      1, Preferences::GetInt("media.peerconnection.video.svc.spatial", 0));
-  options.mTemporalLayers = std::max(
-      1, Preferences::GetInt("media.peerconnection.video.svc.temporal", 0));
+  options.mSpatialLayers = std::clamp(
+      Preferences::GetInt("media.peerconnection.video.svc.spatial", 0), 1,
+      static_cast<int>(webrtc::kMaxSpatialLayers));
+  // kMaxTemporalStreams is the array bound used throughout the encoder bitrate
+  // adjuster for per-temporal-layer tracking.
+  options.mTemporalLayers = std::clamp(
+      Preferences::GetInt("media.peerconnection.video.svc.temporal", 0), 1,
+      static_cast<int>(webrtc::kMaxTemporalStreams));
   options.mDenoising =
       Preferences::GetBool("media.peerconnection.video.denoising", false);
   options.mLockScaling =
@@ -705,6 +709,7 @@ static void JsepCodecDescToAudioCodecConfig(
   (*aConfig)->mMinFrameSizeMs = aCodec.mMinFrameSizeMs;
   (*aConfig)->mMaxFrameSizeMs = aCodec.mMaxFrameSizeMs;
   (*aConfig)->mCbrEnabled = aCodec.mCbrEnabled;
+  (*aConfig)->mTransportCCFbSet = aCodec.RtcpFbTransportCCIsSet();
 }
 
 // TODO: This and the next function probably should move to JsepTransceiver
@@ -772,6 +777,37 @@ void RTCRtpTransceiver::NegotiatedDetailsToAudioCodecConfigs(
 
   // Put telephone event at the back, because webrtc.org crashes if we don't
   // If we need to do even more sorting, we should use std::sort.
+  if (telephoneEvent) {
+    aConfigs->push_back(std::move(*telephoneEvent));
+  }
+}
+
+/*static*/
+void RTCRtpTransceiver::EarlyRecvCodecsToAudioCodecConfigs(
+    JsepTrack& aTrack, std::vector<AudioCodecConfig>* aConfigs) {
+  Maybe<AudioCodecConfig> telephoneEvent;
+
+  aTrack.ForEachEarlyRecvCodec(
+      [&](const UniquePtr<JsepCodecDescription>& codec) {
+        if (!codec->mEnabled || codec->Type() != SdpMediaSection::kAudio ||
+            !codec->DirectionSupported(sdp::kRecv)) {
+          return;
+        }
+        Maybe<AudioCodecConfig> config;
+        const JsepAudioCodecDescription& audio =
+            static_cast<const JsepAudioCodecDescription&>(*codec);
+        JsepCodecDescToAudioCodecConfig(audio, &config);
+        if (!config) {
+          return;
+        }
+        if (config->mName == "telephone-event") {
+          telephoneEvent = std::move(config);
+        } else {
+          aConfigs->push_back(std::move(*config));
+        }
+      });
+
+  // Put telephone event at the back, because webrtc.org crashes if we don't
   if (telephoneEvent) {
     aConfigs->push_back(std::move(*telephoneEvent));
   }
@@ -898,6 +934,25 @@ void RTCRtpTransceiver::NegotiatedDetailsToVideoCodecConfigs(
   }
 }
 
+/*static*/
+void RTCRtpTransceiver::EarlyRecvCodecsToVideoCodecConfigs(
+    JsepTrack& aTrack, std::vector<VideoCodecConfig>* aConfigs) {
+  aTrack.ForEachEarlyRecvCodec(
+      [&](const UniquePtr<JsepCodecDescription>& codec) {
+        if (!codec->mEnabled || codec->Type() != SdpMediaSection::kVideo ||
+            !codec->DirectionSupported(sdp::kRecv)) {
+          return;
+        }
+        const JsepVideoCodecDescription& video =
+            static_cast<const JsepVideoCodecDescription&>(*codec);
+
+        JsepCodecDescToVideoCodecConfig(video).apply(
+            [&](VideoCodecConfig config) {
+              aConfigs->push_back(std::move(config));
+            });
+      });
+}
+
 /* static */
 void RTCRtpTransceiver::ToDomRtpCodec(const JsepCodecDescription& aCodec,
                                       RTCRtpCodec* aDomCodec) {
@@ -968,6 +1023,22 @@ void RTCRtpTransceiver::ToDomRtpCodecParametersRtx(
   }
 }
 
+/* static */
+void RTCRtpTransceiver::ToDomHeaderExtensions(
+    const JsepTrackNegotiatedDetails& aDetails,
+    Sequence<RTCRtpHeaderExtensionParameters>& aExtensions) {
+  aDetails.ForEachRTPHeaderExtension(
+      [&](const SdpExtmapAttributeList::Extmap& aExtmap) {
+        RTCRtpHeaderExtensionParameters ext;
+        ext.mUri.Construct(NS_ConvertUTF8toUTF16(aExtmap.extensionname));
+        ext.mId.Construct(aExtmap.entry);
+        // We do not negotiate RFC 6904 encrypted header extensions. When we do,
+        // this should report encrypted=true with the inner (unwrapped) URI.
+        ext.mEncrypted.Construct(false);
+        (void)aExtensions.AppendElement(ext, fallible);
+      });
+}
+
 void RTCRtpTransceiver::Stop(ErrorResult& aRv) {
   if (mPc->IsClosed()) {
     aRv.ThrowInvalidStateError("Peer connection is closed");
@@ -987,7 +1058,6 @@ void RTCRtpTransceiver::SetCodecPreferences(
   nsTArray<RTCRtpCodec> aCodecsFiltered;
   OverrideRtxPreference rtxOverride =
       OverrideRtxPreference::OverrideWithDisabled;
-  ;
   bool useableCodecs = false;
 
   // kind = transciever's kind.
@@ -1054,13 +1124,17 @@ void RTCRtpTransceiver::SetCodecPreferences(
   // If we passed an empty list, we should restore the default list, including
   // RTX
 
-  mPreferredCodecs.clear();
-  std::vector<UniquePtr<JsepCodecDescription>> defaultCodecs;
+  mPreferredCodecs.Clear();
+  AutoTArray<UniquePtr<JsepCodecDescription>, 16> defaultCodecs;
 
   if (kind.EqualsLiteral("video")) {
-    PeerConnectionImpl::GetDefaultVideoCodecs(defaultCodecs, rtxOverride);
+    EnumerateDefaultVideoCodecs(
+        &defaultCodecs,
+        DefaultCodecPreferencesWithRtxOverride(mPc->mPrefs, rtxOverride));
   } else if (kind.EqualsLiteral("audio")) {
-    PeerConnectionImpl::GetDefaultAudioCodecs(defaultCodecs);
+    EnumerateDefaultAudioCodecs(
+        &defaultCodecs,
+        DefaultCodecPreferencesWithRtxOverride(mPc->mPrefs, rtxOverride));
   }
 
   if (!aCodecsFiltered.IsEmpty()) {
@@ -1100,13 +1174,13 @@ void RTCRtpTransceiver::SetCodecPreferences(
         if ((mimeType.Find(defaultCodec->mName) != kNotFound) &&
             (inputCodec.mClockRate == defaultCodec->mClock) && channelsMatch &&
             sdpFmtpLinesMatch) {
-          mPreferredCodecs.emplace_back(defaultCodec->Clone());
+          mPreferredCodecs.EmplaceBack(defaultCodec->Clone());
           break;
         }
       }
     }
   } else {
-    mPreferredCodecs.swap(defaultCodecs);
+    mPreferredCodecs = std::move(defaultCodecs);
     mPreferredCodecsInUse = false;
   }
 }
@@ -1151,7 +1225,7 @@ void RTCRtpTransceiver::StopImpl() {
   mHasTransport = false;
 
   auto self = nsMainThreadPtrHandle<RTCRtpTransceiver>(
-      new nsMainThreadPtrHolder<RTCRtpTransceiver>(
+      MakeAndAddRef<nsMainThreadPtrHolder<RTCRtpTransceiver>>(
           "RTCRtpTransceiver::StopImpl::self", this, false));
   mStsThread->Dispatch(NS_NewRunnableFunction(
       __func__, [self] { self->mTransportHandler = nullptr; }));
@@ -1194,7 +1268,7 @@ void RTCRtpTransceiver::ChainToDomPromiseWithCodecStats(
             RTCStatsCollection opaqueStats;
             idGen->RewriteIds(std::move(stats), &opaqueStats);
 
-            RefPtr<RTCStatsReport> report(new RTCStatsReport(window));
+            RefPtr report = MakeRefPtr<RTCStatsReport>(window);
             report->Incorporate(opaqueStats);
 
             aDomPromise->MaybeResolve(std::move(report));

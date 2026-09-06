@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
@@ -126,7 +124,7 @@ add_task(async function () {
     "@mozilla.org/security/certoverride;1"
   ].getService(Ci.nsICertOverrideService);
 
-  let cert = getTestServerCertificate();
+  let cert = await getTestServerCertificate();
   // Start a server and trust its certificate.
   let server = startServer(cert);
   certOverrideService.rememberValidityOverride(

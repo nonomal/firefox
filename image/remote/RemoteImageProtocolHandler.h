@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,9 +7,9 @@
 
 #include "mozilla/AlreadyAddRefed.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/MozPromise.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/dom/ContentParent.h"
-#include "mozilla/MozPromise.h"
 #include "nsIProtocolHandler.h"
 #include "nsThreadUtils.h"
 #include "nsWeakReference.h"
@@ -31,6 +30,9 @@ class RemoteImageProtocolHandler : public nsIProtocolHandler,
     }
     return do_AddRef(sSingleton);
   }
+
+  static already_AddRefed<gfx::SourceSurface> GetImageSurface(
+      imgIContainer* aContainer, gfx::IntSize aSize, ColorScheme aColorScheme);
 
  private:
   virtual ~RemoteImageProtocolHandler() = default;

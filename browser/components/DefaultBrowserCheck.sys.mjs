@@ -8,7 +8,8 @@ let lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   CommonDialog: "resource://gre/modules/CommonDialog.sys.mjs",
-  SessionStartup: "resource:///modules/sessionstore/SessionStartup.sys.mjs",
+  SessionStartup:
+    "moz-src:///browser/components/sessionstore/SessionStartup.sys.mjs",
 });
 
 export var DefaultBrowserCheck = {
@@ -138,8 +139,21 @@ export var DefaultBrowserCheck = {
       return false;
     }
 
+    // We should never check if running under flatpak
+    // as flatpak can't allow default to be set.
+    // See browser/components/preferences/main.js:canCheck()
+    let runningUnderFlatpak = false;
+    if (Cc["@mozilla.org/gio-service;1"]) {
+      let gIOSvc = Cc["@mozilla.org/gio-service;1"].getService(
+        Ci.nsIGIOService
+      );
+      runningUnderFlatpak = gIOSvc.isRunningUnderFlatpak;
+    }
+
     let shouldCheck =
-      !AppConstants.DEBUG && shellService.shouldCheckDefaultBrowser;
+      !AppConstants.DEBUG &&
+      !runningUnderFlatpak &&
+      shellService.shouldCheckDefaultBrowser;
 
     // Even if we shouldn't check the default browser, we still continue when
     // isStartupCheck = true to set prefs and telemetry.

@@ -43,7 +43,7 @@ function promiseImageDownloaded() {
   return new Promise(resolve => {
     let fileName;
     let MockFilePicker = SpecialPowers.MockFilePicker;
-    MockFilePicker.init(window.browsingContext);
+    MockFilePicker.init();
 
     function onTransferComplete(downloadSuccess) {
       ok(
@@ -78,12 +78,6 @@ function promiseImageDownloaded() {
     });
   });
 }
-
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
 
 add_task(async function () {
   let testURI =

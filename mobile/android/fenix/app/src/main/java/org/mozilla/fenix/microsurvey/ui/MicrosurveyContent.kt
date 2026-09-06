@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -31,16 +30,15 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
-import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
+import mozilla.components.compose.base.annotation.FlexibleWindowPreview
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.compose.list.RadioButtonListItem
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
-import mozilla.components.ui.icons.R as iconsR
-
-private val shape = RoundedCornerShape(8.dp)
 
 /**
  * The microsurvey content UI to hold question and answer data.
@@ -48,8 +46,10 @@ private val shape = RoundedCornerShape(8.dp)
  * @param question The survey question text.
  * @param answers The survey answer text options available for the question.
  * @param icon The survey icon, this will represent the feature the survey is for.
+ * @param iconTint The optional tint color to apply to the survey [icon].
  * @param backgroundColor The view background color.
  * @param selectedAnswer The current selected answer. Will be null until user selects an option.
+ * @param maxLabelLines The maximum number of lines allowed for each answer text layout to prevent truncation.
  * @param onSelectionChange An event that updates the [selectedAnswer].
  */
 @Composable
@@ -57,33 +57,33 @@ fun MicrosurveyContent(
     question: String,
     answers: List<String>,
     @DrawableRes icon: Int = iconsR.drawable.mozac_ic_print_24,
-    backgroundColor: Color = MaterialTheme.colorScheme.surfaceContainerLowest,
+    iconTint: Color? = null,
+    backgroundColor: Color = MaterialTheme.colorScheme.surfaceBright,
     selectedAnswer: String? = null,
+    maxLabelLines: Int = 2,
     onSelectionChange: (String) -> Unit,
 ) {
     Card(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        shape = shape,
+        shape = MaterialTheme.shapes.small,
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
-        modifier = Modifier
-            .wrapContentHeight()
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp),
+        modifier = Modifier.wrapContentHeight().fillMaxWidth().padding(horizontal = 16.dp),
     ) {
         Column {
-            Header(icon, question)
+            Header(icon, iconTint, question)
 
             Column(
-                modifier = Modifier
-                    .wrapContentHeight()
-                    .selectableGroup()
-                    .nestedScroll(rememberNestedScrollInteropConnection())
-                    .verticalScroll(rememberScrollState()),
+                modifier =
+                    Modifier.wrapContentHeight()
+                        .selectableGroup()
+                        .nestedScroll(rememberNestedScrollInteropConnection())
+                        .verticalScroll(rememberScrollState())
             ) {
                 answers.forEach {
                     RadioButtonListItem(
                         label = it,
                         selected = selectedAnswer == it,
+                        maxLabelLines = maxLabelLines,
                         onClick = {
                             onSelectionChange.invoke(it)
                         },
@@ -95,7 +95,7 @@ fun MicrosurveyContent(
 }
 
 @Composable
-private fun Header(icon: Int, question: String) {
+private fun Header(icon: Int, iconTint: Color?, question: String) {
     Row(
         modifier = Modifier.padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -104,6 +104,7 @@ private fun Header(icon: Int, question: String) {
             painter = painterResource(icon),
             contentDescription = stringResource(id = R.string.microsurvey_feature_icon_content_description),
             modifier = Modifier.size(24.dp),
+            tint = iconTint ?: Color.Unspecified,
         )
 
         Spacer(modifier = Modifier.width(16.dp))
@@ -115,39 +116,21 @@ private fun Header(icon: Int, question: String) {
     }
 }
 
-@FlexibleWindowLightDarkPreview
+@FlexibleWindowPreview
 @Composable
-private fun MicrosurveyContentPreview() {
-    FirefoxTheme {
+private fun MicrosurveyContentPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         MicrosurveyContent(
             question = "How satisfied are you with printing in Firefox?",
             icon = iconsR.drawable.mozac_ic_print_24,
-            answers = listOf(
-                stringResource(id = R.string.likert_scale_option_1),
-                stringResource(id = R.string.likert_scale_option_2),
-                stringResource(id = R.string.likert_scale_option_3),
-                stringResource(id = R.string.likert_scale_option_4),
-                stringResource(id = R.string.likert_scale_option_5),
-            ),
-            onSelectionChange = {},
-        )
-    }
-}
-
-@Preview
-@Composable
-private fun MicrosurveyContentPrivatereview() {
-    FirefoxTheme(theme = Theme.Private) {
-        MicrosurveyContent(
-            question = "How satisfied are you with printing in Firefox?",
-            icon = iconsR.drawable.mozac_ic_print_24,
-            answers = listOf(
-                stringResource(id = R.string.likert_scale_option_1),
-                stringResource(id = R.string.likert_scale_option_2),
-                stringResource(id = R.string.likert_scale_option_3),
-                stringResource(id = R.string.likert_scale_option_4),
-                stringResource(id = R.string.likert_scale_option_5),
-            ),
+            answers =
+                listOf(
+                    stringResource(id = R.string.likert_scale_option_1),
+                    stringResource(id = R.string.likert_scale_option_2),
+                    stringResource(id = R.string.likert_scale_option_3),
+                    stringResource(id = R.string.likert_scale_option_4),
+                    stringResource(id = R.string.likert_scale_option_5),
+                ),
             onSelectionChange = {},
         )
     }

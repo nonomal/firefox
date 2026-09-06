@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,10 +5,12 @@
 #include "PerformanceMainThread.h"
 
 #include "LargestContentfulPaint.h"
+#include "PerformanceContainerTiming.h"
 #include "PerformanceEventTiming.h"
 #include "PerformanceInteractionMetrics.h"
 #include "PerformanceNavigation.h"
 #include "PerformancePaintTiming.h"
+#include "SharedLcpMarkerState.h"
 #include "js/GCAPI.h"
 #include "js/PropertyAndElement.h"  // JS_DefineProperty
 #include "jsapi.h"
@@ -32,6 +32,7 @@
 #include "nsIChannel.h"
 #include "nsIDocShell.h"
 #include "nsIHttpChannel.h"
+#include "nsRefreshDriver.h"
 
 namespace mozilla::dom {
 
@@ -70,9 +71,11 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(PerformanceMainThread,
                                                 Performance)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(
       mTiming, mNavigation, mDocEntry, mFCPTiming, mEventTimingEntries,
-      mLargestContentfulPaintEntries, mFirstInputEvent, mPendingPointerDown,
-      mPendingEventTimingEntries, mEventCounts, mInteractionMetrics)
+      mLargestContentfulPaintEntries, mContainerTimingEntries, mFirstInputEvent,
+      mPendingPointerDown, mPendingEventTimingEntries, mEventCounts,
+      mInteractionMetrics, mCurrentEventTimingEntry)
   tmp->mTextFrameUnions.Clear();
+  tmp->mContainerTimingRecords.Clear();
   mozilla::DropJSObjects(tmp);
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
@@ -80,9 +83,10 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(PerformanceMainThread,
                                                   Performance)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(
       mTiming, mNavigation, mDocEntry, mFCPTiming, mEventTimingEntries,
-      mLargestContentfulPaintEntries, mFirstInputEvent, mPendingPointerDown,
-      mPendingEventTimingEntries, mEventCounts, mTextFrameUnions,
-      mInteractionMetrics)
+      mLargestContentfulPaintEntries, mContainerTimingEntries, mFirstInputEvent,
+      mPendingPointerDown, mPendingEventTimingEntries, mEventCounts,
+      mTextFrameUnions, mContainerTimingRecords, mInteractionMetrics,
+      mCurrentEventTimingEntry)
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
@@ -123,21 +127,17 @@ PerformanceMainThread::PerformanceMainThread(nsPIDOMWindowInner* aWindow,
     // - During the Document unload, so we can record the closed pages.
     // - During the profile capture, so we can record the open pages.
     // We are capturing the second one here.
-    // Our static analysis doesn't allow capturing ref-counted pointers in
-    // lambdas, so we need to hide it in a uintptr_t. This is safe because this
-    // lambda will be destroyed in ~PerformanceMainThread().
-    uintptr_t self = reinterpret_cast<uintptr_t>(this);
+    RefPtr<SharedLcpMarkerState> sharedLcpMarkerState =
+        aDOMTiming->GetSharedLcpMarkerState();
     profiler_add_state_change_callback(
         // Using the "Pausing" state as "GeneratingProfile" profile happens too
         // late; we can not record markers if the profiler is already paused.
         ProfilingState::Pausing,
-        [self, innerWindowID](ProfilingState aProfilingState) {
-          const PerformanceMainThread* selfPtr =
-              reinterpret_cast<const PerformanceMainThread*>(self);
-
-          selfPtr->GetDOMTiming()->MaybeAddLCPProfilerMarker(innerWindowID);
+        [sharedLcpMarkerState = std::move(sharedLcpMarkerState),
+         innerWindowID](ProfilingState aProfilingState) {
+          sharedLcpMarkerState->MaybeAddLCPProfilerMarker(innerWindowID);
         },
-        self);
+        reinterpret_cast<uintptr_t>(this));
   }
 }
 
@@ -257,22 +257,31 @@ void PerformanceMainThread::InsertEventTimingEntry(
     return;
   }
 
-  // Using PostRefreshObserver is fine because we don't
-  // run any JS between the `mark paint timing` step and the
-  // `pending Event Timing entries` step. So mixing the order
-  // here is fine.
-  mHasQueuedRefreshdriverObserver = true;
-  presContext->RegisterManagedPostRefreshObserver(
-      new ManagedPostRefreshObserver(
-          presContext, [performance = RefPtr<PerformanceMainThread>(this)](
-                           bool aWasCanceled) {
-            if (!aWasCanceled) {
-              // XXX Should we do this even if canceled?
-              performance->DispatchPendingEventTimingEntries();
-            }
-            performance->mHasQueuedRefreshdriverObserver = false;
-            return ManagedPostRefreshObserver::Unregister::Yes;
-          }));
+  // If the refresh driver already has work to do (pending paint, animations,
+  // etc.), register a post-refresh observer so entries are dispatched after
+  // the paint with an accurate rendering time. Otherwise, avoid waking up
+  // vsync by posting a direct task — entries will be dispatched on the next
+  // event-loop iteration with the current time as rendering time.
+  if (presContext->RefreshDriver()->HasReasonsToTick()) {
+    // Using PostRefreshObserver is fine because we don't
+    // run any JS between the `mark paint timing` step and the
+    // `pending Event Timing entries` step. So mixing the order
+    // here is fine.
+    mHasQueuedRefreshdriverObserver = true;
+
+    presContext->RegisterManagedPostRefreshObserver(
+        new ManagedPostRefreshObserver(
+            presContext, [performance = RefPtr<PerformanceMainThread>(this)](
+                             bool aWasCanceled) {
+              if (!aWasCanceled) {
+                performance->DispatchPendingEventTimingEntries();
+              }
+              performance->mHasQueuedRefreshdriverObserver = false;
+              return ManagedPostRefreshObserver::Unregister::Yes;
+            }));
+  } else {
+    DispatchPendingEventTimingEntries();
+  }
 }
 
 void PerformanceMainThread::BufferEventTimingEntryIfNeeded(
@@ -291,6 +300,107 @@ void PerformanceMainThread::BufferLargestContentfulPaintEntryIfNeeded(
   }
 }
 
+void PerformanceMainThread::RecordModalFallbackTime() {
+  DOMHighResTimeStamp now = NowUnclamped();
+  mLastModalFallbackTime = now;
+  if (mCurrentEventTimingEntry) {
+    mCurrentEventTimingEntry->SetFallbackTimeIfNotSet(now);
+  }
+  for (auto* entry : mPendingEventTimingEntries) {
+    entry->SetFallbackTimeIfNotSet(now);
+  }
+}
+
+void PerformanceMainThread::SetCurrentEventTimingEntry(
+    PerformanceEventTiming* aEntry) {
+  mCurrentEventTimingEntry = aEntry;
+}
+
+PerformanceEventTiming* PerformanceMainThread::GetCurrentEventTimingEntry()
+    const {
+  return mCurrentEventTimingEntry;
+}
+
+void PerformanceMainThread::QueueContainerTimingEntry(
+    PerformanceContainerTiming* aEntry) {
+  MOZ_ASSERT(StaticPrefs::dom_enable_container_timing());
+  // Buffer the entry for potential later retrieval with buffered: true
+  if (mContainerTimingEntries.Length() < kMaxContainerTimingBufferSize) {
+    mContainerTimingEntries.AppendElement(aEntry);
+  }
+  QueueEntry(aEntry);
+}
+
+void PerformanceMainThread::FinalizeContainerTimingEntries() {
+  if (!StaticPrefs::dom_enable_container_timing()) {
+    return;
+  }
+
+  // Stop emitting once a scroll has happened; see the note in
+  // ContainerTimingHelpers::MaybeProcessPaintForContainer and
+  // https://github.com/WICG/container-timing/issues/13. Recording is already
+  // gated there, so no further changes accumulate.
+  if (HasDispatchedScrollEvent()) {
+    return;
+  }
+
+  PresShell* presShell = GetPresShell();
+  if (!presShell) {
+    return;
+  }
+
+  nsPresContext* presContext = presShell->GetPresContext();
+  if (!presContext) {
+    return;
+  }
+
+  // In case we paint outside a tick, this is null. That's okay and per the
+  // spec we report it on the next paint.
+  TimeStamp paintTime = presContext->GetMarkPaintTimingStart();
+  if (paintTime.IsNull()) {
+    return;
+  }
+
+  // https://wicg.github.io/container-timing/#emit-container-timing-entries
+  for (auto iter = mContainerTimingRecords.Iter(); !iter.Done(); iter.Next()) {
+    Element* containerRoot = iter.Key();
+    ContainerTimingRecord& record = iter.Data();
+
+    if (!record.mHasPendingChanges) {
+      continue;
+    }
+
+    // Make sure we still clear things for a detached or shadow-tree.
+    if (!containerRoot->IsInUncomposedDoc()) {
+      record.ClearPendingChanges();
+      continue;
+    }
+
+    if (record.mFirstRenderTime.IsNull()) {
+      record.mFirstRenderTime = paintTime;
+    }
+
+    // The intersectionRect is the bounding box of the painted region; size is
+    // the total painted area in CSS pixels.
+    nsRect intersectionRect = record.mPaintedRegion.GetBounds();
+    uint64_t appUnitsPerPixelSquared =
+        static_cast<uint64_t>(AppUnitsPerCSSPixel()) * AppUnitsPerCSSPixel();
+    uint64_t sizeInPixels = record.mPaintedRegionArea / appUnitsPerPixelSquared;
+
+    // We emit once per frame from the paint pipeline, so mFirstRenderTime
+    // stands in for the spec's per-record paintTimingInfo and the emit-frame
+    // paintTime stands in for lastNewPaintedAreaPaintTimingInfo.
+    RefPtr<PerformanceContainerTiming> containerEntry =
+        new PerformanceContainerTiming(this, containerRoot, record.mIdentifier,
+                                       intersectionRect, sizeInPixels,
+                                       record.mFirstRenderTime, paintTime,
+                                       record.mLastNewPaintedAreaElement);
+    QueueContainerTimingEntry(containerEntry);
+
+    record.ClearPendingChanges();
+  }
+}
+
 void PerformanceMainThread::DispatchPendingEventTimingEntries() {
   DOMHighResTimeStamp renderingTime = NowUnclamped();
 
@@ -300,7 +410,13 @@ void PerformanceMainThread::DispatchPendingEventTimingEntries() {
     // Set its duration if it's not set already.
     PerformanceEventTiming* entry = *it;
     if (entry->RawDuration().isNothing()) {
-      entry->SetDuration(renderingTime - entry->RawStartTime());
+      // If a modal dialog appeared during event processing, its appearance
+      // time is used as the effective rendering time. The dialog provides
+      // visual feedback before the next paint, so we use that earlier time.
+      // https://github.com/w3c/event-timing/issues/154
+      DOMHighResTimeStamp effectiveRenderingTime =
+          entry->GetFallbackTime().valueOr(renderingTime);
+      entry->SetDuration(effectiveRenderingTime - entry->RawStartTime());
     }
 
     if (!(mPendingEventTimingEntries.end() != entriesToBeQueuedEnd) &&
@@ -314,6 +430,7 @@ void PerformanceMainThread::DispatchPendingEventTimingEntries() {
     while (mPendingEventTimingEntries.begin() != entriesToBeQueuedEnd) {
       RefPtr<PerformanceEventTiming> entry =
           mPendingEventTimingEntries.popFirst();
+      UpdateInteractionTelemetry(entry);
       if (entry->RawDuration().valueOr(0) >= kDefaultEventTimingMinDuration) {
         QueueEntry(entry);
       }
@@ -362,6 +479,48 @@ void PerformanceMainThread::DispatchPendingEventTimingEntries() {
         }
       }
     }
+  }
+}
+
+void PerformanceMainThread::UpdateInteractionTelemetry(
+    PerformanceEventTiming* aEntry) {
+  // PerformanceEventTiming allocates an entry for every trusted user-input
+  // event, including handler-less ones bounded by vsync. Filter them out
+  // so the inp* percentiles aren't dominated by no-op events.
+  const double rawDur = aEntry->RawDuration().valueOr(0.0);
+  if (rawDur < kInpEventDurationThreshold) {
+    return;
+  }
+  const uint32_t dur = static_cast<uint32_t>(
+      std::min<double>(rawDur, std::numeric_limits<uint32_t>::max()));
+  const EventMessage msg = aEntry->GetMessage();
+
+  switch (msg) {
+    case eKeyDown:
+    case eKeyPress:
+    case eKeyUp:
+      mInteractionTelemetry.keypressMaxDuration =
+          std::max(mInteractionTelemetry.keypressMaxDuration, dur);
+      break;
+    case ePointerClick:
+      mInteractionTelemetry.mouseClick =
+          std::max(mInteractionTelemetry.mouseClick, dur);
+      break;
+    default:
+      break;
+  }
+
+  if (aEntry->InteractionId() == 0) {
+    return;
+  }
+
+  mInteractionTelemetry.inpLongest =
+      std::max(mInteractionTelemetry.inpLongest, dur);
+
+  auto& durations = mInteractionTelemetry.interactionEventDurations;
+  if (durations.Length() < kMaxInteractionDurations) {
+    durations.InsertElementSorted(static_cast<uint16_t>(
+        std::min<uint32_t>(dur, std::numeric_limits<uint16_t>::max())));
   }
 }
 
@@ -521,6 +680,10 @@ void PerformanceMainThread::CreateNavigationTimingEntry() {
   }
 
   mDocEntry = new PerformanceNavigationTiming(std::move(timing), this, name);
+
+  if (mDOMTiming && mDOMTiming->WasActivatedFromNavigationalPrefetch()) {
+    mDocEntry->SetDeliveryType(u"navigational-prefetch"_ns);
+  }
 }
 
 void PerformanceMainThread::UpdateNavigationTimingEntry() {
@@ -616,6 +779,13 @@ void PerformanceMainThread::GetEntriesByTypeForObserver(
     }
   }
 
+  if (StaticPrefs::dom_enable_container_timing()) {
+    if (aEntryType.Equals(kContainerTimingName)) {
+      aRetval.AppendElements(mContainerTimingEntries);
+      return;
+    }
+  }
+
   return GetEntriesByType(aEntryType, aRetval);
 }
 
@@ -640,11 +810,11 @@ void PerformanceMainThread::GetEntriesByName(
 }
 
 mozilla::PresShell* PerformanceMainThread::GetPresShell() {
-  nsIGlobalObject* ownerGlobal = GetOwnerGlobal();
-  if (!ownerGlobal) {
+  nsIGlobalObject* global = GetRelevantGlobal();
+  if (!global) {
     return nullptr;
   }
-  if (Document* doc = ownerGlobal->GetAsInnerWindow()->GetExtantDoc()) {
+  if (Document* doc = global->GetAsInnerWindow()->GetExtantDoc()) {
     return doc->GetPresShell();
   }
   return nullptr;
@@ -702,8 +872,8 @@ void PerformanceMainThread::ProcessElementTiming() {
   // TODO(sefeng): Check the timestamp after this issue is resolved.
   TimeStamp rawNowTime = presContext->GetMarkPaintTimingStart();
 
-  MOZ_ASSERT(GetOwnerGlobal());
-  Document* document = GetOwnerGlobal()->GetAsInnerWindow()->GetExtantDoc();
+  MOZ_ASSERT(GetRelevantGlobal());
+  Document* document = GetRelevantGlobal()->GetAsInnerWindow()->GetExtantDoc();
   if (!document ||
       !nsContentUtils::GetInProcessSubtreeRootDocument(document)->IsActive()) {
     return;
@@ -774,6 +944,7 @@ bool PerformanceMainThread::UpdateLargestContentfulPaintSize(double aSize) {
 void PerformanceMainThread::SetHasDispatchedScrollEvent() {
   mHasDispatchedScrollEvent = true;
   ClearGeneratedTempDataForLCP();
+  ClearContainerTimingData();
 }
 
 void PerformanceMainThread::SetHasDispatchedInputEvent() {
@@ -785,13 +956,17 @@ void PerformanceMainThread::ClearGeneratedTempDataForLCP() {
   mTextFrameUnions.Clear();
   mImagesPendingRendering.Clear();
 
-  nsIGlobalObject* ownerGlobal = GetOwnerGlobal();
-  if (!ownerGlobal) {
+  nsIGlobalObject* global = GetRelevantGlobal();
+  if (!global) {
     return;
   }
 
-  if (Document* document = ownerGlobal->GetAsInnerWindow()->GetExtantDoc()) {
+  if (Document* document = global->GetAsInnerWindow()->GetExtantDoc()) {
     document->ContentIdentifiersForLCP().Clear();
   }
+}
+
+void PerformanceMainThread::ClearContainerTimingData() {
+  mContainerTimingRecords.Clear();
 }
 }  // namespace mozilla::dom

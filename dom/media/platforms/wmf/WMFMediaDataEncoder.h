@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -96,7 +94,6 @@ class WMFMediaDataEncoder final : public MediaDataEncoder {
 
   EncoderConfig mConfig;
   const RefPtr<TaskQueue> mTaskQueue;
-  const bool mHardwareNotAllowed;
   RefPtr<MFTEncoder> mEncoder;
   // SPS/PPS NALUs when encoding in AnnexB usage, avcC otherwise.
   RefPtr<MediaByteBuffer> mConfigData;
@@ -104,11 +101,7 @@ class WMFMediaDataEncoder final : public MediaDataEncoder {
   // Can be accessed on any thread, but only written on during init.
   Atomic<bool> mIsHardwareAccelerated;
 
-  // Both Encode and EncodeBatch share mEncodePromise and mEncodeRequest, as
-  // concurrent calls are not allowed.
-  MozPromiseHolder<EncodePromise> mEncodePromise;
-  MozPromiseRequestHolder<MFTEncoder::EncodePromise> mEncodeRequest;
-
+  AutoTArray<RefPtr<EncodePromise::Private>, 4> mEncodePromises;
   MozPromiseHolder<EncodePromise> mDrainPromise;
   MozPromiseRequestHolder<MFTEncoder::EncodePromise> mDrainRequest;
 };

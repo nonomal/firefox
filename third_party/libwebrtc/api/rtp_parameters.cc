@@ -11,24 +11,69 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
-#include "api/array_view.h"
+#include "api/media_types.h"
+#include "api/rtc_error.h"
+#include "api/rtp_header_extension_id.h"
 #include "api/rtp_transceiver_direction.h"
 #include "media/base/media_constants.h"
 #include "rtc_base/checks.h"
+#include "rtc_base/logging.h"
+#include "rtc_base/string_encode.h"
 #include "rtc_base/strings/string_builder.h"
 
 namespace webrtc {
+namespace {
+constexpr char kSdpDelimiterSemicolon[] = ";";
+constexpr char kSdpDelimiterEqualChar = '=';
+constexpr char kSdpDelimiterEqual[] = "=";
+constexpr char kSdpDelimiterSemicolonChar = ';';
+
+void ParseFmtpParam(absl::string_view line,
+                    std::string* parameter,
+                    std::string* value) {
+  if (!tokenize_first(line, kSdpDelimiterEqualChar, parameter, value)) {
+    // Support for non-key-value lines like RFC 2198 or RFC 4733.
+    *parameter = "";
+    *value = std::string(line);
+  }
+  // a=fmtp:<payload_type> <param1>=<value1>; <param2>=<value2>; ...
+}
+
+bool IsFmtpParam(absl::string_view name) {
+  // RFC 4855, section 3 specifies the mapping of media format parameters to SDP
+  // parameters. Only ptime, maxptime, channels and rate are placed outside of
+  // the fmtp line. In WebRTC, channels and rate are already handled separately
+  // and thus not included in the CodecParameterMap.
+  return name != kCodecParamPTime && name != kCodecParamMaxPTime;
+}
+
+void WriteFmtpParameter(absl::string_view parameter_name,
+                        absl::string_view parameter_value,
+                        StringBuilder& os) {
+  if (parameter_name.empty()) {
+    // RFC 2198 and RFC 4733 don't use key-value pairs.
+    os << parameter_value;
+  } else {
+    // fmtp parameters: `parameter_name`=`parameter_value`
+    os << parameter_name << kSdpDelimiterEqual << parameter_value;
+  }
+}
+
+}  // namespace
 
 const char* DegradationPreferenceToString(
     DegradationPreference degradation_preference) {
   switch (degradation_preference) {
-    case DegradationPreference::DISABLED:
-      return "disabled";
+    case DegradationPreference::MAINTAIN_FRAMERATE_AND_RESOLUTION:
+      return "maintain-framerate-and-resolution";
     case DegradationPreference::MAINTAIN_FRAMERATE:
       return "maintain-framerate";
     case DegradationPreference::MAINTAIN_RESOLUTION:
@@ -40,6 +85,43 @@ const char* DegradationPreferenceToString(
 }
 
 const double kDefaultBitratePriority = 1.0;
+
+bool WriteFmtpParameters(const CodecParameterMap& parameters,
+                         StringBuilder& os) {
+  bool empty = true;
+  const char* delimiter = "";  // No delimiter before first parameter.
+  for (const auto& entry : parameters) {
+    const std::string& key = entry.first;
+    const std::string& value = entry.second;
+
+    if (IsFmtpParam(key)) {
+      os << delimiter;
+      // A semicolon before each subsequent parameter.
+      delimiter = kSdpDelimiterSemicolon;
+      WriteFmtpParameter(key, value, os);
+      empty = false;
+    }
+  }
+
+  return !empty;
+}
+
+RTCError ParseFmtpParameterSet(absl::string_view line_params,
+                               CodecParameterMap& codec_params) {
+  // Parse out format specific parameters.
+  for (absl::string_view param :
+       split(line_params, kSdpDelimiterSemicolonChar)) {
+    std::string name;
+    std::string value;
+    ParseFmtpParam(absl::StripAsciiWhitespace(param), &name, &value);
+    if (codec_params.find(name) != codec_params.end()) {
+      RTC_LOG(LS_INFO) << "Overwriting duplicate fmtp parameter with key \""
+                       << name << "\".";
+    }
+    codec_params[name] = value;
+  }
+  return RTCError::OK();
+}
 
 RtcpFeedback::RtcpFeedback() = default;
 RtcpFeedback::RtcpFeedback(RtcpFeedbackType type) : type(type) {}
@@ -59,6 +141,9 @@ bool RtpCodec::IsResiliencyCodec() const {
 bool RtpCodec::IsMediaCodec() const {
   return !IsResiliencyCodec() && name != kComfortNoiseCodecName;
 }
+std::string RtpCodec::mime_type() const {
+  return (StringBuilder() << MediaTypeToString(kind) << "/" << name).Release();
+}
 RtpCodecCapability::RtpCodecCapability() = default;
 RtpCodecCapability::~RtpCodecCapability() = default;
 
@@ -68,28 +153,50 @@ RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
     : uri(uri) {}
 RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
     absl::string_view uri,
-    int preferred_id)
+    RtpTransceiverDirection direction)
+    : uri(uri), direction(direction) {}
+RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
+    absl::string_view uri,
+    bool preferred_encrypt,
+    RtpTransceiverDirection direction)
+    : uri(uri), preferred_encrypt(preferred_encrypt), direction(direction) {}
+RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
+    absl::string_view uri,
+    RtpHeaderExtensionId preferred_id)
     : uri(uri), preferred_id(preferred_id) {}
 RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
     absl::string_view uri,
-    int preferred_id,
+    RtpHeaderExtensionId preferred_id,
     RtpTransceiverDirection direction)
-    : uri(uri), preferred_id(preferred_id), direction(direction) {}
+    : uri(uri),
+      preferred_id(preferred_id.IsSet() ? std::optional(preferred_id)
+                                        : std::nullopt),
+      direction(direction) {}
 RtpHeaderExtensionCapability::RtpHeaderExtensionCapability(
     absl::string_view uri,
-    int preferred_id,
+    RtpHeaderExtensionId preferred_id,
     bool preferred_encrypt,
     RtpTransceiverDirection direction)
     : uri(uri),
-      preferred_id(preferred_id),
+      preferred_id(preferred_id.IsSet() ? std::optional(preferred_id)
+                                        : std::nullopt),
       preferred_encrypt(preferred_encrypt),
       direction(direction) {}
+
 RtpHeaderExtensionCapability::~RtpHeaderExtensionCapability() = default;
 
 RtpExtension::RtpExtension() = default;
-RtpExtension::RtpExtension(absl::string_view uri, int id) : uri(uri), id(id) {}
-RtpExtension::RtpExtension(absl::string_view uri, int id, bool encrypt)
-    : uri(uri), id(id), encrypt(encrypt) {}
+RtpExtension::RtpExtension(absl::string_view uri, RtpHeaderExtensionId id)
+    : uri(uri), id(id) {
+  RTC_DCHECK(id.Valid()) << "Extension ID " << id << " is not in valid range";
+}
+RtpExtension::RtpExtension(absl::string_view uri,
+                           RtpHeaderExtensionId id,
+                           bool encrypt)
+    : uri(uri), id(id), encrypt(encrypt) {
+  RTC_DCHECK(id.Valid()) << "Extension ID " << id << " is not in valid range";
+}
+
 RtpExtension::~RtpExtension() = default;
 
 RtpFecParameters::RtpFecParameters() = default;
@@ -126,15 +233,18 @@ RtpParameters::RtpParameters(const RtpParameters& rhs) = default;
 RtpParameters::~RtpParameters() = default;
 
 std::string RtpExtension::ToString() const {
-  char buf[256];
-  SimpleStringBuilder sb(buf);
-  sb << "{uri: " << uri;
+  StringBuilder sb;
+  sb << "{uri: " << SanitizedUriForLogging();
   sb << ", id: " << id;
   if (encrypt) {
     sb << ", encrypt";
   }
-  sb << '}';
-  return sb.str();
+  sb << "}";
+  return sb.Release();
+}
+
+std::string RtpExtension::SanitizedUriForLogging() const {
+  return absl::CEscape(uri);
 }
 
 bool RtpExtension::IsSupportedForAudio(absl::string_view uri) {
@@ -169,14 +279,6 @@ bool RtpExtension::IsSupportedForVideo(absl::string_view uri) {
 
 bool RtpExtension::IsEncryptionSupported(absl::string_view uri) {
   return
-#if defined(ENABLE_EXTERNAL_AUTH)
-      // TODO(jbauch): Figure out a way to always allow "kAbsSendTimeUri"
-      // here and filter out later if external auth is really used in
-      // srtpfilter. External auth is used by Chromium and replaces the
-      // extension header value of "kAbsSendTimeUri", so it must not be
-      // encrypted (which can't be done by Chromium).
-      uri != RtpExtension::kAbsSendTimeUri &&
-#endif
       uri != RtpExtension::kEncryptHeaderExtensionsUri;
 }
 
@@ -279,12 +381,32 @@ const std::vector<RtpExtension> RtpExtension::DeduplicateHeaderExtensions(
 
   // Sort the returned vector to make comparisons of header extensions reliable.
   // In order of priority, we sort by uri first, then encrypt and id last.
+  // .value() has to be used because tie compares using the <=> operator,
+  // which is defined for int, but not for RtpHeaderExtensionId.
   std::sort(filtered.begin(), filtered.end(),
             [](const RtpExtension& a, const RtpExtension& b) {
-              return std::tie(a.uri, a.encrypt, a.id) <
-                     std::tie(b.uri, b.encrypt, b.id);
+              return std::tie(a.uri, a.encrypt, a.id.value()) <
+                     std::tie(b.uri, b.encrypt, b.id.value());
             });
 
   return filtered;
 }
+
+bool RtpParameters::IsMixedCodec() const {
+  std::optional<std::optional<RtpCodec>> first_codec;
+  for (const RtpEncodingParameters& encoding : encodings) {
+    if (!encoding.active) {
+      continue;
+    }
+    if (!first_codec) {
+      first_codec = encoding.codec;
+      continue;
+    }
+    if (*first_codec != encoding.codec) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace webrtc

@@ -4,9 +4,18 @@ skip-if = [
   "os == 'android'",
 ]
 
+["test_appgroup_profile.js"]
+run-if = ["os == 'mac'"]
+
 ["test_async_flush.js"]
 
+["test_async_flush_cp_path.js"]
+
+["test_async_flush_cp_storeID.js"]
+
 ["test_async_flush_current_profile.js"]
+
+["test_bad_ini.js"]
 
 ["test_check_backup.js"]
 
@@ -21,6 +30,8 @@ skip-if = [
 ["test_create_default.js"]
 
 ["test_delete_dirs.js"]
+
+["test_encrypted_databases_marker.js"]
 
 ["test_find_currentProfile.js"]
 
@@ -42,7 +53,13 @@ skip-if = [
 
 ["test_new_default.js"]
 
+["test_new_profile_ping_sent.js"]
+
+["test_new_profile_ping_skipped.js"]
+
 ["test_previous_dedicated.js"]
+
+["test_profile_descriptor_and_localdir.js"]
 
 ["test_profile_reset.js"]
 

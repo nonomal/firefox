@@ -8,7 +8,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   BrowsingContextListener:
     "chrome://remote/content/shared/listeners/BrowsingContextListener.sys.mjs",
   isUncommittedInitialDocument:
-    "chrome://remote/content/shared/messagehandler/transports/BrowsingContextUtils.sys.mjs",
+    "chrome://remote/content/shared/BrowsingContextUtils.sys.mjs",
   Log: "chrome://remote/content/shared/Log.sys.mjs",
   notifyFragmentNavigated:
     "chrome://remote/content/shared/NavigationManager.sys.mjs",
@@ -248,13 +248,18 @@ export class ParentWebProgressListener {
 
   #onContextAttached = async (eventName, data) => {
     const { browsingContext } = data;
-    this.#startWatchingBrowsingContextNavigation(browsingContext);
+
+    if (browsingContext.isContent) {
+      this.#startWatchingBrowsingContextNavigation(browsingContext);
+    }
   };
 
   #onContextDiscarded = async (eventName, data = {}) => {
     const { browsingContext } = data;
 
-    this.#stopWatchingBrowsingContextNavigation(browsingContext);
+    if (browsingContext.isContent) {
+      this.#stopWatchingBrowsingContextNavigation(browsingContext);
+    }
   };
 
   #startWatchingBrowsingContextNavigation(browsingContext) {

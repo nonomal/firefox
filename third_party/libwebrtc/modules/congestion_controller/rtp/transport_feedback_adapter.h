@@ -42,6 +42,8 @@ struct PacketFeedback {
   uint32_t ssrc = 0;
   uint16_t rtp_sequence_number = 0;
   bool is_retransmission = false;
+  bool sent_with_ect1 = false;
+  bool previously_reported_lost = false;
 };
 
 class InFlightBytesTracker {
@@ -124,7 +126,7 @@ class TransportFeedbackAdapter {
   Timestamp current_offset_ = Timestamp::MinusInfinity();
 
   // `last_transport_feedback_base_time` is only used for transport feedback to
-  // track base time.
+
   Timestamp last_transport_feedback_base_time_ = Timestamp::MinusInfinity();
   // Used by RFC 8888 congestion control feedback to track base time.
   std::optional<uint32_t> last_feedback_compact_ntp_time_;

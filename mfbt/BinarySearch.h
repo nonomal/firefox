@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,10 +5,10 @@
 #ifndef mozilla_BinarySearch_h
 #define mozilla_BinarySearch_h
 
-#include "mozilla/Assertions.h"
-
 #include <cstddef>
 #include <utility>
+
+#include "mozilla/Assertions.h"
 
 namespace mozilla {
 
@@ -77,7 +75,7 @@ bool BinarySearchIf(const Container& aContainer, size_t aBegin, size_t aEnd,
 
     // Allow any intermediate type so long as it provides a suitable ordering
     // relation.
-    const int result = aCompare(aContainer[middle]);
+    const auto result = aCompare(aContainer[middle]);
 
     if (result == 0) {
       *aMatchOrInsertionPoint = middle;
@@ -175,7 +173,7 @@ size_t LowerBound(const Container& aContainer, size_t aBegin, size_t aEnd,
 
     // Allow any intermediate type so long as it provides a suitable ordering
     // relation.
-    const int result = aCompare(aContainer[middle]);
+    const auto result = aCompare(aContainer[middle]);
 
     // The range returning from LowerBound does include elements
     // equivalent to the given value i.e. aCompare(element) == 0
@@ -201,7 +199,7 @@ size_t UpperBound(const Container& aContainer, size_t aBegin, size_t aEnd,
 
     // Allow any intermediate type so long as it provides a suitable ordering
     // relation.
-    const int result = aCompare(aContainer[middle]);
+    const auto result = aCompare(aContainer[middle]);
 
     // The range returning from UpperBound does NOT include elements
     // equivalent to the given value i.e. aCompare(element) == 0
@@ -227,7 +225,7 @@ std::pair<size_t, size_t> EqualRange(const Container& aContainer, size_t aBegin,
 
     // Allow any intermediate type so long as it provides a suitable ordering
     // relation.
-    const int result = aCompare(aContainer[middle]);
+    const auto result = aCompare(aContainer[middle]);
 
     if (result < 0) {
       high = middle;

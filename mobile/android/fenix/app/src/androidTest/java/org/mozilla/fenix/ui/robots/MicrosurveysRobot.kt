@@ -31,12 +31,17 @@ import org.mozilla.fenix.helpers.TestHelper.packageName
 
 @OptIn(ExperimentalTestApi::class)
 class MicrosurveysRobot {
-    fun verifySurveyButton() = assertUIObjectExists(itemContainingText(getStringResource(R.string.preferences_take_survey)))
+    fun verifySurveyButton(composeTestRule: ComposeTestRule) {
+        composeTestRule
+            .onNodeWithText(getStringResource(R.string.preferences_take_survey), useUnmergedTree = true)
+            .assertIsDisplayed()
+    }
 
-    fun verifySurveyNoThanksButton() =
-        assertUIObjectExists(
-            itemContainingText(getStringResource(R.string.preferences_not_take_survey)),
-        )
+    fun verifySurveyNoThanksButton(composeTestRule: ComposeTestRule) {
+        composeTestRule
+            .onNodeWithText(getStringResource(R.string.preferences_not_take_survey), useUnmergedTree = true)
+            .assertIsDisplayed()
+    }
 
     fun verifyHomeScreenSurveyCloseButton(exists: Boolean) =
         assertUIObjectExists(itemWithDescription("Close"), exists = exists)
@@ -44,15 +49,27 @@ class MicrosurveysRobot {
     fun verifyContinueSurveyButton(composeTestRule: ComposeTestRule, exists: Boolean) {
         if (exists) {
             Log.i(TAG, "verifyContinueSurveyButton: Waiting for $waitingTime until the \"Continue\" button exists")
-            composeTestRule.waitUntilAtLeastOneExists(hasText(getStringResource(R.string.micro_survey_continue_button_label)), waitingTime)
+            composeTestRule.waitUntilAtLeastOneExists(
+                hasText(getStringResource(R.string.micro_survey_continue_button_label)),
+                waitingTime,
+            )
             Log.i(TAG, "verifyContinueSurveyButton: Waited for $waitingTime until the \"Continue\" button exists")
             Log.i(TAG, "verifyContinueSurveyButton: Trying to verify that the \"Continue\" button is displayed")
             composeTestRule.continueSurveyButton().assertIsDisplayed()
             Log.i(TAG, "verifyContinueSurveyButton: Verified that the \"Continue\" button is displayed")
         } else {
-            Log.i(TAG, "verifyContinueSurveyButton: Waiting for $waitingTime until the \"Continue\" button does not exist")
-            composeTestRule.waitUntilDoesNotExist(hasText(getStringResource(R.string.micro_survey_continue_button_label)), waitingTime)
-            Log.i(TAG, "verifyContinueSurveyButton: Waited for $waitingTime until the \"Continue\" button does not exist")
+            Log.i(
+                TAG,
+                "verifyContinueSurveyButton: Waiting for $waitingTime until the \"Continue\" button does not exist",
+            )
+            composeTestRule.waitUntilDoesNotExist(
+                hasText(getStringResource(R.string.micro_survey_continue_button_label)),
+                waitingTime,
+            )
+            Log.i(
+                TAG,
+                "verifyContinueSurveyButton: Waited for $waitingTime until the \"Continue\" button does not exist",
+            )
             Log.i(TAG, "verifyContinueSurveyButton: Trying to verify that the \"Continue\" button is not displayed")
             composeTestRule.continueSurveyButton().assertIsNotDisplayed()
             Log.i(TAG, "verifyContinueSurveyButton: Verifed that the \"Continue\" button is not displayed")
@@ -61,7 +78,10 @@ class MicrosurveysRobot {
 
     fun clickContinueSurveyButton(composeTestRule: ComposeTestRule) {
         Log.i(TAG, "clickContinueSurveyButton: Waiting for $waitingTime until the \"Continue\" button exists")
-        composeTestRule.waitUntilAtLeastOneExists(hasText(getStringResource(R.string.micro_survey_continue_button_label)), waitingTime)
+        composeTestRule.waitUntilAtLeastOneExists(
+            hasText(getStringResource(R.string.micro_survey_continue_button_label)),
+            waitingTime,
+        )
         Log.i(TAG, "clickContinueSurveyButton: Waited for $waitingTime until the \"Continue\" button exists")
         Log.i(TAG, "clickContinueSurveyButton: Trying to click the \"Continue\" button")
         composeTestRule.continueSurveyButton().performClick()
@@ -109,8 +129,7 @@ class MicrosurveysRobot {
         composeTestRule.waitForIdle()
         Log.i(TAG, "verifyPleaseCompleteTheSurveyHeader: Waited for the compose rule to be idle")
         Log.i(TAG, "verifyPleaseCompleteTheSurveyHeader: Trying to verify that the survey header is displayed")
-        composeTestRule.onNodeWithText(getStringResource(R.string.micro_survey_survey_header_2))
-            .assertIsDisplayed()
+        composeTestRule.onNodeWithText(getStringResource(R.string.micro_survey_survey_header_2)).assertIsDisplayed()
         Log.i(TAG, "verifyPleaseCompleteTheSurveyHeader: Verified that the survey header is displayed")
     }
 
@@ -139,9 +158,7 @@ class MicrosurveysRobot {
         composeTestRule.waitForIdle()
         Log.i(TAG, "clickSubmitButton: Waited for the compose rule to be idle")
         Log.i(TAG, "clickSubmitButton: Trying to click the \"Submit\" button")
-        composeTestRule.submitButton()
-            .assertIsEnabled()
-            .performClick()
+        composeTestRule.submitButton().assertIsEnabled().performClick()
         Log.i(TAG, "clickSubmitButton: Clicked the \"Submit\" button")
     }
 
@@ -149,8 +166,13 @@ class MicrosurveysRobot {
         verifyPleaseCompleteTheSurveyHeader(composeTestRule)
         verifyTheFirefoxLogo(composeTestRule, exists)
         assertUIObjectExists(homescreenSurveyCloseButton())
-        Log.i(TAG, "verifySurveyCompletedScreen: Trying to verify that the \"Thanks for your feedback!\" message is displayed")
-        composeTestRule.onNodeWithText(getStringResource(R.string.micro_survey_feedback_confirmation)).assertIsDisplayed()
+        Log.i(
+            TAG,
+            "verifySurveyCompletedScreen: Trying to verify that the \"Thanks for your feedback!\" message is displayed",
+        )
+        composeTestRule
+            .onNodeWithText(getStringResource(R.string.micro_survey_feedback_confirmation))
+            .assertIsDisplayed()
         Log.i(TAG, "verifySurveyCompletedScreen: Verified that the \"Thanks for your feedback!\" message is displayed")
         Log.i(TAG, "verifySurveyCompletedScreen: Trying to verify that the privacy notice is displayed")
         composeTestRule.privacyNoticeLink().assertIsDisplayed()
@@ -170,17 +192,16 @@ class MicrosurveysRobot {
         verifyHomeScreenSurveyCloseButton(exists)
     }
 
-    class Transition {
+    class Transition(private val composeTestRule: ComposeTestRule) {
         fun clickSurveyButton(interact: BrowserRobot.() -> Unit): BrowserRobot.Transition {
-            Log.i(TAG, "clickSurveyButton: Waiting for $waitingTime for the survey button to exist")
-            surveyButton().waitForExists(waitingTime)
-            Log.i(TAG, "clickSurveyButton: Waited for $waitingTime for the survey button to exist")
             Log.i(TAG, "clickSurveyButton: Trying to click the survey button")
-            surveyButton().click()
+            composeTestRule
+                .onNodeWithText(getStringResource(R.string.preferences_take_survey), useUnmergedTree = true)
+                .performClick()
             Log.i(TAG, "clickSurveyButton: Clicked the survey button")
 
-            BrowserRobot().interact()
-            return BrowserRobot.Transition()
+            BrowserRobot(composeTestRule).interact()
+            return BrowserRobot.Transition(composeTestRule)
         }
 
         fun clickNoThanksSurveyButton(interact: BrowserRobot.() -> Unit): BrowserRobot.Transition {
@@ -191,20 +212,23 @@ class MicrosurveysRobot {
             surveyNoThanksButton().click()
             Log.i(TAG, "clickNoThanksSurveyButton: Clicked the \"No thanks\" button")
 
-            BrowserRobot().interact()
-            return BrowserRobot.Transition()
+            BrowserRobot(composeTestRule).interact()
+            return BrowserRobot.Transition(composeTestRule)
         }
 
         fun clickHomeScreenSurveyCloseButton(interact: BrowserRobot.() -> Unit): BrowserRobot.Transition {
-            Log.i(TAG, "clickHomeScreenSurveyCloseButton: Waiting for $waitingTime for the close survey button to exist")
+            Log.i(
+                TAG,
+                "clickHomeScreenSurveyCloseButton: Waiting for $waitingTime for the close survey button to exist",
+            )
             homescreenSurveyCloseButton().waitForExists(waitingTime)
             Log.i(TAG, "clickHomeScreenSurveyCloseButton: Waited for $waitingTime for the close survey button to exist")
             Log.i(TAG, "clickHomeScreenSurveyCloseButton: Trying to click the close survey button")
             homescreenSurveyCloseButton().click()
             Log.i(TAG, "clickHomeScreenSurveyCloseButton: Clicked the close survey button")
 
-            BrowserRobot().interact()
-            return BrowserRobot.Transition()
+            BrowserRobot(composeTestRule).interact()
+            return BrowserRobot.Transition(composeTestRule)
         }
 
         fun collapseSurveyByTappingBackButton(interact: BrowserRobot.() -> Unit): BrowserRobot.Transition {
@@ -215,25 +239,23 @@ class MicrosurveysRobot {
             mDevice.waitForIdle()
             Log.i(TAG, "collapseSurveyByTappingBackButton: Waited for device to be idle")
 
-            BrowserRobot().interact()
-            return BrowserRobot.Transition()
+            BrowserRobot(composeTestRule).interact()
+            return BrowserRobot.Transition(composeTestRule)
         }
     }
 }
 
-fun surveyScreen(interact: MicrosurveysRobot.() -> Unit): MicrosurveysRobot.Transition {
+fun surveyScreen(
+    composeTestRule: ComposeTestRule,
+    interact: MicrosurveysRobot.() -> Unit,
+): MicrosurveysRobot.Transition {
     MicrosurveysRobot().interact()
-    return MicrosurveysRobot.Transition()
+    return MicrosurveysRobot.Transition(composeTestRule)
 }
 
-private fun surveyButton() =
-    itemContainingText(getStringResource(R.string.preferences_take_survey))
+private fun surveyNoThanksButton() = itemContainingText(getStringResource(R.string.preferences_not_take_survey))
 
-private fun surveyNoThanksButton() =
-    itemContainingText(getStringResource(R.string.preferences_not_take_survey))
-
-private fun homescreenSurveyCloseButton() =
-    itemWithDescription("Close")
+private fun homescreenSurveyCloseButton() = itemWithDescription("Close")
 
 private fun ComposeTestRule.continueSurveyButton() =
     onNodeWithText(getStringResource(R.string.micro_survey_continue_button_label))
@@ -241,5 +263,4 @@ private fun ComposeTestRule.continueSurveyButton() =
 private fun ComposeTestRule.submitButton() =
     onNodeWithText(getStringResource(R.string.micro_survey_submit_button_label))
 
-private fun ComposeTestRule.privacyNoticeLink() =
-    onNodeWithContentDescription("Privacy notice Links available")
+private fun ComposeTestRule.privacyNoticeLink() = onNodeWithContentDescription("Privacy notice Links available")

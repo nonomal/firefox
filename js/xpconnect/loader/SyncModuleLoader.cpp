@@ -1,19 +1,17 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "SyncModuleLoader.h"
 
+#include "mozJSModuleLoader.h"
+#include "nsContentSecurityUtils.h"
 #include "nsISupportsImpl.h"
 
 #include "js/loader/ModuleLoadRequest.h"
-#include "js/RootingAPI.h"          // JS::Rooted
 #include "js/PropertyAndElement.h"  // JS_SetProperty
+#include "js/RootingAPI.h"          // JS::Rooted
 #include "js/Value.h"               // JS::Value, JS::NumberValue
-#include "mozJSModuleLoader.h"
-#include "nsContentSecurityUtils.h"
 
 using namespace JS::loader;
 
@@ -102,14 +100,16 @@ void SyncModuleLoader::OnDynamicImportStarted(ModuleLoadRequest* aRequest) {
     MOZ_ASSERT(DynamicImportRequests().Contains(aRequest));
     MOZ_ASSERT(mLoadRequests.isEmpty());
 
-    nsresult rv = OnFetchComplete(aRequest, NS_OK);
-    if (NS_FAILED(rv)) {
+    OnFetchComplete(aRequest, NS_OK);
+    if (!aRequest->mModuleScript) {
+      // Failed to create the module script, e.g. OOM. OnFetchComplete has
+      // already rejected the dynamic import, so only the pending requests need
+      // cleaning up.
       mLoadRequests.CancelRequestsAndClear();
-      CancelDynamicImport(aRequest, rv);
       return;
     }
 
-    rv = ProcessRequests();
+    nsresult rv = ProcessRequests();
     if (NS_FAILED(rv)) {
       CancelDynamicImport(aRequest, rv);
       return;
@@ -143,11 +143,12 @@ nsresult SyncModuleLoader::StartFetch(ModuleLoadRequest* aRequest) {
   }
 
   JSContext* cx = jsapi.cx();
-  JS::RootedScript script(cx);
+
+  JS::RootedObject module(cx);
   nsresult rv =
-      mozJSModuleLoader::LoadSingleModuleScript(this, cx, aRequest, &script);
+      mozJSModuleLoader::LoadSingleModule(this, cx, aRequest, &module);
   MOZ_ASSERT_IF(jsapi.HasException(), NS_FAILED(rv));
-  MOZ_ASSERT(bool(script) == NS_SUCCEEDED(rv));
+  MOZ_ASSERT(bool(module) == NS_SUCCEEDED(rv));
 
   // Check for failure to load script source and abort.
   bool threwException = jsapi.HasException();
@@ -189,9 +190,9 @@ nsresult SyncModuleLoader::StartFetch(ModuleLoadRequest* aRequest) {
       return NS_ERROR_OUT_OF_MEMORY;
     }
   }
-  if (script) {
-    context->mScript.init(cx);
-    context->mScript = script;
+  if (module) {
+    context->mModule.init(cx);
+    context->mModule = module;
   }
 
   if (!aRequest->IsDynamicImport()) {
@@ -208,9 +209,9 @@ nsresult SyncModuleLoader::CompileFetchedModule(
   // Compilation already happened in StartFetch. Report the result here.
   SyncLoadContext* context = aRequest->GetSyncLoadContext();
   nsresult rv = context->mRv;
-  if (context->mScript) {
-    aModuleOut.set(JS::GetModuleObject(context->mScript));
-    context->mScript = nullptr;
+  if (context->mModule) {
+    aModuleOut.set(context->mModule);
+    context->mModule = nullptr;
   }
   if (NS_FAILED(rv)) {
     JS_SetPendingException(aCx, context->mExceptionValue);
@@ -243,10 +244,13 @@ nsresult SyncModuleLoader::ProcessRequests() {
   // Work list to drive module loader since this is all synchronous.
   while (!mLoadRequests.isEmpty()) {
     RefPtr<ScriptLoadRequest> request = mLoadRequests.StealFirst();
-    nsresult rv = OnFetchComplete(request->AsModuleRequest(), NS_OK);
-    if (NS_FAILED(rv)) {
+    ModuleLoadRequest* moduleRequest = request->AsModuleRequest();
+    OnFetchComplete(moduleRequest, NS_OK);
+    if (!moduleRequest->mModuleScript) {
+      // Failed to create the module script, e.g. OOM. A compilation error
+      // leaves a module script with a parse error, so it doesn't stop us here.
       mLoadRequests.CancelRequestsAndClear();
-      return rv;
+      return NS_ERROR_FAILURE;
     }
   }
 

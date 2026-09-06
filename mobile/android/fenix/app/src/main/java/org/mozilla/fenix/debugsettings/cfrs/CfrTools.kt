@@ -17,63 +17,49 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
-import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
+import androidx.compose.ui.tooling.preview.PreviewParameter
+import mozilla.components.compose.base.annotation.FlexibleWindowPreview
 import mozilla.components.compose.base.button.OutlinedButton
-import mozilla.components.lib.state.ext.observeAsState
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import org.mozilla.fenix.R
-import org.mozilla.fenix.compose.SwitchWithLabel
-import org.mozilla.fenix.nimbus.FxNimbus
+import org.mozilla.fenix.compose.list.SwitchListItem
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 /**
  * CFR Tools UI that allows for the CFR states to be reset.
  *
- * @param cfrToolsStore [CfrToolsStore] used to access [CfrToolsState].
- * CFR toggles will be shown or not.
+ * @param cfrToolsStore [CfrToolsStore] used to access [CfrToolsState]. CFR toggles will be shown or not.
  */
 @Composable
-fun CfrTools(
-    cfrToolsStore: CfrToolsStore,
-) {
+fun CfrTools(cfrToolsStore: CfrToolsStore) {
     Surface {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(vertical = FirefoxTheme.layout.space.dynamic400),
+            modifier =
+                Modifier.fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = FirefoxTheme.layout.space.dynamic400),
             verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic400),
         ) {
-            ResetCfrTool(
-                cfrToolsStore = cfrToolsStore,
-            )
+            ResetCfrTool(cfrToolsStore = cfrToolsStore)
         }
     }
 }
 
 @Suppress("LongMethod")
 @Composable
-private fun ResetCfrTool(
-    cfrToolsStore: CfrToolsStore,
-) {
-    val cfrPreferences by cfrToolsStore.observeAsState(initialValue = cfrToolsStore.state) { state ->
-        state
-    }
+private fun ResetCfrTool(cfrToolsStore: CfrToolsStore) {
+    val cfrPreferences by cfrToolsStore.stateFlow.collectAsState()
 
     Column(
-        modifier = Modifier
-            .fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic400),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = FirefoxTheme.layout.space.dynamic400),
-        ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = FirefoxTheme.layout.space.dynamic400)) {
             Text(
                 text = stringResource(R.string.debug_drawer_cfr_tools_reset_cfr_title),
                 style = FirefoxTheme.typography.headline5,
@@ -100,28 +86,7 @@ private fun ResetCfrTool(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic150),
         ) {
-            CfrSectionTitle(
-                text = stringResource(R.string.debug_drawer_cfr_tools_homepage_cfr_title),
-            )
-
-            CfrToggle(
-                title = stringResource(R.string.debug_drawer_cfr_tools_homepage_searchbar_title),
-                description = stringResource(R.string.debug_drawer_cfr_tools_homepage_searchbar_description),
-                checked = cfrPreferences.homepageSearchBarShown,
-                enabled = FxNimbus.features.encourageSearchCfr.value().enabled,
-                onCfrToggle = {
-                    cfrToolsStore.dispatch(CfrToolsAction.HomepageSearchBarShownToggled)
-                },
-            )
-        }
-
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic150),
-        ) {
-            CfrSectionTitle(
-                text = stringResource(R.string.debug_drawer_cfr_tools_tabs_tray_cfr_title),
-            )
+            CfrSectionTitle(text = stringResource(R.string.debug_drawer_cfr_tools_tabs_tray_cfr_title))
 
             CfrToggle(
                 title = stringResource(R.string.debug_drawer_cfr_tools_inactive_tabs_title),
@@ -146,18 +111,14 @@ private fun ResetCfrTool(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic150),
         ) {
-            CfrSectionTitle(
-                text = stringResource(R.string.debug_drawer_cfr_tools_toolbar_cfr_title),
-            )
+            CfrSectionTitle(text = stringResource(R.string.debug_drawer_cfr_tools_toolbar_cfr_title))
         }
 
         Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(FirefoxTheme.layout.space.dynamic150),
         ) {
-            CfrSectionTitle(
-                text = stringResource(R.string.debug_drawer_cfr_tools_other_cfr_title),
-            )
+            CfrSectionTitle(text = stringResource(R.string.debug_drawer_cfr_tools_other_cfr_title))
 
             CfrToggle(
                 title = stringResource(R.string.debug_drawer_cfr_tools_open_in_app_title),
@@ -190,12 +151,15 @@ private fun CfrToggle(
     enabled: Boolean = true,
     onCfrToggle: () -> Unit,
 ) {
-    SwitchWithLabel(
+    SwitchListItem(
         label = title,
         checked = checked,
         modifier = Modifier.padding(horizontal = FirefoxTheme.layout.space.dynamic400),
         description = description,
+        maxDescriptionLines = Int.MAX_VALUE,
+        maxLabelLines = Int.MAX_VALUE,
         enabled = enabled,
+        showSwitchAfter = true,
     ) {
         onCfrToggle()
     }
@@ -207,9 +171,7 @@ private fun CfrToggle(
  * @param text The text for a section of CFRs.
  */
 @Composable
-private fun CfrSectionTitle(
-    text: String,
-) {
+private fun CfrSectionTitle(text: String) {
     Text(
         text = text,
         modifier = Modifier.padding(horizontal = FirefoxTheme.layout.space.dynamic400),
@@ -219,21 +181,9 @@ private fun CfrSectionTitle(
 }
 
 @Composable
-@FlexibleWindowLightDarkPreview
-private fun CfrToolsPreview() {
-    FirefoxTheme {
-        CfrTools(
-            cfrToolsStore = CfrToolsStore(),
-        )
-    }
-}
-
-@Composable
-@Preview
-private fun CfrToolsPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
-        CfrTools(
-            cfrToolsStore = CfrToolsStore(),
-        )
+@FlexibleWindowPreview
+private fun CfrToolsPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
+        CfrTools(cfrToolsStore = CfrToolsStore())
     }
 }

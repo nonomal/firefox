@@ -10,8 +10,9 @@ import {
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
   UrlUtils: "resource://gre/modules/UrlUtils.sys.mjs",
 });
 
@@ -35,10 +36,10 @@ export class UrlbarProviderClipboard extends UrlbarProvider {
   }
 
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.PROFILE;
+    return lazy.UrlbarShared.PROVIDER_TYPE.PROFILE;
   }
 
   setPreviousClipboardValue(newValue) {
@@ -51,7 +52,7 @@ export class UrlbarProviderClipboard extends UrlbarProvider {
       !lazy.UrlbarPrefs.get("clipboard.featureGate") ||
       !lazy.UrlbarPrefs.get("suggest.clipboard") ||
       queryContext.searchString ||
-      queryContext.searchMode
+      queryContext.restrictInSearchMode()
     ) {
       return false;
     }
@@ -66,8 +67,10 @@ export class UrlbarProviderClipboard extends UrlbarProvider {
     ) {
       return false;
     }
-    textFromClipboard =
-      controller.input.sanitizeTextFromClipboard(textFromClipboard);
+    textFromClipboard = lazy.UrlbarShared.sanitizeTextFromClipboard(
+      textFromClipboard,
+      UrlbarUtils.getFixupPrimitives(textFromClipboard, queryContext.isPrivate)
+    );
     const validUrl = this.#validUrl(textFromClipboard);
     if (!validUrl) {
       return false;
@@ -116,42 +119,48 @@ export class UrlbarProviderClipboard extends UrlbarProvider {
   async startQuery(queryContext, addCallback) {
     // If the query was started, isActive should have cached a url already.
     let result = new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.URL,
-      source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-        fallbackTitle: [
-          UrlbarUtils.prepareUrlForDisplay(this.#previousClipboard.value, {
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
+      payload: {
+        title: lazy.UrlbarShared.prepareUrlForDisplay(
+          this.#previousClipboard.value,
+          {
             trimURL: false,
-          }),
-          UrlbarUtils.HIGHLIGHT.NONE,
-        ],
-        url: [this.#previousClipboard.value, UrlbarUtils.HIGHLIGHT.NONE],
+          }
+        ),
+        url: this.#previousClipboard.value,
         icon: "chrome://global/skin/icons/clipboard.svg",
         isBlockable: true,
-      }),
+      },
     });
 
     addCallback(this, result);
   }
 
+  /**
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   */
   onEngagement(queryContext, controller, details) {
     this.#previousClipboard.impressionsLeft = 0; // User has picked the suggested clipboard result
     // Handle commands.
-    this.#handlePossibleCommand(
-      controller.view,
-      details.result,
-      details.selType
-    );
+    this.#handlePossibleCommand(controller, details.result, details.selType);
   }
 
   onImpression() {
     this.#previousClipboard.impressionsLeft--;
   }
 
-  #handlePossibleCommand(view, result, selType) {
+  /**
+   * @param {UrlbarParentController} controller
+   * @param {UrlbarResult} result
+   * @param {string} selType
+   */
+  #handlePossibleCommand(controller, result, selType) {
     switch (selType) {
       case RESULT_MENU_COMMANDS.DISMISS:
-        view.controller.removeResult(result);
+        controller.removeResult(result);
         this.#previousClipboard.impressionsLeft = 0;
         break;
     }

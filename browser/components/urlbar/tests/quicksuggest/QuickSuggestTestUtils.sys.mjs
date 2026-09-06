@@ -21,7 +21,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustSuggest.sys.mjs",
   TestUtils: "resource://testing-common/TestUtils.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
-  UrlbarUtils: "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
   YelpSubjectType:
     "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustSuggest.sys.mjs",
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
@@ -423,8 +423,10 @@ class _QuickSuggestTestUtils {
     keywords = ["amp"],
     full_keywords = keywords.map(kw => [kw, 1]),
     url = "https://example.com/amp",
+    click_url = "https://example.com/amp-click",
     title = "Amp Suggestion",
     score = 0.3,
+    suggestion_id = "amp-suggestion-id",
   } = {}) {
     return {
       keywords,
@@ -433,11 +435,12 @@ class _QuickSuggestTestUtils {
       title,
       score,
       id: 1,
-      click_url: "https://example.com/amp-click",
+      click_url,
       impression_url: "https://example.com/amp-impression",
       advertiser: "Amp",
       iab_category: "22 - Shopping",
       icon: "1234",
+      suggestion_id,
     };
   }
 
@@ -469,40 +472,36 @@ class _QuickSuggestTestUtils {
     isSuggestedIndexRelativeToGroup = true,
     isBestMatch = false,
     requestId = undefined,
-    descriptionL10n = { id: "urlbar-result-action-sponsored" },
+    dismissalKey = undefined,
     categories = [],
+    suggestionId = "amp-suggestion-id",
   } = {}) {
     let result = {
       suggestedIndex,
       isSuggestedIndexRelativeToGroup,
       isBestMatch,
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: false,
       payload: {
-        title,
+        title: fullKeyword,
+        subtitle: title,
+        bottomTextL10n: { id: "urlbar-result-action-sponsored" },
         url,
         originalUrl,
         requestId,
         source,
         provider,
-        displayUrl: url.replace(/^https:\/\//, ""),
+        suggestionId,
         isSponsored: true,
-        qsSuggestion: fullKeyword ?? keyword,
         sponsoredImpressionUrl: impressionUrl,
         sponsoredClickUrl: clickUrl,
         sponsoredBlockId: blockId,
         sponsoredAdvertiser: advertiser,
         sponsoredIabCategory: iabCategory,
-        isBlockable: true,
-        isManageable: true,
         telemetryType: "adm_sponsored",
       },
     };
-
-    if (descriptionL10n) {
-      result.payload.descriptionL10n = descriptionL10n;
-    }
 
     if (result.payload.source == "rust") {
       result.payload.iconBlob = iconBlob;
@@ -522,9 +521,13 @@ class _QuickSuggestTestUtils {
         rawClickUrl: clickUrl,
         score: 0.3,
         ftsMatchInfo: null,
+        suggestionId,
       });
     } else {
       result.payload.icon = icon;
+      if (typeof dismissalKey == "string") {
+        result.payload.dismissalKey = dismissalKey;
+      }
     }
 
     return result;
@@ -580,22 +583,20 @@ class _QuickSuggestTestUtils {
     let result = {
       suggestedIndex,
       isSuggestedIndexRelativeToGroup,
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: false,
       payload: {
-        title,
+        title: fullKeyword,
+        subtitle: title,
+        bottomTextL10n: { id: "urlbar-result-suggestion-recommended" },
         url,
         icon,
         iconBlob,
         source,
         provider,
         telemetryType,
-        displayUrl: url.replace(/^https:\/\//, ""),
         isSponsored: false,
-        qsSuggestion: fullKeyword ?? keyword,
-        isBlockable: true,
-        isManageable: true,
       },
     };
 
@@ -926,8 +927,8 @@ class _QuickSuggestTestUtils {
     let result = {
       isBestMatch: true,
       suggestedIndex: 1,
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: false,
       payload: {
         source,
@@ -935,15 +936,15 @@ class _QuickSuggestTestUtils {
         title,
         description,
         url,
+        subtitleL10n: {
+          id: "urlbar-result-addons-subtitle",
+        },
         originalUrl,
         icon,
-        displayUrl: url.replace(/^https:\/\//, ""),
         isSponsored: false,
-        shouldShowUrl: true,
         bottomTextL10n: {
-          id: "firefox-suggest-addons-recommended",
+          id: "urlbar-result-suggestion-recommended",
         },
-        helpUrl: lazy.QuickSuggest.HELP_URL,
         telemetryType: "amo",
       },
     };
@@ -984,21 +985,20 @@ class _QuickSuggestTestUtils {
     return {
       isBestMatch: true,
       suggestedIndex: 1,
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.OTHER_NETWORK,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.OTHER_NETWORK,
       heuristic: false,
       payload: {
         telemetryType: "mdn",
         title,
+        subtitleL10n: { id: "urlbar-result-mdn-subtitle" },
         url: finalUrl.href,
         originalUrl: url,
-        displayUrl: finalUrl.href.replace(/^https:\/\//, ""),
         isSponsored: false,
         description,
         icon: "chrome://global/skin/icons/mdn.svg",
-        shouldShowUrl: true,
         bottomTextL10n: {
-          id: "firefox-suggest-mdn-bottom-text",
+          id: "urlbar-result-suggestion-recommended",
         },
         source: "rust",
         provider: "Mdn",
@@ -1050,8 +1050,8 @@ class _QuickSuggestTestUtils {
     }
 
     let result = {
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       isBestMatch: !!isTopPick,
       suggestedIndex,
       isSuggestedIndexRelativeToGroup,
@@ -1061,7 +1061,7 @@ class _QuickSuggestTestUtils {
         provider,
         telemetryType: "yelp",
         bottomTextL10n: {
-          id: "firefox-suggest-yelp-bottom-text",
+          id: "urlbar-result-action-sponsored",
         },
         url,
         originalUrl,
@@ -1069,6 +1069,7 @@ class _QuickSuggestTestUtils {
         titleL10n,
         icon: null,
         isSponsored: true,
+        subtitleL10n: { id: "urlbar-result-yelp-subtitle" },
       },
     };
 
@@ -1135,9 +1136,10 @@ class _QuickSuggestTestUtils {
     };
 
     return {
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: false,
+      isBestMatch: true,
       suggestedIndex: 1,
       isRichSuggestion: true,
       richSuggestionIconVariation: "6",
@@ -1176,11 +1178,6 @@ class _QuickSuggestTestUtils {
    *   Whether the result is expected to be sponsored.
    * @param {boolean} [options.isBestMatch]
    *   Whether the result is expected to be a best match.
-   * @param {boolean} [options.isManageable]
-   *   Whether the result is expected to show Manage result menu item.
-   * @param {boolean} [options.hasSponsoredLabel]
-   *   Whether the result is expected to show the "Sponsored" label below the
-   *   title.
    * @returns {Promise<object>}
    *   The quick suggest result.
    */
@@ -1191,8 +1188,6 @@ class _QuickSuggestTestUtils {
     index = -1,
     isSponsored = true,
     isBestMatch = false,
-    isManageable = true,
-    hasSponsoredLabel = isSponsored || isBestMatch,
   }) {
     this.Assert.ok(
       url || originalUrl,
@@ -1234,7 +1229,7 @@ class _QuickSuggestTestUtils {
       "UrlbarProviderQuickSuggest",
       "Result provider name is UrlbarProviderQuickSuggest"
     );
-    this.Assert.equal(details.type, lazy.UrlbarUtils.RESULT_TYPE.URL);
+    this.Assert.equal(details.type, lazy.UrlbarShared.RESULT_TYPE.URL);
     this.Assert.equal(details.isSponsored, isSponsored, "Result isSponsored");
     if (url) {
       this.Assert.equal(details.url, url, "Result URL");
@@ -1251,34 +1246,15 @@ class _QuickSuggestTestUtils {
 
     let { row } = details.element;
 
-    let sponsoredElement = row._elements.get("description");
-    if (hasSponsoredLabel) {
-      this.Assert.ok(sponsoredElement, "Result sponsored label element exists");
-      this.Assert.equal(
-        sponsoredElement.textContent,
-        isSponsored ? "Sponsored" : "",
-        "Result sponsored label"
-      );
-    } else {
-      this.Assert.ok(
-        !sponsoredElement?.textContent,
-        "Result sponsored label element should not exist"
-      );
-    }
-
-    this.Assert.equal(
-      result.payload.isManageable,
-      isManageable,
-      "Result isManageable"
+    let bottomLabel = row._elements.get("bottomLabel");
+    this.Assert.ok(bottomLabel, "Result bottom label should exist");
+    this.Assert.deepEqual(
+      window.document.l10n.getAttributes(bottomLabel),
+      isSponsored
+        ? { id: "urlbar-result-action-sponsored", args: null }
+        : { id: "urlbar-result-suggestion-recommended", args: null },
+      "Result bottom label should have correct l10n"
     );
-
-    if (!isManageable) {
-      this.Assert.equal(
-        result.payload.helpUrl,
-        lazy.QuickSuggest.HELP_URL,
-        "Result helpURL"
-      );
-    }
 
     this.Assert.ok(
       row._buttons.get("result-menu"),

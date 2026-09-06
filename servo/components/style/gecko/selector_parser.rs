@@ -5,14 +5,15 @@
 //! Gecko-specific bits for selector-parsing.
 
 use crate::computed_value_flags::ComputedValueFlags;
+use crate::derives::*;
 use crate::invalidation::element::document_state::InvalidationMatchingData;
 use crate::properties::ComputedValues;
 use crate::selector_parser::{Direction, HorizontalDirection, SelectorParser};
 use crate::str::starts_with_ignore_ascii_case;
 use crate::string_cache::{Atom, Namespace, WeakAtom, WeakNamespace};
-use crate::values::{AtomIdent, AtomString, CSSInteger};
+use crate::values::{AtomIdent, AtomString, CSSInteger, CustomIdent};
+use cssparser::{match_ignore_ascii_case, CowRcStr, ToCss, Token};
 use cssparser::{BasicParseError, BasicParseErrorKind, Parser};
-use cssparser::{CowRcStr, SourceLocation, ToCss, Token};
 use dom::{DocumentState, ElementState, HEADING_LEVEL_OFFSET};
 use selectors::parser::SelectorParseErrorKind;
 use std::fmt;
@@ -68,7 +69,7 @@ impl HeadingSelectorData {
         }
         let level = (bits >> HEADING_LEVEL_OFFSET) as i32;
         debug_assert!(level > 0 && level < 16);
-        self.0.iter().any(|item| *item == level)
+        self.0.contains(&level)
     }
 }
 
@@ -89,6 +90,9 @@ macro_rules! pseudo_class_name {
             CustomState(CustomState),
             /// The `:heading` & `:heading()` pseudo-classes.
             Heading(HeadingSelectorData),
+            /// The :active-view-transition-type() pseudo-class:
+            /// https://drafts.csswg.org/css-view-transitions-2/#the-active-view-transition-type-pseudo
+            ActiveViewTransitionType(ThinVec<CustomIdent>),
             /// The non-standard `:-moz-locale-dir` pseudo-class.
             MozLocaleDir(Direction),
         }
@@ -123,6 +127,18 @@ impl ToCss for NonTSPseudoClass {
                     NonTSPseudoClass::Dir(ref dir) => {
                         dest.write_str(":dir(")?;
                         dir.to_css(&mut CssWriter::new(dest))?;
+                        return dest.write_char(')')
+                    },
+                    NonTSPseudoClass::ActiveViewTransitionType(ref types) => {
+                        dest.write_str(":active-view-transition-type(")?;
+                        let mut first = true;
+                        for ty in types.iter() {
+                            if !first {
+                                dest.write_str(", ")?;
+                            }
+                            first = false;
+                            ty.to_css(&mut CssWriter::new(dest))?;
+                        }
                         return dest.write_char(')')
                     },
                     NonTSPseudoClass::Heading(ref levels) => {
@@ -188,9 +204,10 @@ impl NonTSPseudoClass {
                 match *self {
                     $(NonTSPseudoClass::$name => check_flag!($flags),)*
                     NonTSPseudoClass::MozLocaleDir(_) => check_flag!(PSEUDO_CLASS_ENABLED_IN_UA_SHEETS_AND_CHROME),
+                    NonTSPseudoClass::Heading(_) => check_flag!(PSEUDO_CLASS_ENABLED_IN_UA_SHEETS),
                     NonTSPseudoClass::CustomState(_) |
-                    NonTSPseudoClass::Heading(_) |
                     NonTSPseudoClass::Lang(_) |
+                    NonTSPseudoClass::ActiveViewTransitionType(_) |
                     NonTSPseudoClass::Dir(_) => false,
                 }
             }
@@ -201,11 +218,14 @@ impl NonTSPseudoClass {
     /// Returns whether the pseudo-class is enabled in content sheets.
     #[inline]
     fn is_enabled_in_content(&self) -> bool {
-        if matches!(*self, Self::ActiveViewTransition) {
-            return static_prefs::pref!("dom.viewTransitions.enabled");
-        }
         if matches!(*self, Self::Heading(..)) {
-            return static_prefs::pref!("layout.css.heading-selector.enabled");
+            return crate::pref!("dom.headingoffset.enabled");
+        }
+        if matches!(*self, Self::PictureInPicture) {
+            return crate::pref!("dom.media-pip.enabled");
+        }
+        if matches!(*self, NonTSPseudoClass::MozPlaceholder) {
+            return crate::pref!("layout.css.moz-placeholder.content.enabled");
         }
         !self.has_any_flag(NonTSPseudoClassFlag::PSEUDO_CLASS_ENABLED_IN_UA_SHEETS_AND_CHROME)
     }
@@ -226,6 +246,7 @@ impl NonTSPseudoClass {
                     $(NonTSPseudoClass::$name => flag!($state),)*
                     NonTSPseudoClass::Dir(ref dir) => dir.element_state(),
                     NonTSPseudoClass::Heading(..) => ElementState::HEADING_LEVEL_BITS,
+                    NonTSPseudoClass::ActiveViewTransitionType(..) => ElementState::ACTIVE_VIEW_TRANSITION,
                     NonTSPseudoClass::MozLocaleDir(..) |
                     NonTSPseudoClass::CustomState(..) |
                     NonTSPseudoClass::Lang(..) => ElementState::empty(),
@@ -272,8 +293,6 @@ impl NonTSPseudoClass {
 }
 
 impl ::selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
-    type Impl = SelectorImpl;
-
     #[inline]
     fn is_active_or_hover(&self) -> bool {
         matches!(*self, NonTSPseudoClass::Active | NonTSPseudoClass::Hover)
@@ -345,15 +364,11 @@ impl<'a> SelectorParser<'a> {
             return true;
         }
 
-        if matches!(*pseudo_class, NonTSPseudoClass::MozBroken) {
-            return static_prefs::pref!("layout.css.moz-broken.content.enabled");
-        }
-
-        return false;
+        false
     }
 
     fn is_pseudo_element_enabled(&self, pseudo_element: &PseudoElement) -> bool {
-        if pseudo_element.enabled_in_content() {
+        if pseudo_element.enabled_in_content(self.url_data, self.for_supports_rule) {
             return true;
         }
 
@@ -365,28 +380,29 @@ impl<'a> SelectorParser<'a> {
             return true;
         }
 
-        return false;
+        false
     }
 }
 
 /// Parse the functional pseudo-element with the function name.
-pub fn parse_functional_pseudo_element_with_name<'i, 't>(
-    name: CowRcStr<'i>,
-    parser: &mut Parser<'i, 't>,
+pub fn parse_functional_pseudo_element_with_name<'i>(
+    name: &CowRcStr<'i>,
+    parser: &mut Parser<'i>,
     target: Target,
-) -> Result<PseudoElement, ParseError<'i>> {
+) -> Result<PseudoElement, ParseError> {
     use crate::gecko::pseudo_element::PtNameAndClassSelector;
 
-    if matches!(target, Target::Selector) && starts_with_ignore_ascii_case(&name, "-moz-tree-") {
+    if matches!(target, Target::Selector)
+        && starts_with_ignore_ascii_case(name.as_ref(), "-moz-tree-")
+    {
         // Tree pseudo-elements can have zero or more arguments, separated
         // by either comma or space.
         let mut args = ThinVec::new();
         loop {
-            let location = parser.current_source_location();
             match parser.next() {
-                Ok(&Token::Ident(ref ident)) => args.push(Atom::from(ident.as_ref())),
+                Ok(Token::Ident(ident)) => args.push(Atom::from(ident.as_ref())),
                 Ok(&Token::Comma) => {},
-                Ok(t) => return Err(location.new_unexpected_token_error(t.clone())),
+                Ok(_) => return Err(ParseError::unexpected_token()),
                 Err(BasicParseError {
                     kind: BasicParseErrorKind::EndOfInput,
                     ..
@@ -394,14 +410,22 @@ pub fn parse_functional_pseudo_element_with_name<'i, 't>(
                 _ => unreachable!("Parser::next() shouldn't return any other error"),
             }
         }
-        return PseudoElement::tree_pseudo_element(&name, args).ok_or(parser.new_custom_error(
-            SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+        return PseudoElement::tree_pseudo_element(name.as_ref(), args).ok_or(ParseError::custom(
+            SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
         ));
     }
 
     Ok(match_ignore_ascii_case! { &name,
-        "highlight" => {
-            PseudoElement::Highlight(AtomIdent::from(parser.expect_ident()?.as_ref()))
+        "highlight" => PseudoElement::Highlight(AtomIdent::from(parser.expect_ident()?.as_ref())),
+        "picker" => {
+            let picker_element = parser.expect_ident()?.as_ref();
+            if !picker_element.eq_ignore_ascii_case("select") {
+                return Err(ParseError::custom(
+                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+                ));
+            }
+            // Don't use the actual ident, because it is not always all lowercase.
+            PseudoElement::Picker(AtomIdent(atom!("select")))
         },
         "view-transition-group" => {
             PseudoElement::ViewTransitionGroup(PtNameAndClassSelector::parse(parser, target)?)
@@ -415,15 +439,17 @@ pub fn parse_functional_pseudo_element_with_name<'i, 't>(
         "view-transition-new" => {
             PseudoElement::ViewTransitionNew(PtNameAndClassSelector::parse(parser, target)?)
         },
-        _ => return Err(parser.new_custom_error(
-            SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name)
-        ))
+        _ => {
+            return Err(ParseError::custom(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+            ));
+        },
     })
 }
 
 impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     type Impl = SelectorImpl;
-    type Error = StyleParseErrorKind<'i>;
+    type Error = StyleParseErrorKind;
 
     #[inline]
     fn parse_parent_selector(&self) -> bool {
@@ -472,34 +498,31 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
 
     fn parse_non_ts_pseudo_class(
         &self,
-        location: SourceLocation,
         name: CowRcStr<'i>,
-    ) -> Result<NonTSPseudoClass, ParseError<'i>> {
+    ) -> Result<NonTSPseudoClass, ParseError> {
         if let Some(pseudo_class) = NonTSPseudoClass::parse_non_functional(&name) {
             if self.is_pseudo_class_enabled(&pseudo_class) {
                 return Ok(pseudo_class);
             }
         }
-        Err(
-            location.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
-                name,
-            )),
-        )
+        Err(ParseError::custom(
+            SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+        ))
     }
 
-    fn parse_non_ts_functional_pseudo_class<'t>(
+    fn parse_non_ts_functional_pseudo_class(
         &self,
         name: CowRcStr<'i>,
-        parser: &mut Parser<'i, 't>,
+        parser: &mut Parser<'i>,
         _after_part: bool,
-    ) -> Result<NonTSPseudoClass, ParseError<'i>> {
+    ) -> Result<NonTSPseudoClass, ParseError> {
         let pseudo_class = match_ignore_ascii_case! { &name,
             "lang" => {
                 let result = parser.parse_comma_separated(|input| {
                     Ok(AtomIdent::from(input.expect_ident_or_string()?.as_ref()))
                 })?;
                 if result.is_empty() {
-                    return Err(parser.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                    return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                 }
                 NonTSPseudoClass::Lang(Lang(result.into()))
             },
@@ -510,9 +533,16 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "heading" => {
                 let result = parser.parse_comma_separated(|input| Ok(input.expect_integer()?))?;
                 if result.is_empty() {
-                    return Err(parser.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                    return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                 }
                 NonTSPseudoClass::Heading(HeadingSelectorData(result.into()))
+            },
+            "active-view-transition-type" => {
+                let result = parser.parse_comma_separated(|input| CustomIdent::parse(input, &[]))?;
+                if result.is_empty() {
+                    return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
+                }
+                NonTSPseudoClass::ActiveViewTransitionType(result.into())
             },
             "-moz-locale-dir" => {
                 NonTSPseudoClass::MozLocaleDir(Direction::parse(parser)?)
@@ -520,56 +550,51 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "dir" => {
                 NonTSPseudoClass::Dir(Direction::parse(parser)?)
             },
-            _ => return Err(parser.new_custom_error(
-                SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name.clone())
+            _ => return Err(ParseError::custom(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement
             ))
         };
         if self.is_pseudo_class_enabled(&pseudo_class) {
             Ok(pseudo_class)
         } else {
-            Err(
-                parser.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
-                    name,
-                )),
-            )
+            Err(ParseError::custom(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+            ))
         }
     }
 
-    fn parse_pseudo_element(
-        &self,
-        location: SourceLocation,
-        name: CowRcStr<'i>,
-    ) -> Result<PseudoElement, ParseError<'i>> {
-        let allow_unkown_webkit = !self.for_supports_rule;
-        if let Some(pseudo) = PseudoElement::from_slice(&name, allow_unkown_webkit) {
+    fn parse_pseudo_element(&self, name: CowRcStr<'i>) -> Result<PseudoElement, ParseError> {
+        if let Some(pseudo) = PseudoElement::from_slice(&name) {
             if self.is_pseudo_element_enabled(&pseudo) {
                 return Ok(pseudo);
             }
         }
 
-        Err(
-            location.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
-                name,
-            )),
-        )
+        // @supports must report disabled/unknown `-webkit-*` pseudos as unsupported.
+        if !self.for_supports_rule {
+            if let Some(pseudo) = PseudoElement::unknown_webkit_from_name(&name) {
+                return Ok(pseudo);
+            }
+        }
+
+        Err(ParseError::custom(
+            SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+        ))
     }
 
-    fn parse_functional_pseudo_element<'t>(
+    fn parse_functional_pseudo_element(
         &self,
         name: CowRcStr<'i>,
-        parser: &mut Parser<'i, 't>,
-    ) -> Result<PseudoElement, ParseError<'i>> {
-        let pseudo =
-            parse_functional_pseudo_element_with_name(name.clone(), parser, Target::Selector)?;
+        parser: &mut Parser<'i>,
+    ) -> Result<PseudoElement, ParseError> {
+        let pseudo = parse_functional_pseudo_element_with_name(&name, parser, Target::Selector)?;
         if self.is_pseudo_element_enabled(&pseudo) {
             return Ok(pseudo);
         }
 
-        Err(
-            parser.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
-                name,
-            )),
-        )
+        Err(ParseError::custom(
+            SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+        ))
     }
 
     fn default_namespace(&self) -> Option<Namespace> {

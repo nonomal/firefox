@@ -9,7 +9,6 @@ import xml.etree.ElementTree as ET
 from io import StringIO
 from textwrap import dedent
 
-import mozunit
 import pytest
 from mozlog.formatters import (
     GroupingFormatter,
@@ -331,9 +330,7 @@ def test_fail(get_logger, name, opts, expected):
     stack = """
     SimpleTest.is@SimpleTest/SimpleTest.js:312:5
     @caps/tests/mochitest/test_bug246699.html:53:1
-""".strip(
-        "\n"
-    )
+""".strip("\n")
 
     logger = get_logger(name, **opts)
 
@@ -789,4 +786,6 @@ class TestXUnitFormatter(FormatterTest):
 
 
 if __name__ == "__main__":
+    import mozunit
+
     mozunit.main()

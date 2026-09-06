@@ -16,12 +16,10 @@ import {
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
-  UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
-  UrlbarTokenizer:
-    "moz-src:///browser/components/urlbar/UrlbarTokenizer.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
   UrlUtils: "resource://gre/modules/UrlUtils.sys.mjs",
 });
 
@@ -34,19 +32,21 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
   }
 
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.HEURISTIC;
+    return lazy.UrlbarShared.PROVIDER_TYPE.HEURISTIC;
   }
 
   /**
    * Whether this provider should be invoked for the given context.
    * If this method returns false, the providers manager won't start a query
    * with this provider, to save on resources.
+   *
+   * @param {UrlbarQueryContext} queryContext
    */
-  async isActive() {
-    return true;
+  async isActive(queryContext) {
+    return !!queryContext.searchString.length;
   }
 
   /**
@@ -68,33 +68,36 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
   async startQuery(queryContext, addCallback) {
     let instance = this.queryInstance;
 
-    let result = this._matchUnknownUrl(queryContext);
-    if (result) {
-      addCallback(this, result);
-      // Since we can't tell if this is a real URL and whether the user wants
-      // to visit or search for it, we provide an alternative searchengine
-      // match if the string looks like an alphanumeric origin or an e-mail.
-      let str = queryContext.searchString;
-      if (!URL.canParse(str)) {
-        if (
-          lazy.UrlbarPrefs.get("keyword.enabled") &&
-          (lazy.UrlUtils.looksLikeOrigin(str, {
-            noIp: true,
-            noPort: true,
-          }) ||
-            lazy.UrlUtils.REGEXP_COMMON_EMAIL.test(str))
-        ) {
-          let searchResult = await this._engineSearchResult({ queryContext });
-          if (instance != this.queryInstance) {
-            return;
+    if (queryContext.navigationEnabled) {
+      let result =
+        UrlbarProviderHeuristicFallback.matchUnknownUrl(queryContext);
+      if (result) {
+        addCallback(this, result);
+        // Since we can't tell if this is a real URL and whether the user wants
+        // to visit or search for it, we provide an alternative searchengine
+        // match if the string looks like an alphanumeric origin or an e-mail.
+        let str = queryContext.searchString;
+        if (!URL.canParse(str)) {
+          if (
+            queryContext.keywordEnabled &&
+            (lazy.UrlUtils.looksLikeOrigin(str, {
+              noIp: true,
+              noPort: true,
+            }) ||
+              lazy.UrlUtils.REGEXP_COMMON_EMAIL.test(str))
+          ) {
+            let searchResult = await this._engineSearchResult({ queryContext });
+            if (instance != this.queryInstance) {
+              return;
+            }
+            addCallback(this, searchResult);
           }
-          addCallback(this, searchResult);
         }
+        return;
       }
-      return;
     }
 
-    result = await this._searchModeKeywordResult(queryContext);
+    let result = await this._searchModeKeywordResult(queryContext);
     if (instance != this.queryInstance) {
       return;
     }
@@ -104,8 +107,8 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     }
 
     if (
-      lazy.UrlbarPrefs.get("keyword.enabled") ||
-      queryContext.restrictSource == UrlbarUtils.RESULT_SOURCE.SEARCH ||
+      queryContext.keywordEnabled ||
+      queryContext.restrictSource == lazy.UrlbarShared.RESULT_SOURCE.SEARCH ||
       queryContext.searchMode
     ) {
       result = await this._engineSearchResult({
@@ -121,16 +124,14 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     }
   }
 
-  // TODO (bug 1054814): Use visited URLs to inform which scheme to use, if the
-  // scheme isn't specificed.
-  _matchUnknownUrl(queryContext) {
+  static matchUnknownUrl(queryContext) {
     // The user may have typed something like "word?" to run a search.  We
     // should not convert that to a URL.  We should also never convert actual
     // URLs into URL results when search mode is active or a search mode
     // restriction token was typed.
     if (
-      queryContext.restrictSource == UrlbarUtils.RESULT_SOURCE.SEARCH ||
-      lazy.UrlbarTokenizer.SEARCH_MODE_RESTRICT.has(
+      queryContext.restrictSource == lazy.UrlbarShared.RESULT_SOURCE.SEARCH ||
+      lazy.UrlbarShared.SEARCH_MODE_RESTRICT.has(
         queryContext.restrictToken?.value
       ) ||
       queryContext.searchMode
@@ -138,7 +139,7 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
       return null;
     }
 
-    let unescapedSearchString = UrlbarUtils.unEscapeURIForUI(
+    let unescapedSearchString = lazy.UrlbarShared.unEscapeURIForUI(
       queryContext.searchString
     );
     let [prefix, suffix] = UrlbarUtils.stripURLPrefix(unescapedSearchString);
@@ -153,16 +154,16 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     if (queryContext.fixupError) {
       if (
         queryContext.fixupError == Cr.NS_ERROR_MALFORMED_URI &&
-        !lazy.UrlbarPrefs.get("keyword.enabled")
+        !queryContext.keywordEnabled
       ) {
         return new lazy.UrlbarResult({
-          type: UrlbarUtils.RESULT_TYPE.URL,
-          source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+          type: lazy.UrlbarShared.RESULT_TYPE.URL,
+          source: lazy.UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
           heuristic: true,
-          ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-            fallbackTitle: [searchUrl, UrlbarUtils.HIGHLIGHT.NONE],
-            url: [searchUrl, UrlbarUtils.HIGHLIGHT.NONE],
-          }),
+          payload: {
+            title: searchUrl,
+            url: searchUrl,
+          },
         });
       }
 
@@ -195,7 +196,7 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     // pass the pretty, unescaped URL as the result's title, since it is
     // displayed to the user.
     let escapedURL = uri.toString();
-    let displayURL = UrlbarUtils.prepareUrlForDisplay(uri, {
+    let displayURL = lazy.UrlbarShared.prepareUrlForDisplay(uri, {
       trimURL: false,
       // If the user didn't type a protocol, and we added one, don't show it,
       // as https-first may upgrade it, potentially breaking expectations.
@@ -218,14 +219,14 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     }
 
     return new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.URL,
-      source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
       heuristic: true,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-        fallbackTitle: [displayURL, UrlbarUtils.HIGHLIGHT.NONE],
-        url: [escapedURL, UrlbarUtils.HIGHLIGHT.NONE],
+      payload: {
+        title: displayURL,
+        url: escapedURL,
         icon: iconUri,
-      }),
+      },
     });
   }
 
@@ -235,7 +236,7 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     }
 
     let firstToken = queryContext.tokens[0].value;
-    if (!lazy.UrlbarTokenizer.SEARCH_MODE_RESTRICT.has(firstToken)) {
+    if (!lazy.UrlbarShared.SEARCH_MODE_RESTRICT.has(firstToken)) {
       return null;
     }
 
@@ -265,7 +266,7 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
       return null;
     }
 
-    if (queryContext.restrictSource == UrlbarUtils.RESULT_SOURCE.SEARCH) {
+    if (queryContext.restrictSource == lazy.UrlbarShared.RESULT_SOURCE.SEARCH) {
       return await this._engineSearchResult({
         queryContext,
         keyword: firstToken,
@@ -273,14 +274,16 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
       });
     }
 
+    query = query.trimStart();
     return new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.SEARCH,
-      source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+      type: lazy.UrlbarShared.RESULT_TYPE.SEARCH,
+      source: lazy.UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
       heuristic: true,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-        query: [query.trimStart(), UrlbarUtils.HIGHLIGHT.NONE],
-        keyword: [firstToken, UrlbarUtils.HIGHLIGHT.NONE],
-      }),
+      payload: {
+        query,
+        title: query,
+        keyword: firstToken,
+      },
     });
   }
 
@@ -309,7 +312,7 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     let query = queryContext.searchString;
     if (
       queryContext.tokens[0] &&
-      queryContext.tokens[0].value === lazy.UrlbarTokenizer.RESTRICT.SEARCH
+      queryContext.tokens[0].value === lazy.UrlbarShared.RESTRICT_TOKENS.SEARCH
     ) {
       query = UrlbarUtils.substringAfter(
         query,
@@ -318,15 +321,16 @@ export class UrlbarProviderHeuristicFallback extends UrlbarProvider {
     }
 
     return new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.SEARCH,
-      source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.SEARCH,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-        engine: [engine.name, UrlbarUtils.HIGHLIGHT.TYPED],
-        icon: UrlbarUtils.ICON.SEARCH_GLASS,
-        query: [query, UrlbarUtils.HIGHLIGHT.NONE],
-        keyword: keyword ? [keyword, UrlbarUtils.HIGHLIGHT.NONE] : undefined,
-      }),
+      payload: {
+        engine: engine.name,
+        icon: lazy.UrlbarShared.ICON.SEARCH_GLASS,
+        query,
+        title: query,
+        keyword,
+      },
     });
   }
 }

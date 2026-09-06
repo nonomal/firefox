@@ -4,22 +4,18 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #define GTEST_HAS_RTTI 0
-#include "gtest/gtest.h"
-
-#include "nss.h"
-
 #include "Canonicals.h"
 #include "ImageContainer.h"
-#include "VideoConduit.h"
-#include "VideoFrameConverter.h"
-#include "RtpRtcpConfig.h"
-
-#include "api/video/i420_buffer.h"
-#include "api/video/video_sink_interface.h"
-#include "media/base/media_constants.h"
-
 #include "MockCall.h"
 #include "MockConduit.h"
+#include "RtpRtcpConfig.h"
+#include "VideoConduit.h"
+#include "VideoFrameConverter.h"
+#include "api/video/i420_buffer.h"
+#include "api/video/video_sink_interface.h"
+#include "gtest/gtest.h"
+#include "media/base/media_constants.h"
+#include "nss.h"
 
 using namespace mozilla;
 using namespace mozilla::layers;
@@ -46,8 +42,8 @@ class MockVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
 struct TestRTCStatsTimestampState : public dom::RTCStatsTimestampState {
   TestRTCStatsTimestampState()
       : dom::RTCStatsTimestampState(
-            TimeStamp::Now() + TimeDuration::FromMilliseconds(10),
-            webrtc::Timestamp::Micros(0)) {}
+            0, TimeStamp::Now() + TimeDuration::FromMilliseconds(10),
+            webrtc::Timestamp::Micros(0), RTPCallerType::Normal, 0) {}
 };
 
 class TestRTCStatsTimestampMaker : public dom::RTCStatsTimestampMaker {
@@ -438,6 +434,9 @@ TEST_F(VideoConduitTest, TestConfigureSendMediaCodec) {
   ASSERT_EQ(Call()->mVideoSendEncoderConfig->min_transmit_bitrate_bps, 0);
   ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, KBPS(10000));
   ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  ASSERT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      KBPS(10000));
 
   // empty codec name
   mControl.Update([&](auto& aControl) {
@@ -552,9 +551,13 @@ TEST_F(VideoConduitTest, TestConfigureSendMediaCodecTias) {
     aControl.mVideoSendRtpRtcpConfig =
         Some(RtpRtcpConfig(webrtc::RtcpMode::kCompound, true));
   });
-  ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 2000000);
   {
     ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
+    ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 2000000);
+    ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+    ASSERT_EQ(
+        Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+        2000000);
     SendVideoFrame(1280, 720, 1);
     const std::vector<webrtc::VideoStream> videoStreams =
         Call()->CreateEncoderStreams(1280, 720);
@@ -571,9 +574,13 @@ TEST_F(VideoConduitTest, TestConfigureSendMediaCodecTias) {
     codecConfigTiasLow.mTias = 1000;
     aControl.mVideoSendCodec = Some(codecConfigTiasLow);
   });
-  ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 1000);
   {
     ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
+    ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 1000);
+    ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+    ASSERT_EQ(
+        Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+        1000);
     SendVideoFrame(1280, 720, 2);
     const std::vector<webrtc::VideoStream> videoStreams =
         Call()->CreateEncoderStreams(1280, 720);
@@ -595,6 +602,11 @@ TEST_F(VideoConduitTest, TestConfigureSendMediaCodecMaxBr) {
         Some(RtpRtcpConfig(webrtc::RtcpMode::kCompound, true));
   });
   ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 50000);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  ASSERT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      50000);
   SendVideoFrame(1280, 720, 1);
   const std::vector<webrtc::VideoStream> videoStreams =
       Call()->CreateEncoderStreams(1280, 720);
@@ -1261,6 +1273,10 @@ TEST_P(VideoConduitCodecModeTest, TestReconfigureSendMediaCodec) {
   });
   ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
   EXPECT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 2000000);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  EXPECT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      2000000);
   SendVideoFrame(1280, 720, 1);
 
   {
@@ -1285,6 +1301,11 @@ TEST_P(VideoConduitCodecModeTest, TestReconfigureSendMediaCodec) {
     aControl.mVideoSendCodec = Some(codecConfig);
   });
   ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
+  EXPECT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 50000);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  EXPECT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      50000);
   SendVideoFrame(1280, 720, 2);
   {
     const std::vector<webrtc::VideoStream> videoStreams =
@@ -1382,6 +1403,10 @@ TEST_P(VideoConduitCodecModeTest,
   });
   ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
   ASSERT_EQ(Call()->mVideoSendEncoderConfig->max_bitrate_bps, 2000000);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  EXPECT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      2000000);
   SendVideoFrame(1280, 720, 1);
 
   {
@@ -1403,6 +1428,10 @@ TEST_P(VideoConduitCodecModeTest,
     aControl.mVideoSendCodec = Some(codecConfig);
   });
   ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
+  ASSERT_EQ(Call()->mVideoSendEncoderConfig->number_of_streams, 1U);
+  EXPECT_EQ(
+      Call()->mVideoSendEncoderConfig->simulcast_layers[0].max_bitrate_bps,
+      50000);
   SendVideoFrame(1280, 720, 2);
   {
     const std::vector<webrtc::VideoStream> videoStreams =
@@ -2369,7 +2398,7 @@ TEST_F(VideoConduitTest, TestVideoConfigurationH264) {
     auto& params = Call()->mVideoSendEncoderConfig->video_format.parameters;
     EXPECT_EQ(params[webrtc::kH264FmtpPacketizationMode], "0");
     EXPECT_EQ(params[webrtc::kH264FmtpProfileLevelId], "42e01f");
-    EXPECT_EQ(params[webrtc::kH264FmtpSpropParameterSets], sprop1);
+    EXPECT_EQ(params[std::string(webrtc::kH264FmtpSpropParameterSets)], sprop1);
   }
 
   {
@@ -2389,7 +2418,7 @@ TEST_F(VideoConduitTest, TestVideoConfigurationH264) {
     auto& params = Call()->mVideoSendEncoderConfig->video_format.parameters;
     EXPECT_EQ(params[webrtc::kH264FmtpPacketizationMode], "1");
     EXPECT_EQ(params[webrtc::kH264FmtpProfileLevelId], "64000c");
-    EXPECT_EQ(params[webrtc::kH264FmtpSpropParameterSets], sprop2);
+    EXPECT_EQ(params[std::string(webrtc::kH264FmtpSpropParameterSets)], sprop2);
   }
 }
 
@@ -2413,9 +2442,9 @@ TEST_F(VideoConduitTest, TestVideoConfigurationAV1) {
 
     ASSERT_TRUE(Call()->mVideoSendEncoderConfig);
     auto& params = Call()->mVideoSendEncoderConfig->video_format.parameters;
-    EXPECT_EQ(params[webrtc::kAv1FmtpProfile], "2");
-    EXPECT_EQ(params[webrtc::kAv1FmtpLevelIdx], "4");
-    EXPECT_EQ(params[webrtc::kAv1FmtpTier], "1");
+    EXPECT_EQ(params[std::string(webrtc::kAv1FmtpProfile)], "2");
+    EXPECT_EQ(params[std::string(webrtc::kAv1FmtpLevelIdx)], "4");
+    EXPECT_EQ(params[std::string(webrtc::kAv1FmtpTier)], "1");
   }
 }
 

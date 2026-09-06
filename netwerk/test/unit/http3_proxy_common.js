@@ -16,6 +16,10 @@ const {
   NodeHTTPSServer,
   NodeHTTP2Server,
   NodeHTTP2ProxyServer,
+  NodeWebSocketHttp2Server,
+  WebSocketConnection,
+  NodeTCPEchoServer,
+  NodeTLSEchoServer,
 } = ChromeUtils.importESModule("resource://testing-common/NodeServer.sys.mjs");
 
 function makeChan(uri) {
@@ -431,7 +435,71 @@ async function test_http_connect_fallback() {
   await server.stop();
 }
 
-async function test_inner_connection_fallback() {
+/**
+ * Helper function to open a WebSocket connection
+ */
+async function wsChannelOpenPromise(url, msg) {
+  let conn = new WebSocketConnection();
+  let statusObj = await Promise.race([conn.open(url), conn.finished()]);
+  if (statusObj && statusObj.status != Cr.NS_OK) {
+    return [statusObj.status, ""];
+  }
+  let finalStatusPromise = conn.finished();
+  conn.send(msg);
+  let res = await conn.receiveMessages();
+  conn.close();
+  let finalStatus = await finalStatusPromise;
+  return [finalStatus.status, res];
+}
+
+/**
+ * Test WebSocket through H3 proxy using H2 WebSocket server
+ */
+async function test_http_connect_websocket() {
+  info("Running test_http_connect_websocket");
+  Services.prefs.setBoolPref("network.http.http2.websockets", true);
+
+  let wss = new NodeWebSocketHttp2Server();
+  await wss.start();
+
+  registerCleanupFunction(async () => {
+    await wss.stop();
+  });
+
+  Assert.notEqual(wss.port(), null);
+  await wss.registerMessageHandler((data, ws) => {
+    ws.send(data);
+  });
+
+  let url = `wss://alt1.example.com:${wss.port()}`;
+  const msg = "test h2 websocket through h3 proxy";
+  let [status, res] = await wsChannelOpenPromise(url, msg);
+  Assert.equal(status, Cr.NS_OK);
+  Assert.deepEqual(res, [msg]);
+
+  // Test multiple messages
+  let conn = new WebSocketConnection();
+  await conn.open(url);
+  conn.send("message1");
+  let mess1 = await conn.receiveMessages();
+  Assert.deepEqual(mess1, ["message1"]);
+
+  conn.send("message2");
+  conn.send("message3");
+  let mess2 = [];
+  while (mess2.length < 2) {
+    mess2 = mess2.concat(await conn.receiveMessages());
+  }
+  Assert.deepEqual(mess2, ["message2", "message3"]);
+
+  conn.close();
+  let { status: finalStatus } = await conn.finished();
+  Assert.equal(finalStatus, Cr.NS_OK);
+
+  await wss.stop();
+}
+
+async function test_inner_connection_fallback(ServerClass) {
   info("Running test_inner_connection_fallback");
   let h3Port = Services.env.get("MOZHTTP3_PORT_NO_RESPONSE");
   info(`h3Port = ${h3Port}`);
@@ -439,7 +507,10 @@ async function test_inner_connection_fallback() {
   // Register the connect-udp proxy.
   pps.registerFilter(proxyFilter, 10);
 
-  let server = new NodeHTTPSServer();
+  let httpsProxy = new NodeHTTP2ProxyServer();
+  await httpsProxy.startWithoutProxyFilter(proxyPort);
+
+  let server = new ServerClass();
   await server.start(h3Port);
 
   // Register multiple endpoints
@@ -457,6 +528,7 @@ async function test_inner_connection_fallback() {
   });
   registerCleanupFunction(async () => {
     await server.stop();
+    await httpsProxy.stop();
   });
 
   Services.prefs.setCharPref(
@@ -482,4 +554,150 @@ async function test_inner_connection_fallback() {
     Assert.equal(buf, `fallback${i + 1}`);
   }
   await server.stop();
+  await httpsProxy.stop();
+
+  pps.unregisterFilter(proxyFilter);
+}
+
+const CC = Components.Constructor;
+const BinaryInputStream = CC(
+  "@mozilla.org/binaryinputstream;1",
+  "nsIBinaryInputStream",
+  "setInputStream"
+);
+const BinaryOutputStream = CC(
+  "@mozilla.org/binaryoutputstream;1",
+  "nsIBinaryOutputStream",
+  "setOutputStream"
+);
+
+function createUpgradeHandlers({ writePayload = "hello" } = {}) {
+  const handler = {
+    _resolve: null,
+
+    waitForData() {
+      return new Promise(resolve => {
+        this._resolve = resolve;
+      });
+    },
+
+    onInputStreamReady(input) {
+      try {
+        const bis = new BinaryInputStream(input);
+        const n = input.available();
+        if (n > 0) {
+          const data = bis.readByteArray(n);
+          if (this._resolve) {
+            this._resolve(data);
+            this._resolve = null;
+          }
+        }
+      } catch (e) {
+        Assert.ok(false, `onInputStreamReady threw: ${e}`);
+      }
+    },
+
+    onOutputStreamReady(output) {
+      try {
+        const bos = new BinaryOutputStream(output);
+        bos.writeByteArray(new TextEncoder().encode(writePayload));
+      } catch (e) {
+        Assert.ok(false, `onOutputStreamReady threw: ${e}`);
+      }
+    },
+
+    QueryInterface: ChromeUtils.generateQI([
+      "nsIInputStreamCallback",
+      "nsIOutputStreamCallback",
+    ]),
+  };
+
+  const listener = {
+    onTransportAvailable(transport, socketIn, socketOut) {
+      Assert.ok(
+        transport && socketIn && socketOut,
+        "transport and streams present"
+      );
+      socketIn.asyncWait(handler, 0, 0, Services.tm.mainThread);
+      socketOut.asyncWait(handler, 0, 0, Services.tm.mainThread);
+    },
+    QueryInterface: ChromeUtils.generateQI(["nsIHttpUpgradeListener"]),
+  };
+
+  return { upgradeListener: listener, connectHandler: handler };
+}
+
+async function test_http_connect_only() {
+  info("Running test_http_connect_only");
+  Services.prefs.setCharPref(
+    "network.http.http3.alt-svc-mapping-for-testing",
+    ""
+  );
+
+  let echo = new NodeTCPEchoServer();
+  await echo.start();
+  registerCleanupFunction(async () => {
+    await echo.stop();
+  });
+
+  pps.registerFilter(proxyFilter, 10);
+
+  const TEST_DATA = "HelloWorld";
+  const { upgradeListener, connectHandler } = createUpgradeHandlers({
+    writePayload: TEST_DATA,
+  });
+
+  const dataPromise = connectHandler.waitForData();
+
+  let chan = makeChan(`http://localhost:${echo.port()}/`);
+  let internal = chan.QueryInterface(Ci.nsIHttpChannelInternal);
+  internal.HTTPUpgrade("webrtc", upgradeListener);
+  internal.setConnectOnly(true);
+
+  let [req] = await channelOpenPromise(
+    chan,
+    CL_IGNORE_CL | CL_ALLOW_UNKNOWN_CL
+  );
+
+  Assert.equal(req.status, Cr.NS_OK);
+  Assert.equal(req.responseStatus, 200);
+
+  const data = await dataPromise;
+  Assert.equal(TEST_DATA, String.fromCharCode.apply(String, data));
+}
+
+async function test_https_connect_only() {
+  info("Running test_http_connect_only");
+  pps.unregisterFilter(proxyFilter);
+
+  let echo = new NodeTLSEchoServer();
+  await echo.start();
+  registerCleanupFunction(async () => {
+    await echo.stop();
+  });
+
+  pps.registerFilter(proxyFilter, 10);
+
+  const TEST_DATA = "HelloWorld";
+  const { upgradeListener, connectHandler } = createUpgradeHandlers({
+    writePayload: TEST_DATA,
+  });
+
+  const dataPromise = connectHandler.waitForData();
+
+  let chan = makeChan(`https://localhost:${echo.port()}/`);
+  let internal = chan.QueryInterface(Ci.nsIHttpChannelInternal);
+  internal.HTTPUpgrade("webrtc", upgradeListener);
+  internal.setConnectOnly(true);
+
+  let [req] = await channelOpenPromise(
+    chan,
+    CL_IGNORE_CL | CL_ALLOW_UNKNOWN_CL
+  );
+
+  Assert.equal(req.status, Cr.NS_OK);
+  Assert.equal(req.responseStatus, 200);
+
+  const data = await dataPromise;
+  Assert.equal(TEST_DATA, String.fromCharCode.apply(String, data));
 }

@@ -18,6 +18,7 @@ support-files = [
   "data/cfhtml-ie.txt",
   "data/cfhtml-ooo.txt",
   "data/cfhtml-nocontext.txt",
+  "data/cfhtml-negative-endfragment.txt",
 ]
 
 ["test_abs_positioner_appearance.html"]
@@ -35,6 +36,8 @@ skip-if = [
 ]
 
 ["test_backspace_vs.html"]
+
+["test_blur_in_compositionend.html"]
 
 ["test_bug46555.html"]
 
@@ -80,8 +83,6 @@ skip-if = [
 ["test_bug417418.html"]
 
 ["test_bug426246.html"]
-
-["test_bug430392.html"]
 
 ["test_bug439808.html"]
 
@@ -424,12 +425,20 @@ skip-if = [
 ["test_bug1649005.html"]
 
 ["test_bug1659276.html"]
+skip-if = [
+  "standalone", # Bug 2026600
+]
 
 ["test_bug1704381.html"]
 
 ["test_cannot_undo_after_reinitializing_editor.html"]
 
+["test_caret_focused_element_becomes_editable.html"]
+
 ["test_caret_move_in_vertical_content.html"]
+
+["test_caret_visibility_when_moving_focus_in_shadow.html"]
+support-files = ["window_caret_visibility_when_moving_focus_in_shadow.html"]
 
 ["test_cmd_absPos.html"]
 
@@ -446,6 +455,10 @@ skip-if = [
 ["test_command_state_when_readonly.html"]
 
 ["test_composition_event_created_in_chrome.html"]
+
+["test_composition_modified_as_multiple_text_nodes.html"]
+
+["test_composition_selectionchange.html"]
 
 ["test_composition_with_highlight_in_texteditor.html"]
 
@@ -469,6 +482,8 @@ skip-if = [
 ["test_dom_input_event_on_texteditor.html"]
 
 ["test_dragdrop.html"]
+
+["test_dragdrop_img_with_data_url.html"]
 
 ["test_dragend_target.html"]
 
@@ -494,6 +509,8 @@ skip-if = [
 ["test_inlineTableEditing.html"]
 
 ["test_inline_style_cache.html"]
+
+["test_insertHTML_caret_position_after_replaced_element.html"]
 
 ["test_insertHTML_starting_with_multiple_comment_nodes.html"]
 
@@ -634,9 +651,13 @@ skip-if = [
 
 ["test_pasteImgTextarea.html"]
 
+["test_pasteURLFromTransferable.html"]
+
 ["test_paste_as_quote_in_text_control.html"]
 
 ["test_paste_clipboard_change.html"]
+
+["test_paste_command_data.html"]
 
 ["test_paste_no_formatting.html"]
 
@@ -653,6 +674,10 @@ skip-if = [
 
 ["test_pasting_text_longer_than_maxlength.html"]
 
+["test_plaintext_mail_in_design_mode.html"]
+
+["test_remove_during_composition.html"]
+
 ["test_replace_text.html"]
 
 ["test_resizers_appearance.html"]
@@ -666,6 +691,8 @@ support-files = ["file_sanitizer_on_paste.sjs"]
 
 ["test_select_all_without_body.html"]
 support-files = ["file_select_all_without_body.html"]
+
+["test_selectable_input_event_dispatching_for_compositionend.html"]
 
 ["test_selection_at_beforeinput_insertReplacementText.html"]
 skip-if = [

@@ -43,6 +43,7 @@ const PROFILE_FIRST_USE_MS = PROFILE_RESET_DATE_MS - MILLISECONDS_PER_DAY;
 const PROFILE_CREATION_DATE_MS = PROFILE_FIRST_USE_MS - MILLISECONDS_PER_DAY;
 const PROFILE_RECOVERED_FROM_BACKUP =
   PROFILE_RESET_DATE_MS - MILLISECONDS_PER_HOUR;
+const PROFILE_SOURCE = "telemetry-tests";
 
 const GFX_VENDOR_ID = "0xabcd";
 const GFX_DEVICE_ID = "0x1234";
@@ -50,7 +51,21 @@ const GFX_DEVICE_ID = "0x1234";
 const EXPECTED_HDD_FIELDS = ["profile", "binary", "system"];
 
 // Valid attribution code to write so that settings.attribution can be tested.
-const ATTRIBUTION_CODE = "source%3Dgoogle.com%26dlsource%3Dunittest";
+const ATTRIBUTION_CODE = [
+  ["source", "%3D", "google.com"],
+  ["medium", "%3D", "referral"],
+  ["campaign", "%3D", "Firefox-Brand-US-Chrome"],
+  ["content", "%3D", "(not set)"],
+  ["experiment", "%3D", "(not set)"],
+  ["variation", "%3D", "(not set)"],
+  ["ua", "%3D", "chrome"],
+  ["dltoken", "%3D", "(not set)"],
+  ["msstoresignedin", "%3D", "false"],
+  ["storeBingAd", "_", "(not set)"], // `storeBingAd` uniquely uses `_` as a seperator.
+  ["dlsource", "%3D", "unittest"],
+]
+  .map(attr => attr.join(""))
+  .join("%26");
 
 function truncateToDays(aMsec) {
   return Math.floor(aMsec / MILLISECONDS_PER_DAY);
@@ -130,6 +145,7 @@ export var TelemetryEnvironmentTesting = {
         reset: PROFILE_RESET_DATE_MS,
         firstUse: PROFILE_FIRST_USE_MS,
         recoveredFromBackup: PROFILE_RECOVERED_FROM_BACKUP,
+        source: PROFILE_SOURCE,
       }
     );
   },
@@ -413,9 +429,35 @@ export var TelemetryEnvironmentTesting = {
       );
       let attrExt = Glean.gleanAttribution.ext.testGetValue();
       lazy.Assert.equal(
+        attrExt.experiment,
+        "(not set)",
+        "Must have correct `experiment`."
+      );
+      lazy.Assert.equal(
+        attrExt.variation,
+        "(not set)",
+        "Must have correct `variation`."
+      );
+      lazy.Assert.equal(attrExt.ua, "chrome", "Must have correct `ua`.");
+      lazy.Assert.equal(
+        attrExt.dltoken,
+        "(not set)",
+        "Must have correct `dltoken`."
+      );
+      lazy.Assert.equal(
+        attrExt.msstoresignedin,
+        false,
+        "Must have correct `msstoresignedin`."
+      );
+      lazy.Assert.equal(
+        attrExt.msclkid,
+        "(not set)",
+        "`storeBingAd_[value] should translate to `msclkid=[value]`."
+      );
+      lazy.Assert.equal(
         attrExt.dlsource,
         "unittest",
-        "Must have correct dlsource."
+        "Must have correct `dlsource`."
       );
     }
 
@@ -484,9 +526,15 @@ export var TelemetryEnvironmentTesting = {
       data.profile.recoveredFromBackup,
       Glean.profiles.recoveredFromBackup.testGetValue()
     );
+    lazy.Assert.equal(Glean.profiles.source.testGetValue(), PROFILE_SOURCE);
   },
 
   checkPartnerSection(data, isInitial) {
+    if (AppConstants.MOZ_APP_NAME == "thunderbird") {
+      // Thunderbird doesn't have distribution data and this section fails.
+      return;
+    }
+
     const EXPECTED_FIELDS = {
       distributionId: DISTRIBUTION_ID,
       distributionVersion: DISTRIBUTION_VERSION,
@@ -746,22 +794,6 @@ export var TelemetryEnvironmentTesting = {
 
     // Service pack is only available on Windows.
     if (gIsWindows) {
-      lazy.Assert.ok(
-        Number.isFinite(osData.servicePackMajor),
-        "ServicePackMajor must be a number."
-      );
-      lazy.Assert.ok(
-        Number.isFinite(osData.servicePackMinor),
-        "ServicePackMinor must be a number."
-      );
-      lazy.Assert.equal(
-        osData.servicePackMajor,
-        Glean.systemOs.servicePackMajor.testGetValue()
-      );
-      lazy.Assert.equal(
-        osData.servicePackMinor,
-        Glean.systemOs.servicePackMinor.testGetValue()
-      );
       if ("windowsBuildNumber" in osData) {
         // This might not be available on all Windows platforms.
         lazy.Assert.ok(
@@ -976,178 +1008,13 @@ export var TelemetryEnvironmentTesting = {
     } catch (e) {}
   },
 
-  checkActiveAddon(id, data, partialRecord) {
-    let signedState = "number";
-    // system add-ons have an undefined signState
-    if (data.isSystem) {
-      signedState = "undefined";
-    }
-
-    const EXPECTED_ADDON_FIELDS_TYPES = {
-      version: "string",
-      scope: "number",
-      type: "string",
-      updateDay: "number",
-      isSystem: "boolean",
-      isWebExtension: "boolean",
-      multiprocessCompatible: "boolean",
-    };
-
-    const FULL_ADDON_FIELD_TYPES = {
-      blocklisted: "boolean",
-      name: "string",
-      userDisabled: "boolean",
-      appDisabled: "boolean",
-      foreignInstall: "boolean",
-      hasBinaryComponents: "boolean",
-      installDay: "number",
-      signedState,
-    };
-
-    let fields = EXPECTED_ADDON_FIELDS_TYPES;
-    if (!partialRecord) {
-      fields = Object.assign({}, fields, FULL_ADDON_FIELD_TYPES);
-    }
-
-    for (let [name, type] of Object.entries(fields)) {
-      lazy.Assert.ok(name in data, name + " must be available.");
-      lazy.Assert.equal(
-        typeof data[name],
-        type,
-        name + " must have the correct type."
-      );
-    }
-
-    // Retrieve the Glean `addons.activeAddons` from the test API
-    let gleanData = Glean.addons.activeAddons.testGetValue();
-    // gleanData has all of the addons in it so we need to find the right one
-    let gleanObject = gleanData.find(entry => entry.id == id);
-    // Check the Glean properties of `addons.activeAddons`
-    for (let [field] of Object.entries(fields)) {
-      // Glean cannot use "type" as a field name so it is named "addonType"
-      // We account for that difference here in order to test the data
-      let gleanField = field;
-      if (field == "type") {
-        gleanField = "addonType";
-      }
-
-      lazy.Assert.equal(
-        data[field],
-        gleanObject[gleanField],
-        field + " must match what is recorded in Glean."
-      );
-    }
-
-    if (!partialRecord) {
-      // We check "description" separately, as it can be null.
-      lazy.Assert.ok(this.checkNullOrString(data.description));
-    }
-  },
-
-  checkTheme(data) {
-    const EXPECTED_THEME_FIELDS_TYPES = {
-      id: "string",
-      blocklisted: "boolean",
-      name: "string",
-      userDisabled: "boolean",
-      appDisabled: "boolean",
-      version: "string",
-      scope: "number",
-      foreignInstall: "boolean",
-      installDay: "number",
-      updateDay: "number",
-    };
-
-    for (let f in EXPECTED_THEME_FIELDS_TYPES) {
-      lazy.Assert.ok(f in data, f + " must be available.");
-      lazy.Assert.equal(
-        typeof data[f],
-        EXPECTED_THEME_FIELDS_TYPES[f],
-        f + " must have the correct type."
-      );
-    }
-
-    // Retrieve the Glean `addons.theme` from the test API
-    let gleanData = Glean.addons.theme.testGetValue();
-
-    // Check the Glean properties of `addons.theme`
-    for (let field in EXPECTED_THEME_FIELDS_TYPES) {
-      lazy.Assert.equal(
-        data[field],
-        gleanData[field],
-        field + " must match what is recorded in Glean."
-      );
-    }
-
-    // We check "description" separately, as it can be null.
-    lazy.Assert.ok(this.checkNullOrString(data.description));
-  },
-
-  checkActiveGMPlugin(data) {
-    // GMP plugin version defaults to null until GMPDownloader runs to update it.
-    if (data.version) {
-      lazy.Assert.equal(typeof data.version, "string");
-    }
-    lazy.Assert.equal(typeof data.userDisabled, "boolean");
-    lazy.Assert.equal(typeof data.applyBackgroundUpdates, "number");
-
-    // Retrieve the Glean `addons.activeGMPlugins` from the test API
-    let gleanData = Glean.addons.activeGMPlugins.testGetValue()[0];
-    lazy.Assert.equal(data.version, gleanData.version);
-    lazy.Assert.equal(data.userDisabled, gleanData.userDisabled);
-    lazy.Assert.equal(
-      data.applyBackgroundUpdates,
-      gleanData.applyBackgroundUpdates
-    );
-  },
-
-  checkAddonsSection(data, expectBrokenAddons, partialAddonsRecords) {
-    const EXPECTED_FIELDS = ["activeAddons", "theme", "activeGMPlugins"];
-
-    lazy.Assert.ok(
-      "addons" in data,
-      "There must be an addons section in Environment."
-    );
-    for (let f of EXPECTED_FIELDS) {
-      lazy.Assert.ok(f in data.addons, f + " must be available.");
-    }
-
-    // Check the active addons, if available.
-    if (!expectBrokenAddons) {
-      let activeAddons = data.addons.activeAddons;
-      for (let addon in activeAddons) {
-        this.checkActiveAddon(addon, activeAddons[addon], partialAddonsRecords);
-      }
-    }
-
-    // Check "theme" structure.
-    // NOTE: theme is expected to be set to an empty object while the theme is
-    // not installed or enabled yet by the time the telemetry environment is
-    // capturing the active addons and themes early during the first at startup,
-    // see Bug 1994389.
-    if (Object.keys(data.addons.theme).length !== 0) {
-      this.checkTheme(data.addons.theme);
-    }
-
-    // Check active GMPlugins
-    let activeGMPlugins = data.addons.activeGMPlugins;
-    for (let gmPlugin in activeGMPlugins) {
-      this.checkActiveGMPlugin(activeGMPlugins[gmPlugin]);
-    }
-  },
-
   checkEnvironmentData(data, options = {}) {
-    const {
-      isInitial = false,
-      expectBrokenAddons = false,
-      assertProcessData = false,
-    } = options;
+    const { isInitial = false, assertProcessData = false } = options;
 
     this.checkBuildSection(data);
     this.checkSettingsSection(data);
     this.checkProfileSection(data);
     this.checkPartnerSection(data, isInitial);
     this.checkSystemSection(data, assertProcessData);
-    this.checkAddonsSection(data, expectBrokenAddons);
   },
 };

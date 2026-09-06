@@ -28,7 +28,6 @@ console.error = function (msg, ...args) {
 };
 
 const req = require.context(".", true, /\.test\.jsx?$/);
-const files = req.keys();
 
 // This exposes sinon assertions to chai.assert
 sinon.assert.expose(assert, { prefix: "" });
@@ -244,12 +243,7 @@ const TEST_GLOBAL = {
       FINGERPRINTERS_ID: 4,
       SOCIAL_ID: 5,
     },
-    nsICookieBannerService: {
-      MODE_DISABLED: 0,
-      MODE_REJECT: 1,
-      MODE_REJECT_OR_ACCEPT: 2,
-      MODE_UNSET: 3,
-    },
+    nsIProtocolProxyChannelFilter: {},
   },
   Cu: {
     importGlobalProperties() {},
@@ -259,6 +253,15 @@ const TEST_GLOBAL = {
   console: {
     ...console,
     error() {},
+    createInstance() {
+      return {
+        log() {},
+        debug() {},
+        info() {},
+        warn() {},
+        error() {},
+      };
+    },
   },
   dump() {},
   EveryWindow: {
@@ -369,6 +372,22 @@ const TEST_GLOBAL = {
     home: "US",
     REGION_TOPIC: "browser-region-updated",
   },
+  SearchService: {
+    init() {
+      return Promise.resolve();
+    },
+    getVisibleEngines: () =>
+      Promise.resolve([{ identifier: "google" }, { identifier: "bing" }]),
+    defaultEngine: {
+      identifier: "google",
+      aliases: ["@google"],
+    },
+    defaultPrivateEngine: {
+      identifier: "bing",
+      aliases: ["@bing"],
+    },
+    getEngineByAlias: async () => null,
+  },
   Services: {
     dirsvc: {
       get: () => ({ parent: { parent: { path: "appPath" } } }),
@@ -426,22 +445,7 @@ const TEST_GLOBAL = {
         spec,
       }),
     },
-    search: {
-      init() {
-        return Promise.resolve();
-      },
-      getVisibleEngines: () =>
-        Promise.resolve([{ identifier: "google" }, { identifier: "bing" }]),
-      defaultEngine: {
-        identifier: "google",
-        aliases: ["@google"],
-      },
-      defaultPrivateEngine: {
-        identifier: "bing",
-        aliases: ["@bing"],
-      },
-      getEngineByAlias: async () => null,
-    },
+
     scriptSecurityManager: {
       createNullPrincipal() {},
       getSystemPrincipal() {},
@@ -520,6 +524,7 @@ const TEST_GLOBAL = {
   FX_MONITOR_OAUTH_CLIENT_ID: "fake_client_id",
   ExperimentAPI: {},
   NimbusFeatures: FakeNimbusFeatures([
+    "adsBackend",
     "glean",
     "newtab",
     "newtabTrainhop",
@@ -528,7 +533,6 @@ const TEST_GLOBAL = {
     "newtabInferredPersonalization",
     "newtabWidgets",
     "newtabOhttpImages",
-    "cookieBannerHandling",
   ]),
   TelemetryEnvironment: {
     setExperimentActive() {},
@@ -567,6 +571,9 @@ const TEST_GLOBAL = {
 
   getFxAccountsSingleton() {},
   AboutNewTab: {},
+  AboutHomeStartupCache: {
+    onPreloadedNewTabMessage() {},
+  },
   Glean: {
     activityStream: {
       eventClick: {
@@ -690,6 +697,11 @@ const TEST_GLOBAL = {
         set() {},
       },
     },
+    newtabContent: {
+      surfaceId: {
+        set() {},
+      },
+    },
   },
   GleanPings: {
     newtab: {
@@ -707,10 +719,14 @@ const TEST_GLOBAL = {
     SERVER_URL: "bogus://foo",
   },
   NewTabContentPing,
+  ProxyService: {
+    registerChannelFilter() {},
+    unregisterChannelFilter() {},
+  },
 };
 overrider.set(TEST_GLOBAL);
 
 describe("activity-stream", () => {
   after(() => overrider.restore());
-  files.forEach(file => req(file));
+  req.keys().forEach(file => req(file));
 });

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,8 +10,10 @@
 #include "mozilla/HTMLEditor.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MozPromise.h"  // for mozilla::detail::Any
+#include "mozilla/dom/DataTransfer.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Selection.h"
+#include "mozilla/dom/UserActivation.h"
 #include "nsCommandParams.h"
 #include "nsIClipboard.h"
 #include "nsIEditingSession.h"
@@ -432,9 +433,35 @@ bool PasteCommand::IsCommandEnabled(Command aCommand,
 
 nsresult PasteCommand::DoCommand(Command aCommand, EditorBase& aEditorBase,
                                  nsIPrincipal* aPrincipal) const {
+  RefPtr<dom::DataTransfer> dataTransfer;
+  nsCOMPtr<nsIPrincipal> subjectPrincipal =
+      aPrincipal ? aPrincipal
+                 : nsContentUtils::SubjectPrincipalOrSystemIfNativeCaller();
+  MOZ_ASSERT(subjectPrincipal);
+
+  // If we don't need to get user confirmation for clipboard access, we could
+  // just let EditorBase::PasteAsAction() to create DataTransfer instance
+  // synchronously for paste event. Otherwise, we need to spin the event loop to
+  // wait for the clipboard paste contextmenu to be shown and get user
+  // confirmation which are all handled in parent process before sending the
+  // paste event.
+  if (!nsContentUtils::PrincipalHasPermission(*subjectPrincipal,
+                                              nsGkAtoms::clipboardRead) &&
+      !dom::UserActivation::IsHandlingKeyboardInputWithPasteActions()) {
+    MOZ_DIAGNOSTIC_ASSERT(StaticPrefs::dom_execCommand_paste_enabled(),
+                          "How did we get here?");
+    // This will spin the event loop.
+    nsCOMPtr<nsPIDOMWindowOuter> window = aEditorBase.GetWindow();
+    dataTransfer = dom::DataTransfer::WaitForClipboardDataSnapshotAndCreate(
+        window, subjectPrincipal);
+    if (!dataTransfer) {
+      return NS_SUCCESS_DOM_NO_OPERATION;
+    }
+  }
+
   nsresult rv = aEditorBase.PasteAsAction(nsIClipboard::kGlobalClipboard,
                                           EditorBase::DispatchPasteEvent::Yes,
-                                          nullptr, aPrincipal);
+                                          dataTransfer, aPrincipal);
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
                        "EditorBase::PasteAsAction(nsIClipboard::"
                        "kGlobalClipboard, DispatchPasteEvent::Yes) failed");
@@ -442,6 +469,46 @@ nsresult PasteCommand::DoCommand(Command aCommand, EditorBase& aEditorBase,
 }
 
 nsresult PasteCommand::GetCommandStateParams(
+    Command aCommand, nsCommandParams& aParams, EditorBase* aEditorBase,
+    nsIEditingSession* aEditingSession) const {
+  return aParams.SetBool(STATE_ENABLED,
+                         IsCommandEnabled(aCommand, aEditorBase));
+}
+
+/*****************************************************************************
+ * mozilla::PasteNoFormattingCommand
+ *****************************************************************************/
+
+StaticRefPtr<PasteNoFormattingCommand> PasteNoFormattingCommand::sInstance;
+
+bool PasteNoFormattingCommand::IsCommandEnabled(Command aCommand,
+                                                EditorBase* aEditorBase) const {
+  return aEditorBase && aEditorBase->IsSelectionEditable() &&
+         aEditorBase->CanPaste(nsIClipboard::kGlobalClipboard);
+}
+
+nsresult PasteNoFormattingCommand::DoCommand(Command aCommand,
+                                             EditorBase& aEditorBase,
+                                             nsIPrincipal* aPrincipal) const {
+#ifdef DEBUG
+  // cmd_pasteNoFormatting is not available through document.execCommand.
+  // So it should always have clipboardRead permission.
+  nsCOMPtr<nsIPrincipal> subjectPrincipal =
+      aPrincipal ? aPrincipal
+                 : nsContentUtils::SubjectPrincipalOrSystemIfNativeCaller();
+  MOZ_ASSERT(nsContentUtils::PrincipalHasPermission(*subjectPrincipal,
+                                                    nsGkAtoms::clipboardRead));
+#endif
+  nsresult rv = aEditorBase.PasteNoFormattingAsAction(
+      nsIClipboard::kGlobalClipboard, EditorBase::DispatchPasteEvent::Yes,
+      nullptr, aPrincipal);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                       "EditorBase::PasteNoFormattingAsAction(nsIClipboard::"
+                       "kGlobalClipboard, DispatchPasteEvent::Yes) failed");
+  return rv;
+}
+
+nsresult PasteNoFormattingCommand::GetCommandStateParams(
     Command aCommand, nsCommandParams& aParams, EditorBase* aEditorBase,
     nsIEditingSession* aEditingSession) const {
   return aParams.SetBool(STATE_ENABLED,
@@ -677,6 +744,9 @@ static const struct MoveCommand {
      Command::SelectWordNext, &nsISelectionController::WordMove},
     {Command::BeginLine, Command::EndLine, Command::SelectBeginLine,
      Command::SelectEndLine, &nsISelectionController::IntraLineMove},
+    {Command::BeginParagraph, Command::EndParagraph,
+     Command::SelectBeginParagraph, Command::SelectEndParagraph,
+     &nsISelectionController::ParagraphMove},
     {Command::MovePageUp, Command::MovePageDown, Command::SelectPageUp,
      Command::SelectPageDown, &nsISelectionController::PageMove},
     {Command::MoveTop, Command::MoveBottom, Command::SelectTop,
@@ -701,7 +771,11 @@ static const struct PhysicalCommand {
      nsISelectionController::MOVE_RIGHT, 1},
     {Command::MoveUp2, Command::SelectUp2, nsISelectionController::MOVE_UP, 1},
     {Command::MoveDown2, Command::SelectDown2,
-     nsISelectionController::MOVE_DOWN, 1}};
+     nsISelectionController::MOVE_DOWN, 1},
+    {Command::MoveLeft3, Command::SelectLeft3,
+     nsISelectionController::MOVE_LEFT, 2},
+    {Command::MoveRight3, Command::SelectRight3,
+     nsISelectionController::MOVE_RIGHT, 2}};
 
 nsresult SelectionMoveCommands::DoCommand(Command aCommand,
                                           EditorBase& aEditorBase,
@@ -720,8 +794,7 @@ nsresult SelectionMoveCommands::DoCommand(Command aCommand,
   }
 
   // scroll commands
-  for (size_t i = 0; i < std::size(scrollCommands); i++) {
-    const ScrollCommand& cmd = scrollCommands[i];
+  for (const auto& cmd : scrollCommands) {
     if (aCommand == cmd.mReverseScroll) {
       return (selectionController->*(cmd.scroll))(false);
     }
@@ -731,8 +804,7 @@ nsresult SelectionMoveCommands::DoCommand(Command aCommand,
   }
 
   // caret movement/selection commands
-  for (size_t i = 0; i < std::size(moveCommands); i++) {
-    const MoveCommand& cmd = moveCommands[i];
+  for (const auto& cmd : moveCommands) {
     if (aCommand == cmd.mReverseMove) {
       return (selectionController->*(cmd.move))(false, false);
     }
@@ -748,8 +820,7 @@ nsresult SelectionMoveCommands::DoCommand(Command aCommand,
   }
 
   // physical-direction movement/selection
-  for (size_t i = 0; i < std::size(physicalCommands); i++) {
-    const PhysicalCommand& cmd = physicalCommands[i];
+  for (auto cmd : physicalCommands) {
     if (aCommand == cmd.mMove) {
       nsresult rv =
           selectionController->PhysicalMove(cmd.direction, cmd.amount, false);

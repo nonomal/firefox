@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -34,21 +32,22 @@ class CacheIRStubInfo;
 class CompileInfo;
 class WarpScriptSnapshot;
 
-#define WARP_OP_SNAPSHOT_LIST(_) \
-  _(WarpArguments)               \
-  _(WarpRegExp)                  \
-  _(WarpBuiltinObject)           \
-  _(WarpGetIntrinsic)            \
-  _(WarpGetImport)               \
-  _(WarpRest)                    \
-  _(WarpBindUnqualifiedGName)    \
-  _(WarpVarEnvironment)          \
-  _(WarpLexicalEnvironment)      \
-  _(WarpClassBodyEnvironment)    \
-  _(WarpBailout)                 \
-  _(WarpCacheIR)                 \
-  _(WarpCacheIRWithShapeList)    \
-  _(WarpInlinedCall)             \
+#define WARP_OP_SNAPSHOT_LIST(_)        \
+  _(WarpArguments)                      \
+  _(WarpRegExp)                         \
+  _(WarpBuiltinObject)                  \
+  _(WarpGetIntrinsic)                   \
+  _(WarpGetImport)                      \
+  _(WarpRest)                           \
+  _(WarpBindUnqualifiedGName)           \
+  _(WarpVarEnvironment)                 \
+  _(WarpLexicalEnvironment)             \
+  _(WarpClassBodyEnvironment)           \
+  _(WarpBailout)                        \
+  _(WarpCacheIR)                        \
+  _(WarpCacheIRWithShapeList)           \
+  _(WarpCacheIRWithShapeListAndOffsets) \
+  _(WarpInlinedCall)                    \
   _(WarpPolymorphicTypes)
 
 // WarpOpSnapshot is the base class for data attached to a single bytecode op by
@@ -282,9 +281,25 @@ class ShapeListSnapshot {
 
   void trace(JSTracer* trc) const;
 
- private:
+ protected:
   static constexpr size_t NumShapes = 4;
   mozilla::Array<OffthreadGCPtr<Shape*>, NumShapes> shapes_{};
+};
+
+class ShapeListWithOffsetsSnapshot : public ShapeListSnapshot {
+ public:
+  ShapeListWithOffsetsSnapshot() = default;
+
+  void init(size_t index, Shape* shape, uint32_t offset) {
+    MOZ_ASSERT(shape);
+    shapes_[index].init(shape);
+    offsets_[index] = offset;
+  }
+
+  const auto& offsets() const { return offsets_; }
+
+ private:
+  mozilla::Array<uint32_t, NumShapes> offsets_{};
 };
 
 // Like WarpCacheIR, but also includes a ShapeListSnapshot for the
@@ -309,6 +324,30 @@ class WarpCacheIRWithShapeList : public WarpCacheIRBase {
 #endif
 
   const ShapeListSnapshot* shapes() const { return &shapes_; }
+};
+
+// Like WarpCacheIR, but also includes a ShapeListWithOffsetsSnapshot for the
+// GuardMultipleShapesToOffset CacheIR op.
+class WarpCacheIRWithShapeListAndOffsets : public WarpCacheIRBase {
+  const ShapeListWithOffsetsSnapshot shapes_;
+
+ public:
+  static constexpr Kind ThisKind = Kind::WarpCacheIRWithShapeListAndOffsets;
+
+  WarpCacheIRWithShapeListAndOffsets(uint32_t offset, JitCode* stubCode,
+                                     const CacheIRStubInfo* stubInfo,
+                                     const uint8_t* stubData,
+                                     const ShapeListWithOffsetsSnapshot& shapes)
+      : WarpCacheIRBase(ThisKind, offset, stubCode, stubInfo, stubData),
+        shapes_(shapes) {}
+
+  void traceData(JSTracer* trc);
+
+#ifdef JS_JITSPEW
+  void dumpData(GenericPrinter& out) const;
+#endif
+
+  const ShapeListWithOffsetsSnapshot* shapes() const { return &shapes_; }
 };
 
 // [SMDOC] Warp Nursery Object/Value support

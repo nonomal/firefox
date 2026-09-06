@@ -1,6 +1,4 @@
-/* -*- Mode: Java; c-basic-offset: 4; tab-width: 20; indent-tabs-mode: nil; -*-
- * vim: ts=4 sw=4 expandtab:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -482,7 +480,7 @@ public class BasicSelectionActionDelegate
 
     // outRect has to convert to current window coordinate.
     final Matrix matrix = new Matrix();
-    mSession.getScreenToWindowManagerOffsetMatrix(matrix);
+    mSession.getScreenToWindowManagerOffsetMatrix(mActivity, matrix);
     final RectF transformedRect = new RectF();
     matrix.mapRect(transformedRect, mSelection.screenRect);
     transformedRect.roundOut(outRect);

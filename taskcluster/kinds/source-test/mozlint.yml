@@ -67,6 +67,9 @@ rejected-words:
         tier: 2
     run:
         mach: lint -v -l rejected-words -f treeherder -f json:/builds/worker/mozlint.json .
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.js'
@@ -94,12 +97,16 @@ rejected-words:
 dot-mozilla-reference:
     description: Give visibility to misuse of ".mozilla" being hardcoded and thus breaking XDG support
     treeherder:
-        symbol: text(dot-mozilla-reference)
+        symbol: misc(dot-mozilla-reference)
         # We don't want patches to be backed out because of this, a follow up bug will be
         # good enough
         tier: 2
     run:
         mach: lint -v -l dot-mozilla-reference -f treeherder -f json:/builds/worker/mozlint.json .
+
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.js'
@@ -223,7 +230,7 @@ typescript:
     description: TypeScript checker
     treeherder:
         symbol: js(TSC)
-        tier: 3
+        tier: 2
     run:
         using: run-task
         cwd: '{checkout}'
@@ -244,8 +251,14 @@ typescript:
             - 'browser/components/places/**/*.ts'
             - 'browser/components/search/**/*.*js'
             - 'browser/components/search/**/*.ts'
+            - 'browser/components/sessionstore/**/*.*js'
+            - 'browser/components/sessionstore/**/*.ts'
+            - 'browser/components/tabbrowser/**/*.*js'
+            - 'browser/components/tabbrowser/**/*.ts'
             - 'browser/components/urlbar/**/*.*js'
             - 'browser/components/urlbar/**/*.ts'
+            - 'toolkit/components/extensions/**/*.*js'
+            - 'toolkit/components/extensions/**/*.ts'
             - 'toolkit/components/places/**/*.*js'
             - 'toolkit/components/places/**/*.ts'
             - 'toolkit/components/search/**/*.*js'
@@ -265,6 +278,9 @@ license:
         symbol: pedantic(license)
     run:
         mach: lint -v -l license -f treeherder -f json:/builds/worker/mozlint.json .
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.c'
@@ -309,8 +325,6 @@ lintpref:
             - 'browser/branding/unofficial/pref/firefox-branding.js'
             - 'browser/branding/aurora/pref/firefox-branding.js'
             - 'browser/app/profile/channel-prefs.js'
-            - 'mobile/android/installer/mobile-l10n.js'
-            - 'mobile/android/locales/en-US/mobile-l10n.js'
             - 'tools/lint/lintpref.yml'
 
 node-licenses:
@@ -327,6 +341,7 @@ node-licenses:
             ln -s ../tools/lint/eslint/eslint-plugin-spidermonkey-js node_modules &&
             cp -r $MOZ_FETCHES_DIR/eslint-plugin-mozilla/node_modules tools/lint/eslint/eslint-plugin-mozilla/node_modules &&
             cp -r $MOZ_FETCHES_DIR/stylelint-plugin-mozilla/node_modules tools/lint/stylelint/stylelint-plugin-mozilla/node_modules &&
+            cp -r $MOZ_FETCHES_DIR/terser/node_modules tools/terser/node_modules &&
             ./mach lint -v -l node-licenses -f treeherder -f json:/builds/worker/mozlint.json .
     when:
         files-changed:
@@ -338,12 +353,14 @@ node-licenses:
             - package.json
             - tools/lint/eslint/eslint-plugin-mozilla/package.json
             - tools/lint/stylelint/stylelint-plugin-mozilla/package.json
+            - tools/terser/package.json
     fetches:
         toolchain:
             - linux64-node
             - node-modules
             - eslint-plugin-mozilla
             - stylelint-plugin-mozilla
+            - terser
 
 node-package-names:
     description: Lint for node package name issues
@@ -395,21 +412,22 @@ mscom-init:
             - '**/*.rs'
             - 'tools/lint/mscom-init.yml'
 
-py-black:
-    description: black run over the gecko codebase
+py-ruff-format:
+    description: ruff format run over the gecko codebase
     treeherder:
-        symbol: py(black)
+        symbol: py(ruff-format)
     run:
-        mach: lint -v -l black -f treeherder -f json:/builds/worker/mozlint.json .
+        mach: lint -v -l ruff-format -f treeherder -f json:/builds/worker/mozlint.json .
     when:
         files-changed:
-            # The list of extensions should match tools/lint/black.yml
+            # The list of extensions should match tools/lint/ruff-format.yml
             - '**/*.py'
             - '**/moz.build'
             - '**/*.configure'
             - '**/*.mozbuild'
             - 'pyproject.toml'
-            - 'tools/lint/black.yml'
+            - 'tools/lint/ruff-format.yml'
+            - 'tools/lint/python/ruff.py'
 
 py-ruff:
     description: Run ruff over the gecko codebase
@@ -441,19 +459,34 @@ python-sites:
 test-manifest:
     description: lint test manifests
     treeherder:
-        symbol: misc(tm)
+        symbol: tests(test-manifest)
     run:
         mach: lint -v -l test-manifest-toml -f treeherder -f json:/builds/worker/mozlint.json .
     when:
         files-changed:
             - '**/*.toml'
             - 'python/mozlint/**'
-            - 'tools/lint/**'
+            - 'tools/lint/test/files/test_manifest_toml/**'
+            - 'tools/lint/test/test_manifest_toml.py'
+            - 'tools/lint/test-manifest-toml/**'
+
+review-context-toml:
+    description: Validate review-context.toml against the review context schema
+    treeherder:
+        symbol: misc(review-context)
+    run:
+        mach: lint -v -l review-context-toml -f treeherder -f json:/builds/worker/mozlint.json .
+    when:
+        files-changed:
+            - 'review-context.toml'
+            - 'tools/lint/review-context-toml.yml'
+            - 'tools/lint/python/review_context_schema.py'
+            - 'tools/lint/python/review_context_toml.py'
 
 wptlint-gecko:
     description: web-platform-tests linter
     treeherder:
-        symbol: misc(W)
+        symbol: tests(web-platform)
     run:
         mach: lint -v -l wpt -f treeherder -f json:/builds/worker/mozlint.json .
     when:
@@ -461,6 +494,22 @@ wptlint-gecko:
             - 'testing/web-platform/tests/**'
             - 'testing/web-platform/mozilla/tests/**'
             - 'tools/lint/wpt.yml'
+
+wpt-subsuite-tagging:
+    description: Checks WPT tests in subsuite directories have subsuite tags
+    treeherder:
+        symbol: tests(wpt-sub)
+    run:
+        mach: lint -v -l wpt-subsuite-tagging -f treeherder -f json:/builds/worker/mozlint.json .
+    when:
+        files-changed:
+            - 'testing/web-platform/tests/**'
+            - 'testing/web-platform/mozilla/tests/**'
+            - 'testing/web-platform/meta/**'
+            - 'testing/web-platform/mozilla/meta/**'
+            - 'taskcluster/gecko_taskgraph/util/chunking.py'
+            - 'tools/lint/wpt-subsuite-tagging/**'
+            - 'tools/lint/wpt-subsuite-tagging.yml'
 
 yaml:
     description: yamllint run over the gecko codebase
@@ -474,16 +523,20 @@ yaml:
             - '**/*.yaml'
             - '**/.ymllint'
 
-rst:
-    description: rst lint run over the gecko codebase
+md:
+    description: Markdown linters run over the gecko codebase
     treeherder:
-        symbol: text(rst)
+        symbol: doc(md)
+        # Allow follow-ups for Markdown style issues rather than backing patches out.
+        tier: 2
     run:
-        mach: lint -v -l rst -f treeherder -f json:/builds/worker/mozlint.json .
+        mach: lint -v -l md -f treeherder -f json:/builds/worker/mozlint.json .
     when:
         files-changed:
-            - '**/*.rst'
-            - 'tools/lint/rst.yml'
+            - '**/*.md'
+            - 'tools/lint/md.yml'
+            - 'tools/lint/rumdl.toml'
+            - 'tools/lint/python/rumdl.py'
 
 shellcheck:
     description: shellcheck run over the gecko codebase
@@ -611,6 +664,24 @@ cargo-audit:
         toolchain:
             - linux64-rust
 
+mozcheck-tests:
+    description: mozcheck Rust unit tests
+    treeherder:
+        symbol: rust(mozcheck)
+    run:
+        using: run-task
+        cwd: '{checkout}'
+        command: >-
+            PATH="$MOZ_FETCHES_DIR/rustc/bin:$PATH"
+            cargo test --locked --verbose
+            --manifest-path tools/lint/mozcheck/Cargo.toml
+    when:
+        files-changed:
+            - 'tools/lint/mozcheck/**'
+    fetches:
+        toolchain:
+            - linux64-rust
+
 file-whitespace:
     description: Check for trailing whitespaces and Windows CR
     platform: lint/opt
@@ -621,6 +692,9 @@ file-whitespace:
         tier: 2
     run:
         mach: lint -v -l file-whitespace -f treeherder -f json:/builds/worker/mozlint.json .
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.c'
@@ -656,6 +730,9 @@ file-perm:
         tier: 2
     run:
         mach: lint -v -l file-perm -f treeherder -f json:/builds/worker/mozlint.json .
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.build'
@@ -696,9 +773,9 @@ file-perm:
 perfdocs-verify:
     description: Verifies Performance Testing documentation
     treeherder:
-        symbol: text(perfdocs)
+        symbol: doc(perfdocs)
     run:
-        mach: lint -v -l perfdocs -f treeherder -f json:/builds/worker/mozlint.json .
+        mach: perfdocs --output-file /builds/worker/mozlint.json
     worker:
         env:
             WORKSPACE: /builds/worker/checkouts/gecko/
@@ -772,7 +849,10 @@ trojan-source:
     treeherder:
         symbol: misc(trojan-source)
     run:
-        mach: lint -v -l trojan-source --include-third-party -f treeherder -f json:/builds/worker/mozlint.json .
+        mach: lint -v -l trojan-source -f treeherder -f json:/builds/worker/mozlint.json .
+    fetches:
+        toolchain:
+            - linux64-mozcheck
     when:
         files-changed:
             - '**/*.c'
@@ -795,6 +875,20 @@ ignorefile-test:
             - '.gitignore'
             - '.hgignore'
 
+agent-skills-sync:
+    description: Keep .claude/skills and .agents/skills in sync
+    platform: lint/opt
+    treeherder:
+        symbol: agent-skills-sync
+    run:
+        mach: lint -v -l agent-skills-sync -f treeherder -f json:/builds/worker/mozlint.json .claude/skills .agents/skills
+    when:
+        files-changed:
+            - '.claude/skills/**'
+            - '.agents/skills/**'
+            - 'tools/lint/agent-skills-sync.yml'
+            - 'tools/lint/agent-skills-sync/**'
+
 
 c-includes:
     description: Remove unused mfbt includes from the codebase
@@ -815,6 +909,33 @@ c-includes:
             - 'tools/lint/includes.yml'
             - 'tools/lint/includes/**'
             - 'mfbt/api.yml'
+
+header-guards:
+    description: Checks include header guards
+    treeherder:
+        symbol: cpp(guards)
+    run:
+        mach: lint -l header-guards -f treeherder -f json:/builds/worker/mozlint.json .
+    when:
+        files-changed:
+            - '**/*.h'
+            - '**/*.hpp'
+            - 'tools/lint/header-guards.yml'
+            - 'tools/lint/header_guards/**'
+
+android-expired-strings:
+    description: Check for references to Android strings marked for removal
+    treeherder:
+        symbol: android(expired-strings)
+    run:
+        mach: lint -v -l android-expired-strings -f treeherder -f json:/builds/worker/mozlint.json .
+    when:
+        files-changed:
+            - 'mobile/android/**/*.kt'
+            - 'mobile/android/**/*.java'
+            - 'mobile/android/**/*.xml'
+            - 'tools/lint/android-expired-strings.yml'
+            - 'tools/lint/android-expired-strings/**'
 
 gecko-trace:
     description: Check that all `gecko-trace.yaml` files are correct

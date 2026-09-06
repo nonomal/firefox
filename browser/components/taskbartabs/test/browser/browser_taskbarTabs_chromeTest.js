@@ -11,11 +11,11 @@ const gAudioPage =
 
 // Given a window, check if it meets all requirements
 // of the taskbar tab chrome UI
-function checkWindowChrome(win) {
-  let document = win.document.documentElement;
+function checkWindowChrome(win, userContextId) {
+  let docElement = win.document.documentElement;
 
   ok(
-    document.hasAttribute("taskbartab"),
+    docElement.hasAttribute("taskbartab"),
     "The window HTML should have a taskbartab attribute"
   );
 
@@ -26,14 +26,18 @@ function checkWindowChrome(win) {
     "The tab bar should be collapsed"
   );
 
-  is(
-    document.getAttribute("chromehidden"),
-    "menubar directories extrachrome ",
-    "The correct chrome hidden attributes should be populated"
+  ok(
+    !docElement.hasAttribute("popup-window"),
+    "Taskbar tabs keep the navigation toolbar"
   );
 
-  ok(!win.menubar.visible, "menubar barprop should not be visible");
-  ok(!win.personalbar.visible, "personalbar barprop should not be visible");
+  for (let id of ["toolbar-menubar", "PersonalToolbar"]) {
+    is(
+      win.getComputedStyle(win.document.getElementById(id)).display,
+      "none",
+      `${id} should not be visible`
+    );
+  }
 
   let starButton = win.document.querySelector("#star-button-box");
   is(
@@ -43,16 +47,22 @@ function checkWindowChrome(win) {
   );
 
   ok(
-    !document.hasAttribute("fxatoolbarmenu"),
+    !docElement.hasAttribute("fxatoolbarmenu"),
     "Firefox accounts menu should not be displayed"
   );
 
   ok(
-    document.hasAttribute("fxadisabled"),
+    docElement.hasAttribute("fxadisabled"),
     "fxadisabled attribute should exist"
   );
 
-  let sideBarElement = win.document.getElementById("sidebar-main");
+  is(
+    win.document.getElementById("userContext-icons").hidden,
+    !userContextId,
+    "Container indicator is shown if applicable"
+  );
+
+  let sideBarElement = win.document.getElementById("sidebar-container");
   ok(BrowserTestUtils.isHidden(sideBarElement), "The sidebar should be hidden");
 }
 
@@ -112,6 +122,42 @@ add_task(async function testOpenWindowChrome() {
   const win = await openTaskbarTabWindow();
 
   checkWindowChrome(win);
+  await checkHamburgerMenu(win);
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+add_task(async function testReplaceTabWithWindowChrome() {
+  const tab = await BrowserTestUtils.addTab(
+    window.gBrowser,
+    "https://example.com"
+  );
+  const win = await openTaskbarTabWindow(tab);
+
+  checkWindowChrome(win);
+  await checkHamburgerMenu(win);
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+add_task(async function testOpenWindowChromeContainer() {
+  const win = await openTaskbarTabWindow(null, { userContextId: 1 });
+
+  checkWindowChrome(win, 1);
+  await checkHamburgerMenu(win);
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+add_task(async function testReplaceTabWithWindowChromeContainer() {
+  const tab = await BrowserTestUtils.addTab(
+    window.gBrowser,
+    "https://example.com",
+    { userContextId: 1 }
+  );
+  const win = await openTaskbarTabWindow(tab, { userContextId: 1 });
+
+  checkWindowChrome(win, 1);
   await checkHamburgerMenu(win);
 
   await BrowserTestUtils.closeWindow(win);

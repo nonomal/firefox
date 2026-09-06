@@ -11,10 +11,11 @@
 #ifndef API_VIDEO_VIDEO_FRAME_BUFFER_H_
 #define API_VIDEO_VIDEO_FRAME_BUFFER_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 
-#include "api/array_view.h"
 #include "api/ref_count.h"
 #include "api/scoped_refptr.h"
 #include "rtc_base/system/rtc_export.h"
@@ -47,6 +48,11 @@ class NV12BufferInterface;
 // VideoFrame, and not here.
 class RTC_EXPORT VideoFrameBuffer : public RefCountInterface {
  public:
+  class RTC_EXPORT PreparedFrameHandler : public webrtc::RefCountInterface {
+   public:
+    virtual void OnFramePrepared(size_t frame_identifier) = 0;
+  };
+
   // New frame buffer types will be added conservatively when there is an
   // opportunity to optimize the path between some pair of video source and
   // video sink.
@@ -123,10 +129,19 @@ class RTC_EXPORT VideoFrameBuffer : public RefCountInterface {
   // frame type is not supported, mapping is not possible, or if the kNative
   // frame has not implemented this method. Only callable if type() is kNative.
   virtual scoped_refptr<VideoFrameBuffer> GetMappedFrameBuffer(
-      ArrayView<Type> types);
+      std::span<Type> types);
 
   // For logging: returns a textual representation of the storage.
   virtual std::string storage_representation() const;
+
+  // Informs the buffer about the maximum resolution for the upcoming
+  // `GetMappedBuffer()` calls.
+  //
+  virtual void PrepareMappedBufferAsync(
+      size_t width,
+      size_t height,
+      scoped_refptr<PreparedFrameHandler> handler,
+      size_t frame_identifier);
 
  protected:
   ~VideoFrameBuffer() override {}

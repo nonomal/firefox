@@ -210,6 +210,9 @@ export class FakePrefs extends FakensIPrefBranch {
   }
   observeBranch(_listener) {}
   ignoreBranch(_listener) {}
+  locked(prefName) {
+    return this.prefIsLocked(prefName);
+  }
   set(prefName, value) {
     this.prefs.set(prefName, value);
 
@@ -321,7 +324,7 @@ FakePerformance.prototype = {
   callsToMark: 0,
 
   /**
-   * @note The "startTime" for each mark is simply the number of times mark
+   * Note: The "startTime" for each mark is simply the number of times mark
    * has been called in this object.
    */
   mark(name) {

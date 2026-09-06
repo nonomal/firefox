@@ -6,14 +6,14 @@ package org.mozilla.fenix.bookmarks
 
 import androidx.annotation.VisibleForTesting
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 import org.mozilla.fenix.components.AppStore
 
 /**
  * A middleware that supports private browsing mode lock feature on bookmarks screen.
  *
- * If private mode is locked and requires verification to access it, the middleware intercepts
- * private mode related actions and requires verification before allowing them to proceed.
+ * If private mode is locked and requires verification to access it, the middleware intercepts private mode related
+ * actions and requires verification before allowing them to proceed.
  *
  * @param appStore The [AppStore] containing the state of private mode lock feature.
  * @param requireAuth A callback function that triggers the UI flow to authenticate the user.
@@ -23,19 +23,17 @@ internal class PrivateBrowsingLockMiddleware(
     private val requireAuth: () -> Unit,
 ) : Middleware<BookmarksState, BookmarksAction> {
 
-    @VisibleForTesting
-    internal var pendingAction: BookmarksAction? = null
+    @VisibleForTesting internal var pendingAction: BookmarksAction? = null
 
     override fun invoke(
-        context: MiddlewareContext<BookmarksState, BookmarksAction>,
+        store: Store<BookmarksState, BookmarksAction>,
         next: (BookmarksAction) -> Unit,
         action: BookmarksAction,
     ) {
         when (action) {
             is BookmarksListMenuAction.MultiSelect.OpenInPrivateTabsClicked,
             is BookmarksListMenuAction.Bookmark.OpenInPrivateTabClicked,
-            is BookmarksListMenuAction.Folder.OpenAllInPrivateTabClicked,
-                -> {
+            is BookmarksListMenuAction.Folder.OpenAllInPrivateTabClicked -> {
                 if (appStore.state.isPrivateScreenLocked) {
                     pendingAction = action
                     requireAuth()

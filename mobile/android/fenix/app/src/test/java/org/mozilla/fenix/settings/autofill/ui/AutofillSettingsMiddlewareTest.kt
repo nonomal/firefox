@@ -5,12 +5,12 @@
 package org.mozilla.fenix.settings.autofill.ui
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.mockk.mockk
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import mozilla.components.lib.dataprotect.SecureAbove22Preferences
 import mozilla.components.service.fxa.manager.FxaAccountManager
 import mozilla.components.service.sync.autofill.AutofillCreditCardsAddressesStorage
-import mozilla.components.support.test.mock
 import mozilla.components.support.test.robolectric.testContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,13 +35,12 @@ class AutofillSettingsMiddlewareTest {
     @Before
     fun setup() {
         securePrefs = SecureAbove22Preferences(testContext, "autofill", forceInsecure = true)
-        autofillSettingsStorage =
-            AutofillCreditCardsAddressesStorage(testContext, lazy { securePrefs })
-        accountManager = mock()
+        autofillSettingsStorage = AutofillCreditCardsAddressesStorage(testContext, lazy { securePrefs })
+        accountManager = mockk(relaxUnitFun = true)
         updateSaveFillStatus = { _, _ -> }
         updateSyncStatusAcrossDevices = { _, _ -> }
-        goToScreen = { }
-        exitAutofillSettings = { }
+        goToScreen = {}
+        exitAutofillSettings = {}
     }
 
     @Test
@@ -134,20 +133,22 @@ class AutofillSettingsMiddlewareTest {
             assertFalse(newSyncCreditCardsOption)
         }
 
-    private fun buildMiddleware() = AutofillSettingsMiddleware(
-        autofillSettingsStorage = autofillSettingsStorage,
-        accountManager = accountManager,
-        updateSaveFillStatus = updateSaveFillStatus,
-        updateSyncStatusAcrossDevices = updateSyncStatusAcrossDevices,
-        goToScreen = goToScreen,
-        exitAutofillSettings = exitAutofillSettings,
-        ioDispatcher = testDispatcher,
-    )
+    private fun buildMiddleware() =
+        AutofillSettingsMiddleware(
+            autofillSettingsStorage = autofillSettingsStorage,
+            accountManager = accountManager,
+            updateSaveFillStatus = updateSaveFillStatus,
+            updateSyncStatusAcrossDevices = updateSyncStatusAcrossDevices,
+            goToScreen = goToScreen,
+            exitAutofillSettings = exitAutofillSettings,
+            ioDispatcher = testDispatcher,
+        )
 
     private fun AutofillSettingsMiddleware.makeStore(
-        initialState: AutofillSettingsState = AutofillSettingsState.default,
-    ) = AutofillSettingsStore(
-        initialState = initialState,
-        middleware = listOf(this),
-    )
+        initialState: AutofillSettingsState = AutofillSettingsState.default
+    ) =
+        AutofillSettingsStore(
+            initialState = initialState,
+            middleware = listOf(this),
+        )
 }

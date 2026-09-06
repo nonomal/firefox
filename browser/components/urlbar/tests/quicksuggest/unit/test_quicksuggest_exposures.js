@@ -65,7 +65,7 @@ const EXPECTED_BBB_RESULT = makeExpectedResult({
 
 const EXPECTED_WIKIPEDIA_RESULT = {
   ...QuickSuggestTestUtils.wikipediaResult(),
-  exposureTelemetry: UrlbarUtils.EXPOSURE_TELEMETRY.NONE,
+  exposureTelemetry: UrlbarShared.EXPOSURE_TELEMETRY.NONE,
 };
 
 add_setup(async function () {
@@ -323,8 +323,8 @@ add_task(async function maxResults_exposuresHistory() {
     );
     historyResults.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         payload: { url: "http://example.com/history/" + i },
       })
     );
@@ -377,8 +377,8 @@ add_task(async function maxResults_exposuresHistoryAmp() {
     );
     historyResults.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         payload: { url: "http://example.com/history/" + i },
       })
     );
@@ -411,13 +411,14 @@ async function doMaxResultsTest({
   // If history results should be included, register a test provider that adds a
   // bunch of history results.
   let historyProvider;
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
   let historyResults = [];
   if (includeHistory) {
     for (let i = 0; i < maxResults; i++) {
       historyResults.push(
         new UrlbarResult({
-          type: UrlbarUtils.RESULT_TYPE.URL,
-          source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+          type: UrlbarShared.RESULT_TYPE.URL,
+          source: UrlbarShared.RESULT_SOURCE.HISTORY,
           payload: { url: "http://example.com/history/" + i },
         })
       );
@@ -425,7 +426,7 @@ async function doMaxResultsTest({
     historyProvider = new UrlbarTestUtils.TestProvider({
       results: historyResults,
     });
-    UrlbarProvidersManager.registerProvider(historyProvider);
+    providersManager.registerProvider(historyProvider);
     providerNames.push(historyProvider.name);
   }
 
@@ -452,7 +453,7 @@ async function doMaxResultsTest({
   });
 
   if (historyProvider) {
-    UrlbarProvidersManager.unregisterProvider(historyProvider);
+    providersManager.unregisterProvider(historyProvider);
   }
   UrlbarPrefs.clear("suggest.quicksuggest.sponsored");
   await QuickSuggestTestUtils.forceSync();
@@ -567,10 +568,10 @@ async function withSuggestionTypesPref(prefValue, callback) {
 
 function makeExpectedResult({ rsSuggestionType, telemetryType = "exposure" }) {
   return {
-    type: UrlbarUtils.RESULT_TYPE.DYNAMIC,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.DYNAMIC,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     heuristic: false,
-    exposureTelemetry: UrlbarUtils.EXPOSURE_TELEMETRY.HIDDEN,
+    exposureTelemetry: UrlbarShared.EXPOSURE_TELEMETRY.HIDDEN,
     payload: {
       telemetryType,
       rsSuggestionType,

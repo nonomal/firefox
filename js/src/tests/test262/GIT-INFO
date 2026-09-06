@@ -1,8 +1,13 @@
-commit 2312907b9b426cb2e9ae50aff25119319ab4e2d4
+commit 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
 Author: Philip Chimento <pchimento@igalia.com>
-Date:   Tue Nov 11 10:21:00 2025 -0800
+Date:   Mon Aug 3 14:35:30 2026 -0700
 
-    Intl Era Monthcode: Fix up locale frontmatter for Hijri fallback
+    CI: Run tests of tools only when the tools are changed
     
-    We don't require an en-u-ca-islamic locale to run this test, in fact
-    it's the intention that it will fall back to another Hijri calendar.
+    This was what I intended from the start, but I used a wrong JSON
+    key ("files" instead of "paths"). But this would never have worked as
+    intended anyway, because jobs that are skipped apparently cannot be
+    required for PRs to pass, and we would like the tools tests to be
+    required.
+    
+    LLM disclosure: The diff was drafted using a bot.

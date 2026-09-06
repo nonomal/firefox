@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -51,8 +49,8 @@ bool SVGTests::HasExtension(const nsAString& aExtension) const {
 
 bool SVGTests::IsConditionalProcessingAttribute(
     const nsAtom* aAttribute) const {
-  for (uint32_t i = 0; i < std::size(sStringListNames); i++) {
-    if (aAttribute == sStringListNames[i]) {
+  for (auto sStringListName : sStringListNames) {
+    if (aAttribute == sStringListName) {
       return true;
     }
   }
@@ -85,7 +83,7 @@ static int32_t FindBestLanguage(const nsTArray<nsCString>& aAvailLangs,
       struct LangTagDelete {
         void operator()(LangTag* aLangTag) const { lang_tag_destroy(aLangTag); }
       };
-      UniquePtr<LangTag, LangTagDelete> langTag(lang_tag_new(&avail));
+      std::unique_ptr<LangTag, LangTagDelete> langTag(lang_tag_new(&avail));
       if (langTag && lang_tag_matches(langTag.get(), &req)) {
         return &avail - &aAvailLangs[0];
       }
@@ -166,7 +164,7 @@ bool SVGTests::PassesRequiredExtensionsTests() const {
 
 bool SVGTests::PassesConditionalProcessingTests() const {
   if (mPassesConditionalProcessingTests) {
-    return mPassesConditionalProcessingTests.value();
+    return *mPassesConditionalProcessingTests;
   }
   if (!PassesRequiredExtensionsTests()) {
     return false;
@@ -191,7 +189,7 @@ bool SVGTests::PassesConditionalProcessingTests() const {
 
     mPassesConditionalProcessingTests =
         Some(FindBestLanguage(availLocales, AsSVGElement()->OwnerDoc()) >= 0);
-    return mPassesConditionalProcessingTests.value();
+    return *mPassesConditionalProcessingTests;
   }
 
   mPassesConditionalProcessingTests = Some(true);

@@ -18,16 +18,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
-import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
+import mozilla.components.compose.base.annotation.FlexibleWindowPreview
 import mozilla.components.compose.base.button.FilledButton
 import mozilla.components.compose.base.textfield.TextField
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import org.mozilla.fenix.R
 import org.mozilla.fenix.settings.doh.DohSettingsState
 import org.mozilla.fenix.settings.doh.ProtectionLevel
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 /**
  * Composable function that displays the exceptions list screen of DoH settings.
@@ -43,11 +44,7 @@ internal fun AddExceptionScreen(
     var urlInput by remember { mutableStateOf("") }
 
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp),
-        ) {
+        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             Spacer(modifier = Modifier.height(8.dp))
 
             TextField(
@@ -73,46 +70,26 @@ internal fun AddExceptionScreen(
     }
 }
 
+@FlexibleWindowPreview
 @Composable
-@FlexibleWindowLightDarkPreview
-private fun AddExceptionScreenPreview() {
-    FirefoxTheme {
+private fun AddExceptionScreenPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         AddExceptionScreen(
-            state = DohSettingsState(
-                allProtectionLevels = listOf(
-                    ProtectionLevel.Default,
-                    ProtectionLevel.Increased,
-                    ProtectionLevel.Max,
-                    ProtectionLevel.Off,
-                ),
-                selectedProtectionLevel = ProtectionLevel.Off,
-                providers = emptyList(),
-                selectedProvider = null,
-                exceptionsList = emptyList(),
-                isUserExceptionValid = false,
-            ),
-        )
-    }
-}
-
-@Composable
-@Preview
-private fun AddExceptionScreenPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
-        AddExceptionScreen(
-            state = DohSettingsState(
-                allProtectionLevels = listOf(
-                    ProtectionLevel.Default,
-                    ProtectionLevel.Increased,
-                    ProtectionLevel.Max,
-                    ProtectionLevel.Off,
-                ),
-                selectedProtectionLevel = ProtectionLevel.Off,
-                providers = emptyList(),
-                selectedProvider = null,
-                exceptionsList = emptyList(),
-                isUserExceptionValid = false,
-            ),
+            state =
+                DohSettingsState(
+                    allProtectionLevels =
+                        listOf(
+                            ProtectionLevel.Default,
+                            ProtectionLevel.Increased,
+                            ProtectionLevel.Max,
+                            ProtectionLevel.Off,
+                        ),
+                    selectedProtectionLevel = ProtectionLevel.Off,
+                    providers = emptyList(),
+                    selectedProvider = null,
+                    exceptionsList = emptyList(),
+                    isUserExceptionValid = false,
+                )
         )
     }
 }

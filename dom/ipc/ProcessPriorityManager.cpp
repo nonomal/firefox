@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -203,6 +201,11 @@ class ProcessPriorityManagerImpl final : public nsIObserver,
   void BrowserPriorityChanged(CanonicalBrowsingContext* aBC, bool aPriority);
   void BrowserPriorityChanged(BrowserParent* aBrowserParent, bool aPriority);
 
+  ProcessPriorityManagerImpl(const ProcessPriorityManagerImpl&) = delete;
+
+  const ProcessPriorityManagerImpl& operator=(
+      const ProcessPriorityManagerImpl&) = delete;
+
  private:
   static bool sPrefListenersRegistered;
   static bool sInitialized;
@@ -212,10 +215,6 @@ class ProcessPriorityManagerImpl final : public nsIObserver,
 
   ProcessPriorityManagerImpl();
   ~ProcessPriorityManagerImpl();
-  ProcessPriorityManagerImpl(const ProcessPriorityManagerImpl&) = delete;
-
-  const ProcessPriorityManagerImpl& operator=(
-      const ProcessPriorityManagerImpl&) = delete;
 
   void Init();
 
@@ -245,15 +244,16 @@ class ProcessPriorityManagerChild final : public nsIObserver {
 
   bool CurrentProcessIsForeground();
 
+  ProcessPriorityManagerChild(const ProcessPriorityManagerChild&) = delete;
+
+  const ProcessPriorityManagerChild& operator=(
+      const ProcessPriorityManagerChild&) = delete;
+
  private:
   static StaticRefPtr<ProcessPriorityManagerChild> sSingleton;
 
   ProcessPriorityManagerChild();
   ~ProcessPriorityManagerChild() = default;
-  ProcessPriorityManagerChild(const ProcessPriorityManagerChild&) = delete;
-
-  const ProcessPriorityManagerChild& operator=(
-      const ProcessPriorityManagerChild&) = delete;
 
   void Init();
 
@@ -748,7 +748,7 @@ ProcessPriority ParticularProcessPriorityManager::CurrentPriority() {
 
 ProcessPriority ParticularProcessPriorityManager::ComputePriority() {
   if (!mHighPriorityBrowserParents.IsEmpty() ||
-      mContentParent->GetRemoteType() == EXTENSION_REMOTE_TYPE ||
+      mContentParent->GetRemoteType().IsExtension() ||
       mHoldsPlayingAudioWakeLock) {
     return PROCESS_PRIORITY_FOREGROUND;
   }
@@ -804,7 +804,7 @@ void ParticularProcessPriorityManager::SetPriorityNow(
 
   mPriority = aPriority;
 
-  // We skip incrementing the DOM_CONTENTPROCESS_OS_PRIORITY_RAISED if we're
+  // We skip incrementing the dom.contentprocess.os_priority_raised if we're
   // transitioning from the PROCESS_PRIORITY_UNKNOWN level, which is where
   // we initialize at.
   if (oldPriority < mPriority && oldPriority != PROCESS_PRIORITY_UNKNOWN) {

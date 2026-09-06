@@ -5,6 +5,8 @@
 package org.mozilla.fenix
 
 import androidx.navigation.NavController
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -17,24 +19,31 @@ import mozilla.components.lib.state.helpers.AbstractBinding
 import org.mozilla.fenix.home.HomeFragment
 
 /**
- * A binding for observing [ContentState.url] and navigating to the [HomeFragment] if
- * the current session's url is updated to [ABOUT_HOME_URL].
+ * A binding for observing [ContentState.url] and navigating to the [HomeFragment] if the current session's url is
+ * updated to [ABOUT_HOME_URL].
  */
 class AboutHomeBinding(
     browserStore: BrowserStore,
     private val navController: NavController,
-) : AbstractBinding<BrowserState>(browserStore) {
+    mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
+) : AbstractBinding<BrowserState>(browserStore, mainDispatcher) {
 
     override suspend fun onState(flow: Flow<BrowserState>) {
         flow
             .map { it.selectedTab?.content?.url }
             .distinctUntilChanged()
             .collect { url ->
-                if (url == ABOUT_HOME_URL &&
-                    !listOf(
-                        R.id.homeFragment,
-                        R.id.onboardingFragment,
-                    ).contains(navController.currentDestination?.id)
+                if (
+                    url == ABOUT_HOME_URL &&
+                        !listOf(
+                                R.id.homeFragment,
+                                R.id.onboardingFragment,
+                                R.id.unlockPrivateTabsFragment,
+                                // Closing a tab in the tabs tray can select an [ABOUT_HOME_URL] tab. Do not
+                                // navigate to the homepage in that case since it would dismiss the tabs tray.
+                                R.id.tabManagementFragment,
+                            )
+                            .contains(navController.currentDestination?.id)
                 ) {
                     navController.navigate(NavGraphDirections.actionGlobalHome())
                 }

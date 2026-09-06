@@ -9,18 +9,8 @@ const { ERRORS } = ChromeUtils.importESModule(
 
 let TEST_PROFILE_PATH;
 
-// Helper function for when we need to wait for the backup state to update and
-// the UI to finish reacting to that.
-async function makeStateUpdatedPromise(restoreFromBackupEl) {
-  await BrowserTestUtils.waitForEvent(window, "BackupUI:StateWasUpdated");
-  // Wait for `restoreFromBackupEl` to handle this event.
-  await TestUtils.waitForTick();
-  // Then wait for it to finish updating all the UI.
-  await restoreFromBackupEl.updateComplete;
-}
-
 add_setup(async () => {
-  MockFilePicker.init(window.browsingContext);
+  MockFilePicker.init();
   TEST_PROFILE_PATH = await IOUtils.createUniqueDirectory(
     PathUtils.tempDir,
     "testBackup"
@@ -41,21 +31,11 @@ add_setup(async () => {
   });
 });
 
-async function waitInitialRequestStateSettled() {
-  // restore-from-backup.mjs is rendered quite late during the load.
-  // Bug 543435 caused a timing change such that withNewTab resolves right after
-  // that component dispatches BackupUI:InitWidget. So BackupUIParent hasn't yet
-  // received RequestState. If the RequestState / StateUpdate happens during the test
-  // that can mess things up, so wait a tick. See bug 2001583
-  await new Promise(res => setTimeout(res));
-}
-
 /**
  * Tests for when the user specifies an invalid backup file to restore.
  */
 add_task(async function test_backup_failure() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
     const mockBackupFilePath = await IOUtils.createUniqueFile(
       TEST_PROFILE_PATH,
       "backup.html"
@@ -64,6 +44,14 @@ add_task(async function test_backup_failure() {
       Ci.nsIFile
     );
     mockBackupFile.initWithPath(mockBackupFilePath);
+    let sandbox = sinon.createSandbox();
+    let bs = getAndMaybeInitBackupService();
+
+    sandbox.stub(bs, "findBackupsInWellKnownLocations").resolves({
+      found: false,
+      backupFileToRestore: null,
+      multipleBackupsFound: false,
+    });
 
     MockFilePicker.showCallback = () => {
       Assert.ok(true, "Filepicker shown");
@@ -71,24 +59,11 @@ add_task(async function test_backup_failure() {
     };
     MockFilePicker.returnValue = MockFilePicker.returnOK;
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
-
-    await settings.updateComplete;
-
-    Assert.ok(
-      settings.restoreFromBackupButtonEl,
-      "Button to restore backups should be found"
-    );
-
-    settings.restoreFromBackupButtonEl.click();
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
-
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
     Services.fog.testResetFOG();
-
-    let stateUpdatedPromise = makeStateUpdatedPromise(restoreFromBackup);
+    let stateUpdatedPromise = TestUtils.topicObserved(
+      "browser-backup-glean-sent"
+    );
     restoreFromBackup.chooseButtonEl.click();
     await stateUpdatedPromise;
 
@@ -103,6 +78,7 @@ add_task(async function test_backup_failure() {
       { location: "other", valid: "false" },
       "Restore telemetry event should have the right data"
     );
+    sandbox.restore();
   });
 });
 
@@ -111,7 +87,6 @@ add_task(async function test_backup_failure() {
  */
 add_task(async function test_restore_from_backup() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
     // Info about our mock backup
     const date = new Date().getTime();
     const deviceName = "test-device";
@@ -147,6 +122,7 @@ add_task(async function test_restore_from_backup() {
         healthTelemetryEnabled,
       },
       backupFileToRestore: mockBackupFilePath,
+      backupFileCoarseLocation: "other",
       restoreID,
       recoveryErrorCode: ERRORS.NONE,
     };
@@ -155,7 +131,7 @@ add_task(async function test_restore_from_backup() {
     let recoverFromBackupArchiveStub = sandbox
       .stub(BackupService.prototype, "recoverFromBackupArchive")
       .resolves();
-    sandbox.stub(BackupService.prototype, "state").get(() => mockBackupState);
+    sandbox.stub(BackupService.get(), "state").get(() => mockBackupState);
 
     MockFilePicker.showCallback = () => {
       Assert.ok(true, "Filepicker shown");
@@ -172,26 +148,12 @@ add_task(async function test_restore_from_backup() {
       }
     );
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
-
-    await settings.updateComplete;
-
-    Assert.ok(
-      settings.restoreFromBackupButtonEl,
-      "Button to restore backups should be found"
-    );
-
-    settings.restoreFromBackupButtonEl.click();
-
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
-
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
     Services.fog.testResetFOG();
 
-    let stateUpdatedPromise = makeStateUpdatedPromise(restoreFromBackup);
+    let stateUpdatedPromise = TestUtils.topicObserved(
+      "browser-backup-glean-sent"
+    );
     restoreFromBackup.chooseButtonEl.click();
     await stateUpdatedPromise;
 
@@ -240,14 +202,15 @@ add_task(async function test_restore_from_backup() {
     restoreFromBackup.confirmButtonEl.click();
 
     await restorePromise.then(e => {
-      let mockEvent = {
-        backupFile: mockBackupFile.path,
-        backupPassword: "h-*@Vfge3_hGxdpwqr@w",
-      };
-      Assert.deepEqual(
-        e.detail,
-        mockEvent,
-        "Event should contain the file and password"
+      Assert.equal(
+        e.detail.backupPassword,
+        "h-*@Vfge3_hGxdpwqr@w",
+        "Event should contain the password"
+      );
+      Assert.equal(
+        e.detail.restoreType,
+        "add",
+        "restoreType should default to 'add'"
       );
     });
 
@@ -267,7 +230,6 @@ add_task(async function test_restore_from_backup() {
  */
 add_task(async function test_restore_uses_matching_initial_folder() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
     const mockBackupFilePath = await IOUtils.createUniqueFile(
       TEST_PROFILE_PATH,
       "backup.html"
@@ -291,23 +253,16 @@ add_task(async function test_restore_uses_matching_initial_folder() {
     });
     MockFilePicker.returnValue = MockFilePicker.returnOK;
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
-    await settings.updateComplete;
-
-    Assert.ok(
-      settings.restoreFromBackupButtonEl,
-      "Button to restore backups should be found"
-    );
-
-    settings.restoreFromBackupButtonEl.click();
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
-
+    let { restoreFromBackup, settings } =
+      await initializedBackupWidgets(browser);
     let selectedFilePromise = BrowserTestUtils.waitForEvent(
       settings,
       "BackupUI:SelectNewFilepickerPath"
+    ).then(() =>
+      BrowserTestUtils.waitForEvent(
+        restoreFromBackup,
+        "BackupUI:StateWasUpdated"
+      )
     );
 
     restoreFromBackup.backupServiceState.backupFileToRestore =
@@ -324,9 +279,11 @@ add_task(async function test_restore_uses_matching_initial_folder() {
  */
 add_task(async function test_restore_in_progress() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
     let sandbox = sinon.createSandbox();
     let bs = getAndMaybeInitBackupService();
+    bs.resetLastBackupInternalState();
+
+    sandbox.stub(bs, "findBackupsInWellKnownLocations").resolves(null);
 
     let { promise: recoverPromise, resolve: recoverResolve } =
       Promise.withResolvers();
@@ -343,34 +300,8 @@ add_task(async function test_restore_in_progress() {
       }
     );
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
-
-    await settings.updateComplete;
-
-    Assert.ok(
-      settings.restoreFromBackupButtonEl,
-      "Button to restore backups should be found"
-    );
-
-    settings.restoreFromBackupButtonEl.click();
-
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
-
-    Assert.equal(
-      restoreFromBackup.filePicker.value,
-      "",
-      "File picker has no value assigned automatically"
-    );
-
-    Assert.equal(
-      restoreFromBackup.filePicker.tagName.toLowerCase(),
-      "input",
-      "File picker should be an input when aboutWelcomeEmbedded is false"
-    );
+    let { restoreFromBackup, settings } =
+      await initializedBackupWidgets(browser);
 
     // There is a backup file, but it is not a valid one
     // we don't automatically pick it
@@ -384,9 +315,21 @@ add_task(async function test_restore_in_progress() {
       "backup.html"
     );
 
+    let originalState = bs.state;
+    sandbox.stub(bs, "state").get(() => ({
+      ...originalState,
+      backupFileToRestore: mockBackupFilePath,
+      backupFileInfo: {
+        date: new Date(0),
+      },
+    }));
+
     restoreFromBackup.backupServiceState = {
       ...restoreFromBackup.backupServiceState,
       backupFileToRestore: mockBackupFilePath,
+      backupFileInfo: {
+        date: new Date(0),
+      },
     };
     await restoreFromBackup.updateComplete;
 
@@ -406,16 +349,15 @@ add_task(async function test_restore_in_progress() {
     );
 
     restoreFromBackup.confirmButtonEl.click();
+    await restorePromise;
+
     restoreFromBackup.backupServiceState = {
       ...restoreFromBackup.backupServiceState,
       recoveryInProgress: true,
     };
     // Re-render since we've manually changed the component's state
     await restoreFromBackup.requestUpdate();
-
-    await restorePromise;
-
-    await settings.updateComplete;
+    await restoreFromBackup.updateComplete;
 
     Assert.ok(
       settings.restoreFromBackupDialogEl.open,
@@ -442,10 +384,10 @@ add_task(async function test_restore_in_progress() {
     recoverResolve();
     // Wait a tick of the event loop to let the BackupUIParent respond to
     // the promise resolution, and to send its message to the BackupUIChild.
-    await new Promise(resolve => SimpleTest.executeSoon(resolve));
+    await TestUtils.waitForTick();
     // Wait a second tick to let the BackupUIChild respond to the message
     // from BackupUIParent.
-    await new Promise(resolve => SimpleTest.executeSoon(resolve));
+    await TestUtils.waitForTick();
 
     await settings.updateComplete;
 
@@ -460,113 +402,185 @@ add_task(async function test_restore_in_progress() {
   });
 });
 
-/**
- * Tests that the restore component uses a textarea when aboutWelcomeEmbedded is true
- * as well as the associated functionality for said textarea
- */
-add_task(
-  async function test_restore_from_backup_aboutwelcome_embedded_textarea() {
-    await BrowserTestUtils.withNewTab(
-      "about:preferences#sync",
-      async browser => {
-        await waitInitialRequestStateSettled();
-        let sandbox = sinon.createSandbox();
-        let settings = browser.contentDocument.querySelector("backup-settings");
-        await settings.updateComplete;
+add_task(async function test_restore_fails_without_backup_in_state() {
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let sandbox = sinon.createSandbox();
+    let bs = getAndMaybeInitBackupService();
 
-        Assert.ok(
-          settings.restoreFromBackupButtonEl,
-          "Restore button should exist"
-        );
+    let recoverStub = sandbox.stub(bs, "recoverFromBackupArchive").resolves();
 
-        settings.restoreFromBackupButtonEl.click();
-        await settings.updateComplete;
-        let restoreFromBackup = settings.restoreFromBackupEl;
-        Assert.ok(restoreFromBackup, "restore-from-backup should be found");
+    let originalState = bs.state;
+    sandbox.stub(bs, "state").get(() => ({
+      ...originalState,
+      backupFileToRestore: null,
+    }));
 
-        // When aboutWelcomeEmbedded is false, the file picker should be an input
-        Assert.equal(
-          restoreFromBackup.filePicker.tagName.toLowerCase(),
-          "input",
-          "File picker should be an input when aboutWelcomeEmbedded is false"
-        );
+    let { restoreFromBackup, settings } =
+      await initializedBackupWidgets(browser);
 
-        restoreFromBackup.aboutWelcomeEmbedded = true;
-        await restoreFromBackup.updateComplete;
-        let resizeTextareaSpy = sandbox.spy(
-          restoreFromBackup,
-          "resizeTextarea"
-        );
+    restoreFromBackup.backupServiceState = {
+      ...restoreFromBackup.backupServiceState,
+      backupFileToRestore: "/fake/path.html",
+      backupFileInfo: { date: new Date() },
+    };
+    await restoreFromBackup.updateComplete;
 
-        const textarea = restoreFromBackup.shadowRoot.querySelector(
-          "#backup-filepicker-input"
-        );
-
-        Assert.ok(
-          textarea,
-          "textarea should be present after setting aboutWelcomeEmbedded to true"
-        );
-        Assert.equal(
-          textarea.tagName.toLowerCase(),
-          "textarea",
-          "File picker should be a textarea when aboutWelcomeEmbedded is true"
-        );
-        Assert.equal(
-          textarea.getAttribute("rows"),
-          "1",
-          "Textarea should have rows=1"
-        );
-
-        // Test resize functionality when content changes
-        const initialHeight = textarea.style.height;
-        Assert.ok(initialHeight, "Textarea should have an initial height set");
-
-        const longPath =
-          "/a/very/long/path/to/a/backup/file/that/would/wrap/multiple/lines.html";
-        textarea.value = longPath;
-        restoreFromBackup.resizeTextarea();
-
-        const newHeight = textarea.style.height;
-        Assert.notEqual(
-          newHeight,
-          initialHeight,
-          "Textarea height should change when content is added"
-        );
-
-        // The text area resize function should also be called
-        // when the resize event occurs on the window
-        window.dispatchEvent(new Event("resize"));
-
-        Assert.ok(
-          resizeTextareaSpy.calledOnce,
-          "resizeTextarea should be called when window resize event is fired"
-        );
-
-        sandbox.restore();
-      }
+    Assert.ok(
+      !restoreFromBackup.confirmButtonEl.disabled,
+      "Confirm button should not be disabled."
     );
-  }
-);
+
+    let restorePromise = BrowserTestUtils.waitForEvent(
+      window,
+      "BackupUI:RestoreFromBackupFile"
+    );
+    restoreFromBackup.confirmButtonEl.click();
+    await restorePromise;
+
+    Assert.ok(
+      !recoverStub.called,
+      "recoverFromBackupArchive should not be called when state has no backup file."
+    );
+    Assert.ok(
+      settings.restoreFromBackupDialogEl.open,
+      "Restore dialog should still be open."
+    );
+
+    sandbox.restore();
+  });
+});
+
+add_task(async function test_restore_from_backup_prefills_prior_valid_backup() {
+  let dir = await IOUtils.createUniqueDirectory(
+    TEST_PROFILE_PATH,
+    "backup-dir"
+  );
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.backup.location", dir]],
+  });
+  let { archivePath: path } = await BackupService.get().createBackup({
+    profilePath: TEST_PROFILE_PATH,
+  });
+  await SpecialPowers.popPrefEnv();
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+
+    let mockBackupFile = await IOUtils.getFile(path);
+    MockFilePicker.showCallback = () => {
+      Assert.ok(true, "Filepicker shown");
+      MockFilePicker.setFiles([mockBackupFile]);
+    };
+    MockFilePicker.returnValue = MockFilePicker.returnOK;
+
+    let selectedFilePromise = BrowserTestUtils.waitForEvent(
+      restoreFromBackup,
+      "BackupUI:SelectNewFilepickerPath"
+    );
+    restoreFromBackup.chooseButtonEl.click();
+    await selectedFilePromise;
+
+    // Wait for the state to reflect the newly selected file. We can't
+    // simply wait for the next BackupUI:StateWasUpdated because a stale
+    // loadBackupFileInfo request (from maybeGetBackupFileInfo during
+    // connectedCallback) may resolve first with an outdated state.
+    await TestUtils.waitForCondition(async () => {
+      await restoreFromBackup.updateComplete;
+      return restoreFromBackup.filePicker.value === path;
+    }, "The file picker should contain the expected path.");
+  });
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+
+    await TestUtils.waitForCondition(async () => {
+      await restoreFromBackup.updateComplete;
+      return restoreFromBackup.filePicker.value === path;
+    }, "The path selected before should be used.");
+  });
+});
+
+add_task(async function test_restore_from_backup_displays_invalid_backup() {
+  const path = await IOUtils.createUniqueFile(TEST_PROFILE_PATH, "backup.html");
+  await IOUtils.writeUTF8(path, "");
+
+  let sandbox = sinon.createSandbox();
+  let bs = getAndMaybeInitBackupService();
+  sandbox.stub(bs, "findBackupsInWellKnownLocations").resolves(null);
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+
+    const mockBackupFile = await IOUtils.getFile(path);
+    MockFilePicker.showCallback = () => {
+      Assert.ok(true, "Filepicker shown");
+      MockFilePicker.setFiles([mockBackupFile]);
+    };
+    MockFilePicker.returnValue = MockFilePicker.returnOK;
+
+    let selectedFilePromise = BrowserTestUtils.waitForEvent(
+      restoreFromBackup,
+      "BackupUI:SelectNewFilepickerPath"
+    ).then(() =>
+      BrowserTestUtils.waitForEvent(
+        restoreFromBackup,
+        "BackupUI:StateWasUpdated"
+      )
+    );
+    restoreFromBackup.chooseButtonEl.click();
+    await selectedFilePromise;
+    await restoreFromBackup.updateComplete;
+
+    Assert.equal(
+      restoreFromBackup.filePicker.value,
+      path,
+      "The file picker should contain the expected path."
+    );
+  });
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+
+    Assert.equal(
+      restoreFromBackup.filePicker.value,
+      path,
+      "The path selected before should be used."
+    );
+  });
+
+  sandbox.restore();
+});
+
+/**
+ * Tests that the restore component uses a textarea.
+ */
+add_task(async function test_restore_from_backup_embedded_textarea() {
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+
+    const textarea = restoreFromBackup.shadowRoot.querySelector(
+      "#backup-filepicker-input"
+    );
+    Assert.ok(textarea, "textarea should be present");
+    Assert.equal(
+      textarea.tagName.toLowerCase(),
+      "textarea",
+      "File picker should be a textarea"
+    );
+    Assert.equal(
+      textarea.getAttribute("rows"),
+      "1",
+      "Textarea should have rows=1"
+    );
+  });
+});
 
 /**
  * Tests that the backup file info is displayed when backupFileInfo is present
  */
 add_task(async function test_restore_backup_file_info_display() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
-    let settings = browser.contentDocument.querySelector("backup-settings");
-    await settings.updateComplete;
-
-    Assert.ok(
-      settings.restoreFromBackupButtonEl,
-      "Restore button should exist"
-    );
-
-    settings.restoreFromBackupButtonEl.click();
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
 
     // Initially, backup file info should not be displayed underneath the input
     let fileInfoSpan = restoreFromBackup.shadowRoot.querySelector(
@@ -587,6 +601,7 @@ add_task(async function test_restore_backup_file_info_display() {
         deviceName: mockDeviceName,
         isEncrypted: false,
       },
+      recoveryErrorCode: 0,
     };
     await restoreFromBackup.updateComplete;
 
@@ -600,7 +615,7 @@ add_task(async function test_restore_backup_file_info_display() {
 
     Assert.equal(
       fileInfoSpan.getAttribute("data-l10n-id"),
-      "backup-file-creation-date-and-device",
+      "backup-file-creation-metadata2",
       "Should have the correct l10n id"
     );
 
@@ -648,42 +663,18 @@ function assertNonEmbeddedSupportLink(link, linkName) {
  */
 add_task(async function test_support_links_non_embedded() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    await waitInitialRequestStateSettled();
-    let settings = browser.contentDocument.querySelector("backup-settings");
-    await settings.updateComplete;
-
-    settings.restoreFromBackupButtonEl.click();
-    await settings.updateComplete;
-
-    let restoreFromBackup = settings.restoreFromBackupEl;
-    Assert.ok(restoreFromBackup, "restore-from-backup should be found");
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
 
     Assert.ok(
       !restoreFromBackup.aboutWelcomeEmbedded,
       "aboutWelcomeEmbedded should be falsy"
     );
 
-    // Test the 'no backup file' link
-    let noBackupFileLink = restoreFromBackup.shadowRoot.querySelector(
-      "#restore-from-backup-no-backup-file-link"
+    // Test the main support link
+    let supportLink = restoreFromBackup.shadowRoot.querySelector(
+      "#restore-from-backup-support-link"
     );
-    assertNonEmbeddedSupportLink(noBackupFileLink, "'No backup file' link");
-
-    // Test the description link
-    restoreFromBackup.backupServiceState = {
-      ...restoreFromBackup.backupServiceState,
-      backupFileInfo: {
-        date: new Date(),
-        deviceName: "test-device",
-        isEncrypted: false,
-      },
-    };
-    await restoreFromBackup.updateComplete;
-
-    let descriptionLink = restoreFromBackup.shadowRoot.querySelector(
-      "#restore-from-backup-learn-more-link"
-    );
-    assertNonEmbeddedSupportLink(descriptionLink, "Description link");
+    assertNonEmbeddedSupportLink(supportLink, "Main support link");
 
     // Test the incorrect password link
     restoreFromBackup.backupServiceState = {
@@ -703,3 +694,108 @@ add_task(async function test_support_links_non_embedded() {
     assertNonEmbeddedSupportLink(passwordErrorLink, "Password error link");
   });
 });
+
+add_task(async function test_selectableProfilesAllowed_toggles_restore_ui() {
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+    let bs = BackupService.get();
+    let sandbox = sinon.createSandbox();
+
+    sandbox.stub(SelectableProfileService, "isEnabled").get(() => false);
+    bs.onUpdateProfilesEnabledState();
+
+    await TestUtils.waitForCondition(
+      () =>
+        restoreFromBackup.shadowRoot.querySelector(
+          "moz-message-bar[type='info']"
+        ),
+      "Waiting for info message bar to appear when profiles are disabled"
+    );
+
+    Assert.ok(
+      !restoreFromBackup.shadowRoot.querySelector(
+        "#restore-from-backup-type-group"
+      ),
+      "Radio group should not be shown when profiles are disabled"
+    );
+
+    sandbox.restore();
+    sandbox.stub(SelectableProfileService, "isEnabled").get(() => true);
+    bs.onUpdateProfilesEnabledState();
+
+    await TestUtils.waitForCondition(
+      () =>
+        restoreFromBackup.shadowRoot.querySelector(
+          "#restore-from-backup-type-group"
+        ),
+      "Waiting for radio group to appear when profiles are enabled"
+    );
+
+    Assert.ok(
+      !restoreFromBackup.shadowRoot.querySelector(
+        "moz-message-bar[type='info']"
+      ),
+      "Info message bar should not be shown when profiles are enabled"
+    );
+
+    sandbox.restore();
+  });
+});
+
+add_task(async function test_error_about_welcome() {
+  await checkVisibleStatusTemplate({
+    status: "error",
+    aboutWelcome: true,
+    visible: ["error message"],
+  });
+});
+
+add_task(async function test_invalid_password_about_welcome() {
+  await checkVisibleStatusTemplate({
+    status: "wrong password",
+    aboutWelcome: true,
+    visible: ["size", "password error"],
+  });
+});
+
+async function checkVisibleStatusTemplate({ status, aboutWelcome, visible }) {
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let { restoreFromBackup } = await initializedBackupWidgets(browser);
+    restoreFromBackup.aboutWelcomeEmbedded = aboutWelcome;
+    restoreFromBackup.backupServiceState = {
+      ...restoreFromBackup.backupServiceState,
+      recoveryErrorCode:
+        {
+          "wrong password": ERRORS.UNAUTHORIZED,
+        }[status] ?? ERRORS.RECOVERY_FAILED,
+      backupFileInfo: {
+        date: new Date("2025-11-06T15:37-0500"),
+        isEncrypted: true,
+      },
+      defaultParent: {},
+      backupFileToRestore: "",
+    };
+    await restoreFromBackup.updateComplete;
+
+    const idIsVisible = id => {
+      const element = restoreFromBackup.shadowRoot.querySelector(`#${id}`);
+      return element ? BrowserTestUtils.isVisible(element) : false;
+    };
+
+    Assert.equal(
+      await idIsVisible("backup-generic-file-error"),
+      visible.includes("error message"),
+      `Error message is ${visible.includes("error message") ? "" : "not "}visible`
+    );
+    Assert.equal(
+      await idIsVisible("restore-from-backup-backup-found-info"),
+      visible.includes("size"),
+      `Size info is ${visible.includes("size") ? "" : "not "}visible`
+    );
+    Assert.equal(
+      await idIsVisible("backup-password-error"),
+      visible.includes("password error"),
+      `Password error is ${visible.includes("password error") ? "" : "not "}visible`
+    );
+  });
+}

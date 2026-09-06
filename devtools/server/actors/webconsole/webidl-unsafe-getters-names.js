@@ -8,13 +8,16 @@
 
 module.exports = [
   "InstallTrigger",
-  "farthestViewportElement",
+  "containerName",
+  "containerQuery",
+  "fullScreen",
   "mozInputSource",
+  "mozOrientation",
   "mozPressure",
-  "nearestViewportElement",
   "onmouseenter",
   "onmouseleave",
   "onmozfullscreenchange",
   "onmozfullscreenerror",
+  "onmozorientationchange",
   "onreadystatechange",
 ];

@@ -1,17 +1,12 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set sw=2 ts=8 et tw=80 ft=cpp : */
-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 include protocol PContent;
 include protocol PHttpChannel;
+include protocol PCacheEntryWriteHandle;
 include protocol PCookieService;
 include protocol PBrowser;
-#ifdef MOZ_WIDGET_GTK
-include protocol PGIOChannel;
-#endif
 #ifdef MOZ_WIDGET_ANDROID
 include protocol PGeckoViewContentChannel;
 #endif
@@ -45,11 +40,19 @@ using nsIDNSService::DNSFlags from "nsIDNSService.h";
 namespace mozilla {
 namespace net {
 
+struct HTMLDNSPrefetchArgs {
+  nsString hostname;
+  bool isHttps;
+  OriginAttributes originAttributes;
+  DNSFlags flags;
+};
+
 //-------------------------------------------------------------------
 [NestedUpTo=inside_cpow] sync protocol PNecko
 {
   manager PContent;
   manages PHttpChannel;
+  manages PCacheEntryWriteHandle;
   manages PCookieService;
   manages PWebSocket;
   manages PWebSocketEventListener;
@@ -57,9 +60,6 @@ namespace net {
   manages PTCPServerSocket;
   manages PUDPSocket;
   manages PDNSRequest;
-#ifdef MOZ_WIDGET_GTK
-  manages PGIOChannel;
-#endif
 #ifdef MOZ_WIDGET_ANDROID
   manages PGeckoViewContentChannel;
 #endif
@@ -91,21 +91,15 @@ parent:
 
   async PWebSocketEventListener(uint64_t aInnerWindowID);
 
-  /* Predictor Methods */
-  async PredPredict(nullable nsIURI targetURI, nullable nsIURI sourceURI,
-                    uint32_t reason, OriginAttributes originAttributes,
-                    bool hasVerifier);
-  [Priority=low]
-  async PredLearn(nullable nsIURI targetURI, nullable nsIURI sourceURI,
-                  uint32_t reason, OriginAttributes originAttributes);
-  async PredReset();
-
-  async SpeculativeConnect(nullable nsIURI uri,
+  async SpeculativeConnect(nullable PBrowser browser,
+                           SerializedLoadContext loadContext,
+                           nullable nsIURI uri,
                            nullable nsIPrincipal principal,
                            OriginAttributes? originAttributes,
                            bool anonymous);
   async HTMLDNSPrefetch(nsString hostname, bool isHttps,
                         OriginAttributes originAttributes, DNSFlags flags);
+  async HTMLDNSPrefetchBatch(HTMLDNSPrefetchArgs[] prefetches);
   async CancelHTMLDNSPrefetch(nsString hostname, bool isHttps,
                               OriginAttributes originAttributes,
                               DNSFlags flags, nsresult reason);
@@ -115,10 +109,6 @@ parent:
    * specialized nsIParentChannel handling.
    */
   async ConnectBaseChannel(uint32_t channelId);
-
-#ifdef MOZ_WIDGET_GTK
-  async PGIOChannel(nullable PBrowser browser, SerializedLoadContext loadContext, GIOChannelCreationArgs args);
-#endif
 
 #ifdef MOZ_WIDGET_ANDROID
   async PGeckoViewContentChannel(nullable PBrowser browser,
@@ -136,7 +126,10 @@ parent:
   async RequestContextAfterDOMContentLoaded(uint64_t rcid);
   async RemoveRequestContext(uint64_t rcid);
 
-  async PAltDataOutputStream(nsCString type, int64_t predictedSize, PHttpChannel channel);
+  async PCacheEntryWriteHandle(PHttpChannel channel);
+
+  async PAltDataOutputStream(nsCString type, int64_t predictedSize, PHttpChannel? channel, PCacheEntryWriteHandle? handle);
+
 
   async PStunAddrsRequest();
 
@@ -162,12 +155,12 @@ parent:
   async GetPageThumbStream(nullable nsIURI uri, LoadInfoArgs loadInfo) returns (RemoteStreamInfo? info);
   async GetPageIconStream(nullable nsIURI uri, LoadInfoArgs loadInfo) returns (RemoteStreamInfo? info);
 
-child:
-  /* Predictor Methods */
-  async PredOnPredictPrefetch(nullable nsIURI uri, uint32_t httpStatus);
-  async PredOnPredictPreconnect(nullable nsIURI uri);
-  async PredOnPredictDNS(nullable nsIURI uri);
+  /**
+   * New Tab wallpaper remote resource loading
+   */
+  async GetMozNewTabWallpaperStream(nullable nsIURI uri, LoadInfoArgs loadInfo) returns (RemoteStreamInfo? info);
 
+child:
   async SpeculativeConnectRequest();
 
   // Using medium high priority to deliver this notification possibly sooner than we

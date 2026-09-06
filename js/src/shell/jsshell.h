@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -108,7 +106,6 @@ extern bool enableDisassemblyDumps;
 extern bool offthreadBaselineCompilation;
 extern bool offthreadIonCompilation;
 extern JS::DelazificationOption defaultDelazificationMode;
-extern bool enableAsmJS;
 extern bool enableWasm;
 extern bool enableSharedMemory;
 extern bool enableWasmBaseline;
@@ -121,7 +118,6 @@ extern bool enableWeakRefs;
 extern bool enableToSource;
 extern bool enablePropertyErrorMessageFix;
 extern bool enableIteratorHelpers;
-extern bool enableShadowRealms;
 extern bool enableArrayGrouping;
 extern bool enableWellFormedUnicodeStrings;
 extern bool enableArrayBufferTransfer;
@@ -169,7 +165,12 @@ class NonShrinkingValueVector
  public:
   bool traceWeak(JSTracer* trc) {
     for (HeapPtr<Value>& value : *this) {
-      TraceWeakEdge(trc, &value, "NonShrinkingValueVector element");
+      if (value.isGCThing()) {
+        Zone* zone = value.toGCThing()->zoneFromAnyThread();
+        if (zone->isGCSweeping() || zone->isGCCompacting()) {
+          TraceOrClearWeakEdge(trc, &value, "NonShrinkingValueVector element");
+        }
+      }
     }
     return true;
   }
@@ -244,6 +245,9 @@ struct ShellContext {
   // Off-thread parse state.
   js::Monitor offThreadMonitor MOZ_UNANNOTATED;
   Vector<OffThreadJob*, 0, SystemAllocPolicy> offThreadJobs;
+
+  // Number of root module evaluation promises that have not yet settled.
+  uint32_t pendingRootModuleEvaluations = 0;
 
   // Queued task callbacks that run after the microtask queue.
 

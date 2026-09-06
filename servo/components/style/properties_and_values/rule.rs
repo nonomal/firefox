@@ -7,26 +7,20 @@
 //! https://drafts.css-houdini.org/css-properties-values-api-1/#at-property-rule
 
 use super::{
-    registry::{PropertyRegistration, PropertyRegistrationData},
-    syntax::Descriptor,
+    registry::PropertyRegistration,
     value::{
         AllowComputationallyDependent, ComputedValue as ComputedRegisteredValue,
         SpecifiedValue as SpecifiedRegisteredValue,
     },
 };
 use crate::custom_properties::{Name as CustomPropertyName, SpecifiedValue};
+use crate::derives::*;
 use crate::error_reporting::ContextualParseError;
 use crate::parser::{Parse, ParserContext};
 use crate::shared_lock::{SharedRwLockReadGuard, ToCssWithGuard};
 use crate::values::{computed, serialize_atom_name};
-use cssparser::{
-    AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, ParseErrorKind, Parser,
-    ParserInput, ParserState, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser,
-    SourceLocation,
-};
-#[cfg(feature = "gecko")]
+use cssparser::{BasicParseErrorKind, ParseErrorKind, Parser, RuleBodyParser, SourceLocation};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use selectors::parser::SelectorParseErrorKind;
 use servo_arc::Arc;
 use std::fmt::{self, Write};
 use style_traits::{
@@ -35,30 +29,32 @@ use style_traits::{
 };
 use to_shmem::{SharedMemoryBuilder, ToShmem};
 
+pub use super::syntax::Descriptor as SyntaxDescriptor;
+pub use crate::properties::property::{DescriptorId, DescriptorParser, Descriptors};
+
 /// Parse the block inside a `@property` rule.
 ///
 /// Valid `@property` rules result in a registered custom property, as if `registerProperty()` had
 /// been called with equivalent parameters.
-pub fn parse_property_block<'i, 't>(
+pub fn parse_property_block(
     context: &ParserContext,
-    input: &mut Parser<'i, 't>,
+    input: &mut Parser,
     name: PropertyRuleName,
     source_location: SourceLocation,
-) -> Result<PropertyRegistration, ParseError<'i>> {
-    let mut descriptors = PropertyDescriptors::default();
-    let mut parser = PropertyRuleParser {
+) -> Result<PropertyRegistration, ParseError> {
+    let mut descriptors = Descriptors::default();
+    let mut parser = DescriptorParser {
         context,
         descriptors: &mut descriptors,
     };
-    let mut iter = RuleBodyParser::new(input, &mut parser);
+    let iter = RuleBodyParser::new(input, &mut parser);
     let mut syntax_err = None;
     let mut inherits_err = None;
-    while let Some(declaration) = iter.next() {
+    for declaration in iter {
         if !context.error_reporting_enabled() {
             continue;
         }
-        if let Err((error, slice)) = declaration {
-            let location = error.location;
+        if let Err((error, slice, location)) = declaration {
             let error = match error.kind {
                 // If the provided string is not a valid syntax string (if it
                 // returns failure when consume a syntax definition is called on
@@ -87,11 +83,11 @@ pub fn parse_property_block<'i, 't>(
     //
     //     The syntax descriptor is required for the @property rule to be valid; if it’s
     //     missing, the @property rule is invalid.
-    let Some(syntax) = descriptors.syntax else {
+    let Some(ref syntax) = descriptors.syntax else {
         return Err(if let Some(err) = syntax_err {
             err
         } else {
-            let err = input.new_custom_error(StyleParseErrorKind::PropertySyntaxField(
+            let err = ParseError::custom(StyleParseErrorKind::PropertySyntaxField(
                 PropertySyntaxParseError::NoSyntax,
             ));
             context.log_css_error(
@@ -106,11 +102,11 @@ pub fn parse_property_block<'i, 't>(
     //
     //     The inherits descriptor is required for the @property rule to be valid; if it’s
     //     missing, the @property rule is invalid.
-    let Some(inherits) = descriptors.inherits else {
+    if descriptors.inherits.is_none() {
         return Err(if let Some(err) = inherits_err {
             err
         } else {
-            let err = input.new_custom_error(StyleParseErrorKind::PropertyInheritsField(
+            let err = ParseError::custom(StyleParseErrorKind::PropertyInheritsField(
                 PropertyInheritsParseError::NoInherits,
             ));
             context.log_css_error(
@@ -121,119 +117,20 @@ pub fn parse_property_block<'i, 't>(
         });
     };
 
-    if PropertyRegistration::validate_initial_value(&syntax, descriptors.initial_value.as_deref())
+    if PropertyRegistration::validate_initial_value(syntax, descriptors.initial_value.as_deref())
         .is_err()
     {
-        return Err(input.new_error(BasicParseErrorKind::AtRuleBodyInvalid));
+        return Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::AtRuleBodyInvalid,
+        ));
     }
 
     Ok(PropertyRegistration {
         name,
-        data: PropertyRegistrationData {
-            syntax,
-            inherits,
-            initial_value: descriptors.initial_value,
-        },
+        descriptors,
         url_data: context.url_data.clone(),
         source_location,
     })
-}
-
-struct PropertyRuleParser<'a, 'b: 'a> {
-    context: &'a ParserContext<'b>,
-    descriptors: &'a mut PropertyDescriptors,
-}
-
-/// Default methods reject all at rules.
-impl<'a, 'b, 'i> AtRuleParser<'i> for PropertyRuleParser<'a, 'b> {
-    type Prelude = ();
-    type AtRule = ();
-    type Error = StyleParseErrorKind<'i>;
-}
-
-impl<'a, 'b, 'i> QualifiedRuleParser<'i> for PropertyRuleParser<'a, 'b> {
-    type Prelude = ();
-    type QualifiedRule = ();
-    type Error = StyleParseErrorKind<'i>;
-}
-
-impl<'a, 'b, 'i> RuleBodyItemParser<'i, (), StyleParseErrorKind<'i>>
-    for PropertyRuleParser<'a, 'b>
-{
-    fn parse_qualified(&self) -> bool {
-        false
-    }
-    fn parse_declarations(&self) -> bool {
-        true
-    }
-}
-
-macro_rules! property_descriptors {
-    (
-        $( #[$doc: meta] $name: tt $ident: ident: $ty: ty, )*
-    ) => {
-        /// Data inside a `@property` rule.
-        ///
-        /// <https://drafts.css-houdini.org/css-properties-values-api-1/#at-property-rule>
-        #[derive(Clone, Debug, Default, PartialEq)]
-        struct PropertyDescriptors {
-            $(
-                #[$doc]
-                $ident: Option<$ty>,
-            )*
-        }
-
-        impl PropertyRegistration {
-            fn decl_to_css(&self, dest: &mut CssStringWriter) -> fmt::Result {
-                $(
-                    let $ident = Option::<&$ty>::from(&self.data.$ident);
-                    if let Some(ref value) = $ident {
-                        dest.write_str(concat!($name, ": "))?;
-                        value.to_css(&mut CssWriter::new(dest))?;
-                        dest.write_str("; ")?;
-                    }
-                )*
-                Ok(())
-            }
-        }
-
-        impl<'a, 'b, 'i> DeclarationParser<'i> for PropertyRuleParser<'a, 'b> {
-            type Declaration = ();
-            type Error = StyleParseErrorKind<'i>;
-
-            fn parse_value<'t>(
-                &mut self,
-                name: CowRcStr<'i>,
-                input: &mut Parser<'i, 't>,
-                _declaration_start: &ParserState,
-            ) -> Result<(), ParseError<'i>> {
-                match_ignore_ascii_case! { &*name,
-                    $(
-                        $name => {
-                            // DeclarationParser also calls parse_entirely so we’d normally not need
-                            // to, but in this case we do because we set the value as a side effect
-                            // rather than returning it.
-                            let value = input.parse_entirely(|i| Parse::parse(self.context, i))?;
-                            self.descriptors.$ident = Some(value)
-                        },
-                    )*
-                    _ => return Err(input.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone()))),
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-property_descriptors! {
-    /// <https://drafts.css-houdini.org/css-properties-values-api-1/#the-syntax-descriptor>
-    "syntax" syntax: Descriptor,
-
-    /// <https://drafts.css-houdini.org/css-properties-values-api-1/#inherits-descriptor>
-    "inherits" inherits: Inherits,
-
-    /// <https://drafts.css-houdini.org/css-properties-values-api-1/#initial-value-descriptor>
-    "initial-value" initial_value: InitialValue,
 }
 
 /// Errors that can happen when registering a property.
@@ -246,7 +143,6 @@ pub enum PropertyRegistrationError {
 
 impl PropertyRegistration {
     /// Measure heap usage.
-    #[cfg(feature = "gecko")]
     pub fn size_of(&self, _: &SharedRwLockReadGuard, ops: &mut MallocSizeOfOps) -> usize {
         MallocSizeOf::size_of(self, ops)
     }
@@ -256,24 +152,25 @@ impl PropertyRegistration {
         &self,
         computed_context: &computed::Context,
     ) -> Result<ComputedRegisteredValue, ()> {
-        let Some(ref initial) = self.data.initial_value else {
+        let Some(ref initial) = self.descriptors.initial_value else {
             return Err(());
         };
 
-        if self.data.syntax.is_universal() {
+        if self.descriptors.is_universal() {
             return Ok(ComputedRegisteredValue::universal(Arc::clone(initial)));
         }
 
-        let mut input = ParserInput::new(initial.css_text());
-        let mut input = Parser::new(&mut input);
+        let mut input = Parser::new(initial.css_text());
         input.skip_whitespace();
 
         match SpecifiedRegisteredValue::compute(
             &mut input,
-            &self.data,
+            &self.descriptors,
+            None,
             &self.url_data,
             computed_context,
             AllowComputationallyDependent::No,
+            /* attr_taint */ Default::default(),
         ) {
             Ok(computed) => Ok(computed),
             Err(_) => Err(()),
@@ -283,7 +180,7 @@ impl PropertyRegistration {
     /// Performs syntax validation as per the initial value descriptor.
     /// https://drafts.css-houdini.org/css-properties-values-api-1/#initial-value-descriptor
     pub fn validate_initial_value(
-        syntax: &Descriptor,
+        syntax: &SyntaxDescriptor,
         initial_value: Option<&SpecifiedValue>,
     ) -> Result<(), PropertyRegistrationError> {
         use crate::properties::CSSWideKeyword;
@@ -308,8 +205,7 @@ impl PropertyRegistration {
             return Err(PropertyRegistrationError::InitialValueNotComputationallyIndependent);
         }
 
-        let mut input = ParserInput::new(initial.css_text());
-        let mut input = Parser::new(&mut input);
+        let mut input = Parser::new(initial.css_text());
         input.skip_whitespace();
 
         // The initial-value cannot include CSS-wide keywords.
@@ -321,7 +217,9 @@ impl PropertyRegistration {
             &mut input,
             syntax,
             &initial.url_data,
+            None,
             AllowComputationallyDependent::No,
+            /* attr_taint */ Default::default(),
         ) {
             Ok(_) => {},
             Err(_) => return Err(PropertyRegistrationError::InvalidInitialValue),
@@ -337,7 +235,7 @@ impl ToCssWithGuard for PropertyRegistration {
         dest.write_str("@property ")?;
         self.name.to_css(&mut CssWriter::new(dest))?;
         dest.write_str(" { ")?;
-        self.decl_to_css(dest)?;
+        self.descriptors.to_css(&mut CssWriter::new(dest))?;
         dest.write_char('}')
     }
 }
@@ -362,7 +260,7 @@ impl ToCss for PropertyRuleName {
 }
 
 /// <https://drafts.css-houdini.org/css-properties-values-api-1/#inherits-descriptor>
-#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss)]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss, ToShmem)]
 pub enum Inherits {
     /// `true` value for the `inherits` descriptor
     True,
@@ -371,10 +269,7 @@ pub enum Inherits {
 }
 
 impl Parse for Inherits {
-    fn parse<'i, 't>(
-        _context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(_context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         // FIXME(bug 1927012): Remove `return` from try_match_ident_ignore_ascii_case so the closure
         // can be removed.
         let result: Result<Inherits, ParseError> = (|| {
@@ -383,13 +278,12 @@ impl Parse for Inherits {
                 "false" => Ok(Inherits::False),
             }
         })();
-        if let Err(err) = result {
-            Err(ParseError {
-                kind: ParseErrorKind::Custom(StyleParseErrorKind::PropertyInheritsField(
+        if result.is_err() {
+            Err(ParseError::custom(
+                StyleParseErrorKind::PropertyInheritsField(
                     PropertyInheritsParseError::InvalidInherits,
-                )),
-                location: err.location,
-            })
+                ),
+            ))
         } else {
             result
         }
@@ -403,11 +297,35 @@ impl Parse for Inherits {
 pub type InitialValue = Arc<SpecifiedValue>;
 
 impl Parse for InitialValue {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         input.skip_whitespace();
-        Ok(Arc::new(SpecifiedValue::parse(input, &context.url_data)?))
+        Ok(Arc::new(SpecifiedValue::parse(
+            input,
+            Some(&context.namespaces.prefixes),
+            context.url_data,
+        )?))
+    }
+}
+
+impl Descriptors {
+    /// Returns descriptors for an unregistered property.
+    #[inline]
+    pub fn unregistered() -> &'static Self {
+        static UNREGISTERED: Descriptors = Descriptors {
+            inherits: Some(Inherits::True),
+            syntax: Some(SyntaxDescriptor::universal()),
+            initial_value: None,
+        };
+        &UNREGISTERED
+    }
+
+    /// Whether this property inherits.
+    pub fn inherits(&self) -> bool {
+        self.inherits != Some(Inherits::False)
+    }
+
+    /// Whether this property uses universal syntax.
+    pub fn is_universal(&self) -> bool {
+        self.syntax.as_ref().is_none_or(|s| s.is_universal())
     }
 }

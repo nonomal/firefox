@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,6 +13,7 @@
 #include "mozilla/PresShellInlines.h"
 #include "mozilla/StaticPrefs_print.h"
 #include "mozilla/Try.h"
+#include "mozilla/dom/AnimationTimelinesController.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/CustomEvent.h"
@@ -41,7 +40,6 @@
 #include "nsQueryObject.h"
 #include "nsReadableUtils.h"
 #include "nsSubDocumentFrame.h"
-#include "nsView.h"
 
 // Print Options
 #include "nsGkAtoms.h"
@@ -84,7 +82,11 @@ static const char sPrintSettingsServiceContractID[] =
 #include "nsIWebBrowserChrome.h"
 #include "nsPageSequenceFrame.h"
 #include "nsRange.h"
-#include "nsViewManager.h"
+
+#if defined(ACCESSIBILITY) && defined(MOZ_ENABLE_SKIA_PDF)
+#  include "mozilla/a11y/DocManager.h"
+#  include "mozilla/a11y/PdfStructTreeBuilder.h"
+#endif
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -310,7 +312,6 @@ static void DumpPrintObjectsTree(nsPrintObject* aPO, int aLevel, FILE* aFD);
 static void DumpPrintObjectsList(const nsTArray<nsPrintObject*>& aDocList);
 static void RootFrameList(nsPresContext* aPresContext, FILE* out,
                           const char* aPrefix);
-static void DumpViews(nsIDocShell* aDocShell, FILE* out);
 static void DumpLayoutData(const char* aTitleStr, const char* aURLStr,
                            nsPresContext* aPresContext, nsDeviceContext* aDC,
                            nsIFrame* aRootFrame, nsIDocShell* aDocShell,
@@ -414,7 +415,7 @@ nsresult nsPrintJob::DoCommonPrint(bool aIsPrintPreview,
 
   nsCOMPtr<nsIDeviceContextSpec> devspec;
   if (XRE_IsContentProcess()) {
-    devspec = new nsDeviceContextSpecProxy(mRemotePrintJob);
+    devspec = MakeAndAddRef<nsDeviceContextSpecProxy>(mRemotePrintJob);
   } else {
     devspec = do_CreateInstance("@mozilla.org/gfx/devicecontextspec;1", &rv);
     NS_ENSURE_SUCCESS(rv, rv);
@@ -832,6 +833,17 @@ nsresult nsPrintJob::SetupToPrintContent() {
     }
   }
 
+  // If the document is a PDF, then we will allow the user to scale the
+  // page up past 100% despite it having a CSS page size.
+  // This allows the page to increase in size on the sheet.
+  {
+    PresShell* const presShell = mPrintObject->mPresShell;
+    if (nsContentUtils::IsPDFJS(presShell->GetDocument()->GetPrincipal())) {
+      const float pageZoomRatio = std::max(mPrintObject->mZoomRatio, 1.0f);
+      presShell->GetPageSequenceFrame()->SetMaxPageZoomRatio(pageZoomRatio);
+    }
+  }
+
   // If the frames got reconstructed and reflowed the number of pages might
   // has changed.
   if (didReconstruction) {
@@ -892,8 +904,19 @@ nsresult nsPrintJob::SetupToPrintContent() {
   //      to the "File Name" dialog, this comes back as an error
   // Don't start printing when regression test are executed
   if (mIsDoingPrinting) {
-    rv = printData->mPrintDC->BeginDocument(docTitleStr, fileNameStr, startPage,
-                                            endPage);
+#if defined(ACCESSIBILITY) && defined(MOZ_ENABLE_SKIA_PDF)
+    if (!mIsCreatingPrintPreview) {
+      a11y::DocManager::NotifyOfPrintDocument(mPrintObject->mDocument);
+      // XXX Out-of-process iframes inside a parent process document won't be
+      // accessible. We need to wait for the iframe accessibility trees to
+      // arrive asynchronously using
+      // a11y::PdfStructTreeBuilder::GetReadyPromise, but there's no clear
+      // place to do that right now when printing in-process.
+    }
+#endif
+    rv = printData->mPrintDC->BeginDocument(
+        docTitleStr, fileNameStr, mPrintObject->mDocument->GetWindowContext(),
+        startPage, endPage);
   }
 
   if (mIsCreatingPrintPreview) {
@@ -1209,12 +1232,6 @@ nsresult nsPrintJob::SetRootView(nsPrintObject* aPO, bool aDocumentIsTopLevel,
     adjSize = mPrt->mPrintDC->GetDeviceSurfaceDimensions();
   }
 
-  if (!aPO->mViewManager->GetRootView()) {
-    // Create a child window of the parent that is our "root view/window"
-    nsView* rootView = aPO->mViewManager->CreateView(adjSize);
-    aPO->mViewManager->SetRootView(rootView);
-  }
-
   if (mIsCreatingPrintPreview && aDocumentIsTopLevel) {
     aPO->mPresContext->SetPaginatedScrolling(canCreateScrollbars);
   }
@@ -1245,9 +1262,11 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
       !aPO->mParent || !aPO->mParent->PrintingIsEnabled();
   auto* embedderFrame = [&]() -> nsSubDocumentFrame* {
     if (documentIsTopLevel) {
-      if (nsCOMPtr<nsIDocumentViewer> viewer =
-              do_QueryInterface(mDocViewerPrint)) {
-        return viewer->FindContainerFrame();
+      if (mIsCreatingPrintPreview) {
+        if (nsCOMPtr<nsIDocumentViewer> viewer =
+                do_QueryInterface(mDocViewerPrint)) {
+          return viewer->FindContainerFrame();
+        }
       }
     } else if (aPO->mContent) {
       return do_QueryFrame(aPO->mContent->GetPrimaryFrame());
@@ -1261,9 +1280,7 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
   aPO->mPresContext->SetPrintSettings(mPrintSettings);
 
   // init it with the DC
-  MOZ_TRY(aPO->mPresContext->Init(printData->mPrintDC));
-
-  aPO->mViewManager = new nsViewManager();
+  aPO->mPresContext->Init(printData->mPrintDC);
 
   bool doReturn = false;
   nsSize adjSize;
@@ -1311,10 +1328,8 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
   // in media_queries.rs for more details.
   RefPtr<Document> doc = aPO->mDocument;
   RefPtr<nsPresContext> presContext = aPO->mPresContext;
-  RefPtr<nsViewManager> viewManager = aPO->mViewManager;
 
-  aPO->mPresShell =
-      doc->CreatePresShell(presContext, viewManager, embedderFrame);
+  aPO->mPresShell = doc->CreatePresShell(presContext, embedderFrame);
   if (!aPO->mPresShell) {
     return NS_ERROR_FAILURE;
   }
@@ -1337,8 +1352,8 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
        pageSize.width, pageSize.height));
 
   if (mIsCreatingPrintPreview && documentIsTopLevel) {
-    mDocViewerPrint->SetPrintPreviewPresentation(
-        aPO->mViewManager, aPO->mPresContext, aPO->mPresShell.get());
+    mDocViewerPrint->SetPrintPreviewPresentation(aPO->mPresContext,
+                                                 aPO->mPresShell.get());
   }
 
   MOZ_TRY(aPO->mPresShell->Initialize());
@@ -1387,9 +1402,7 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
     }
   }
   // Make sure animations are active.
-  for (DocumentTimeline* tl : aPO->mDocument->Timelines()) {
-    tl->TriggerAllPendingAnimationsNow();
-  }
+  aPO->mDocument->TimelinesController().TriggerAllPendingAnimationsNow();
   // Process the reflow event Initialize posted
   presShell->FlushPendingNotifications(FlushType::Layout);
   aPO->mDocument->UpdateRemoteFrameEffects();
@@ -1415,18 +1428,6 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
       RootFrameList(aPO->mPresContext, fd, 0);
       // DumpFrames(fd, aPO->mPresContext, renderingContext, theRootFrame, 0);
       fprintf(fd, "---------------------------------------\n\n");
-      fprintf(fd, "--------------- Views From Root Frame----------------\n");
-      nsView* v = theRootFrame->GetView();
-      if (v) {
-        v->List(fd);
-      } else {
-        printf("View is null!\n");
-      }
-      if (aPO->mDocShell) {
-        fprintf(fd, "--------------- All Views ----------------\n");
-        DumpViews(aPO->mDocShell, fd);
-        fprintf(fd, "---------------------------------------\n\n");
-      }
       fclose(fd);
     }
   }
@@ -1509,8 +1510,6 @@ struct MOZ_STACK_CLASS SelectionRangeState {
   };
 
   MOZ_CAN_RUN_SCRIPT void SelectRange(nsRange*);
-  MOZ_CAN_RUN_SCRIPT void SelectNodesExcept(const Position& aStart,
-                                            const Position& aEnd);
   MOZ_CAN_RUN_SCRIPT void SelectNodesExceptInSubtree(const Position& aStart,
                                                      const Position& aEnd);
 
@@ -1529,7 +1528,7 @@ void SelectionRangeState::SelectComplementOf(
                           range->MayCrossShadowBoundaryStartOffset()};
     auto end = Position{range->GetMayCrossShadowBoundaryEndContainer(),
                         range->MayCrossShadowBoundaryEndOffset()};
-    SelectNodesExcept(start, end);
+    SelectNodesExceptInSubtree(start, end);
   }
 }
 
@@ -1540,31 +1539,13 @@ void SelectionRangeState::SelectRange(nsRange* aRange) {
   }
 }
 
-void SelectionRangeState::SelectNodesExcept(const Position& aStart,
-                                            const Position& aEnd) {
-  SelectNodesExceptInSubtree(aStart, aEnd);
-  if (!StaticPrefs::dom_shadowdom_selection_across_boundary_enabled()) {
-    if (auto* shadow = ShadowRoot::FromNode(aStart.mNode->SubtreeRoot())) {
-      auto* host = shadow->Host();
-      // Can't just select other nodes except the host, because other nodes that
-      // are not in this particular shadow tree could also be selected
-      SelectNodesExcept(Position{host, 0},
-                        Position{host, host->GetChildCount()});
-    } else {
-      MOZ_ASSERT(aStart.mNode->IsInUncomposedDoc());
-    }
-  }
-}
-
 void SelectionRangeState::SelectNodesExceptInSubtree(const Position& aStart,
                                                      const Position& aEnd) {
   static constexpr auto kEllipsis = u"\x2026"_ns;
 
   // Finish https://bugzilla.mozilla.org/show_bug.cgi?id=1903871 once the pref
   // is shipped, so that we only need one position.
-  nsINode* root = StaticPrefs::dom_shadowdom_selection_across_boundary_enabled()
-                      ? aStart.mNode->OwnerDoc()
-                      : aStart.mNode->SubtreeRoot();
+  nsINode* root = aStart.mNode->OwnerDoc();
   auto& start =
       mPositions.WithEntryHandle(root, [&](auto&& entry) -> Position& {
         return entry.OrInsertWith([&] { return Position{root, 0}; });
@@ -1582,11 +1563,9 @@ void SelectionRangeState::SelectNodesExceptInSubtree(const Position& aStart,
     }
   }
 
-  RefPtr<nsRange> range = nsRange::Create(
-      start.mNode, start.mOffset, aStart.mNode, aStart.mOffset, IgnoreErrors(),
-      StaticPrefs::dom_shadowdom_selection_across_boundary_enabled()
-          ? AllowRangeCrossShadowBoundary::Yes
-          : AllowRangeCrossShadowBoundary::No);
+  RefPtr<nsRange> range =
+      nsRange::Create(start.mNode, start.mOffset, aStart.mNode, aStart.mOffset,
+                      IgnoreErrors(), AllowRangeCrossShadowBoundary::Yes);
   SelectRange(range);
 
   start = aEnd;
@@ -1613,11 +1592,9 @@ void SelectionRangeState::RemoveSelectionFromDocument() {
   for (auto& entry : mPositions) {
     const Position& pos = entry.GetData();
     nsINode* root = entry.GetKey();
-    RefPtr<nsRange> range = nsRange::Create(
-        pos.mNode, pos.mOffset, root, root->GetChildCount(), IgnoreErrors(),
-        StaticPrefs::dom_shadowdom_selection_across_boundary_enabled()
-            ? AllowRangeCrossShadowBoundary::Yes
-            : AllowRangeCrossShadowBoundary::No);
+    RefPtr<nsRange> range =
+        nsRange::Create(pos.mNode, pos.mOffset, root, root->GetChildCount(),
+                        IgnoreErrors(), AllowRangeCrossShadowBoundary::Yes);
     SelectRange(range);
   }
   for (uint32_t i = 0; i < mSelection->RangeCount(); i++) {
@@ -1949,8 +1926,6 @@ nsresult nsPrintJob::EnablePOsForPrinting() {
 nsresult nsPrintJob::FinishPrintPreview() {
   nsresult rv = NS_OK;
 
-#ifdef NS_PRINT_PREVIEW
-
   // If mPrt is null we've already finished with print preview. If mPrt is not
   // null but mIsCreatingPrintPreview is false FinishPrintPreview must have
   // already failed due to DocumentReadyForPrinting failing.
@@ -2003,9 +1978,6 @@ nsresult nsPrintJob::FinishPrintPreview() {
   // before it is to be created
 
   printData->OnEndPrinting();
-
-#endif  // NS_PRINT_PREVIEW
-
   return NS_OK;
 }
 
@@ -2048,7 +2020,7 @@ class nsPrintCompletionEvent : public Runnable {
     NS_ASSERTION(mDocViewerPrint, "mDocViewerPrint is null.");
   }
 
-  NS_IMETHOD Run() override {
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY NS_IMETHOD Run() override {
     if (mDocViewerPrint) {
       mDocViewerPrint->OnDonePrinting();
     }
@@ -2056,13 +2028,14 @@ class nsPrintCompletionEvent : public Runnable {
   }
 
  private:
-  nsCOMPtr<nsIDocumentViewerPrint> mDocViewerPrint;
+  MOZ_KNOWN_LIVE const nsCOMPtr<nsIDocumentViewerPrint> mDocViewerPrint;
 };
 
 //-----------------------------------------------------------
 void nsPrintJob::FirePrintCompletionEvent() {
   MOZ_ASSERT(NS_IsMainThread());
-  nsCOMPtr<nsIRunnable> event = new nsPrintCompletionEvent(mDocViewerPrint);
+  nsCOMPtr<nsIRunnable> event =
+      MakeAndAddRef<nsPrintCompletionEvent>(mDocViewerPrint);
   nsCOMPtr<nsIDocumentViewer> viewer = do_QueryInterface(mDocViewerPrint);
   NS_ENSURE_TRUE_VOID(viewer);
   nsCOMPtr<Document> doc = viewer->GetDocument();
@@ -2183,38 +2156,6 @@ static void DumpFrames(FILE* out, nsPresContext* aPresContext,
 }
 
 /** ---------------------------------------------------
- *  Dumps the Views from the DocShell
- */
-static void DumpViews(nsIDocShell* aDocShell, FILE* out) {
-  NS_ASSERTION(aDocShell, "Pointer is null!");
-  NS_ASSERTION(out, "Pointer is null!");
-
-  if (nullptr != aDocShell) {
-    fprintf(out, "docshell=%p \n", aDocShell);
-    if (PresShell* presShell = aDocShell->GetPresShell()) {
-      nsViewManager* vm = presShell->GetViewManager();
-      if (vm) {
-        nsView* root = vm->GetRootView();
-        if (root) {
-          root->List(out);
-        }
-      }
-    } else {
-      fputs("null pres shell\n", out);
-    }
-
-    // dump the views of the sub documents
-    int32_t i, n;
-    BrowsingContext* bc = nsDocShell::Cast(aDocShell)->GetBrowsingContext();
-    for (auto& child : bc->Children()) {
-      if (auto childDS = child->GetDocShell()) {
-        DumpViews(childAsShell, out);
-      }
-    }
-  }
-}
-
-/** ---------------------------------------------------
  *  Dumps the Views and Frames
  */
 void DumpLayoutData(const char* aTitleStr, const char* aURLStr,
@@ -2229,11 +2170,9 @@ void DumpLayoutData(const char* aTitleStr, const char* aURLStr,
     return;
   }
 
-#  ifdef NS_PRINT_PREVIEW
   if (aPresContext->Type() == nsPresContext::eContext_PrintPreview) {
     return;
   }
-#  endif
 
   NS_ASSERTION(aRootFrame, "Pointer is null!");
   NS_ASSERTION(aDocShell, "Pointer is null!");
@@ -2258,11 +2197,6 @@ void DumpLayoutData(const char* aTitleStr, const char* aURLStr,
       v->List(fd);
     } else {
       printf("View is null!\n");
-    }
-    if (aDocShell) {
-      fprintf(fd, "--------------- All Views ----------------\n");
-      DumpViews(aDocShell, fd);
-      fprintf(fd, "---------------------------------------\n\n");
     }
     if (aFD == nullptr) {
       fclose(fd);

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,6 +15,7 @@
 #include "mozilla/dom/UserActivation.h"
 #include "mozilla/gfx/2D.h"
 #include "nsContentUtils.h"
+#include "nsIURIWithSizeOf.h"
 #include "nsLayoutUtils.h"
 #include "nsNetUtil.h"
 
@@ -61,7 +60,7 @@ NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED(SVGFEImageElement,
 // Implementation
 
 SVGFEImageElement::SVGFEImageElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : SVGFEImageElementBase(std::move(aNodeInfo)) {
   // We start out broken
   AddStatesSilently(ElementState::BROKEN);
@@ -247,12 +246,9 @@ FilterPrimitiveDescription SVGFEImageElement::GetPrimitiveDescription(
   RefPtr<SourceSurface> image;
   nsIntSize nativeSize;
   if (imageContainer) {
-    if (NS_FAILED(imageContainer->GetWidth(&nativeSize.width))) {
-      nativeSize.width = kFallbackIntrinsicWidthInPixels;
-    }
-    if (NS_FAILED(imageContainer->GetHeight(&nativeSize.height))) {
-      nativeSize.height = kFallbackIntrinsicHeightInPixels;
-    }
+    CSSIntSize size = NaturalSize(DoDensityCorrection::No);
+    nativeSize.width = size.width;
+    nativeSize.height = size.height;
     uint32_t flags =
         imgIContainer::FLAG_SYNC_DECODE | imgIContainer::FLAG_ASYNC_NOTIFY;
     image = imageContainer->GetFrameAtSize(nativeSize,
@@ -327,7 +323,8 @@ bool SVGFEImageElement::OutputIsTainted(const nsTArray<bool>& aInputsAreTainted,
 // SVGElement methods
 
 already_AddRefed<DOMSVGAnimatedString> SVGFEImageElement::Href() {
-  return mStringAttributes[HREF].IsExplicitlySet()
+  return mStringAttributes[HREF].IsExplicitlySet() ||
+                 !mStringAttributes[XLINK_HREF].IsExplicitlySet()
              ? mStringAttributes[HREF].ToDOMAnimatedString(this)
              : mStringAttributes[XLINK_HREF].ToDOMAnimatedString(this);
 }
@@ -426,6 +423,20 @@ void SVGFEImageElement::HrefAsString(nsAString& aHref) {
 
 void SVGFEImageElement::NotifyImageContentChanged() {
   // We don't support rendering fragments yet (bug 455986)
+}
+
+void SVGFEImageElement::AddSizeOfExcludingThis(nsWindowSizes& aSizes,
+                                               size_t* aNodeSize) const {
+  SVGElement::AddSizeOfExcludingThis(aSizes, aNodeSize);
+
+  // It is okay to include the size of mSrcURI here even though it might have
+  // strong references from elsewhere because the URI was created for this
+  // object, in nsImageLoadingContent::StringToURI(). Only objects that created
+  // their own URI will call nsIURIWithSizeOf::SizeOfIncludingThis().
+  if (mSrcURI) {
+    *aNodeSize += SizeOfIncludingThisIfURIWithSizeOf(
+        mSrcURI, aSizes.mState.mMallocSizeOf);
+  }
 }
 
 }  // namespace mozilla::dom

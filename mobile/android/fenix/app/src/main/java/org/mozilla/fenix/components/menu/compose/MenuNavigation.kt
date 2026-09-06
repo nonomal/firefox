@@ -33,13 +33,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
-import mozilla.components.ui.icons.R as iconsR
 
 @Suppress("LongParameterList")
 @Composable
@@ -60,24 +60,26 @@ internal fun MenuNavigation(
         stringResource(id = R.string.browser_main_menu_content_description_navigation_header)
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = if (isExtensionsExpanded || isMoreMenuExpanded) {
-                    MaterialTheme.colorScheme.surfaceContainerHighest
-                } else {
-                    MaterialTheme.colorScheme.surface
+        modifier =
+            Modifier.fillMaxWidth()
+                .background(
+                    color =
+                        if (isExtensionsExpanded || isMoreMenuExpanded) {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        } else {
+                            MaterialTheme.colorScheme.surface
+                        }
+                )
+                .padding(horizontal = 4.dp, vertical = 12.dp)
+                .verticalScroll(rememberScrollState())
+                .semantics(mergeDescendants = true) {
+                    contentDescription = navigationHeaderContentDescription
                 },
-            )
-            .padding(horizontal = 4.dp, vertical = 12.dp)
-            .verticalScroll(rememberScrollState())
-            .semantics(mergeDescendants = true) {
-                contentDescription = navigationHeaderContentDescription
-            },
-        horizontalArrangement = Arrangement.SpaceAround,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.Top,
     ) {
         MenuNavItem(
+            modifier = Modifier.weight(1f),
             state = goBackState,
             painter = painterResource(id = iconsR.drawable.mozac_ic_back_24),
             label = stringResource(id = R.string.browser_menu_back),
@@ -86,6 +88,7 @@ internal fun MenuNavigation(
         )
 
         MenuNavItem(
+            modifier = Modifier.weight(1f),
             state = goForwardState,
             painter = painterResource(id = iconsR.drawable.mozac_ic_forward_24),
             label = stringResource(id = R.string.browser_menu_forward),
@@ -94,6 +97,7 @@ internal fun MenuNavigation(
         )
 
         MenuNavItem(
+            modifier = Modifier.weight(1f),
             state = state,
             painter = painterResource(id = iconsR.drawable.mozac_ic_share_android_24),
             label = stringResource(id = R.string.browser_menu_share),
@@ -102,13 +106,15 @@ internal fun MenuNavigation(
 
         if (isSiteLoading) {
             MenuNavItem(
+                modifier = Modifier.weight(1f),
                 state = state,
-                painter = painterResource(id = iconsR.drawable.mozac_ic_stop),
+                painter = painterResource(id = iconsR.drawable.mozac_ic_cross_24),
                 label = stringResource(id = R.string.browser_menu_stop),
                 onClick = onStopButtonClick,
             )
         } else {
             MenuNavItem(
+                modifier = Modifier.weight(1f),
                 state = state,
                 painter = painterResource(id = iconsR.drawable.mozac_ic_arrow_clockwise_24),
                 label = stringResource(id = R.string.browser_menu_refresh),
@@ -121,6 +127,7 @@ internal fun MenuNavigation(
 
 @Composable
 private fun MenuNavItem(
+    modifier: Modifier = Modifier,
     state: MenuItemState = MenuItemState.ENABLED,
     painter: Painter,
     label: String,
@@ -128,16 +135,17 @@ private fun MenuNavItem(
     onLongClick: (() -> Unit)? = null,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxHeight()
-            .combinedClickable(
-                interactionSource = null,
-                indication = LocalIndication.current,
-                enabled = state != MenuItemState.DISABLED,
-                onClick = onClick,
-                onLongClick = onLongClick,
-                role = Role.Button,
-            ),
+        modifier =
+            modifier
+                .fillMaxHeight()
+                .combinedClickable(
+                    interactionSource = null,
+                    indication = LocalIndication.current,
+                    enabled = state != MenuItemState.DISABLED,
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                    role = Role.Button,
+                ),
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -176,14 +184,14 @@ private fun getIconTint(state: MenuItemState): Color {
         MenuItemState.ACTIVE -> MaterialTheme.colorScheme.tertiary
         MenuItemState.WARNING -> MaterialTheme.colorScheme.error
         MenuItemState.DISABLED -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-        else -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 }
 
-@PreviewLightDark
+@Preview
 @Composable
-private fun MenuNavigationPreview() {
-    FirefoxTheme {
+private fun MenuNavigationPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         MenuNavigation(
             isSiteLoading = false,
             isExtensionsExpanded = false,
@@ -197,10 +205,10 @@ private fun MenuNavigationPreview() {
     }
 }
 
-@PreviewLightDark
+@Preview
 @Composable
-private fun MenuNavigationExpandedPreview() {
-    FirefoxTheme {
+private fun MenuNavigationExpandedPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         MenuNavigation(
             isSiteLoading = false,
             isExtensionsExpanded = true,
@@ -216,12 +224,10 @@ private fun MenuNavigationExpandedPreview() {
 
 @Preview
 @Composable
-private fun MenuNavigationPrivatePreview(
-    @PreviewParameter(SiteLoadingPreviewParameterProvider::class) isSiteLoading: Boolean,
-) {
-    FirefoxTheme(theme = Theme.Private) {
+private fun MenuNavigationSiteLoadingPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         MenuNavigation(
-            isSiteLoading = isSiteLoading,
+            isSiteLoading = true,
             isExtensionsExpanded = false,
             isMoreMenuExpanded = false,
             onBackButtonClick = {},
@@ -235,12 +241,10 @@ private fun MenuNavigationPrivatePreview(
 
 @Preview
 @Composable
-private fun MenuNavigationExpandedPrivatePreview(
-    @PreviewParameter(SiteLoadingPreviewParameterProvider::class) isSiteLoading: Boolean,
-) {
-    FirefoxTheme(theme = Theme.Private) {
+private fun MenuNavigationExpandedSiteLoadingPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         MenuNavigation(
-            isSiteLoading = isSiteLoading,
+            isSiteLoading = true,
             isExtensionsExpanded = true,
             isMoreMenuExpanded = false,
             onBackButtonClick = {},

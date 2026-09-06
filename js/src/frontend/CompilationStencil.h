@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -15,8 +13,10 @@
 #include "mozilla/Maybe.h"       // mozilla::Maybe
 #include "mozilla/MemoryReporting.h"  // mozilla::MallocSizeOf
 #include "mozilla/RefPtr.h"           // RefPtr
-#include "mozilla/Span.h"             // mozilla::Span
-#include "mozilla/Variant.h"          // mozilla::Variant
+#include "mozilla/Result.h"           // mozilla::Result
+#include "mozilla/ResultVariant.h"
+#include "mozilla/Span.h"     // mozilla::Span
+#include "mozilla/Variant.h"  // mozilla::Variant
 
 #include <algorithm>    // std::swap
 #include <stddef.h>     // size_t
@@ -99,8 +99,17 @@ struct ScopeStencilRef {
 
   // Lookup the ScopeStencil referenced by this ScopeStencilRef.
   inline const ScopeStencil& scope() const;
+
   // Reference to the script which owns the scope pointed by this object.
   inline ScriptStencilRef script() const;
+
+  // Checking whether the enclosing scope exists is as costly as computing
+  // it. Thus, the enclosing function will either return the enclosing scope or
+  // fail with one of the following code.
+  enum class EnclosingFailure : uint8_t { ModuleScope, GlobalScope };
+
+  // Compute the encloding scope or fail with one of the previous error code.
+  Result<ScopeStencilRef, EnclosingFailure> enclosing() const;
 
   // For a Function scope, return the ScriptExtra information from the initial
   // stencil.
@@ -131,6 +140,7 @@ class InputScope {
 
   // Create an InputScope given a CompilationStencil and the ScopeIndex which is
   // an offset within the same CompilationStencil given as argument.
+  explicit InputScope(const ScopeStencilRef& ref) : scope_(ref) {}
   InputScope(const InitialStencilAndDelazifications& stencils,
              ScriptIndex scriptIndex, ScopeIndex scopeIndex)
       : scope_(ScopeStencilRef{stencils, scriptIndex, scopeIndex}) {}
@@ -201,12 +211,11 @@ class InputScope {
                                 kind == ScopeKind::Global) {
                               return true;
                             }
-                            if (!scope.hasEnclosing()) {
+                            auto result = it.enclosing();
+                            if (result.isErr()) {
                               break;
                             }
-                            new (&it)
-                                ScopeStencilRef{ref.stencils_, ref.scriptIndex_,
-                                                scope.enclosing()};
+                            new (&it) ScopeStencilRef(result.unwrap());
                           }
                           return false;
                         },
@@ -234,11 +243,11 @@ class InputScope {
               MOZ_ASSERT(!scope.hasEnclosing());
               length += js::ModuleScope::EnclosingEnvironmentChainLength;
             }
-            if (!scope.hasEnclosing()) {
+            auto result = it.enclosing();
+            if (result.isErr()) {
               break;
             }
-            new (&it) ScopeStencilRef{ref.stencils_, ref.scriptIndex_,
-                                      scope.enclosing()};
+            new (&it) ScopeStencilRef(result.unwrap());
           }
           return length;
         },
@@ -1025,28 +1034,6 @@ class CompilationSyntaxParseCache {
                                             const ScriptStencilRef& lazy);
 };
 
-// AsmJS scripts are very rare on-average, so we use a HashMap to associate
-// data with a ScriptStencil. The ScriptStencil has a flag to indicate if we
-// need to even do this lookup.
-using StencilAsmJSMap =
-    mozilla::HashMap<ScriptIndex, RefPtr<const JS::WasmModule>,
-                     mozilla::DefaultHasher<ScriptIndex>,
-                     js::SystemAllocPolicy>;
-
-struct StencilAsmJSContainer
-    : public js::AtomicRefCounted<StencilAsmJSContainer> {
-  StencilAsmJSMap moduleMap;
-
-  StencilAsmJSContainer() = default;
-
-  size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const {
-    return moduleMap.shallowSizeOfExcludingThis(mallocSizeOf);
-  }
-  size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const {
-    return mallocSizeOf(this) + sizeOfExcludingThis(mallocSizeOf);
-  }
-};
-
 // Store shared data for non-lazy script.
 struct SharedDataContainer {
   // NOTE: While stored, we must hold a ref-count and care must be taken when
@@ -1107,7 +1094,7 @@ struct SharedDataContainer {
   bool isMap() const { return (data_ & TagMask) == MapTag; }
   bool isBorrow() const { return (data_ & TagMask) == BorrowTag; }
 
-  void setSingle(already_AddRefed<SharedImmutableScriptData>&& data) {
+  void setSingle(already_AddRefed<SharedImmutableScriptData> data) {
     MOZ_ASSERT(isEmpty());
     data_ = reinterpret_cast<uintptr_t>(data.take());
     MOZ_ASSERT(isSingle());
@@ -1284,14 +1271,6 @@ struct CompilationStencil {
   // Module metadata if this is a module compile.
   RefPtr<StencilModuleMetadata> moduleMetadata;
 
-  // AsmJS modules generated by parsing. These scripts are never lazy and
-  // therefore only generated during initial parse.
-  //
-  // This is non-null if we have seen an asm.js directive, but doesn't imply
-  // that we successfully compiled an asm.js module. See the comment in
-  // FunctionBox::setUseAsm for more information.
-  RefPtr<StencilAsmJSContainer> asmJS;
-
   // End of fields.
 
   // Construct a CompilationStencil
@@ -1377,11 +1356,6 @@ struct CompilationStencil {
   const ParserAtomSpan& parserAtomsSpan() const { return parserAtomData; }
 
   bool isModule() const;
-
-  // Whether this stencil has a function with an asm.js directive in it. The
-  // function may not have been compiled with asm.js if support was disabled or
-  // the asm.js module failed validation.
-  bool hasAsmJS() const;
 
   bool hasMultipleReference() const { return refCount_ > 1; }
 
@@ -1687,11 +1661,6 @@ struct InitialStencilAndDelazifications {
   // FrontendContext.
   CompilationStencil* getMerged(FrontendContext* fc) const;
 
-  // Whether this stencil has a function with an asm.js directive in it. The
-  // function may not have been compiled with asm.js if support was disabled or
-  // the asm.js module failed validation.
-  bool hasAsmJS() const;
-
   // Instantiate the initial stencil and all delazifications populated so far.
   [[nodiscard]] static bool instantiateStencils(
       JSContext* cx, CompilationInput& input,
@@ -1755,14 +1724,6 @@ struct ExtensibleCompilationStencil {
 
   RefPtr<StencilModuleMetadata> moduleMetadata;
 
-  // AsmJS modules generated by parsing. These scripts are never lazy and
-  // therefore only generated during initial parse.
-  //
-  // This is non-null if we have seen an asm.js directive, but doesn't imply
-  // that we successfully compiled an asm.js module. See the comment in
-  // FunctionBox::setUseAsm for more information.
-  RefPtr<StencilAsmJSContainer> asmJS;
-
   explicit ExtensibleCompilationStencil(ScriptSource* source);
 
   explicit ExtensibleCompilationStencil(CompilationInput& input);
@@ -1785,8 +1746,7 @@ struct ExtensibleCompilationStencil {
         objLiteralData(std::move(other.objLiteralData)),
         parserAtoms(std::move(other.parserAtoms)),
         sharedData(std::move(other.sharedData)),
-        moduleMetadata(std::move(other.moduleMetadata)),
-        asmJS(std::move(other.asmJS)) {
+        moduleMetadata(std::move(other.moduleMetadata)) {
     alloc.steal(&other.alloc);
     parserAtoms.fixupAlloc(alloc);
   }
@@ -1809,7 +1769,6 @@ struct ExtensibleCompilationStencil {
     parserAtoms = std::move(other.parserAtoms);
     sharedData = std::move(other.sharedData);
     moduleMetadata = std::move(other.moduleMetadata);
-    asmJS = std::move(other.asmJS);
 
     alloc.steal(&other.alloc);
     parserAtoms.fixupAlloc(alloc);
@@ -1845,11 +1804,6 @@ struct ExtensibleCompilationStencil {
   }
 
   bool isModule() const;
-
-  // Whether this stencil has a function with an asm.js directive in it. The
-  // function may not have been compiled with asm.js if support was disabled or
-  // the asm.js module failed validation.
-  bool hasAsmJS() const;
 
   inline size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
   size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const {
@@ -1923,8 +1877,6 @@ struct MOZ_RAII CompilationState : public ExtensibleCompilationStencil {
   struct CompilationStatePosition {
     // Temporarily share this token struct with CompilationState.
     size_t scriptDataLength = 0;
-
-    size_t asmJSCount = 0;
   };
 
   bool prepareSharedDataStorage(FrontendContext* fc);
@@ -1972,18 +1924,15 @@ inline size_t CompilationStencil::sizeOfExcludingThis(
 
   size_t moduleMetadataSize =
       moduleMetadata ? moduleMetadata->sizeOfIncludingThis(mallocSizeOf) : 0;
-  size_t asmJSSize = asmJS ? asmJS->sizeOfIncludingThis(mallocSizeOf) : 0;
 
   return alloc.sizeOfExcludingThis(mallocSizeOf) +
-         sharedData.sizeOfExcludingThis(mallocSizeOf) + moduleMetadataSize +
-         asmJSSize;
+         sharedData.sizeOfExcludingThis(mallocSizeOf) + moduleMetadataSize;
 }
 
 inline size_t ExtensibleCompilationStencil::sizeOfExcludingThis(
     mozilla::MallocSizeOf mallocSizeOf) const {
   size_t moduleMetadataSize =
       moduleMetadata ? moduleMetadata->sizeOfIncludingThis(mallocSizeOf) : 0;
-  size_t asmJSSize = asmJS ? asmJS->sizeOfIncludingThis(mallocSizeOf) : 0;
 
   return alloc.sizeOfExcludingThis(mallocSizeOf) +
          scriptData.sizeOfExcludingThis(mallocSizeOf) +
@@ -1995,8 +1944,7 @@ inline size_t ExtensibleCompilationStencil::sizeOfExcludingThis(
          bigIntData.sizeOfExcludingThis(mallocSizeOf) +
          objLiteralData.sizeOfExcludingThis(mallocSizeOf) +
          parserAtoms.sizeOfExcludingThis(mallocSizeOf) +
-         sharedData.sizeOfExcludingThis(mallocSizeOf) + moduleMetadataSize +
-         asmJSSize;
+         sharedData.sizeOfExcludingThis(mallocSizeOf) + moduleMetadataSize;
 }
 
 // A PreAllocateableGCArray is an array of GC thing pointers.
@@ -2422,60 +2370,19 @@ InputScope InputScope::enclosing() const {
         return InputScope(ptr->enclosing());
       },
       [](const ScopeStencilRef& ref) {
-        auto& scope = ref.scope();
-        if (scope.hasEnclosing()) {
-#ifdef DEBUG
-          // Assert that checking for the same stencil is equivalent to
-          // checking for being encoded in the initial stencil.
-          if (ref.scriptIndex_ != 0) {
-            auto enclosingScript = ref.script().enclosingScript();
-            bool same = ref.context() == enclosingScript.context();
-            MOZ_ASSERT(same == ref.script().isEagerlyCompiledInInitial());
-          }
-#endif
-
-          // By default we are walking the scope within the same function.
-          ScriptIndex scriptIndex = ref.scriptIndex_;
-
-          // `scope.enclosing()` and `scope` would have the same scriptIndex
-          // unless `scope` is the first scope of the script. In which case, the
-          // returned enclosing scope index should be returned with the
-          // enclosing script index.
-          //
-          // This can only happen in the initial stencil, as only the initial
-          // stencil can have multiple scripts compiled in the same stencil.
-          if (ref.script().isEagerlyCompiledInInitial()) {
-            auto gcThingsFromContext = ref.script().gcThingsFromInitial();
-            if (gcThingsFromContext[0].toScope() == ref.scopeIndex_) {
-              scriptIndex = ref.script().enclosingScript().scriptIndex_;
-            }
-          }
-
-          return InputScope(ref.stencils_, scriptIndex, scope.enclosing());
+        auto result = ref.enclosing();
+        if (result.isOk()) {
+          return InputScope(result.unwrap());
         }
 
-        // By default the previous condition (scope.hasEnclosing()) should
-        // trigger, except when we are at the top-level of a delazification, in
-        // which case we have to find the enclosing script in the stencil of the
-        // enclosing script, to find the lazyFunctionEnclosingScopeIndex which
-        // is valid in the stencil of the enclosing script.
-        //
-        // Note, at one point the enclosing script would be the initial stencil.
-        if (!ref.script().isEagerlyCompiledInInitial()) {
-          auto enclosing = ref.script().enclosingScript();
-          auto& scriptData = ref.script().scriptDataFromEnclosing();
-          MOZ_ASSERT(scriptData.hasLazyFunctionEnclosingScopeIndex());
-          return InputScope(ref.stencils_, enclosing.scriptIndex_,
-                            scriptData.lazyFunctionEnclosingScopeIndex());
+        switch (result.unwrapErr()) {
+          case ScopeStencilRef::EnclosingFailure::ModuleScope:
+            return InputScope(FakeStencilGlobalScope{});
+          case ScopeStencilRef::EnclosingFailure::GlobalScope:
+            return InputScope(nullptr);
         }
-
-        // The global scope is not known by the Stencil, while parsing inner
-        // functions from Stencils where they are known at the execution using
-        // the GlobalScope.
-        if (ref.scope().kind() == ScopeKind::Module) {
-          return InputScope(FakeStencilGlobalScope{});
-        }
-        return InputScope(nullptr);
+        MOZ_MAKE_COMPILER_ASSUME_IS_UNREACHABLE(
+            "Unknown EnclosingFailure code");
       },
       [](const FakeStencilGlobalScope&) { return InputScope(nullptr); });
 }

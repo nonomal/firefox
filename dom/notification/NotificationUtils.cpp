@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -45,6 +43,10 @@ static void ReportTelemetry(GleanLabel aLabel,
     case PermissionCheckPurpose::NotificationShow:
       glean::web_notification::show_origin.EnumGet(aLabel).Add();
       return;
+    case PermissionCheckPurpose::LoadImageForShow:
+      // This will always be followed by a NotificationShow permissions check
+      // anyway.
+      return;
     default:
       MOZ_CRASH("Unknown permission checker");
       return;
@@ -74,7 +76,7 @@ bool IsNotificationForbiddenFor(nsIPrincipal* aPrincipal,
       glean::web_notification::insecure_context_permission_request.Add();
       nsContentUtils::ReportToConsole(
           nsIScriptError::errorFlag, "DOM"_ns, aRequestorDoc,
-          nsContentUtils::eDOM_PROPERTIES,
+          PropertiesFile::DOM_PROPERTIES,
           "NotificationsInsecureRequestIsForbidden");
     }
     return true;
@@ -107,7 +109,7 @@ bool IsNotificationForbiddenFor(nsIPrincipal* aPrincipal,
   if (aRequestorDoc) {
     nsContentUtils::ReportToConsole(
         nsIScriptError::errorFlag, "DOM"_ns, aRequestorDoc,
-        nsContentUtils::eDOM_PROPERTIES,
+        PropertiesFile::DOM_PROPERTIES,
         "NotificationsCrossOriginIframeRequestIsForbidden");
   }
   return !StaticPrefs::dom_webnotifications_allowcrossoriginiframe();
@@ -292,7 +294,7 @@ void UnregisterNotification(nsIPrincipal* aPrincipal, const nsString& aId) {
 }
 
 nsresult ShowAlertWithCleanup(nsIAlertNotification* aAlert,
-                              nsIObserver* aAlertListener) {
+                              nsIAlertCallbacks* aAlertCallbacks) {
   nsCOMPtr<nsIAlertsService> alertService = components::Alerts::Service();
   if (!gTriedStorageCleanup ||
       StaticPrefs::
@@ -313,7 +315,7 @@ nsresult ShowAlertWithCleanup(nsIAlertNotification* aAlert,
     UnpersistAllNotificationsExcept(history);
   }
 
-  MOZ_TRY(alertService->ShowAlert(aAlert, aAlertListener));
+  MOZ_TRY(alertService->ShowAlertWithCallbacks(aAlert, aAlertCallbacks));
   return NS_OK;
 }
 
@@ -370,11 +372,29 @@ NS_IMETHODIMP NotificationActionStorageEntry::GetTitle(nsAString& aTitle) {
   return NS_OK;
 }
 
+NS_IMETHODIMP NotificationActionStorageEntry::GetNavigate(
+    nsACString& aNavigate) {
+  nsIURI* navigateUri = mIPCAction.navigate();
+  if (!navigateUri) {
+    aNavigate.SetIsVoid(true);
+    return NS_OK;
+  }
+  navigateUri->GetSpec(aNavigate);
+  return NS_OK;
+}
+
 Result<IPCNotificationAction, nsresult> NotificationActionStorageEntry::ToIPC(
     nsINotificationActionStorageEntry& aEntry) {
   IPCNotificationAction action;
   MOZ_TRY(aEntry.GetName(action.name()));
   MOZ_TRY(aEntry.GetTitle(action.title()));
+  if (StaticPrefs::dom_webnotifications_navigate_enabled()) {
+    nsAutoCString navigateUrl;
+    MOZ_TRY(aEntry.GetNavigate(navigateUrl));
+    if (!navigateUrl.IsVoid()) {
+      MOZ_TRY(NS_NewURI(getter_AddRefs(action.navigate()), navigateUrl));
+    }
+  }
   return action;
 }
 
@@ -417,6 +437,16 @@ NS_IMETHODIMP NotificationStorageEntry::GetIcon(nsACString& aIcon) {
     return NS_OK;
   }
   iconUri->GetSpec(aIcon);
+  return NS_OK;
+}
+
+NS_IMETHODIMP NotificationStorageEntry::GetNavigate(nsACString& aNavigate) {
+  nsIURI* navigateUri = mIPCNotification.options().navigate();
+  if (!navigateUri) {
+    aNavigate.SetIsVoid(true);
+    return NS_OK;
+  }
+  navigateUri->GetSpec(aNavigate);
   return NS_OK;
 }
 
@@ -480,6 +510,15 @@ Result<IPCNotification, nsresult> NotificationStorageEntry::ToIPC(
   MOZ_TRY(aEntry.GetIcon(iconUrl));
   if (!iconUrl.IsEmpty()) {
     MOZ_TRY(NS_NewURI(getter_AddRefs(notification.options().icon()), iconUrl));
+  }
+
+  if (StaticPrefs::dom_webnotifications_navigate_enabled()) {
+    nsAutoCString navigateUrl;
+    MOZ_TRY(aEntry.GetNavigate(navigateUrl));
+    if (!navigateUrl.IsVoid()) {
+      MOZ_TRY(NS_NewURI(getter_AddRefs(notification.options().navigate()),
+                        navigateUrl));
+    }
   }
 
   MOZ_TRY(aEntry.GetRequireInteraction(&options.requireInteraction()));

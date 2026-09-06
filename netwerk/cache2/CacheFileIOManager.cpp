@@ -2,40 +2,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <limits>
-#include "CacheLog.h"
 #include "CacheFileIOManager.h"
 
-#include "CacheHashUtils.h"
-#include "CacheStorageService.h"
-#include "CacheIndex.h"
-#include "CacheFileUtils.h"
-#include "nsError.h"
-#include "nsThreadUtils.h"
+#include <limits>
+
 #include "CacheFile.h"
-#include "CacheObserver.h"
-#include "nsIFile.h"
 #include "CacheFileContextEvictor.h"
-#include "nsITimer.h"
-#include "nsIDirectoryEnumerator.h"
-#include "nsEffectiveTLDService.h"
-#include "nsIObserverService.h"
-#include "nsISizeOf.h"
-#include "mozilla/net/MozURL.h"
-#include "mozilla/glean/NetwerkCache2Metrics.h"
+#include "CacheFileUtils.h"
+#include "CacheHashUtils.h"
+#include "CacheIndex.h"
+#include "CacheLog.h"
+#include "CacheObserver.h"
+#include "CacheStorageService.h"
 #include "mozilla/DebugOnly.h"
+#include "mozilla/FileUtils.h"
+#include "mozilla/IOUtils.h"
+#include "mozilla/IntegerPrintfMacros.h"
+#include "mozilla/Preferences.h"
 #include "mozilla/Services.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/StoragePrincipalHelper.h"
-#include "nsDirectoryServiceUtils.h"
-#include "nsAppDirectoryServiceDefs.h"
-#include "private/pprio.h"
-#include "mozilla/IntegerPrintfMacros.h"
-#include "mozilla/Preferences.h"
-#include "nsNetUtil.h"
+#include "mozilla/glean/NetwerkCache2Metrics.h"
 #include "mozilla/glean/NetwerkMetrics.h"
-#include "mozilla/FileUtils.h"
+#include "mozilla/net/MozURL.h"
+#include "nsAppDirectoryServiceDefs.h"
+#include "nsDirectoryServiceUtils.h"
+#include "nsEffectiveTLDService.h"
+#include "nsError.h"
+#include "nsIDirectoryEnumerator.h"
+#include "nsIFile.h"
+#include "nsIObserverService.h"
+#include "nsITimer.h"
+#include "nsNetUtil.h"
+#include "nsThreadUtils.h"
+#include "private/pprio.h"
 
 #ifdef MOZ_BACKGROUNDTASKS
 #  include "mozilla/BackgroundTasksRunner.h"
@@ -224,6 +225,10 @@ CacheFileHandle::~CacheFileHandle() {
 }
 
 void CacheFileHandle::Log() {
+  if (!LOG_ENABLED()) {
+    return;
+  }
+
   nsAutoCString leafName;
   if (mFile) {
     mFile->GetNativeLeafName(leafName);
@@ -297,13 +302,6 @@ bool CacheFileHandle::SetPinned(bool aPinned) {
 size_t CacheFileHandle::SizeOfExcludingThis(
     mozilla::MallocSizeOf mallocSizeOf) const {
   size_t n = 0;
-  nsCOMPtr<nsISizeOf> sizeOf;
-
-  sizeOf = do_QueryInterface(mFile);
-  if (sizeOf) {
-    n += sizeOf->SizeOfIncludingThis(mallocSizeOf);
-  }
-
   n += mallocSizeOf(mFD);
   n += mKey.SizeOfExcludingThisIfUnshared(mallocSizeOf);
   return n;
@@ -663,54 +661,15 @@ class ShutdownEvent : public Runnable, nsITimerCallback {
 
 NS_IMPL_ISUPPORTS_INHERITED(ShutdownEvent, Runnable, nsITimerCallback)
 
-// Class responsible for reporting IO performance stats
-class IOPerfReportEvent {
- public:
-  explicit IOPerfReportEvent(CacheFileUtils::CachePerfStats::EDataType aType)
-      : mType(aType), mEventCounter(0) {}
-
-  void Start(CacheIOThread* aIOThread) {
-    mStartTime = TimeStamp::Now();
-    mEventCounter = aIOThread->EventCounter();
-  }
-
-  void Report(CacheIOThread* aIOThread) {
-    if (mStartTime.IsNull()) {
-      return;
-    }
-
-    // Single IO operations can take less than 1ms. So we use microseconds to
-    // keep a good resolution of data.
-    uint32_t duration = (TimeStamp::Now() - mStartTime).ToMicroseconds();
-
-    // This is a simple prefiltering of values that might differ a lot from the
-    // average value. Do not add the value to the filtered stats when the event
-    // had to wait in a long queue.
-    uint32_t eventCounter = aIOThread->EventCounter();
-    bool shortOnly = eventCounter - mEventCounter >= 5;
-
-    CacheFileUtils::CachePerfStats::AddValue(mType, duration, shortOnly);
-  }
-
- protected:
-  CacheFileUtils::CachePerfStats::EDataType mType;
-  TimeStamp mStartTime;
-  uint32_t mEventCounter;
-};
-
-class OpenFileEvent : public Runnable, public IOPerfReportEvent {
+class OpenFileEvent : public Runnable {
  public:
   OpenFileEvent(const nsACString& aKey, uint32_t aFlags,
                 CacheFileIOListener* aCallback)
       : Runnable("net::OpenFileEvent"),
-        IOPerfReportEvent(CacheFileUtils::CachePerfStats::IO_OPEN),
         mFlags(aFlags),
         mCallback(aCallback),
         mKey(aKey) {
     mIOMan = CacheFileIOManager::gInstance;
-    if (!(mFlags & CacheFileIOManager::SPECIAL_FILE)) {
-      Start(mIOMan->mIOThread);
-    }
   }
 
  protected:
@@ -735,9 +694,6 @@ class OpenFileEvent : public Runnable, public IOPerfReportEvent {
       } else {
         rv = mIOMan->OpenFileInternal(&mHash, mKey, mFlags,
                                       getter_AddRefs(mHandle));
-        if (NS_SUCCEEDED(rv)) {
-          Report(mIOMan->mIOThread);
-        }
       }
       mIOMan = nullptr;
       if (mHandle) {
@@ -760,21 +716,16 @@ class OpenFileEvent : public Runnable, public IOPerfReportEvent {
   nsCString mKey;
 };
 
-class ReadEvent : public Runnable, public IOPerfReportEvent {
+class ReadEvent : public Runnable {
  public:
   ReadEvent(CacheFileHandle* aHandle, int64_t aOffset, char* aBuf,
             int32_t aCount, CacheFileIOListener* aCallback)
       : Runnable("net::ReadEvent"),
-        IOPerfReportEvent(CacheFileUtils::CachePerfStats::IO_READ),
         mHandle(aHandle),
         mOffset(aOffset),
         mBuf(aBuf),
         mCount(aCount),
-        mCallback(aCallback) {
-    if (!mHandle->IsSpecialFile()) {
-      Start(CacheFileIOManager::gInstance->mIOThread);
-    }
-  }
+        mCallback(aCallback) {}
 
  protected:
   ~ReadEvent() = default;
@@ -790,16 +741,14 @@ class ReadEvent : public Runnable, public IOPerfReportEvent {
     } else {
       rv = CacheFileIOManager::gInstance->ReadInternal(mHandle, mOffset, mBuf,
                                                        mCount, this);
+#if defined(MOZ_CACHE_ASYNC_IO)
       if (NS_SUCCEEDED(rv)) {
-#if !defined(MOZ_CACHE_ASYNC_IO)
-        Report(CacheFileIOManager::gInstance->mIOThread);
-#else
         /* The request has been performed asynchronously. It should
          * complete later.
          */
         return NS_OK;
-#endif
       }
+#endif
     }
 
 #if defined(MOZ_CACHE_ASYNC_IO)
@@ -807,13 +756,17 @@ class ReadEvent : public Runnable, public IOPerfReportEvent {
       nsCOMPtr<nsIEventTarget> ioTarget = CacheFileIOManager::IOTarget();
       ioTarget->Dispatch(NS_NewRunnableFunction(
           "net::ReadEvent::Callback", [self = RefPtr(this), rv]() {
-            self->mCallback->OnDataRead(self->mHandle, self->mBuf, rv);
+            // Prevent calling back twice
+            nsCOMPtr<CacheFileIOListener> cb = std::move(self->mCallback);
+            cb->OnDataRead(self->mHandle, self->mBuf, rv);
           }));
       return NS_OK;
     }
 #endif
 
-    mCallback->OnDataRead(mHandle, mBuf, rv);
+    // Prevent calling back twice
+    nsCOMPtr<CacheFileIOListener> cb = std::move(mCallback);
+    cb->OnDataRead(mHandle, mBuf, rv);
     return NS_OK;
   }
 
@@ -821,13 +774,9 @@ class ReadEvent : public Runnable, public IOPerfReportEvent {
 
 #if defined(MOZ_CACHE_ASYNC_IO)
   nsresult OnComplete(nsresult aStatus) {
-    nsresult result = aStatus;
-
-    if (NS_SUCCEEDED(result)) {
-      Report(CacheFileIOManager::gInstance->mIOThread);
-    }
-
-    mCallback->OnDataRead(mHandle, mBuf, result);
+    // Prevent calling back twice
+    nsCOMPtr<CacheFileIOListener> cb = std::move(mCallback);
+    cb->OnDataRead(mHandle, mBuf, aStatus);
     mHandle->EndAsyncOperation();
     return NS_OK;
   }
@@ -841,24 +790,19 @@ class ReadEvent : public Runnable, public IOPerfReportEvent {
   nsCOMPtr<CacheFileIOListener> mCallback;
 };
 
-class WriteEvent : public Runnable, public IOPerfReportEvent {
+class WriteEvent : public Runnable {
  public:
   WriteEvent(CacheFileHandle* aHandle, int64_t aOffset, const char* aBuf,
              int32_t aCount, bool aValidate, bool aTruncate,
              CacheFileIOListener* aCallback)
       : Runnable("net::WriteEvent"),
-        IOPerfReportEvent(CacheFileUtils::CachePerfStats::IO_WRITE),
         mHandle(aHandle),
         mOffset(aOffset),
         mBuf(aBuf),
         mCount(aCount),
         mValidate(aValidate),
         mTruncate(aTruncate),
-        mCallback(aCallback) {
-    if (!mHandle->IsSpecialFile()) {
-      Start(CacheFileIOManager::gInstance->mIOThread);
-    }
-  }
+        mCallback(aCallback) {}
 
  protected:
   ~WriteEvent() {
@@ -883,9 +827,6 @@ class WriteEvent : public Runnable, public IOPerfReportEvent {
     } else {
       rv = CacheFileIOManager::gInstance->WriteInternal(
           mHandle, mOffset, mBuf, mCount, mValidate, mTruncate);
-      if (NS_SUCCEEDED(rv)) {
-        Report(CacheFileIOManager::gInstance->mIOThread);
-      }
       if (NS_FAILED(rv) && !mCallback) {
         // No listener is going to handle the error, doom the file
         CacheFileIOManager::gInstance->DoomFileInternal(mHandle);
@@ -1122,20 +1063,20 @@ class InitIndexEntryEvent : public Runnable {
 class UpdateIndexEntryEvent : public Runnable {
  public:
   UpdateIndexEntryEvent(CacheFileHandle* aHandle, const uint32_t* aFrecency,
-                        const bool* aHasAltData, const uint16_t* aOnStartTime,
-                        const uint16_t* aOnStopTime,
+                        const bool* aHasAltData, const uint32_t* aLastFetched,
+                        const uint32_t* aFetchCount,
                         const uint8_t* aContentType)
       : Runnable("net::UpdateIndexEntryEvent"),
         mHandle(aHandle),
         mHasFrecency(false),
         mHasHasAltData(false),
-        mHasOnStartTime(false),
-        mHasOnStopTime(false),
+        mHasLastFetched(false),
+        mHasFetchCount(false),
         mHasContentType(false),
         mFrecency(0),
         mHasAltData(false),
-        mOnStartTime(0),
-        mOnStopTime(0),
+        mLastFetched(0),
+        mFetchCount(0),
         mContentType(nsICacheEntry::CONTENT_TYPE_UNKNOWN) {
     if (aFrecency) {
       mHasFrecency = true;
@@ -1145,13 +1086,13 @@ class UpdateIndexEntryEvent : public Runnable {
       mHasHasAltData = true;
       mHasAltData = *aHasAltData;
     }
-    if (aOnStartTime) {
-      mHasOnStartTime = true;
-      mOnStartTime = *aOnStartTime;
+    if (aLastFetched) {
+      mHasLastFetched = true;
+      mLastFetched = *aLastFetched;
     }
-    if (aOnStopTime) {
-      mHasOnStopTime = true;
-      mOnStopTime = *aOnStopTime;
+    if (aFetchCount) {
+      mHasFetchCount = true;
+      mFetchCount = *aFetchCount;
     }
     if (aContentType) {
       mHasContentType = true;
@@ -1171,8 +1112,8 @@ class UpdateIndexEntryEvent : public Runnable {
     CacheIndex::UpdateEntry(mHandle->Hash(),
                             mHasFrecency ? &mFrecency : nullptr,
                             mHasHasAltData ? &mHasAltData : nullptr,
-                            mHasOnStartTime ? &mOnStartTime : nullptr,
-                            mHasOnStopTime ? &mOnStopTime : nullptr,
+                            mHasLastFetched ? &mLastFetched : nullptr,
+                            mHasFetchCount ? &mFetchCount : nullptr,
                             mHasContentType ? &mContentType : nullptr, nullptr);
     return NS_OK;
   }
@@ -1182,14 +1123,14 @@ class UpdateIndexEntryEvent : public Runnable {
 
   bool mHasFrecency;
   bool mHasHasAltData;
-  bool mHasOnStartTime;
-  bool mHasOnStopTime;
+  bool mHasLastFetched;
+  bool mHasFetchCount;
   bool mHasContentType;
 
   uint32_t mFrecency;
   bool mHasAltData;
-  uint16_t mOnStartTime;
-  uint16_t mOnStopTime;
+  uint32_t mLastFetched;
+  uint32_t mFetchCount;
   uint8_t mContentType;
 };
 
@@ -1297,8 +1238,6 @@ nsresult CacheFileIOManager::Shutdown() {
     return NS_ERROR_NOT_INITIALIZED;
   }
 
-  auto shutdownTimer = glean::network::disk_cache_shutdown_v2.Measure();
-
   CacheIndex::PreShutdown();
 
   ShutdownMetadataWriteScheduling();
@@ -1360,7 +1299,11 @@ void CacheFileIOManager::ShutdownInternal() {
     // Invalid files don't have metadata and thus won't load anyway
     // (hashes won't match).
 
-    if (!h->IsSpecialFile() && !h->mIsDoomed && !h->mFileExists) {
+    // Past the shutdown I/O lag the index is no longer written to disk, so
+    // this bookkeeping would be thrown away. The next startup rescans the
+    // entries directory and drops the stale entries anyway.
+    if (!h->IsSpecialFile() && !h->mIsDoomed && !h->mFileExists &&
+        !CacheObserver::IsPastShutdownIOLag()) {
       CacheIndex::RemoveEntry(h->Hash(), h->Key());
     }
 
@@ -1571,8 +1514,14 @@ nsresult CacheFileIOManager::OnIdleDaily() {
               }
               if (leafName.Find(kPurgeExtension) != kNotFound) {
                 mozilla::glean::networking::residual_cache_folder_count.Add(1);
-                rv = subdir->Remove(true);
-                if (NS_SUCCEEDED(rv)) {
+                // A read-only entry anywhere in the folder makes both
+                // DeleteFileW and RemoveDirectoryW fail with ACCESS_DENIED, so
+                // clear the attribute and retry rather than leaving the folder
+                // behind forever (bug 1882163).
+                if (IOUtils::RemoveSync(subdir, /* aIgnoreAbsent */ true,
+                                        /* aRecursive */ true,
+                                        /* aRetryReadonly */ true)
+                        .isOk()) {
                   mozilla::glean::networking::residual_cache_folder_removal
                       .Get("success"_ns)
                       .Add(1);
@@ -3931,7 +3880,7 @@ nsresult CacheFileIOManager::FindTrashDirToRemove() {
     LOG(("CacheFileIOManager::FindTrashDirToRemove() - Returning directory %s",
          leafName.get()));
 
-    mTrashDir = file;
+    mTrashDir = std::move(file);
     return NS_OK;
   }
 
@@ -3977,16 +3926,16 @@ nsresult CacheFileIOManager::InitIndexEntry(CacheFileHandle* aHandle,
 nsresult CacheFileIOManager::UpdateIndexEntry(CacheFileHandle* aHandle,
                                               const uint32_t* aFrecency,
                                               const bool* aHasAltData,
-                                              const uint16_t* aOnStartTime,
-                                              const uint16_t* aOnStopTime,
+                                              const uint32_t* aLastFetched,
+                                              const uint32_t* aFetchCount,
                                               const uint8_t* aContentType) {
   LOG(
       ("CacheFileIOManager::UpdateIndexEntry() [handle=%p, frecency=%s, "
-       "hasAltData=%s, onStartTime=%s, onStopTime=%s, contentType=%s]",
+       "hasAltData=%s, lastFetched=%s, fetchCount=%s, contentType=%s]",
        aHandle, aFrecency ? nsPrintfCString("%u", *aFrecency).get() : "",
        aHasAltData ? (*aHasAltData ? "true" : "false") : "",
-       aOnStartTime ? nsPrintfCString("%u", *aOnStartTime).get() : "",
-       aOnStopTime ? nsPrintfCString("%u", *aOnStopTime).get() : "",
+       aLastFetched ? nsPrintfCString("%u", *aLastFetched).get() : "",
+       aFetchCount ? nsPrintfCString("%u", *aFetchCount).get() : "",
        aContentType ? nsPrintfCString("%u", *aContentType).get() : ""));
 
   nsresult rv;
@@ -4001,7 +3950,7 @@ nsresult CacheFileIOManager::UpdateIndexEntry(CacheFileHandle* aHandle,
   }
 
   RefPtr<UpdateIndexEntryEvent> ev = new UpdateIndexEntryEvent(
-      aHandle, aFrecency, aHasAltData, aOnStartTime, aOnStopTime, aContentType);
+      aHandle, aFrecency, aHasAltData, aLastFetched, aFetchCount, aContentType);
   rv = ioMan->mIOThread->Dispatch(ev, aHandle->mPriority
                                           ? CacheIOThread::WRITE_PRIORITY
                                           : CacheIOThread::WRITE);
@@ -4469,9 +4418,9 @@ void CacheFileIOManager::SyncRemoveAllCacheFiles() {
 
       PRExplodedTime now;
       PR_ExplodeTime(PR_Now(), PR_GMTParameters, &now);
-      leafName.Append(nsPrintfCString(
-          "%04d-%02d-%02d-%02d-%02d-%02d", now.tm_year, now.tm_month + 1,
-          now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec));
+      leafName.AppendPrintf("%04d-%02d-%02d-%02d-%02d-%02d", now.tm_year,
+                            now.tm_month + 1, now.tm_mday, now.tm_hour,
+                            now.tm_min, now.tm_sec);
       leafName.Append(kPurgeExtension);
 
       nsAutoCString secondsToWait;
@@ -4635,15 +4584,13 @@ class SizeOfHandlesRunnable : public Runnable {
  public:
   SizeOfHandlesRunnable(mozilla::MallocSizeOf mallocSizeOf,
                         CacheFileHandles const& handles,
-                        nsTArray<CacheFileHandle*> const& specialHandles,
-                        nsCOMPtr<nsITimer> const& metadataWritesTimer)
+                        nsTArray<CacheFileHandle*> const& specialHandles)
       : Runnable("net::SizeOfHandlesRunnable"),
         mMonitor("SizeOfHandlesRunnable.mMonitor"),
         mMonitorNotified(false),
         mMallocSizeOf(mallocSizeOf),
         mHandles(handles),
         mSpecialHandles(specialHandles),
-        mMetadataWritesTimer(metadataWritesTimer),
         mSize(0) {}
 
   size_t Get(CacheIOThread* thread) {
@@ -4675,10 +4622,6 @@ class SizeOfHandlesRunnable : public Runnable {
     for (uint32_t i = 0; i < mSpecialHandles.Length(); ++i) {
       mSize += mSpecialHandles[i]->SizeOfIncludingThis(mMallocSizeOf);
     }
-    nsCOMPtr<nsISizeOf> sizeOf = do_QueryInterface(mMetadataWritesTimer);
-    if (sizeOf) {
-      mSize += sizeOf->SizeOfIncludingThis(mMallocSizeOf);
-    }
 
     mMonitorNotified = true;
     mon.Notify();
@@ -4691,7 +4634,6 @@ class SizeOfHandlesRunnable : public Runnable {
   mozilla::MallocSizeOf mMallocSizeOf;
   CacheFileHandles const& mHandles;
   nsTArray<CacheFileHandle*> const& mSpecialHandles;
-  nsCOMPtr<nsITimer> const& mMetadataWritesTimer;
   size_t mSize;
 };
 
@@ -4700,29 +4642,27 @@ class SizeOfHandlesRunnable : public Runnable {
 size_t CacheFileIOManager::SizeOfExcludingThisInternal(
     mozilla::MallocSizeOf mallocSizeOf) const {
   size_t n = 0;
-  nsCOMPtr<nsISizeOf> sizeOf;
 
   if (mIOThread) {
     n += mIOThread->SizeOfIncludingThis(mallocSizeOf);
 
-    // mHandles, mSpecialHandles and mMetadataWritesTimer must be accessed
-    // only on the I/O thread, must sync dispatch.
+    // mHandles and mSpecialHandles must be accessed only on the I/O thread,
+    // must sync dispatch.
     RefPtr<SizeOfHandlesRunnable> sizeOfHandlesRunnable =
-        new SizeOfHandlesRunnable(mallocSizeOf, mHandles, mSpecialHandles,
-                                  mMetadataWritesTimer);
+        new SizeOfHandlesRunnable(mallocSizeOf, mHandles, mSpecialHandles);
     n += sizeOfHandlesRunnable->Get(mIOThread);
   }
 
   // mHandlesByLastUsed just refers handles reported by mHandles.
 
-  sizeOf = do_QueryInterface(mCacheDirectory);
-  if (sizeOf) n += sizeOf->SizeOfIncludingThis(mallocSizeOf);
+  // mCacheDirectory is an nsIFile which we don't have reporting for.
 
-  sizeOf = do_QueryInterface(mTrashTimer);
-  if (sizeOf) n += sizeOf->SizeOfIncludingThis(mallocSizeOf);
+  // mMetadataWritesTimer is an nsITimer which we don't have reporting for.
+  // Note that it would need to be accessed on the I/O thread.
 
-  sizeOf = do_QueryInterface(mTrashDir);
-  if (sizeOf) n += sizeOf->SizeOfIncludingThis(mallocSizeOf);
+  // mTrashTimer is an nsITimer which we don't have reporting for.
+
+  // mTrashDir is an nsIFile which we don't have reporting for.
 
   for (uint32_t i = 0; i < mFailedTrashDirs.Length(); ++i) {
     n += mFailedTrashDirs[i].SizeOfExcludingThisIfUnshared(mallocSizeOf);

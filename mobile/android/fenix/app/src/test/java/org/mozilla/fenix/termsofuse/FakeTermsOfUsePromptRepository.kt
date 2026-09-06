@@ -10,13 +10,17 @@ class FakeTermsOfUsePromptRepository(
     private val canShowTermsOfUsePrompt: Boolean = true,
     private val userPostponedAndWithinCooldownPeriod: Boolean = false,
 ) : TermsOfUsePromptRepository {
+    override var isShowingPrompt = false
+
     override fun canShowTermsOfUsePrompt() = canShowTermsOfUsePrompt
 
-    override fun userPostponedAndWithinCooldownPeriod(currentTimeMillis: Long) =
-        userPostponedAndWithinCooldownPeriod
+    override fun userPostponedAndWithinCooldownPeriod(currentTimeMillis: Long) = userPostponedAndWithinCooldownPeriod
 
-    override fun updateHasAcceptedTermsOfUsePreference(nowMillis: Long) {}
+    override fun updateHasAcceptedTermsOfUsePreference() {}
+
     override fun updateHasPostponedAcceptingTermsOfUsePreference() {}
-    override fun updateLastTermsOfUsePromptTimeInMillis(currentTimeInMillis: Long) {}
+
+    override fun updateLastTermsOfUsePromptTimeInMillis() {}
+
     override fun incrementTermsOfUsePromptDisplayedCount() {}
 }

@@ -14,15 +14,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -58,9 +55,13 @@ import mozilla.components.ui.colors.PhotonColors
 import org.mozilla.fenix.components.components
 import org.mozilla.fenix.compose.Image
 import org.mozilla.fenix.compose.TabThumbnail
+import org.mozilla.fenix.compose.thumbnailImageData
 import org.mozilla.fenix.home.fake.FakeHomepagePreview
 import org.mozilla.fenix.home.recenttabs.RecentTab
+import org.mozilla.fenix.home.topsites.ui.HomepageCard
+import org.mozilla.fenix.home.topsites.ui.homepageCardImageShape
 import org.mozilla.fenix.theme.FirefoxTheme
+import org.mozilla.fenix.wallpapers.WallpaperTheme
 
 private const val THUMBNAIL_SIZE = 108
 
@@ -76,13 +77,12 @@ private const val THUMBNAIL_SIZE = 108
 fun RecentTabs(
     recentTabs: List<RecentTab>,
     menuItems: List<RecentTabMenuItem>,
-    backgroundColor: Color = MaterialTheme.colorScheme.surfaceContainerLowest,
+    backgroundColor: Color = WallpaperTheme.cardBackgroundColor,
     onRecentTabClick: (String) -> Unit = {},
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics {
+        modifier =
+            Modifier.fillMaxWidth().semantics {
                 testTagsAsResourceId = true
                 testTag = "recent.tabs"
             },
@@ -121,53 +121,55 @@ private fun RecentTabItem(
 ) {
     var isMenuExpanded by remember { mutableStateOf(false) }
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(112.dp)
-            .combinedClickable(
-                enabled = true,
-                onClick = { onRecentTabClick(tab.state.id) },
-                onLongClick = { isMenuExpanded = true },
-            ),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = backgroundColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+    HomepageCard(
+        modifier =
+            Modifier.fillMaxWidth()
+                .wrapContentHeight()
+                .combinedClickable(
+                    enabled = true,
+                    onClick = { onRecentTabClick(tab.state.id) },
+                    onLongClick = { isMenuExpanded = true },
+                ),
+        backgroundColor = backgroundColor,
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier =
+                Modifier.padding(
+                    start = FirefoxTheme.layout.space.static50,
+                    top = FirefoxTheme.layout.space.static50,
+                    bottom = FirefoxTheme.layout.space.static50,
+                    end = FirefoxTheme.layout.space.static100,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             RecentTabImage(
                 tab = tab,
-                modifier = Modifier
-                    .size(108.dp, 80.dp)
-                    .clip(RoundedCornerShape(8.dp)),
+                modifier = Modifier.size(108.dp, 80.dp).clip(homepageCardImageShape),
             )
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(FirefoxTheme.layout.space.static100))
 
             Column(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
                 verticalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     text = tab.state.content.title.ifEmpty { tab.state.content.url.trimmed() },
-                    modifier = Modifier.semantics {
-                        testTagsAsResourceId = true
-                        testTag = "recent.tab.title"
-                    },
+                    modifier =
+                        Modifier.semantics {
+                            testTagsAsResourceId = true
+                            testTag = "recent.tab.title"
+                        },
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
 
-                Row {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     RecentTabIcon(
                         url = tab.state.content.url,
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clip(RoundedCornerShape(2.dp)),
+                        modifier = Modifier.size(18.dp).clip(RoundedCornerShape(2.dp)),
                         contentScale = ContentScale.Crop,
                         icon = tab.state.content.icon,
                     )
@@ -176,10 +178,11 @@ private fun RecentTabItem(
 
                     Text(
                         text = tab.state.content.url.trimmed(),
-                        modifier = Modifier.semantics {
-                            testTagsAsResourceId = true
-                            testTag = "recent.tab.url"
-                        },
+                        modifier =
+                            Modifier.semantics {
+                                testTagsAsResourceId = true
+                                testTag = "recent.tab.url"
+                            },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                         overflow = TextOverflow.Ellipsis,
@@ -189,14 +192,16 @@ private fun RecentTabItem(
             }
 
             DropdownMenu(
-                menuItems = menuItems.map { item ->
-                    MenuItem.TextItem(Text.String(item.title)) { item.onClick(tab) }
-                },
+                menuItems =
+                    menuItems.map { item ->
+                        MenuItem.TextItem(Text.String(item.title)) { item.onClick(tab) }
+                    },
                 expanded = isMenuExpanded,
-                modifier = Modifier.semantics {
-                    testTagsAsResourceId = true
-                    testTag = "recent.tab.menu"
-                },
+                modifier =
+                    Modifier.semantics {
+                        testTagsAsResourceId = true
+                        testTag = "recent.tab.menu"
+                    },
                 onDismissRequest = { isMenuExpanded = false },
             )
         }
@@ -225,18 +230,19 @@ fun RecentTabImage(
                 contentScale = ContentScale.Crop,
                 fallback = {
                     TabThumbnail(
-                        tab = tab.state,
+                        tabThumbnailImageData = tab.state.thumbnailImageData(),
                         thumbnailSizePx = LocalDensity.current.run { THUMBNAIL_SIZE.dp.toPx().toInt() },
                         modifier = modifier,
                     )
                 },
             )
         }
-        else -> TabThumbnail(
-            tab = tab.state,
-            thumbnailSizePx = LocalDensity.current.run { THUMBNAIL_SIZE.dp.toPx().toInt() },
-            modifier = modifier,
-        )
+        else ->
+            TabThumbnail(
+                tabThumbnailImageData = tab.state.thumbnailImageData(),
+                thumbnailSizePx = LocalDensity.current.run { THUMBNAIL_SIZE.dp.toPx().toInt() },
+                modifier = modifier,
+            )
     }
 }
 
@@ -247,8 +253,7 @@ fun RecentTabImage(
  * @param modifier [Modifier] used to draw the image content.
  * @param contentScale [ContentScale] used to draw image content.
  * @param alignment [Alignment] used to draw the image content.
- * @param icon The icon of the tab. Fallback to loading the icon from the [url] if the [icon]
- * is null.
+ * @param icon The icon of the tab. Fallback to loading the icon from the [url] if the [icon] is null.
  */
 @Composable
 private fun RecentTabIcon(
@@ -298,12 +303,14 @@ private fun RecentTabIcon(
 @Composable
 private fun PlaceHolderTabIcon(modifier: Modifier) {
     Box(
-        modifier = modifier.background(
-            color = when (isSystemInDarkTheme()) {
-                true -> PhotonColors.DarkGrey60
-                false -> PhotonColors.LightGrey30
-            },
-        ),
+        modifier =
+            modifier.background(
+                color =
+                    when (isSystemInDarkTheme()) {
+                        true -> PhotonColors.DarkGrey60
+                        false -> PhotonColors.LightGrey30
+                    }
+            )
     )
 }
 
@@ -312,17 +319,16 @@ private fun PlaceHolderTabIcon(modifier: Modifier) {
 private fun RecentTabsPreview() {
     FirefoxTheme {
         Surface {
-            Column(
-                modifier = Modifier.padding(all = FirefoxTheme.layout.space.static200),
-            ) {
+            Column(modifier = Modifier.padding(all = FirefoxTheme.layout.space.static200)) {
                 RecentTabs(
                     recentTabs = FakeHomepagePreview.recentTabs(),
-                    menuItems = listOf(
-                        RecentTabMenuItem(
-                            title = "Menu item",
-                            onClick = {},
+                    menuItems =
+                        listOf(
+                            RecentTabMenuItem(
+                                title = "Menu item",
+                                onClick = {},
+                            )
                         ),
-                    ),
                     onRecentTabClick = {},
                 )
             }

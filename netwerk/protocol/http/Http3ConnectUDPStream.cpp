@@ -1,18 +1,17 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // HttpLog.h should generally be included first
-#include "HttpLog.h"
-
 #include "Http3ConnectUDPStream.h"
-#include "HttpConnectionUDP.h"
+
 #include "Http3Session.h"
+#include "HttpConnectionUDP.h"
+#include "HttpLog.h"
 #include "mozilla/net/UriTemplate.h"
-#include "nsIPipe.h"
-#include "nsIOService.h"
 #include "nsHttpHandler.h"
+#include "nsIOService.h"
+#include "nsIPipe.h"
 #include "nsNetAddr.h"
 #include "nsProxyInfo.h"
 
@@ -328,6 +327,19 @@ NS_IMETHODIMP Http3ConnectUDPStream::GetDontFragment(bool* aDontFragment) {
 
 NS_IMETHODIMP Http3ConnectUDPStream::SetDontFragment(bool aDontFragment) {
   return NS_OK;
+}
+
+void Http3ConnectUDPStream::MarkAsTRRServiceChannel() {
+  mIsTRRServiceChannel = true;
+}
+
+bool Http3ConnectUDPStream::IsTRRServiceChannel() {
+  return mIsTRRServiceChannel;
+}
+
+void Http3ConnectUDPStream::SetOriginAttributes(
+    const mozilla::OriginAttributes& aOriginAttributes) {
+  mOriginAttributes = aOriginAttributes;
 }
 
 }  // namespace mozilla::net

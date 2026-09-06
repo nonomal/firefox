@@ -4,11 +4,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::str::FromStr;
+use std::{
+    fmt::{self, Debug},
+    str::FromStr,
+};
 
 use thiserror::Error;
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
+use crate::hex::HexWithLen;
+
+#[derive(PartialEq, PartialOrd, Eq, Ord, Clone)]
 pub struct Header {
     name: String,
     /// The raw header field value as bytes.
@@ -47,21 +52,11 @@ impl Header {
         )
     }
 
-    #[allow(
-        clippy::allow_attributes,
-        clippy::missing_const_for_fn,
-        reason = "False positive on 1.86, remove when MSRV is higher."
-    )]
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    #[allow(
-        clippy::allow_attributes,
-        clippy::missing_const_for_fn,
-        reason = "False positive on 1.86, remove when MSRV is higher."
-    )]
     #[must_use]
     pub fn value(&self) -> &[u8] {
         &self.value
@@ -74,6 +69,22 @@ impl Header {
     /// Returns an error if the value contains invalid UTF-8.
     pub fn value_utf8(&self) -> Result<&str, std::str::Utf8Error> {
         std::str::from_utf8(&self.value)
+    }
+}
+
+impl Debug for Header {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.name.starts_with(':') {
+            write!(f, "<{}>", self.name)?;
+        } else {
+            f.write_str(&self.name)?;
+        }
+        f.write_str(": ")?;
+        if let Ok(s) = self.value_utf8() {
+            write!(f, "{s:?}")
+        } else {
+            HexWithLen::fmt(f, &self.value)
+        }
     }
 }
 
@@ -218,12 +229,47 @@ mod tests {
     #[test]
     fn header_comparison_with_bytes() {
         let header = Header::new("test", b"value");
-
-        // Test PartialEq with byte slice
         assert_eq!(header, ("test", b"value".as_ref()));
+        assert_ne!(header, ("test", b"other".as_ref()));
+        assert_ne!(header, ("other", b"value".as_ref()));
+    }
 
-        // Test with string (converted to bytes)
-        let header2 = Header::new("test2", "string_value");
-        assert_eq!(header2, ("test2", b"string_value".as_ref()));
+    #[test]
+    fn is_allowed_for_response() {
+        assert!(Header::new("content-type", "text/html").is_allowed_for_response());
+        for name in ["connection", "host", "keep-alive", "transfer-encoding"] {
+            assert!(!Header::new(name, "x").is_allowed_for_response());
+        }
+    }
+
+    #[test]
+    fn headers_ext() {
+        let headers = [
+            Header::new("content-type", "text/html"),
+            Header::new("x-custom", "value"),
+        ];
+        assert!(headers.iter().contains_header("content-type", "text/html"));
+        assert!(!headers.iter().contains_header("content-type", "other"));
+        assert!(!headers.iter().contains_header("missing", "value"));
+        assert_eq!(
+            headers.iter().find_header("x-custom").unwrap().name(),
+            "x-custom"
+        );
+        assert!(headers.iter().find_header("missing").is_none());
+    }
+
+    #[test]
+    fn debug_format() {
+        let h = Header::new(":status", "200");
+        assert_eq!(format!("{h:?}"), r#"<:status>: "200""#);
+
+        let h = Header::new("content-type", "text/html");
+        assert_eq!(format!("{h:?}"), r#"content-type: "text/html""#);
+
+        let h = Header::new("has-quotes", "abc\"123");
+        assert_eq!(format!("{h:?}"), r#"has-quotes: "abc\"123""#);
+
+        let h = Header::new("binary", vec![0xff, 0xfe]);
+        assert_eq!(format!("{h:?}"), "binary: [2]: fffe");
     }
 }

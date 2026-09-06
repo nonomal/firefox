@@ -5,6 +5,7 @@
 //! before-change style: the `@starting-style` rules.
 //! https://drafts.csswg.org/css-transitions-2/#defining-before-change-style
 
+use crate::derives::*;
 use crate::shared_lock::{DeepCloneWithLock, Locked};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::stylesheets::CssRules;
@@ -47,7 +48,7 @@ impl DeepCloneWithLock for StartingStyleRule {
         let rules = self.rules.read_with(guard);
         StartingStyleRule {
             rules: Arc::new(lock.wrap(rules.deep_clone_with_lock(lock, guard))),
-            source_location: self.source_location.clone(),
+            source_location: self.source_location,
         }
     }
 }

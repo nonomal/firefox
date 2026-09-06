@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -74,7 +72,8 @@ nsMathMLmrootFrame::InheritAutomaticData(nsIFrame* aParent) {
 
   bool isRootWithIndex = GetContent()->IsMathMLElement(nsGkAtoms::mroot);
   if (!isRootWithIndex) {
-    mPresentationData.flags |= NS_MATHML_STRETCH_ALL_CHILDREN_VERTICALLY;
+    mPresentationData.flags +=
+        MathMLPresentationFlag::StretchAllChildrenVertically;
   }
 
   return NS_OK;
@@ -84,26 +83,8 @@ NS_IMETHODIMP
 nsMathMLmrootFrame::TransmitAutomaticData() {
   bool isRootWithIndex = GetContent()->IsMathMLElement(nsGkAtoms::mroot);
   if (isRootWithIndex) {
-    // 1. The REC says:
-    //    The <mroot> element increments scriptlevel by 2, and sets displaystyle
-    //    to "false", within index, but leaves both attributes unchanged within
-    //    base.
-    // 2. The TeXbook (Ch 17. p.141) says \sqrt is compressed
-    if (!StaticPrefs::mathml_math_shift_enabled()) {
-      UpdatePresentationDataFromChildAt(1, 1, NS_MATHML_COMPRESSED,
-                                        NS_MATHML_COMPRESSED);
-      UpdatePresentationDataFromChildAt(0, 0, NS_MATHML_COMPRESSED,
-                                        NS_MATHML_COMPRESSED);
-    }
-
     PropagateFrameFlagFor(mFrames.LastChild(),
                           NS_FRAME_MATHML_SCRIPT_DESCENDANT);
-  } else {
-    // The TeXBook (Ch 17. p.141) says that \sqrt is cramped
-    if (!StaticPrefs::mathml_math_shift_enabled()) {
-      UpdatePresentationDataFromChildAt(0, -1, NS_MATHML_COMPRESSED,
-                                        NS_MATHML_COMPRESSED);
-    }
   }
 
   return NS_OK;
@@ -250,9 +231,8 @@ void nsMathMLmrootFrame::Place(DrawTarget* aDrawTarget,
     bmSqr.ascent = bmSqr.descent = 0;
   } else {
     mSqrChar.Stretch(this, aDrawTarget, fontSizeInflation,
-                     NS_STRETCH_DIRECTION_VERTICAL, contSize, radicalSize,
-                     NS_STRETCH_LARGER,
-                     StyleVisibility()->mDirection == StyleDirection::Rtl);
+                     StretchDirection::Vertical, contSize, radicalSize,
+                     MathMLStretchFlag::Larger, GetWritingMode().IsBidiRTL());
     // radicalSize have changed at this point, and should match with
     // the bounding metrics of the char
     mSqrChar.GetBoundingMetrics(bmSqr);
@@ -341,7 +321,7 @@ void nsMathMLmrootFrame::Place(DrawTarget* aDrawTarget,
 
   if (!aFlags.contains(PlaceFlag::MeasureOnly)) {
     nsPresContext* presContext = PresContext();
-    const bool isRTL = StyleVisibility()->mDirection == StyleDirection::Rtl;
+    const bool isRTL = GetWritingMode().IsBidiRTL();
     nscoord borderPaddingInlineStart =
         isRTL ? borderPadding.right : borderPadding.left;
     nscoord dx, dy;

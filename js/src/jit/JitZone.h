@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -20,6 +18,7 @@
 
 #include "gc/Barrier.h"
 #include "gc/Marking.h"
+#include "gc/WeakMap.h"
 #include "jit/CacheIRAOT.h"
 #include "jit/ExecutableAllocator.h"
 #include "jit/ICStubSpace.h"
@@ -39,12 +38,27 @@ struct CodeSizes;
 }
 
 namespace js {
+
+class BaseScript;
+
 namespace jit {
 
 enum class CacheKind : uint8_t;
 class CacheIRStubInfo;
 class JitCode;
 class JitScript;
+
+/*
+ *  The EntryTrampolineMap is used to cache the trampoline code for each script
+ *  as they are created.  These trampolines are created only under
+ *  --emit-interpreter-entry and are used to identify which script is being
+ *  interpeted when profiling with external profilers such as perf.
+ *
+ *  This is a weak map keyed by script. The map keeps the JitCode values alive
+ *  as long as the script is alive. When a script is collected, its entry is
+ *  automatically removed.
+ */
+using EntryTrampolineMap = WeakMap<BaseScript*, JitCode*, ZoneAllocPolicy>;
 
 enum class ICStubEngine : uint8_t {
   // Baseline IC, see BaselineIC.h.
@@ -56,17 +70,23 @@ enum class ICStubEngine : uint8_t {
 
 struct CacheIRStubKey : public DefaultHasher<CacheIRStubKey> {
   struct Lookup {
-    CacheKind kind;
-    ICStubEngine engine;
     const uint8_t* code;
     uint32_t length;
+    HashNumber hash;
+    CacheKind kind;
+    ICStubEngine engine;
 
     Lookup(CacheKind kind, ICStubEngine engine, const uint8_t* code,
            uint32_t length)
-        : kind(kind), engine(engine), code(code), length(length) {}
+        : code(code),
+          length(length),
+          hash(mozilla::AddToHash(mozilla::HashBytes(code, length),
+                                  uint32_t(kind), uint32_t(engine))),
+          kind(kind),
+          engine(engine) {}
   };
 
-  static HashNumber hash(const Lookup& l);
+  static HashNumber hash(const Lookup& l) { return l.hash; }
   static bool match(const CacheIRStubKey& entry, const Lookup& l);
 
   UniquePtr<CacheIRStubInfo, JS::FreePolicy> stubInfo;
@@ -149,6 +169,10 @@ class JitZone {
   // they depend on in WarpSnapshot.
   Stubs<WeakHeapPtr<JitCode*>> stubs_;
 
+  // Map used to cache entry trampolines for scripts, for external profiling to
+  // identify which functions are being interpreted.
+  js::UniquePtr<EntryTrampolineMap> interpreterEntryMap;
+
   mozilla::Maybe<IonCompilationId> currentCompilationId_;
   bool keepJitScripts_ = false;
 
@@ -174,6 +198,7 @@ class JitZone {
   ~JitZone() {
     MOZ_ASSERT(jitScripts_.isEmpty());
     MOZ_ASSERT(!keepJitScripts_);
+    MOZ_ASSERT_IF(interpreterEntryMap, interpreterEntryMap->empty());
   }
 
   void traceWeak(JSTracer* trc, Zone* zone);
@@ -299,6 +324,9 @@ class JitZone {
 
   void traceWeak(JSTracer* trc, JS::Realm* realm);
 
+  void traceScriptTableRoots(JSTracer* trc);
+  void finishScriptTableRoots();
+
   void discardStubs() {
     for (WeakHeapPtr<JitCode*>& stubRef : stubs_) {
       stubRef = nullptr;
@@ -344,6 +372,11 @@ class JitZone {
     }
     return stubs_[kind];
   }
+
+  EntryTrampolineMap* maybeInterpreterEntryMap() {
+    return interpreterEntryMap.get();
+  }
+  EntryTrampolineMap* getOrCreateInterpreterEntryMap(JS::Zone* zone);
 
   static constexpr size_t offsetOfStringConcatStub() {
     return offsetof(JitZone, stubs_) +

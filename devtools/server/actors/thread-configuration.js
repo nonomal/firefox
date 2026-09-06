@@ -24,9 +24,10 @@ const SUPPORTED_OPTIONS = {
   ignoreCaughtExceptions: true,
   // Log the event break points.
   logEventBreakpoints: true,
-  // Enable debugging asm & wasm.
-  // See https://searchfox.org/mozilla-central/source/js/src/doc/Debugger/Debugger.md#16-26
+  // @backward-compat { version 154 } asm.js was removed in Fx154; accepted
+  // from old clients for compatibility but no longer acted upon.
   observeAsmJS: true,
+  // Enable debugging wasm.
   observeWasm: true,
   // Enable pausing on exceptions.
   pauseOnExceptions: true,
@@ -54,7 +55,7 @@ const SUPPORTED_OPTIONS = {
  * flags when they are created. The flags will be forwarded to the WatcherActor
  * and stored as THREAD_CONFIGURATION data entries.
  *
- * @constructor
+ * @class
  */
 class ThreadConfigurationActor extends Actor {
   constructor(watcherActor) {

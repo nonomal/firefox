@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,6 +13,7 @@
 
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ReflowInput.h"
 #include "mozilla/ScrollContainerFrame.h"
 #include "mozilla/dom/Element.h"
 #include "nsContentCreatorFunctions.h"
@@ -28,6 +27,10 @@
 
 using namespace mozilla;
 using mozilla::dom::Element;
+
+static mozilla::LazyLogModule sScrollBarLog("apz.scrollbar");
+#define SCROLLBAR_LOG(...) \
+  MOZ_LOG(sScrollBarLog, LogLevel::Debug, (__VA_ARGS__));
 
 //
 // NS_NewScrollbarFrame
@@ -121,6 +124,18 @@ void nsScrollbarFrame::Destroy(DestroyContext& aContext) {
   nsContainerFrame::Destroy(aContext);
 }
 
+std::pair<nscoord, nscoord> nsScrollbarFrame::ScrollbarInset() const {
+  // The scroll container owns the property and resolves the writing mode, so
+  // the margin it hands back is already physical and needs no further mapping.
+  ScrollContainerFrame* scrollContainerFrame = do_QueryFrame(GetParent());
+  if (!scrollContainerFrame) {
+    return {0, 0};
+  }
+  const nsMargin inset = scrollContainerFrame->ScrollbarInsets();
+  return IsHorizontal() ? std::pair{inset.left, inset.right}
+                        : std::pair{inset.top, inset.bottom};
+}
+
 void nsScrollbarFrame::Reflow(nsPresContext* aPresContext,
                               ReflowOutput& aDesiredSize,
                               const ReflowInput& aReflowInput,
@@ -149,10 +164,21 @@ void nsScrollbarFrame::Reflow(nsPresContext* aPresContext,
 
   const nsSize containerSize = aDesiredSize.PhysicalSize();
   const LogicalSize totalAvailSize = aDesiredSize.Size(wm);
-  LogicalPoint nextKidPos(wm);
 
   MOZ_ASSERT(!wm.IsVertical());
   const bool movesInInlineDirection = horizontal;
+
+  // We stay full-length so our track still spans the whole scrollport, and hold
+  // the slider back at each end instead. Unlike a scrollbar button the two ends
+  // are independent, so the symmetry assumption below doesn't apply to them.
+  const auto [insetStart, insetEnd] = ScrollbarInset();
+
+  LogicalPoint nextKidPos(wm);
+  if (movesInInlineDirection) {
+    nextKidPos.I(wm) = insetStart;
+  } else {
+    nextKidPos.B(wm) = insetStart;
+  }
 
   // Layout our kids left to right / top to bottom.
   for (nsIFrame* kid : mFrames) {
@@ -161,16 +187,18 @@ void nsScrollbarFrame::Reflow(nsPresContext* aPresContext,
     const bool isSlider = kid->GetContent() == mSlider;
     LogicalSize availSize = totalAvailSize;
     {
+      const nscoord consumed =
+          movesInInlineDirection ? nextKidPos.I(wm) : nextKidPos.B(wm);
       // Assume we'll consume the same size before and after the slider. This is
       // not a technically correct assumption if we have weird scrollbar button
       // setups, but those will be going away, see bug 1824254.
-      const int32_t factor = isSlider ? 2 : 1;
+      const nscoord reserved =
+          isSlider ? (consumed - insetStart) * 2 + insetStart + insetEnd
+                   : consumed;
       if (movesInInlineDirection) {
-        availSize.ISize(wm) =
-            std::max(0, totalAvailSize.ISize(wm) - nextKidPos.I(wm) * factor);
+        availSize.ISize(wm) = std::max(0, totalAvailSize.ISize(wm) - reserved);
       } else {
-        availSize.BSize(wm) =
-            std::max(0, totalAvailSize.BSize(wm) - nextKidPos.B(wm) * factor);
+        availSize.BSize(wm) = std::max(0, totalAvailSize.BSize(wm) - reserved);
       }
     }
 
@@ -314,15 +342,15 @@ nsSize nsScrollbarFrame::ScrollbarMinSize() const {
 }
 
 StyleScrollbarWidth nsScrollbarFrame::ScrollbarWidth() const {
-  return nsLayoutUtils::StyleForScrollbar(this)
-      ->StyleUIReset()
-      ->ScrollbarWidth();
+  return nsLayoutUtils::ScrollbarWidthFor(this);
 }
 
 nscoord nsScrollbarFrame::ScrollbarTrackSize() const {
+  auto overlay = nsLayoutUtils::UseOverlayScrollbars(this)
+                     ? nsITheme::Overlay::Yes
+                     : nsITheme::Overlay::No;
+
   nsPresContext* pc = PresContext();
-  auto overlay = pc->UseOverlayScrollbars() ? nsITheme::Overlay::Yes
-                                            : nsITheme::Overlay::No;
   return LayoutDevicePixel::ToAppUnits(
       pc->Theme()->GetScrollbarSize(pc, ScrollbarWidth(), overlay),
       pc->AppUnitsPerDevPixel());
@@ -479,4 +507,12 @@ void nsScrollbarFrame::AppendAnonymousContentTo(
   if (mDownBottomButton) {
     aElements.AppendElement(mDownBottomButton);
   }
+}
+
+void nsScrollbarFrame::SetButtonScrollDirectionAndUnit(
+    int32_t aDirection, mozilla::ScrollUnit aUnit) {
+  SCROLLBAR_LOG("nsScrollbarFrame(%p) setting button scroll direction=%d", this,
+                aDirection);
+  mButtonScrollDirection = aDirection;
+  mButtonScrollUnit = aUnit;
 }

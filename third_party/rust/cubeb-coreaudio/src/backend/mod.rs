@@ -21,6 +21,7 @@ use self::aggregate_device::*;
 use self::auto_release::*;
 use self::buffer_manager::*;
 use self::coreaudio_sys_utils::aggregate_device::*;
+#[allow(unused_imports)]
 use self::coreaudio_sys_utils::audio_device_extensions::*;
 use self::coreaudio_sys_utils::audio_object::*;
 use self::coreaudio_sys_utils::audio_unit::*;
@@ -42,6 +43,7 @@ use cubeb_backend::{
 };
 use mach2::mach_time::{mach_absolute_time, mach_timebase_info};
 use std::cmp;
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::mem;
@@ -50,7 +52,7 @@ use std::ptr;
 use std::slice;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 const NO_ERR: OSStatus = 0;
 
@@ -70,6 +72,28 @@ const SAFE_MAX_LATENCY_FRAMES: u32 = 512;
 const VPIO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MACOS_KERNEL_MAJOR_VERSION_MONTEREY: u32 = 21;
+
+// Global registry for tracking valid sync callback pointers.
+static SYNC_CALLBACK_REGISTRY: LazyLock<Mutex<HashSet<usize>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn sync_callback_registry_register(ptr: usize) {
+    SYNC_CALLBACK_REGISTRY.lock().unwrap().insert(ptr);
+}
+
+fn sync_callback_registry_unregister(ptr: usize) {
+    SYNC_CALLBACK_REGISTRY.lock().unwrap().remove(&ptr);
+}
+
+fn with_sync_callback_ptr<F>(ptr: *mut c_void, f: F)
+where
+    F: FnOnce(),
+{
+    let guard = SYNC_CALLBACK_REGISTRY.lock().unwrap();
+    if guard.contains(&(ptr as usize)) {
+        f();
+    }
+}
 
 #[derive(Debug, PartialEq)]
 enum ParseMacOSKernelVersionError {
@@ -244,8 +268,22 @@ fn create_device_info(devid: AudioDeviceID, devtype: DeviceType) -> Option<devic
 }
 
 fn create_stream_description(stream_params: &StreamParams) -> Result<AudioStreamBasicDescription> {
-    assert!(stream_params.rate() > 0);
-    assert!(stream_params.channels() > 0);
+    debug_assert!(stream_params.rate() > 0);
+    debug_assert!(stream_params.channels() > 0);
+    if stream_params.rate() == 0 {
+        cubeb_log!(
+            "create_stream_description: invalid rate 0 (channels={})",
+            stream_params.channels()
+        );
+        return Err(Error::Error);
+    }
+    if stream_params.channels() == 0 {
+        cubeb_log!(
+            "create_stream_description: invalid channel count 0 (rate={})",
+            stream_params.rate()
+        );
+        return Err(Error::Error);
+    }
 
     let mut desc = AudioStreamBasicDescription::default();
 
@@ -286,7 +324,11 @@ fn create_stream_description(stream_params: &StreamParams) -> Result<AudioStream
 }
 
 fn set_volume(unit: AudioUnit, volume: f32) -> Result<()> {
-    assert!(!unit.is_null());
+    debug_assert!(!unit.is_null());
+    if unit.is_null() {
+        cubeb_log!("set_volume: audio unit is null");
+        return Err(Error::Error);
+    }
     let r = audio_unit_set_parameter(
         unit,
         kHALOutputParam_Volume,
@@ -304,7 +346,11 @@ fn set_volume(unit: AudioUnit, volume: f32) -> Result<()> {
 }
 
 fn get_volume(unit: AudioUnit) -> Result<f32> {
-    assert!(!unit.is_null());
+    debug_assert!(!unit.is_null());
+    if unit.is_null() {
+        cubeb_log!("get_volume: audio unit is null");
+        return Err(Error::Error);
+    }
     let mut volume: f32 = 0.0;
     let r = audio_unit_get_parameter(
         unit,
@@ -322,7 +368,11 @@ fn get_volume(unit: AudioUnit) -> Result<f32> {
 }
 
 fn set_input_mute(unit: AudioUnit, mute: bool) -> Result<()> {
-    assert!(!unit.is_null());
+    debug_assert!(!unit.is_null());
+    if unit.is_null() {
+        cubeb_log!("set_input_mute: audio unit is null");
+        return Err(Error::Error);
+    }
     let mute: u32 = mute.into();
     let mut old_mute: u32 = 0;
     let r = audio_unit_get_property(
@@ -363,7 +413,11 @@ fn set_input_mute(unit: AudioUnit, mute: bool) -> Result<()> {
 }
 
 fn set_input_processing_params(unit: AudioUnit, params: InputProcessingParams) -> Result<()> {
-    assert!(!unit.is_null());
+    debug_assert!(!unit.is_null());
+    if unit.is_null() {
+        cubeb_log!("set_input_processing_params: audio unit is null");
+        return Err(Error::Error);
+    }
     let aec = params.contains(InputProcessingParams::ECHO_CANCELLATION);
     let ns = params.contains(InputProcessingParams::NOISE_SUPPRESSION);
     let agc = params.contains(InputProcessingParams::AUTOMATIC_GAIN_CONTROL);
@@ -492,11 +546,18 @@ extern "C" fn audiounit_input_callback(
         Reinit,
     }
 
-    assert!(input_frames > 0);
     assert_eq!(bus, AU_IN_BUS);
 
     assert!(!user_ptr.is_null());
     let stm = unsafe { &mut *(user_ptr as *mut AudioUnitStream) };
+
+    if input_frames == 0 {
+        cubeb_alog!(
+            "({:p}) input callback empty.",
+            stm as *const AudioUnitStream
+        );
+        return NO_ERR;
+    }
 
     if unsafe { *flags | kAudioTimeStampHostTimeValid } != 0 {
         let now = unsafe { mach_absolute_time() };
@@ -661,6 +722,19 @@ extern "C" fn audiounit_input_callback(
             let stm = unsafe { &mut *(stm_ptr as *mut AudioUnitStream) };
             stm.core_stream_data.stop_audiounits();
         });
+    }
+
+    // AudioOutputUnitStop waits for in-flight callbacks, but TSan cannot see
+    // CoreAudio's internal synchronization. Release on the AudioUnit handle to
+    // pair with the acquire in stop_audiounit, modeling the per-unit HALB_Mutex.
+    #[cfg(feature = "tsan-annotations")]
+    {
+        extern "C" {
+            fn __tsan_release(addr: *mut c_void);
+        }
+        unsafe {
+            __tsan_release(stm.core_stream_data.input_unit as *mut c_void);
+        }
     }
 
     match handle {
@@ -943,12 +1017,19 @@ extern "C" fn audiounit_output_callback(
     }
 
     // Mixing
-    if stm.core_stream_data.mixer.is_some() {
-        assert!(
-            buffers[0].mDataByteSize
-                >= stm.core_stream_data.output_dev_desc.mBytesPerFrame * output_frames
-        );
-        stm.core_stream_data.mixer.as_mut().unwrap().mix(
+    if let Some(mixer) = stm.core_stream_data.mixer.as_mut() {
+        let needed = stm.core_stream_data.output_dev_desc.mBytesPerFrame * output_frames;
+        if buffers[0].mDataByteSize < needed {
+            cubeb_log!(
+                "({:p}) output buffer too small for mixer: have {} bytes, need {} bytes",
+                stm as *const AudioUnitStream,
+                buffers[0].mDataByteSize,
+                needed
+            );
+            audiounit_make_silent(&buffers[0]);
+            return NO_ERR;
+        }
+        mixer.mix(
             output_frames as usize,
             buffers[0].mData,
             buffers[0].mDataByteSize as usize,
@@ -963,6 +1044,17 @@ extern "C" fn audiounit_output_callback(
             output_frames * stm.core_stream_data.output_dev_desc.mChannelsPerFrame,
         );
     }
+
+    #[cfg(feature = "tsan-annotations")]
+    {
+        extern "C" {
+            fn __tsan_release(addr: *mut c_void);
+        }
+        unsafe {
+            __tsan_release(stm.core_stream_data.output_unit as *mut c_void);
+        }
+    }
+
     NO_ERR
 }
 
@@ -1206,6 +1298,18 @@ fn start_audiounit(unit: AudioUnit) -> Result<()> {
 
 fn stop_audiounit(unit: AudioUnit) -> Result<()> {
     let status = audio_output_unit_stop(unit);
+    // AudioOutputUnitStop waits for in-flight callbacks, but TSan cannot see
+    // CoreAudio's internal HALB_Mutex synchronization. Acquire on the AudioUnit
+    // handle to pair with the release at the end of each callback.
+    #[cfg(feature = "tsan-annotations")]
+    {
+        extern "C" {
+            fn __tsan_acquire(addr: *mut c_void);
+        }
+        unsafe {
+            __tsan_acquire(unit as *mut c_void);
+        }
+    }
     if status == NO_ERR {
         Ok(())
     } else {
@@ -1412,6 +1516,7 @@ fn create_voiceprocessing_audiounit() -> Result<VoiceProcessingUnit> {
         return Err(Error::Error);
     }
 
+    #[cfg(not(feature = "no-private-apis"))]
     match get_default_device(DeviceType::OUTPUT) {
         None => {
             cubeb_log!("Could not get default output device in order to undo vpio ducking");
@@ -1509,16 +1614,16 @@ fn set_buffer_size_sync(unit: AudioUnit, devtype: DeviceType, frames: u32) -> Re
     }
 
     let waiting_time = Duration::from_millis(100);
-    let pair = Arc::new((Mutex::new(false), Condvar::new()));
-    let mut pair2 = pair.clone();
-    let pair_ptr = &mut pair2;
+    let pair = Box::new((Mutex::new(false), Condvar::new()));
+    let pair_ptr = Box::into_raw(pair);
+    sync_callback_registry_register(pair_ptr as usize);
 
     assert_eq!(
         audio_unit_add_property_listener(
             unit,
             kAudioDevicePropertyBufferFrameSize,
             buffer_size_changed_callback,
-            pair_ptr,
+            pair_ptr as *mut c_void,
         ),
         NO_ERR
     );
@@ -1529,10 +1634,14 @@ fn set_buffer_size_sync(unit: AudioUnit, devtype: DeviceType, frames: u32) -> Re
                 unit,
                 kAudioDevicePropertyBufferFrameSize,
                 buffer_size_changed_callback,
-                pair_ptr,
+                pair_ptr as *mut c_void,
             ),
             NO_ERR
         );
+        // Unregister blocks if callback is in-flight (holds registry lock)
+        sync_callback_registry_unregister(pair_ptr as usize);
+        // Safe to drop: callback has either completed or will exit early
+        unsafe { drop(Box::from_raw(pair_ptr)) };
     });
 
     set_buffer_size(unit, devtype, frames).map_err(|e| {
@@ -1545,7 +1654,7 @@ fn set_buffer_size_sync(unit: AudioUnit, devtype: DeviceType, frames: u32) -> Re
         Error::Error
     })?;
 
-    let (lock, cvar) = &*pair;
+    let (lock, cvar) = unsafe { &*pair_ptr };
     let changed = lock.lock().unwrap();
     if !*changed {
         let (chg, timeout_res) = cvar.wait_timeout(changed, waiting_time).unwrap();
@@ -1585,16 +1694,17 @@ fn set_buffer_size_sync(unit: AudioUnit, devtype: DeviceType, frames: u32) -> Re
         in_element: AudioUnitElement,
     ) {
         if in_scope == 0 {
-            // filter out the callback for global scope.
             return;
         }
-        assert!(in_element == AU_IN_BUS || in_element == AU_OUT_BUS);
-        assert_eq!(in_property_id, kAudioDevicePropertyBufferFrameSize);
-        let pair = unsafe { &mut *(in_client_data as *mut Arc<(Mutex<bool>, Condvar)>) };
-        let (lock, cvar) = &**pair;
-        let mut changed = lock.lock().unwrap();
-        *changed = true;
-        cvar.notify_one();
+        with_sync_callback_ptr(in_client_data, || {
+            assert!(in_element == AU_IN_BUS || in_element == AU_OUT_BUS);
+            assert_eq!(in_property_id, kAudioDevicePropertyBufferFrameSize);
+            let pair = unsafe { &*(in_client_data as *const (Mutex<bool>, Condvar)) };
+            let (lock, cvar) = pair;
+            let mut changed = lock.lock().unwrap();
+            *changed = true;
+            cvar.notify_one();
+        });
     }
 
     Ok(())
@@ -2096,22 +2206,16 @@ extern "C" fn audiounit_default_device_changed_callback(
             let property = PropertySelector::from(addr.mSelector);
             match property {
                 PropertySelector::DefaultInputDevice => {
-                    if devices.input.changed_callback.is_some() {
+                    if let Some(cb) = devices.input.changed_callback {
                         unsafe {
-                            devices.input.changed_callback.unwrap()(
-                                ctx_ptr as *mut ffi::cubeb,
-                                devices.input.callback_user_ptr,
-                            );
+                            cb(ctx_ptr as *mut ffi::cubeb, devices.input.callback_user_ptr);
                         }
                     }
                 }
                 PropertySelector::DefaultOutputDevice => {
-                    if devices.output.changed_callback.is_some() {
+                    if let Some(cb) = devices.output.changed_callback {
                         unsafe {
-                            devices.output.changed_callback.unwrap()(
-                                ctx_ptr as *mut ffi::cubeb,
-                                devices.output.callback_user_ptr,
-                            );
+                            cb(ctx_ptr as *mut ffi::cubeb, devices.output.callback_user_ptr);
                         }
                     }
                 }
@@ -3343,6 +3447,12 @@ impl<'ctx> CoreStreamData<'ctx> {
         // and before the stream is destroyed.
         debug_assert!(!self.input_unit.is_null() || !self.output_unit.is_null());
 
+        // Match other cubeb backends: reset the async logger's recorded
+        // producer thread id before the CoreAudio I/O proc begins logging.
+        unsafe {
+            ffi::cubeb_async_log_reset_threads();
+        }
+
         if !self.input_unit.is_null() {
             start_audiounit(self.input_unit)?;
         }
@@ -3790,6 +3900,16 @@ impl<'ctx> CoreStreamData<'ctx> {
                 self.stm_ptr,
                 input_hw_desc
             );
+            // These have been observed in the wild.
+            if input_hw_desc.mSampleRate <= 0.0 || input_hw_desc.mChannelsPerFrame == 0 {
+                cubeb_log!(
+                    "({:p}) Invalid input hardware description: rate={}, channels={}",
+                    self.stm_ptr,
+                    input_hw_desc.mSampleRate,
+                    input_hw_desc.mChannelsPerFrame
+                );
+                return Err(Error::Error);
+            }
             // Notice: when we are using an aggregate device, input_hw_desc.mChannelsPerFrame is the
             // sum of all input channels of all devices added to the aggregate device.
             // Because we set the input device first on the aggregate device, the input device's
@@ -3998,11 +4118,13 @@ impl<'ctx> CoreStreamData<'ctx> {
                 output_hw_desc
             );
 
-            // This has been observed in the wild.
-            if output_hw_desc.mChannelsPerFrame == 0 {
+            // These have been observed in the wild.
+            if output_hw_desc.mSampleRate <= 0.0 || output_hw_desc.mChannelsPerFrame == 0 {
                 cubeb_log!(
-                    "({:p}) Output hardware description channel count is zero",
-                    self.stm_ptr
+                    "({:p}) Invalid output hardware description: rate={}, channels={}",
+                    self.stm_ptr,
+                    output_hw_desc.mSampleRate,
+                    output_hw_desc.mChannelsPerFrame
                 );
                 return Err(Error::Error);
             }
@@ -4303,6 +4425,7 @@ impl<'ctx> CoreStreamData<'ctx> {
             }
         }
 
+        #[cfg(not(feature = "no-private-apis"))]
         if using_voice_processing_unit {
             // The VPIO AudioUnit automatically ducks other audio streams on the VPIO
             // output device. Its ramp duration is 0.5s when ducking, so unduck similarly
@@ -4659,40 +4782,36 @@ impl<'ctx> CoreStreamData<'ctx> {
         // Failing to uninstall listeners is not a fatal error.
         let mut r = Ok(());
 
-        if self.output_source_listener.is_some() {
-            let rv = stm.remove_device_listener(self.output_source_listener.as_ref().unwrap());
+        if let Some(listener) = self.output_source_listener.take() {
+            let rv = stm.remove_device_listener(&listener);
             if rv != NO_ERR {
                 cubeb_log!("AudioObjectRemovePropertyListener/output/kAudioDevicePropertyDataSource rv={}, device id={}", rv, self.output_device.id);
                 r = Err(Error::Error);
             }
-            self.output_source_listener = None;
         }
 
-        if self.output_alive_listener.is_some() {
-            let rv = stm.remove_device_listener(self.output_alive_listener.as_ref().unwrap());
+        if let Some(listener) = self.output_alive_listener.take() {
+            let rv = stm.remove_device_listener(&listener);
             if rv != NO_ERR {
                 cubeb_log!("AudioObjectRemovePropertyListener/output/kAudioDevicePropertyDeviceIsAlive rv={}, device id={}", rv, self.output_device.id);
                 r = Err(Error::Error);
             }
-            self.output_alive_listener = None;
         }
 
-        if self.input_source_listener.is_some() {
-            let rv = stm.remove_device_listener(self.input_source_listener.as_ref().unwrap());
+        if let Some(listener) = self.input_source_listener.take() {
+            let rv = stm.remove_device_listener(&listener);
             if rv != NO_ERR {
                 cubeb_log!("AudioObjectRemovePropertyListener/input/kAudioDevicePropertyDataSource rv={}, device id={}", rv, self.input_device.id);
                 r = Err(Error::Error);
             }
-            self.input_source_listener = None;
         }
 
-        if self.input_alive_listener.is_some() {
-            let rv = stm.remove_device_listener(self.input_alive_listener.as_ref().unwrap());
+        if let Some(listener) = self.input_alive_listener.take() {
+            let rv = stm.remove_device_listener(&listener);
             if rv != NO_ERR {
                 cubeb_log!("AudioObjectRemovePropertyListener/input/kAudioDevicePropertyDeviceIsAlive rv={}, device id={}", rv, self.input_device.id);
                 r = Err(Error::Error);
             }
-            self.input_alive_listener = None;
         }
 
         r
@@ -4709,20 +4828,18 @@ impl<'ctx> CoreStreamData<'ctx> {
 
         let stm = unsafe { &(*self.stm_ptr) };
 
-        if self.default_output_listener.is_some() {
-            let r = stm.remove_device_listener(self.default_output_listener.as_ref().unwrap());
+        if let Some(listener) = self.default_output_listener.take() {
+            let r = stm.remove_device_listener(&listener);
             if r != NO_ERR {
                 return Err(Error::Error);
             }
-            self.default_output_listener = None;
         }
 
-        if self.default_input_listener.is_some() {
-            let r = stm.remove_device_listener(self.default_input_listener.as_ref().unwrap());
+        if let Some(listener) = self.default_input_listener.take() {
+            let r = stm.remove_device_listener(&listener);
             if r != NO_ERR {
                 return Err(Error::Error);
             }
-            self.default_input_listener = None;
         }
 
         Ok(())
@@ -4990,6 +5107,7 @@ impl<'ctx> AudioUnitStream<'ctx> {
 
             if self.reinit().is_err() {
                 self.core_stream_data.close();
+                self.stopped.store(true, Ordering::SeqCst);
                 self.notify_state_changed(State::Error);
                 cubeb_log!(
                     "({:p}) Could not reopen the stream after switching.",

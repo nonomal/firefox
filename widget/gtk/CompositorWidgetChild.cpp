@@ -1,9 +1,9 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "CompositorWidgetChild.h"
+
 #include "gfxPlatform.h"
 
 namespace mozilla {
@@ -21,7 +21,10 @@ CompositorWidgetChild::CompositorWidgetChild(
 
 CompositorWidgetChild::~CompositorWidgetChild() = default;
 
-bool CompositorWidgetChild::Initialize() { return true; }
+bool CompositorWidgetChild::Initialize(
+    const layers::CompositorOptions& aOptions) {
+  return true;
+}
 
 mozilla::ipc::IPCResult CompositorWidgetChild::RecvObserveVsync() {
   mVsyncDispatcher->SetCompositorVsyncObserver(mVsyncObserver);
@@ -39,10 +42,6 @@ void CompositorWidgetChild::NotifyClientSizeChanged(
 }
 
 void CompositorWidgetChild::CleanupResources() { (void)SendCleanupResources(); }
-
-void CompositorWidgetChild::SetRenderingSurface(const uintptr_t aXWindow) {
-  (void)SendSetRenderingSurface(aXWindow);
-}
 
 }  // namespace widget
 }  // namespace mozilla

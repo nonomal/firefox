@@ -1,11 +1,15 @@
 "use strict";
 
-requestLongerTimeout(16);
+requestLongerTimeout(2);
 
 Services.scriptloader.loadSubScript(
   "chrome://mochitests/content/browser/browser/base/content/test/general/head.js",
   this
 );
+
+add_setup(function () {
+  registerCleanupFunction(clearSiteTestData);
+});
 
 async function openAWindow(usePrivate) {
   info("Creating a new " + (usePrivate ? "private" : "normal") + " window");
@@ -22,7 +26,10 @@ async function testOnWindowBody(win, expectedReferrer, rp) {
   let browser = win.gBrowser;
   let tab = browser.selectedTab;
   let b = browser.getBrowserForTab(tab);
-  await promiseTabLoadEvent(tab, TEST_TOP_PAGE);
+  await BrowserTestUtils.loadURIString({
+    browser: tab.linkedBrowser,
+    uriString: TEST_TOP_PAGE,
+  });
 
   info("Loading tracking scripts and tracking images");
   let { iframeReferrer, refreshReferrer } = await SpecialPowers.spawn(
@@ -242,6 +249,7 @@ async function executeTests() {
   gRecording = false;
   for (let mode in gTests) {
     info(`Open a ${mode} window`);
+    let win = await openAWindow(mode == "private");
     while (gTests[mode].length) {
       let test = gTests[mode].shift();
       info(`Running test ${test.toSource()}`);
@@ -256,12 +264,9 @@ async function executeTests() {
         ],
       });
 
-      let win = await openAWindow(mode == "private");
-
       await testOnWindowBody(win, test.expectedReferrer, test.rp);
-
-      await closeAWindow(win);
     }
+    await closeAWindow(win);
   }
 
   Services.prefs.clearUserPref(kPBPref);
@@ -669,13 +674,4 @@ add_task(async function () {
   await executeTests();
 
   UrlClassifierTestUtils.cleanupTestTrackers();
-});
-
-add_task(async function () {
-  info("Cleaning up.");
-  await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
-      resolve()
-    );
-  });
 });

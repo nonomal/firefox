@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -26,22 +24,22 @@ JSObject* SVGCircleElement::WrapNode(JSContext* aCx,
 
 SVGElement::LengthInfo SVGCircleElement::sLengthInfo[3] = {
     {nsGkAtoms::cx, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::X},
+     SVGLength::Axis::X},
     {nsGkAtoms::cy, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::Y},
+     SVGLength::Axis::Y},
     {nsGkAtoms::r, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::XY}};
+     SVGLength::Axis::XY}};
 
 //----------------------------------------------------------------------
 // Implementation
 
 SVGCircleElement::SVGCircleElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : SVGCircleElementBase(std::move(aNodeInfo)) {}
 
-bool SVGCircleElement::IsAttributeMapped(const nsAtom* aAttribute) const {
+bool SVGCircleElement::IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const {
   return IsInLengthInfo(aAttribute, sLengthInfo) ||
-         SVGCircleElementBase::IsAttributeMapped(aAttribute);
+         SVGCircleElementBase::IsNoNamespaceAttrMapped(aAttribute);
 }
 
 namespace SVGT = SVGGeometryProperty::Tags;
@@ -89,9 +87,9 @@ SVGElement::LengthAttributesInfo SVGCircleElement::GetLengthInfo() {
 //----------------------------------------------------------------------
 // SVGGeometryElement methods
 
-bool SVGCircleElement::GetGeometryBounds(
-    Rect* aBounds, const StrokeOptions& aStrokeOptions,
-    const Matrix& aToBoundsSpace, const Matrix* aToNonScalingStrokeSpace) {
+Maybe<Rect> SVGCircleElement::GetGeometryBounds(
+    const StrokeOptions& aStrokeOptions, const Matrix& aToBoundsSpace,
+    const Matrix* aToNonScalingStrokeSpace) {
   float x, y, r;
 
   DebugOnly<bool> ok =
@@ -101,33 +99,30 @@ bool SVGCircleElement::GetGeometryBounds(
 
   if (r <= 0.f) {
     // Rendering of the element is disabled
-    *aBounds = Rect(aToBoundsSpace.TransformPoint(Point(x, y)), Size());
-    return true;
+    return Some(Rect(aToBoundsSpace.TransformPoint(Point(x, y)), Size()));
   }
 
-  if (aToBoundsSpace.IsRectilinear()) {
-    // Optimize the case where we can treat the circle as a rectangle and
-    // still get tight bounds.
-    if (aStrokeOptions.mLineWidth > 0.f) {
-      if (aToNonScalingStrokeSpace) {
-        if (aToNonScalingStrokeSpace->IsRectilinear()) {
-          MOZ_ASSERT(!aToNonScalingStrokeSpace->IsSingular());
-          Rect userBounds(x - r, y - r, 2 * r, 2 * r);
-          SVGContentUtils::RectilinearGetStrokeBounds(
-              userBounds, aToBoundsSpace, *aToNonScalingStrokeSpace,
-              aStrokeOptions.mLineWidth, aBounds);
-          return true;
-        }
-        return false;
+  if (!aToBoundsSpace.IsRectilinear()) {
+    return Nothing();
+  }
+
+  // Optimize the case where we can treat the circle as a rectangle and
+  // still get tight bounds.
+  if (aStrokeOptions.mLineWidth > 0.f) {
+    if (aToNonScalingStrokeSpace) {
+      if (aToNonScalingStrokeSpace->IsRectilinear()) {
+        MOZ_ASSERT(!aToNonScalingStrokeSpace->IsSingular());
+        Rect userBounds(x - r, y - r, 2 * r, 2 * r);
+        return Some(SVGContentUtils::RectilinearGetStrokeBounds(
+            userBounds, aToBoundsSpace, *aToNonScalingStrokeSpace,
+            aStrokeOptions.mLineWidth));
       }
-      r += aStrokeOptions.mLineWidth / 2.f;
+      return Nothing();
     }
-    Rect rect(x - r, y - r, 2 * r, 2 * r);
-    *aBounds = aToBoundsSpace.TransformBounds(rect);
-    return true;
+    r += aStrokeOptions.mLineWidth / 2.f;
   }
-
-  return false;
+  Rect rect(x - r, y - r, 2 * r, 2 * r);
+  return Some(aToBoundsSpace.TransformBounds(rect));
 }
 
 already_AddRefed<Path> SVGCircleElement::BuildPath(PathBuilder* aBuilder) {
@@ -146,6 +141,21 @@ already_AddRefed<Path> SVGCircleElement::BuildPath(PathBuilder* aBuilder) {
   aBuilder->Arc(Point(x, y), r, 0, Float(2 * M_PI));
 
   return aBuilder->Finish();
+}
+
+Maybe<bool> SVGCircleElement::HasCtxDependentLength() const {
+  bool hasCtxDependentLength = false;
+  if (SVGGeometryProperty::DoForComputedStyle(
+          this, [&](const ComputedStyle* style) {
+            const nsStyleSVGReset* styleSVGReset = style->StyleSVGReset();
+
+            hasCtxDependentLength = styleSVGReset->mCx.HasPercent() ||
+                                    styleSVGReset->mCy.HasPercent() ||
+                                    styleSVGReset->mR.HasPercent();
+          })) {
+    return Some(hasCtxDependentLength);
+  }
+  return Nothing();
 }
 
 bool SVGCircleElement::IsLengthChangedViaCSS(const ComputedStyle& aNewStyle,

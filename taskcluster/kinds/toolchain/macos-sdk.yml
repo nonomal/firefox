@@ -11,6 +11,7 @@ task-defaults:
         env:
             PATH: "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin"
     run:
+        clone-with: hg
         script: unpack-sdk.py
         resources:
             - python/mozbuild/mozpack/macpkg.py
@@ -30,20 +31,20 @@ macosx64-sdk-13.3:
             - Library/Developer/CommandLineTools/SDKs/MacOSX13.3.sdk
         toolchain-artifact: project/gecko/mac-sdk/MacOSX13.3.sdk.tar.zst
 
-macosx64-sdk-26.1:
-    description: "macOS 26.1 SDK"
+macosx64-sdk-26.5:
+    description: "macOS 26.5 SDK"
     treeherder:
-        symbol: TM(sdk26.1)
+        symbol: TM(sdk26.5)
     run:
         arguments:
-            - https://swcdn.apple.com/content/downloads/22/09/093-00219-A_WIA1LP39TY/evbam2mb02xqr05ju9ddb95y8qil8kz9tm/CLTools_macOSNMOS_SDK.pkg
-            - f6a5f44b3652f5abdf7ad2602f54ad38774404f45264a4e70cfccc58b8b39aed2a89f74ef22c44bf932d0a55b062ebc3651f73fa06ff755ee5da53b9dcc62fba
-            - Library/Developer/CommandLineTools/SDKs/MacOSX26.1.sdk
-        toolchain-artifact: project/gecko/mac-sdk/MacOSX26.1.sdk.tar.zst
+            - https://swcdn.apple.com/content/downloads/09/08/047-91568-A_Y1CFZWQCD4/4xekpyz43i26dbp4enxfro8eb1q7wiujh5/CLTools_macOSNMOS_SDK.pkg
+            - 5db8b5a06a489a7d3ec587ebb7e01be55163128029923fc24edcad47faecd67830193c0d91e2643ee0e92f2ccca37adf20e4c42cf8de5784666f8663638b5cc5
+            - Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+        toolchain-artifact: project/gecko/mac-sdk/MacOSX26.5.sdk.tar.zst
         toolchain-alias:
             - macosx64-sdk
             - macosx64-sdk-toolchain
-            - MacOSX26.1.sdk
+            - MacOSX26.5.sdk
 
 ios-sdk-18.4:
     description: "iPhoneOS18.4 SDK"

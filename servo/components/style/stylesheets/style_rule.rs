@@ -4,6 +4,7 @@
 
 //! A style rule.
 
+use crate::derives::*;
 use crate::properties::PropertyDeclarationBlock;
 use crate::selector_parser::SelectorImpl;
 use crate::shared_lock::{
@@ -47,7 +48,7 @@ impl DeepCloneWithLock for StyleRule {
                 let rules = rules.read_with(guard);
                 Arc::new(lock.wrap(rules.deep_clone_with_lock(lock, guard)))
             }),
-            source_location: self.source_location.clone(),
+            source_location: self.source_location,
         }
     }
 }

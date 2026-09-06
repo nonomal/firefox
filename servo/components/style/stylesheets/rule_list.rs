@@ -4,6 +4,7 @@
 
 //! A list of CSS rules.
 
+use crate::derives::*;
 use crate::shared_lock::{DeepCloneWithLock, Locked};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::stylesheets::loader::StylesheetLoader;
@@ -74,7 +75,7 @@ impl CssRules {
 
         {
             // Step 3
-            let ref rule = self.0[index];
+            let rule = &self.0[index];
 
             // Step 4
             if let CssRule::Namespace(..) = *rule {
@@ -155,7 +156,7 @@ impl CssRules {
 
         // Steps 3, 4, 5, 6
         CssRule::parse(
-            &rule,
+            rule,
             insert_rule_context,
             parent_stylesheet_contents,
             lock,

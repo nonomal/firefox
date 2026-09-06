@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -38,8 +36,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
  public:
   NS_IMPL_FROMNODE_HTML_WITH_TAG(HTMLFormElement, form)
 
-  explicit HTMLFormElement(
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+  explicit HTMLFormElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
   enum { FORM_CONTROL_LIST_HASHTABLE_LENGTH = 8 };
 
@@ -68,7 +65,8 @@ class HTMLFormElement final : public nsGenericHTMLElement {
                       nsAttrValue& aResult) override;
   void GetEventTargetParent(EventChainPreVisitor& aVisitor) override;
   void WillHandleEvent(EventChainPostVisitor& aVisitor) override;
-  nsresult PostHandleEvent(EventChainPostVisitor& aVisitor) override;
+  MOZ_CAN_RUN_SCRIPT nsresult
+  PostHandleEvent(EventChainPostVisitor& aVisitor) override;
 
   nsresult BindToTree(BindContext&, nsINode& aParent) override;
   void UnbindFromTree(UnbindContext&) override;
@@ -304,7 +302,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    */
   MOZ_CAN_RUN_SCRIPT void MaybeSubmit(Element* aSubmitter);
   MOZ_CAN_RUN_SCRIPT void MaybeReset(Element* aSubmitter);
-  void Submit(ErrorResult& aRv);
+  MOZ_CAN_RUN_SCRIPT void Submit(ErrorResult& aRv);
 
   /**
    * Requests to submit the form. Unlike submit(), this method includes
@@ -322,7 +320,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
 
   MOZ_CAN_RUN_SCRIPT void Reset();
 
-  bool CheckValidity() { return CheckFormValidity(nullptr); }
+  MOZ_CAN_RUN_SCRIPT bool CheckValidity() { return CheckFormValidity(nullptr); }
 
   MOZ_CAN_RUN_SCRIPT
   bool ReportValidity() { return CheckValidFormSubmission(); }
@@ -334,14 +332,6 @@ class HTMLFormElement final : public nsGenericHTMLElement {
                                             bool& aFound);
 
   void GetSupportedNames(nsTArray<nsString>& aRetval);
-
-#ifdef DEBUG
-  static void AssertDocumentOrder(
-      const nsTArray<nsGenericHTMLFormElement*>& aControls, nsIContent* aForm);
-  static void AssertDocumentOrder(
-      const nsTArray<RefPtr<nsGenericHTMLFormElement>>& aControls,
-      nsIContent* aForm);
-#endif
 
   JS::ExpandoAndGeneration mExpandoAndGeneration;
 
@@ -366,7 +356,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
     RefPtr<HTMLFormElement> mForm;
   };
 
-  nsresult DoReset();
+  MOZ_CAN_RUN_SCRIPT nsresult DoReset();
 
   // Async callback to handle removal of our default submit
   void HandleDefaultSubmitRemoval();
@@ -381,7 +371,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    * @param aPresContext the presentation context
    * @param aEvent the DOM event that was passed to us for the submit
    */
-  nsresult DoSubmit(Event* aEvent = nullptr);
+  MOZ_CAN_RUN_SCRIPT nsresult DoSubmit(Event* aEvent = nullptr);
 
   /**
    * Prepare the submission object (called by DoSubmit)
@@ -395,7 +385,8 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    *
    * @param aFormSubmission the submission object
    */
-  nsresult SubmitSubmission(HTMLFormSubmission* aFormSubmission);
+  MOZ_CAN_RUN_SCRIPT nsresult
+  SubmitSubmission(HTMLFormSubmission* aFormSubmission);
 
   /**
    * Submit a form[method=dialog]
@@ -409,7 +400,8 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    * @param aCancelSubmit out param where submit observers can specify that the
    *        submit should be cancelled.
    */
-  nsresult DispatchBeforeSubmitChromeOnlyEvent(bool* aCancelSubmit);
+  MOZ_CAN_RUN_SCRIPT nsresult
+  DispatchBeforeSubmitChromeOnlyEvent(bool* aCancelSubmit);
 
   /**
    * If this form submission is secure -> insecure, ask the user if they want
@@ -430,7 +422,8 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    *
    * @return Whether the form is currently valid.
    */
-  bool CheckFormValidity(nsTArray<RefPtr<Element>>* aInvalidElements) const;
+  MOZ_CAN_RUN_SCRIPT bool CheckFormValidity(
+      nsTArray<RefPtr<Element>>* aInvalidElements) const;
 
   // Clear the mImageNameLookupTable and mImageElements.
   void Clear();
@@ -457,7 +450,7 @@ class HTMLFormElement final : public nsGenericHTMLElement {
    * forces the pending submission to be submitted. (happens when the handler
    * returns false or there is an action/target change in the script)
    */
-  void FlushPendingSubmission();
+  MOZ_CAN_RUN_SCRIPT void FlushPendingSubmission();
 
   /**
    * Get the full URL to submit to.  Do not submit if the returned URL is null.

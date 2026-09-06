@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,12 +5,14 @@
 #include "ModuleLoadRequest.h"
 
 #include "mozilla/DebugOnly.h"
-#include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/dom/ScriptLoadContext.h"
+#include "mozilla/HoldDropJSObjects.h"
 
-#include "LoadedScript.h"
 #include "LoadContextBase.h"
+#include "LoadedScript.h"
 #include "ModuleLoaderBase.h"
+
+#include "js/Modules.h"
 
 namespace JS::loader {
 
@@ -70,6 +70,12 @@ nsIGlobalObject* ModuleLoadRequest::GetGlobalObject() {
   return mLoader->GetGlobalObject();
 }
 
+bool ModuleLoadRequest::IsSourcePhaseRequest(JSContext* aCx) const {
+  Rooted<JSObject*> moduleRequest(aCx, mModuleRequestObj);
+  // moduleRequest can be null if ClearImport() has been called.
+  return moduleRequest && JS::ModuleRequestIsSourcePhase(aCx, moduleRequest);
+}
+
 bool ModuleLoadRequest::IsErrored() const {
   return !mModuleScript || mModuleScript->HasParseError();
 }
@@ -97,23 +103,19 @@ void ModuleLoadRequest::ModuleLoaded() {
   MOZ_ASSERT(IsFetching());
 
   mModuleScript = mLoader->GetFetchedModule(ModuleMapKey(URI(), mModuleType));
-}
 
-void ModuleLoadRequest::LoadFailed() {
-  // We failed to load the source text or an error occurred unrelated to the
-  // content of the module (e.g. OOM).
-
-  LOG(("ScriptLoadRequest (%p): Module load failed", this));
-
-  if (IsCanceled()) {
-    return;
+  if (FetchInfo()->IsForModulePreload() != mLoadContext->IsPreload()) {
+    FetchInfo()->SetForModulePreload(mLoadContext->IsPreload());
   }
 
-  MOZ_ASSERT(IsFetching());
-  MOZ_ASSERT(!mModuleScript);
-
-  Cancel();
-  LoadFinished();
+  // A module script fetched during preload can be reused by a normal load whose
+  // top-level request never matched a preload entry, so the preload-promotion
+  // path never clears the module script's preload flag. Clear it here so the
+  // shared module script reflects that it is now part of a normal load.
+  MOZ_ASSERT(mModuleScript);
+  if (!mLoadContext->IsPreload() && mModuleScript->ForPreload()) {
+    mModuleScript->SetForPreload(false);
+  }
 }
 
 void ModuleLoadRequest::ModuleErrored() {
@@ -127,9 +129,14 @@ void ModuleLoadRequest::ModuleErrored() {
 
   MOZ_ASSERT(!IsFinished());
 
+  // Although the “error to rethrow” is only updated during static imports, a
+  // module loaded via a dynamic import may have had its module script
+  // previously fetched by a top-level module load or a static import, which
+  // would have already set the “error to rethrow”. Therefore, if hasRethrow is
+  // true, we do not assert that this request originates from a static import
+  // or a top-level module load.
   mozilla::DebugOnly<bool> hasRethrow =
       mModuleScript && mModuleScript->HasErrorToRethrow();
-  MOZ_ASSERT_IF(hasRethrow, !IsDynamicImport());
 
   // When LoadRequestedModules fails, we will set error to rethrow to the module
   // script or call SetErroredLoadingImports() and then call ModuleErrored().
@@ -151,6 +158,12 @@ void ModuleLoadRequest::LoadFinished() {
   }
 
   mLoader->OnModuleLoadComplete(request);
+}
+
+void ModuleLoadRequest::NotifyModuleWaitFinished() {
+  if (HasScriptLoadContext()) {
+    GetScriptLoadContext()->NotifyModuleWaitFinished();
+  }
 }
 
 void ModuleLoadRequest::SetImport(Handle<JSScript*> aReferrerScript,

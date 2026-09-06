@@ -10,19 +10,12 @@
 // improves readability, particular for conditional blocks that exceed a single
 // screen.
 
-// Caret browsing is disabled on mobile (bug 476009)
-pref("accessibility.browsewithcaret_shortcut.enabled", false);
-
 pref("accessibility.typeaheadfind", false);
 pref("accessibility.typeaheadfind.flashBar", 1);
 pref("accessibility.typeaheadfind.linksonly", false);
 pref("accessibility.typeaheadfind.timeout", 5000);
 
 pref("app.support.baseURL", "https://support.mozilla.org/1/mobile/%VERSION%/%OS%/%LOCALE%/");
-
-#ifdef MOZ_UPDATER
-  pref("app.update.channel", "@MOZ_UPDATE_CHANNEL@");
-#endif
 
 // Prefs used by UpdateTimerManager (including blocklist pings) (bug 783909)
 pref("app.update.timerFirstInterval", 30000); // milliseconds
@@ -111,6 +104,7 @@ pref("browser.meta_refresh_when_inactive.disabled", true);
 // The download protection UI is not implemented yet (bug 1239094).
 pref("browser.safebrowsing.downloads.enabled", false);
 
+pref("browser.safebrowsing.features.harmfuladdon.update", true);
 pref("browser.safebrowsing.features.cryptomining.update", true);
 pref("browser.safebrowsing.features.fingerprinting.update", true);
 pref("browser.safebrowsing.features.malware.update", true);
@@ -233,14 +227,15 @@ pref("extensions.strictCompatibility", false);
 pref("extensions.systemAddon.update.enabled", true);
 pref("extensions.systemAddon.update.url", "https://aus5.mozilla.org/update/3/SystemAddons/%VERSION%/%BUILD_ID%/%BUILD_TARGET%/%LOCALE%/%CHANNEL%/%OS_VERSION%/%DISTRIBUTION%/%DISTRIBUTION_VERSION%/update.xml");
 
-// Enable the EnvironmentAddonBuilder collecting the Glean
-// activeAddons/theme/GMPlugins metrics.
-pref("extensions.telemetry.EnvironmentAddonBuilder", true);
-
 pref("extensions.update.background.url", "https://versioncheck-bg.addons.mozilla.org/update/VersionCheck.php?reqVersion=%REQ_VERSION%&id=%ITEM_ID%&version=%ITEM_VERSION%&maxAppVersion=%ITEM_MAXAPPVERSION%&status=%ITEM_STATUS%&appID=%APP_ID%&appVersion=%APP_VERSION%&appOS=%APP_OS%&appABI=%APP_ABI%&locale=%APP_LOCALE%&currentAppVersion=%CURRENT_APP_VERSION%&updateType=%UPDATE_TYPE%&compatMode=%COMPATIBILITY_MODE%");
 pref("extensions.update.enabled", true);
 pref("extensions.update.interval", 86400);
 pref("extensions.update.url", "https://versioncheck.addons.mozilla.org/update/VersionCheck.php?reqVersion=%REQ_VERSION%&id=%ITEM_ID%&version=%ITEM_VERSION%&maxAppVersion=%ITEM_MAXAPPVERSION%&status=%ITEM_STATUS%&appID=%APP_ID%&appVersion=%APP_VERSION%&appOS=%APP_OS%&appABI=%APP_ABI%&locale=%APP_LOCALE%&currentAppVersion=%CURRENT_APP_VERSION%&updateType=%UPDATE_TYPE%&compatMode=%COMPATIBILITY_MODE%");
+
+// Register the type of the background-video-playback intervention's kill-switch
+// pref (bug 2060611) so Nimbus can toggle it. Defaults to disabled; the
+// intervention is turned on for Nightly via a Nimbus rollout.
+pref("extensions.webcompat.disabled_interventions.2060611", true);
 
 // Enable prompts for browser.permissions.request() (bug 1392176)
 pref("extensions.webextOptionalPermissionPrompts", true);
@@ -259,12 +254,11 @@ pref("formhelper.autozoom", true);
 // Optionally send web console output to logcat (bug 1415318)
 pref("geckoview.console.enabled", false);
 
-#ifdef NIGHTLY_BUILD
-  // Used for mocking data for GeckoView shopping tests, should use in addition with an automation check.
-  pref("geckoview.shopping.mock_test_response", false);
-#endif
-
-pref("image.cache.size", 1048576); // bytes
+// How long (ms) to keep an autocomplete selection prompt open after its field
+// loses focus, so that moving focus between fields of the same form doesn't
+// dismiss and immediately reopen the prompt. Tunable for slower devices.
+// (bug 2040184)
+pref("geckoview.autocomplete.selection_dismiss_delay_ms", 150);
 
 // Inherit locale from the OS, used for multi-locale builds
 pref("intl.locale.requested", "");
@@ -301,16 +295,6 @@ pref("media.eme.require-app-approval", true);
 
 // Enable autoplay permission prompts (bug 1577596)
 pref("media.geckoview.autoplay.request", true);
-
-// Disable future downloads of OpenH264 on Android (bug 1548679)
-pref("media.gmp-gmpopenh264.autoupdate", false);
-
-// Keep OpenH264 if already installed before. (bug 1532578)
-pref("media.gmp-gmpopenh264.enabled", true);
-pref("media.gmp-gmpopenh264.visible", true);
-
-// Enable GMP support in the addon manager (bug 1089867)
-pref("media.gmp-provider.enabled", true);
 
 // Enable Widevine MediaKeySystem (bug 1306219)
 pref("media.mediadrm-widevinecdm.visible", true);
@@ -372,9 +356,6 @@ pref("pdfjs.handleOctetStream", true);
 // Disable tracking protection in PBM for GeckoView (bug 1436887)
 pref("privacy.trackingprotection.pbmode.enabled", false);
 
-// Relay integration is not supported on mobile
-pref("signon.firefoxRelay.feature", "not available");
-
 pref("signon.showAutoCompleteFooter", true);
 
 // Locked because any other value would break GeckoView
@@ -401,3 +382,8 @@ pref("xpinstall.signatures.required", true);
 
 pref("xpinstall.whitelist.add", "https://addons.mozilla.org");
 pref("xpinstall.whitelist.fileRequest", false);
+
+// Pref to enable the IP protection feature
+pref("browser.ipProtection.enabled", true);
+pref("browser.ipProtection.guardian.endpoint", "https://vpn.mozilla.org/");
+pref("toolkit.ipProtection.android.authProvider", "fxa");

@@ -1,5 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,15 +6,15 @@
 #ifndef mozilla_image_decoders_nsAVIFDecoder_h
 #define mozilla_image_decoders_nsAVIFDecoder_h
 
+#include <aom/aom_decoder.h>
+
 #include "Decoder.h"
-#include "mozilla/gfx/Types.h"
 #include "MP4Metadata.h"
-#include "mp4parse.h"
 #include "SampleIterator.h"
 #include "SurfacePipe.h"
-
-#include <aom/aom_decoder.h>
 #include "dav1d/dav1d.h"
+#include "mozilla/gfx/Types.h"
+#include "mp4parse.h"
 
 namespace mozilla {
 namespace image {
@@ -83,8 +82,8 @@ class nsAVIFDecoder final : public Decoder {
   /// Pointer to the next place to read from mBufferedData
   const uint8_t* mReadCursor = nullptr;
 
-  UniquePtr<AVIFParser> mParser = nullptr;
-  UniquePtr<AVIFDecoderInterface> mDecoder = nullptr;
+  UniquePtr<AVIFParser> mParser;
+  UniquePtr<AVIFDecoderInterface> mDecoder;
 
   bool mIsAnimated = false;
   bool mHasAlpha = false;
@@ -119,8 +118,7 @@ struct AVIFImage {
 class AVIFParser {
  public:
   static Mp4parseStatus Create(const Mp4parseIo* aIo, ByteStream* aBuffer,
-                               UniquePtr<AVIFParser>& aParserOut,
-                               bool aAllowSequences, bool aAnimateAVIFMajor);
+                               UniquePtr<AVIFParser>& aParserOut);
 
   ~AVIFParser();
 
@@ -135,8 +133,7 @@ class AVIFParser {
  private:
   explicit AVIFParser(const Mp4parseIo* aIo);
 
-  Mp4parseStatus Init(ByteStream* aBuffer, bool aAllowSequences,
-                      bool aAnimateAVIFMajor);
+  Mp4parseStatus Init(ByteStream* aBuffer);
 
   struct FreeAvifParser {
     void operator()(Mp4parseAvifParser* aPtr) { mp4parse_avif_free(aPtr); }

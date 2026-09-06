@@ -14,6 +14,7 @@ import sys
 here = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(1, os.path.dirname(here))
 
+from mozfile import load_source
 from mozharness.base.log import WARNING
 from mozharness.base.script import BaseScript, PreScriptAction
 from mozharness.mozilla.automation import TBPL_RETRY
@@ -184,7 +185,7 @@ class AndroidEmulatorTest(
     )
 
     def __init__(self, require_config_file=False):
-        super(AndroidEmulatorTest, self).__init__(
+        super().__init__(
             config_options=self.config_options,
             all_actions=[
                 "clobber",
@@ -232,7 +233,7 @@ class AndroidEmulatorTest(
     def query_abs_dirs(self):
         if self.abs_dirs:
             return self.abs_dirs
-        abs_dirs = super(AndroidEmulatorTest, self).query_abs_dirs()
+        abs_dirs = super().query_abs_dirs()
         dirs = {}
         dirs["abs_test_install_dir"] = os.path.join(abs_dirs["abs_work_dir"], "tests")
         dirs["abs_test_bin_dir"] = os.path.join(
@@ -305,7 +306,7 @@ class AndroidEmulatorTest(
             ),
         ]
 
-        raw_log_file, error_summary_file = self.get_indexed_logs(
+        raw_log_file, error_summary_file, test_summary_file = self.get_indexed_logs(
             dirs["abs_blob_upload_dir"], self.test_suite
         )
 
@@ -327,6 +328,7 @@ class AndroidEmulatorTest(
             "log_tbpl_level": self.log_tbpl_level,
             "log_raw_level": self.log_raw_level,
             "error_summary_file": error_summary_file,
+            "test_summary_file": test_summary_file,
             "xpcshell_extra": c.get("xpcshell_extra", ""),
             "gtest_dir": os.path.join(dirs["abs_test_install_dir"], "gtest"),
         }
@@ -401,25 +403,20 @@ class AndroidEmulatorTest(
         if c.get("enable_xorigin_tests"):
             cmd.extend(["--enable-xorigin-tests"])
 
-        try_options, try_tests = self.try_args(self.test_suite)
-        cmd.extend(try_options)
         if not self.verify_enabled and not self.per_test_coverage and not user_paths:
             cmd.extend(
                 self.query_tests_args(
                     self.config["suite_definitions"][self.test_suite].get("tests"),
                     None,
-                    try_tests,
                 )
             )
 
         if self.java_code_coverage_enabled:
-            cmd.extend(
-                [
-                    "--enable-coverage",
-                    "--coverage-output-dir",
-                    self.java_coverage_output_dir,
-                ]
-            )
+            cmd.extend([
+                "--enable-coverage",
+                "--coverage-output-dir",
+                self.java_coverage_output_dir,
+            ])
 
         if self.config.get("restartAfterFailure", False):
             cmd.append("--restartAfterFailure")
@@ -494,9 +491,7 @@ class AndroidEmulatorTest(
         """
         Download and extract product APK, tests.zip, and host utils.
         """
-        super(AndroidEmulatorTest, self).download_and_extract(
-            suite_categories=self._query_suite_categories()
-        )
+        super().download_and_extract(suite_categories=self._query_suite_categories())
         dirs = self.query_abs_dirs()
         self.xre_path = dirs["abs_xre_dir"]
 
@@ -510,9 +505,9 @@ class AndroidEmulatorTest(
         if install_needed is False:
             self.info("Skipping apk installation for %s" % self.test_suite)
             return
-        assert (
-            self.installer_path is not None
-        ), "Either add installer_path to the config or use --installer-path."
+        assert self.installer_path is not None, (
+            "Either add installer_path to the config or use --installer-path."
+        )
         self.install_android_app(self.installer_path)
         self.info("Finished installing apps for %s" % self.device_serial)
 
@@ -576,7 +571,18 @@ class AndroidEmulatorTest(
                     log_obj=self.log_obj,
                     error_list=[],
                 )
+
+                if "reftest" in suite_category:
+                    ref_formatter = load_source(
+                        "ReftestFormatter",
+                        os.path.join(
+                            self.query_abs_dirs()["abs_reftest_dir"], "output.py"
+                        ),
+                    )
+                    parser.formatter = ref_formatter.ReftestFormatter()
+
                 self.run_command(final_cmd, cwd=cwd, env=env, output_parser=parser)
+                self.append_test_summary(self.query_abs_dirs()["abs_blob_upload_dir"])
                 tbpl_status, log_level, summary = parser.evaluate_parser(
                     0, previous_summary=summary
                 )

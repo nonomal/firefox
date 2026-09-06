@@ -6,11 +6,11 @@
  * Module doing most of the content process work for the password manager.
  */
 
-// Disable use-ownerGlobal since LoginForm doesn't have it.
-/* eslint-disable mozilla/use-ownerGlobal */
+// Disable use-documentGlobal since LoginForm doesn't have it.
+/* eslint-disable mozilla/use-documentGlobal */
 
 const PASSWORD_INPUT_ADDED_COALESCING_THRESHOLD_MS = 1;
-// The amount of time a context menu event supresses showing a
+// The amount of time a context menu event suppresses showing a
 // popup from a focus event in ms. This matches the threshold in
 // toolkit/components/satchel/nsFormFillController.cpp
 const AUTOCOMPLETE_AFTER_RIGHT_CLICK_THRESHOLD_MS = 400;
@@ -150,7 +150,7 @@ const observer = {
         this.handleKeydown(aEvent, field, loginManagerChild, ownerDocument);
         break;
 
-      case "focus":
+      case "focusin":
         this.handleFocus(field, docState, aEvent.target);
         break;
 
@@ -534,7 +534,7 @@ export class LoginFormState {
    * field AND whether the username is still filled in with the username AND
    * whether the associated password field has the matching password.
    *
-   * @note This could possibly be unified with getFieldContext but they have
+   * Note: This could possibly be unified with getFieldContext but they have
    * slightly different use cases. getFieldContext looks up recipes whereas this
    * method doesn't need to since it's only returning a boolean based upon the
    * recipes used for the last fill (in _fillForm).
@@ -616,7 +616,7 @@ export class LoginFormState {
     this.generatedPasswordFields.add(passwordField);
 
     // blur/focus: listen for focus changes to we can mask/unmask generated passwords
-    for (let eventType of ["blur", "focus"]) {
+    for (let eventType of ["blur", "focusin"]) {
       passwordField.addEventListener(eventType, observer, {
         capture: true,
         mozSystemGroup: true,
@@ -668,7 +668,7 @@ export class LoginFormState {
     this.generatedPasswordFields.delete(passwordField);
 
     // Remove all the event listeners added in _passwordEditedOrGenerated
-    for (let eventType of ["blur", "focus"]) {
+    for (let eventType of ["blur", "focusin"]) {
       passwordField.removeEventListener(eventType, observer, {
         capture: true,
         mozSystemGroup: true,
@@ -731,7 +731,7 @@ export class LoginFormState {
     let acCredentialType = focusedField.getAutocompleteInfo()?.credentialType;
     if (acCredentialType == "webauthn") {
       const actor =
-        focusedField.ownerGlobal.windowGlobalChild.getActor("LoginManager");
+        focusedField.documentGlobal.windowGlobalChild.getActor("LoginManager");
       actor.markAsAutoCompletableField(focusedField);
     }
 
@@ -2836,7 +2836,7 @@ export class LoginManagerChild extends JSWindowActorChild {
 
       if (
         !userTriggered &&
-        !form.rootElement.ownerGlobal.windowGlobalChild.sameOriginWithTop
+        !form.rootElement.documentGlobal.windowGlobalChild.sameOriginWithTop
       ) {
         lazy.log("Not filling form; it is in a cross-origin subframe.");
         autofillResult = AUTOFILL_RESULT.FORM_IN_CROSSORIGIN_SUBFRAME;
@@ -3113,7 +3113,7 @@ export class LoginManagerChild extends JSWindowActorChild {
 
       if (usernameField) {
         lazy.log("Attaching event listeners to usernameField.");
-        usernameField.addEventListener("focus", observer);
+        usernameField.addEventListener("focusin", observer);
         usernameField.addEventListener("mousedown", observer);
       }
 
@@ -3176,6 +3176,7 @@ export class LoginManagerChild extends JSWindowActorChild {
       searchString,
       forcePasswordGeneration,
       hasBeenTypePassword,
+      inputType: input.type,
       isProbablyANewPasswordField,
       scenarioName,
       inputMaxLength: input.maxLength,

@@ -7,18 +7,20 @@
 #include "AtomType.h"
 #include "Box.h"
 #include "ByteStream.h"
+#include "MediaDataDemuxer.h"
+#include "mozilla/Logging.h"
 #include "mozilla/Try.h"
 
 namespace mozilla {
 
-Sinf::Sinf(Box& aBox) : mDefaultIVSize(0) {
+Sinf::Sinf(const Box& aBox) : mDefaultIVSize(0) {
   SinfParser parser(aBox);
   if (parser.GetSinf().IsValid()) {
     *this = parser.GetSinf();
   }
 }
 
-SinfParser::SinfParser(Box& aBox) {
+SinfParser::SinfParser(const Box& aBox) {
   for (Box box = aBox.FirstChild(); box.IsAvailable(); box = box.Next()) {
     if (box.IsType("schm")) {
       (void)ParseSchm(box);
@@ -28,7 +30,7 @@ SinfParser::SinfParser(Box& aBox) {
   }
 }
 
-Result<Ok, nsresult> SinfParser::ParseSchm(Box& aBox) {
+Result<Ok, nsresult> SinfParser::ParseSchm(const Box& aBox) {
   BoxReader reader(aBox);
 
   if (reader->Remaining() < 8) {
@@ -40,7 +42,7 @@ Result<Ok, nsresult> SinfParser::ParseSchm(Box& aBox) {
   return Ok();
 }
 
-Result<Ok, nsresult> SinfParser::ParseSchi(Box& aBox) {
+Result<Ok, nsresult> SinfParser::ParseSchi(const Box& aBox) {
   for (Box box = aBox.FirstChild(); box.IsAvailable(); box = box.Next()) {
     if (box.IsType("tenc") && ParseTenc(box).isErr()) {
       return Err(NS_ERROR_FAILURE);
@@ -49,7 +51,7 @@ Result<Ok, nsresult> SinfParser::ParseSchi(Box& aBox) {
   return Ok();
 }
 
-Result<Ok, nsresult> SinfParser::ParseTenc(Box& aBox) {
+Result<Ok, nsresult> SinfParser::ParseTenc(const Box& aBox) {
   BoxReader reader(aBox);
 
   if (reader->Remaining() < 24) {
@@ -73,7 +75,14 @@ Result<Ok, nsresult> SinfParser::ParseTenc(Box& aBox) {
   }
 
   uint8_t isEncrypted = MOZ_TRY(reader->ReadU8());
-  mSinf.mDefaultIVSize = MOZ_TRY(reader->ReadU8());
+  uint8_t defaultIVSize = MOZ_TRY(reader->ReadU8());
+  if (defaultIVSize != 0 && defaultIVSize != 8 && defaultIVSize != 16) {
+    MOZ_LOG_FMT(gMediaDemuxerLog, LogLevel::Warning,
+                "SinfParser: unexpected default per-sample IV size {}",
+                static_cast<unsigned>(defaultIVSize));
+    return Err(NS_ERROR_FAILURE);
+  }
+  mSinf.mDefaultIVSize = defaultIVSize;
   memcpy(mSinf.mDefaultKeyID, reader->Read(16), 16);
 
   if (isEncrypted && mSinf.mDefaultIVSize == 0) {

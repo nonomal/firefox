@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -57,7 +56,8 @@ class WebGLChild final : public PWebGLChild, public SupportsWeakPtr {
 
  public:
   mozilla::ipc::IPCResult RecvJsWarning(const std::string&) const;
-  mozilla::ipc::IPCResult RecvOnContextLoss(webgl::ContextLossReason) const;
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY mozilla::ipc::IPCResult RecvOnContextLoss(
+      webgl::ContextLossReason) const;
   mozilla::ipc::IPCResult RecvOnSyncComplete(webgl::ObjectId) const;
 };
 

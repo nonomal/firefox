@@ -1,17 +1,16 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef WindowDbg_h__
-#define WindowDbg_h__
+#ifndef WindowDbg_h_
+#define WindowDbg_h_
 
 /*
  * nsWindowDbg - Debug related utilities for nsWindow.
  */
 
-#include "nsWindowDefs.h"
 #include "mozilla/BaseProfilerMarkersPrerequisites.h"
+#include "nsWindowDefs.h"
 
 // Enables debug output for popup rollup hooks
 // #define POPUP_ROLLUP_DEBUG_OUTPUT
@@ -152,4 +151,4 @@ bool is_vk_down(int vk);
 #  define IS_VK_DOWN(a) (GetKeyState(a) < 0)
 #endif  // defined(DEBUG_VK)
 
-#endif /* WindowDbg_h__ */
+#endif /* WindowDbg_h_ */

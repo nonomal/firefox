@@ -1,16 +1,15 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef _Accessible_H_
-#define _Accessible_H_
+#ifndef Accessible_H_
+#define Accessible_H_
 
-#include "mozilla/a11y/Role.h"
-#include "mozilla/a11y/AccTypes.h"
-#include "nsStringFwd.h"
-#include "nsRect.h"
 #include "Units.h"
+#include "mozilla/a11y/AccTypes.h"
+#include "mozilla/a11y/Role.h"
+#include "nsRect.h"
+#include "nsStringFwd.h"
 
 class nsAtom;
 class nsStaticAtom;
@@ -502,6 +501,11 @@ class Accessible {
    */
   virtual void DOMNodeClass(nsString& aClass) const = 0;
 
+  /**
+   * Return the Heading Level this accessible represents.
+   */
+  virtual int32_t HeadingLevel() const = 0;
+
   //////////////////////////////////////////////////////////////////////////////
   // ActionAccessible
 
@@ -729,6 +733,30 @@ class Accessible {
   }
 
   /**
+   * Returns true if this accessible represents plain content without
+   * interactive or semantic meaning (text, images, generic containers).
+   */
+  bool IsPlainContent() const {
+    switch (Role()) {
+      case roles::TEXT_LEAF:
+      case roles::STATICTEXT:
+      case roles::WHITESPACE:
+      case roles::GRAPHIC:
+      case roles::IMAGE_MAP:
+      case roles::CANVAS:
+      case roles::DIAGRAM:
+      case roles::TEXT:
+      case roles::TEXT_CONTAINER:
+      case roles::SECTION:
+      case roles::NOTHING:
+      case roles::GROUPING:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
    * Return true if the link is valid (e. g. points to a valid URL).
    */
   bool IsLinkValid();
@@ -794,6 +822,20 @@ class Accessible {
    */
   virtual bool HasPrimaryAction() const = 0;
 
+  /**
+   * Return true if this Accessible has custom actions, even if those actions
+   * aren't currently available. Custom actions are secondary actions provided
+   * by the author using associated elements (e.g. via aria-actions), in
+   * contrast to actions provided by Gecko on the element itself (e.g. click).
+   * Custom actions are queried using RelationByType(RelationType::ACTION).
+   * However, there can be cases where there are associated custom actions, but
+   * the target elements are hidden; e.g. because the origin element isn't
+   * focused. The client might need to know there are actions even if it can't
+   * currently query them. For this case, this function will return true, even
+   * though RelationByType will return nothing.
+   */
+  virtual bool HasCustomActions() const = 0;
+
  protected:
   // Some abstracted group utility methods.
 
@@ -845,6 +887,10 @@ class Accessible {
    */
   mozilla::a11y::role ARIATransformRole(mozilla::a11y::role aRole) const;
 
+  AccGenericType GenericTypes() const {
+    return static_cast<AccGenericType>(mGenericTypes);
+  }
+
  private:
   static const uint8_t kTypeBits = 6;
   static const uint8_t kGenericTypesBits = 18;
@@ -863,7 +909,7 @@ class Accessible {
       std::initializer_list<nsStaticAtom*> aRolesToSkip) const;
 
  protected:
-  uint32_t mType : kTypeBits;
+  AccType mType : kTypeBits;
   uint32_t mGenericTypes : kGenericTypesBits;
   uint8_t mRoleMapEntryIndex;
 

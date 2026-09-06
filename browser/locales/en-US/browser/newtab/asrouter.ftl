@@ -180,12 +180,6 @@ mr2022-background-update-toast-primary-button-label = Open { -brand-shorter-name
 # exceeding characters will be truncated.
 mr2022-background-update-toast-secondary-button-label = Remind Me Later
 
-## Cookie Banner Handling CFR
-
-cookie-banner-blocker-onboarding-header = { -brand-short-name } just refused a cookie banner for you
-cookie-banner-blocker-onboarding-body = Less distractions, less cookies tracking you on this site.
-cookie-banner-blocker-onboarding-learn-more = Learn more
-
 ## These strings are used in the Fox doodle Pin/set default spotlights
 
 july-jam-headline = We’ve got you covered
@@ -216,10 +210,8 @@ annotations-default-pdf-handler-headline = Sign on the dotted line — or anywhe
 annotations-default-pdf-handler-body = Draw, type, or upload your signature, then place it exactly where you want. Save your go-to signatures for next time.
 annotations-make-default-pdf-handler-title = Make { -brand-short-name } your default PDF editor?
 annotations-make-default-pdf-handler-subtitle = You’ll have access to our tools every time you open a PDF.
-annotations-make-default-pdf-primary-cta =
-  .label = Set as default
-annotations-make-default-pdf-next =
-  .label = Next
+annotations-make-default-pdf-primary-cta-label = Set as default
+annotations-make-default-pdf-next-label = Next
 
 ## FxA sync CFR
 
@@ -257,21 +249,19 @@ pdf-default-notification-set-default-button =
 pdf-default-notification-decline-button =
     .label = Not now
 
-## Launch on login infobar notification
+## Launch on login "show and tell" infobar notification
+##
+## Shown after Firefox has automatically launched at Windows sign-in (an
+## experiment enabled launch-on-login for the user), informing them that this
+## happened and letting them keep it on or turn it off.
 
-launch-on-login-infobar-message = <strong>Open { -brand-short-name } every time you restart your computer?</strong> Now you can set { -brand-short-name } to open automatically when you restart your device.
-launch-on-login-learnmore = Learn more
-launch-on-login-infobar-confirm-button = Yes, open { -brand-short-name }
-  .accesskey = Y
-launch-on-login-infobar-reject-button = Not now
-  .accesskey = N
-
-## These string variants are used when the “launch on login” infobar
-## notification is displayed for a second time.
-
-launch-on-login-infobar-final-message = <strong>Open { -brand-short-name } every time you restart your computer?</strong> To manage your Startup preferences, search “startup” in settings.
-launch-on-login-infobar-final-reject-button = No thanks
-  .accesskey = N
+# "settings" refers to the Firefox settings (about:preferences), where
+# launch-on-login can be toggled, not the Windows system settings.
+launch-on-login-autostart-infobar-message = { -brand-short-name } now starts up when you sign in to Windows. You can always change this later in settings.
+launch-on-login-autostart-infobar-keep-button = Keep on
+  .accesskey = K
+launch-on-login-autostart-infobar-turn-off-button = Turn off
+  .accesskey = T
 
 ## Tail Fox Set Default Spotlight
 
@@ -283,6 +273,12 @@ tail-fox-spotlight-title = Keep pesky trackers off your tail
 tail-fox-spotlight-subtitle = Say goodbye to annoying ad trackers and settle into a safer, speedy internet experience.
 tail-fox-spotlight-primary-button = Open my links with { -brand-short-name }
 tail-fox-spotlight-secondary-button = Not now
+
+## Welcome Back Spotlight and Import
+
+welcome-back-spotlight-title = Leap back into built-in privacy
+welcome-back-spotlight-subtitle = Welcome back to the only major browser backed by a non-profit. We take extra steps to protect your data wherever you roam.
+welcome-back-embedded-import-title = Import your data and make { -brand-short-name } feel like home
 
 ## Root Certificate Succession Infobar
 
@@ -396,6 +392,14 @@ windows-10-eos-feature-toast-subtitle = By popular request, { -brand-product-nam
 windows-10-eos-feature-toast-whats-new-button = See what’s new
 windows-10-eos-feature-toast-dismiss-button = Dismiss
 
+## Windows 10 EoS Global Infobar
+
+windows-10-eos-global-infobar-title = <strong>Microsoft is no longer supporting Windows 10.</strong> Back up your info to get { -brand-product-name } ready for Windows 11.
+windows-10-eos-global-infobar-primary-button = Turn on backup
+  .accesskey = T
+windows-10-eos-global-infobar-learn-more-link = Learn more
+  .accessKey = L
+
 ## ETP (Enhanced Tracking Protection) Strict exceptions infobar
 ##
 ## These strings are displayed in an infobar notification that appears when
@@ -409,3 +413,87 @@ etp-strict-exceptions-infobar-button = Apply fixes
   .accesskey = A
 etp-strict-exceptions-infobar-not-now = Not now
   .accesskey = N
+
+## 'Set to default' messaging displayed within the App menu
+
+set-default-menu-message-simple-layout-title = { -brand-short-name } is not your default browser
+set-default-menu-message-simple-layout-title-variant = { -brand-short-name } is not your primary browser
+
+set-default-menu-message-row-layout-title = Make { -brand-short-name } your primary browser
+set-default-menu-message-row-layout-title-variant = Make { -brand-short-name } your default browser
+
+set-default-menu-message-row-layout-subtitle = Get speed, safety and privacy every time you browse.
+set-default-menu-message-row-layout-subtitle-variant = { PLATFORM() ->
+    [macos] Keep { -brand-short-name } at your fingertips — make it your default and keep it in your Dock.
+   *[other] Keep { -brand-short-name } at your fingertips — make it your default and keep it in your taskbar.
+}
+
+set-default-menu-message-split-layout-title = { PLATFORM() ->
+    [macos] Keep { -brand-short-name } at your fingertips
+   *[other] Open all links with { -brand-short-name }
+}
+
+set-default-menu-message-split-layout-subtitle = { PLATFORM() ->
+    [macos] Make it your default and keep it in your Dock.
+   *[other] Get faster browsing and automatic privacy protection.
+}
+
+set-default-menu-message-primary-button = Set as default
+set-default-menu-message-primary-button-variant = Set as primary browser
+set-default-menu-message-primary-button-short-variant = Make { -brand-short-name } default
+
+## Firefox Relay 50 Masks Announcement
+
+# "on us" in this context means "for free" or "at no cost"
+relay-50-masks-announcement-title = 50 email masks, on us
+relay-50-masks-announcement-subtitle = Now you get 50 free masks (up from 5). Use one for every account to keep your real email private.
+relay-50-masks-announcement-primary-button = Go to { -relay-brand-name }
+  .accesskey = G
+relay-50-masks-announcement-secondary-button = Dismiss
+  .accesskey = D
+
+## Nova Early Access Infobar
+
+nova-early-access-infobar-title = <strong>{ -brand-product-name } is getting a new look.</strong> You’re previewing an early, unpolished version before the launch later this year.
+
+nova-early-access-share-feedback-link = Share feedback
+  .accesskey = S
+
+nova-early-access-infobar-primary-button = Got it
+  .accesskey = G
+
+## Firefox launch options spotlight
+##
+## Shown as a spotlight prompt on browser close or launch, offering
+## launch-on-login, taskbar pinning, and session restore.
+
+launch-options-spotlight-title-launch-on-login = Start { -brand-short-name } every time you sign in to Windows?
+launch-options-spotlight-title-session-restore = Reopen your session when { -brand-short-name } restarts?
+launch-options-spotlight-checkbox-launch-on-login = Open { -brand-short-name } at startup
+launch-options-spotlight-checkbox-pin-to-taskbar = Pin to your taskbar
+# Shown on the browser-close prompt only
+launch-options-spotlight-checkbox-restore-current = Reopen current windows and tabs
+# Shown on the browser-launch prompt only
+launch-options-spotlight-checkbox-restore-previous = Reopen previous windows and tabs
+# Primary button on the browser-close prompt
+launch-options-spotlight-primary-button-close = Save and close { -brand-short-name }
+# Primary button on the browser-launch prompt
+launch-options-spotlight-primary-button-launch = Save and continue
+
+## Lapsed-user Windows toast notification for the Nova Fall 2026 campaign
+##
+## These strings will be displayed by the Windows operating system in a
+## native toast shown by the background task to users who have Firefox
+## installed but haven't opened it recently. The message itself is hosted
+## off-train on Remote Settings via Nimbus; the strings are landed here so
+## localization can begin.
+##
+## The button labels are fitted into narrow fixed-width buttons by
+## Windows and therefore must be as narrow as possible.
+
+# "has your back" is an idiom meaning support and protection; adapt freely
+# rather than translating literally.
+lapsed-user-toast-title = { -brand-product-name } still has your back
+lapsed-user-toast-subtitle = Check out new ways you can browse with more choice, privacy, and control.
+lapsed-user-toast-whats-new-button = See what’s new
+lapsed-user-toast-dismiss-button = Dismiss

@@ -5,14 +5,13 @@
 package org.mozilla.fenix.termsofuse.store
 
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 import org.mozilla.fenix.GleanMetrics.TermsOfUse
 import org.mozilla.fenix.termsofuse.TOU_VERSION
 
-internal class TermsOfUsePromptTelemetryMiddleware :
-    Middleware<TermsOfUsePromptState, TermsOfUsePromptAction> {
+internal class TermsOfUsePromptTelemetryMiddleware : Middleware<TermsOfUsePromptState, TermsOfUsePromptAction> {
     override fun invoke(
-        context: MiddlewareContext<TermsOfUsePromptState, TermsOfUsePromptAction>,
+        store: Store<TermsOfUsePromptState, TermsOfUsePromptAction>,
         next: (TermsOfUsePromptAction) -> Unit,
         action: TermsOfUsePromptAction,
     ) {
@@ -24,7 +23,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.AcceptedExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
                 TermsOfUse.version.set(TOU_VERSION.toLong())
                 TermsOfUse.date.set()
@@ -37,7 +36,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.RemindMeLaterClickExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
             }
 
@@ -48,7 +47,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.DismissExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
             }
 
@@ -59,7 +58,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.ImpressionExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
             }
 
@@ -68,7 +67,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.LearnMoreClickExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
 
             is TermsOfUsePromptAction.OnPrivacyNoticeClicked ->
@@ -76,7 +75,7 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.PrivacyNoticeClickExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
 
             is TermsOfUsePromptAction.OnTermsOfUseClicked ->
@@ -84,10 +83,11 @@ internal class TermsOfUsePromptTelemetryMiddleware :
                     TermsOfUse.TermsOfUseClickExtra(
                         surface = action.surface.metricLabel,
                         touVersion = TOU_VERSION,
-                    ),
+                    )
                 )
 
             // no-ops
+            is TermsOfUsePromptAction.OnPromptCreated,
             is TermsOfUsePromptAction.OnPromptDismissed -> {}
         }
     }

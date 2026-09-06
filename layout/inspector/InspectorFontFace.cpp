@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -225,7 +223,7 @@ void InspectorFontFace::GetVariationAxes(
     aRV.Throw(NS_ERROR_OUT_OF_MEMORY);
     return;
   }
-  for (auto a : axes) {
+  for (const auto& a : axes) {
     InspectorVariationAxis& axis = *aResult.AppendElement();
     AppendTagAsASCII(axis.mTag, a.mTag);
     axis.mName.Append(NS_ConvertUTF8toUTF16(a.mName));
@@ -259,7 +257,7 @@ void InspectorFontFace::GetVariationInstances(
     }
     for (const auto& v : i.mValues) {
       InspectorVariationValue value;
-      AppendTagAsASCII(value.mAxis, v.mAxis);
+      AppendTagAsASCII(value.mAxis, v.mTag);
       value.mValue = v.mValue;
       // This won't fail, because of SetCapacity above.
       (void)inst.mValues.AppendElement(value, mozilla::fallible);

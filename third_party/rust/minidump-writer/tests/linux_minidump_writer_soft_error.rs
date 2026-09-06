@@ -3,7 +3,7 @@
 use {
     common::*,
     minidump::Minidump,
-    minidump_writer::{minidump_writer::MinidumpWriter, FailSpotName},
+    minidump_writer::{FailSpotName, minidump_writer::MinidumpWriterConfig},
     serde_json::json,
 };
 
@@ -23,8 +23,8 @@ fn soft_error_stream() {
     fail_client.set_enabled(FailSpotName::StopProcess, true);
 
     // Write a minidump
-    MinidumpWriter::new(pid, pid)
-        .dump(&mut tmpfile)
+    MinidumpWriterConfig::new(pid, pid)
+        .write(&mut tmpfile)
         .expect("cound not write minidump");
     child.kill().expect("Failed to kill process");
     child.wait().expect("Failed to wait on killed process");
@@ -38,24 +38,35 @@ fn soft_error_stream() {
 fn soft_error_stream_content() {
     let expected_errors = vec![
         json!({"InitErrors": [
-            {"StopProcessFailed": {"Stop": "EPERM"}},
+            {"StopProcessFailed":
+                {"Stop":
+                    {"Local":
+                        {"SigStopFailed": 1}
+                    }
+                }
+            },
             {"FillMissingAuxvInfoErrors": ["InvalidFormat"]},
             {"EnumerateThreadsErrors": [
                 {"ReadThreadNameFailed": "\
                     Custom {\n    \
                         kind: Other,\n    \
-                        error: \"testing requested failure reading thread name\",\n\
+                        error: Local(\n        \
+                            OpenFileFailed(\n            \
+                                1,\n        \
+                            ),\n    \
+                        ),\n\
                     }"
                 }
-            ]}
+            ]},
+            {"SuspendThreadsErrors": [{"PtraceAttachError": [1234, libc::EPERM]}]}
         ]}),
-        json!({"SuspendThreadsErrors": [{"PtraceAttachError": [1234, "EPERM"]}]}),
         json!({"WriteSystemInfoErrors": [
-            {"WriteCpuInformationFailed": {"IOError": "\
-                Custom {\n    \
-                    kind: Other,\n    \
-                    error: \"test requested cpuinfo file failure\",\n\
-                }"
+            {"WriteCpuInformationFailed": {
+                "ReadFileError": {
+                    "Local": {
+                        "OpenFileFailed": 1
+                    }
+                }
             }}
         ]}),
     ];
@@ -80,8 +91,8 @@ fn soft_error_stream_content() {
     }
 
     // Write a minidump
-    MinidumpWriter::new(pid, pid)
-        .dump(&mut tmpfile)
+    MinidumpWriterConfig::new(pid, pid)
+        .write(&mut tmpfile)
         .expect("cound not write minidump");
     child.kill().expect("Failed to kill process");
     child.wait().expect("Failed to wait on killed process");

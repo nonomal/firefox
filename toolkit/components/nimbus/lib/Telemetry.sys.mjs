@@ -2,9 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const lazy = {};
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
+  FirstStartup: "resource://gre/modules/FirstStartup.sys.mjs",
   TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
 });
 
@@ -32,6 +33,7 @@ const EnrollmentStatusReason = Object.freeze({
   PREF_FLIPS_CONFLICT: "PrefFlipsConflict",
   ERROR: "Error",
   UNENROLLED_IN_ANOTHER_PROFILE: "UnenrolledInAnotherProfile",
+  MIGRATION: "Migration",
 });
 
 const EnrollmentFailureReason = Object.freeze({
@@ -53,6 +55,7 @@ const RemoteSettingsSyncErrorReason = Object.freeze({
   LAST_MODIFIED_EXCEPTION: "last-modified-exception",
   NOT_YET_SYNCED: "not-yet-synced",
   NULL_LAST_MODIFIED: "null-last-modified",
+  MISSING_SIGNATURE: "missing-signature",
 });
 
 /**
@@ -84,12 +87,14 @@ const UnenrollReason = Object.freeze({
   INDIVIDUAL_OPT_OUT: "individual-opt-out",
   LABS_DIABLED: "labs-disabled",
   LABS_OPT_OUT: "labs-opt-out",
+  MIGRATION: "migration",
   PREF_FLIPS_CONFLICT: "prefFlips-conflict",
   PREF_FLIPS_FAILED: "prefFlips-failed",
   PREF_VARIABLE_CHANGED: "pref-variable-changed",
   PREF_VARIABLE_MISSING: "pref-variable-missing",
   PREF_VARIABLE_NO_LONGER: "pref-variable-no-longer",
   RECIPE_NOT_SEEN: "recipe-not-seen",
+  ROLLOUTS_OPT_OUT: "rollouts-opt-out",
   STUDIES_OPT_OUT: "studies-opt-out",
   TARGETING_MISMATCH: "targeting-mismatch",
   UNENROLLED_IN_ANOTHER_PROFILE: "unenrolled-in-another-profile",
@@ -160,7 +165,16 @@ export const NimbusTelemetry = {
     branch,
     error_string,
     conflict_slug,
+    migration,
   }) {
+    // Do not record unsupported feature telemetry.
+    if (
+      reason === EnrollmentStatusReason.ERROR &&
+      error_string === ValidationFailureReason.UNSUPPORTED_FEATURES
+    ) {
+      return;
+    }
+
     Glean.nimbusEvents.enrollmentStatus.record({
       slug,
       status,
@@ -168,6 +182,7 @@ export const NimbusTelemetry = {
       branch,
       error_string,
       conflict_slug,
+      migration,
     });
   },
 
@@ -184,14 +199,24 @@ export const NimbusTelemetry = {
     });
   },
 
-  recordMigration(migration, error) {
+  /**
+   * Record the result of a migration.
+   *
+   * @param {string} migration The name of the migration.
+   * @param {number} duration The duration of the migration.
+   * @param {string | undefined} The reason the migration failed, if any.
+   */
+  recordMigration(migration, duration, errorReason) {
     Glean.nimbusEvents.migration.record(
       Object.assign(
         {
           migration_id: migration,
-          success: typeof error === "undefined",
+          success: typeof errorReason === "undefined",
+          duration,
+          is_first_startup:
+            lazy.FirstStartup.state === lazy.FirstStartup.IN_PROGRESS,
         },
-        typeof error !== "undefined" ? { error_reason: error } : {}
+        typeof errorReason !== "undefined" ? { error_reason: errorReason } : {}
       )
     );
   },
@@ -265,6 +290,10 @@ export const NimbusTelemetry = {
       case UnenrollReason.L10N_MISSING_LOCALE:
         gleanEvent.locale = cause.locale;
         break;
+
+      case UnenrollReason.MIGRATION:
+        gleanEvent.migration = cause.migration;
+        break;
     }
 
     Glean.normandy.unenrollNimbusExperiment.record(legacyEvent);
@@ -292,6 +321,7 @@ export const NimbusTelemetry = {
 
       case UnenrollReason.INDIVIDUAL_OPT_OUT:
       case UnenrollReason.LABS_OPT_OUT:
+      case UnenrollReason.ROLLOUTS_OPT_OUT:
       case UnenrollReason.STUDIES_OPT_OUT:
         enrollmentStatus.status = EnrollmentStatus.DISQUALIFIED;
         enrollmentStatus.reason = EnrollmentStatusReason.OPT_OUT;
@@ -317,6 +347,12 @@ export const NimbusTelemetry = {
         enrollmentStatus.status = EnrollmentStatus.DISQUALIFIED;
         enrollmentStatus.reason =
           EnrollmentStatusReason.UNENROLLED_IN_ANOTHER_PROFILE;
+        break;
+
+      case UnenrollReason.MIGRATION:
+        enrollmentStatus.status = EnrollmentStatus.WAS_ENROLLED;
+        enrollmentStatus.reason = EnrollmentStatusReason.MIGRATION;
+        enrollmentStatus.migration = cause.migration;
         break;
 
       default:

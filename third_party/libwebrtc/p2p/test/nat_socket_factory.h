@@ -16,8 +16,9 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 
-#include "api/array_view.h"
+#include "api/environment/environment.h"
 #include "api/units/time_delta.h"
 #include "p2p/test/nat_server.h"
 #include "p2p/test/nat_types.h"
@@ -102,7 +103,8 @@ class NATSocketServer : public SocketServer, public NATInternalSocketFactory {
   // a specific NAT
   class Translator {
    public:
-    Translator(NATSocketServer* server,
+    Translator(const Environment& env,
+               NATSocketServer* server,
                NATType type,
                const SocketAddress& int_addr,
                Thread& external_socket_thread,
@@ -119,7 +121,8 @@ class NATSocketServer : public SocketServer, public NATInternalSocketFactory {
     }
 
     Translator* GetTranslator(const SocketAddress& ext_ip);
-    Translator* AddTranslator(const SocketAddress& ext_ip,
+    Translator* AddTranslator(const Environment& env,
+                              const SocketAddress& ext_ip,
                               const SocketAddress& int_ip,
                               NATType type);
     void RemoveTranslator(const SocketAddress& ext_ip);
@@ -147,7 +150,8 @@ class NATSocketServer : public SocketServer, public NATInternalSocketFactory {
   Thread* queue() { return msg_queue_; }
 
   Translator* GetTranslator(const SocketAddress& ext_ip);
-  Translator* AddTranslator(const SocketAddress& ext_ip,
+  Translator* AddTranslator(const Environment& env,
+                            const SocketAddress& ext_ip,
                             const SocketAddress& int_ip,
                             NATType type);
   void RemoveTranslator(const SocketAddress& ext_ip);
@@ -173,7 +177,7 @@ class NATSocketServer : public SocketServer, public NATInternalSocketFactory {
 
 // Free-standing NAT helper functions.
 void PackAddressForNAT(const SocketAddress& remote_addr, Buffer& buf);
-size_t UnpackAddressFromNAT(ArrayView<const uint8_t> buf,
+size_t UnpackAddressFromNAT(std::span<const uint8_t> buf,
                             SocketAddress* remote_addr);
 }  //  namespace webrtc
 

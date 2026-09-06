@@ -1,5 +1,3 @@
-/* -*- Mode: indent-tabs-mode: nil; js-indent-level: 2 -*- */
-/* vim: set sts=2 sw=2 et tw=80: */
 "use strict";
 
 /**
@@ -1361,8 +1359,6 @@ add_task(async function test_contentscript_csp() {
  * content page.
  */
 add_task(async function test_extension_contentscript_csp() {
-  Services.prefs.setBoolPref("extensions.manifestV3.enabled", true);
-
   gContentSecurityPolicy = `default-src 'none' 'report-sample'; script-src 'nonce-deadbeef' 'unsafe-eval' 'report-sample'; report-uri ${CSP_REPORT_PATH};`;
 
   let data = {
@@ -1396,5 +1392,4 @@ add_task(async function test_extension_contentscript_csp() {
 
   await extension.unload();
   await contentPage.close();
-  Services.prefs.clearUserPref("extensions.manifestV3.enabled");
 });

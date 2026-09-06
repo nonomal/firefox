@@ -5,11 +5,12 @@
 //! Code related to the invalidation of media-query-affected rules.
 
 use crate::context::QuirksMode;
-use crate::media_queries::Device;
+use crate::derives::*;
+use crate::device::Device;
 use crate::shared_lock::SharedRwLockReadGuard;
 use crate::stylesheets::{CustomMediaMap, DocumentRule, ImportRule, MediaRule};
 use crate::stylesheets::{NestedRuleIterationCondition, StylesheetContents, SupportsRule};
-use rustc_hash::FxHashSet;
+use crate::FxHashSet;
 
 /// A key for a given media query result.
 ///
@@ -53,6 +54,12 @@ impl ToMediaListKey for MediaRule {}
 pub struct EffectiveMediaQueryResults {
     /// The set of media lists that matched last time.
     set: FxHashSet<MediaListKey>,
+}
+
+impl Default for EffectiveMediaQueryResults {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EffectiveMediaQueryResults {

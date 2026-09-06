@@ -10,9 +10,10 @@
 
 #include "api/video/video_frame_buffer.h"
 
+#include <cstddef>
+#include <span>
 #include <string>
 
-#include "api/array_view.h"
 #include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/i422_buffer.h"
@@ -34,6 +35,16 @@ scoped_refptr<VideoFrameBuffer> VideoFrameBuffer::CropAndScale(
   result->CropAndScaleFrom(*this->ToI420(), offset_x, offset_y, crop_width,
                            crop_height);
   return result;
+}
+
+void VideoFrameBuffer::PrepareMappedBufferAsync(
+    size_t width,
+    size_t height,
+    scoped_refptr<PreparedFrameHandler> handler,
+    size_t frame_identifier) {
+  // Default implementation can't do any preparations,
+  // so it just invokes the callback immediately.
+  handler->OnFramePrepared(frame_identifier);
 }
 
 const I420BufferInterface* VideoFrameBuffer::GetI420() const {
@@ -78,7 +89,7 @@ const NV12BufferInterface* VideoFrameBuffer::GetNV12() const {
 }
 
 scoped_refptr<VideoFrameBuffer> VideoFrameBuffer::GetMappedFrameBuffer(
-    ArrayView<Type> /* types */) {
+    std::span<Type> /* types */) {
   RTC_CHECK(type() == Type::kNative);
   return nullptr;
 }

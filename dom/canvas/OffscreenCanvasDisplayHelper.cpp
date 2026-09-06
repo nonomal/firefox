@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -98,13 +96,13 @@ bool OffscreenCanvasDisplayHelper::CanElementCaptureStream() const {
 }
 
 bool OffscreenCanvasDisplayHelper::UsingElementCaptureStream() const {
-  MutexAutoLock lock(mMutex);
-
-  if (NS_WARN_IF(!NS_IsMainThread())) {
-    MOZ_ASSERT_UNREACHABLE("Should not call off main-thread!");
-    return !!mCanvasElement;
+  // We know that if it has already been transferred to a DOM worker, then it
+  // must not be using captureStream.
+  if (!NS_IsMainThread()) {
+    return false;
   }
 
+  MutexAutoLock lock(mMutex);
   return mCanvasElement && mCanvasElement->UsingCaptureStream();
 }
 
@@ -122,18 +120,20 @@ RefPtr<layers::ImageContainer> OffscreenCanvasDisplayHelper::GetImageContainer()
 void OffscreenCanvasDisplayHelper::UpdateContext(
     OffscreenCanvas* aOffscreenCanvas, RefPtr<ThreadSafeWorkerRef>&& aWorkerRef,
     CanvasContextType aType, const Maybe<mozilla::ipc::ActorId>& aChildId) {
-  RefPtr<layers::ImageContainer> imageContainer =
-      MakeRefPtr<layers::ImageContainer>(
-          layers::ImageUsageType::OffscreenCanvas,
-          layers::ImageContainer::ASYNCHRONOUS);
-
   MutexAutoLock lock(mMutex);
+
+  // Only create ImageContainer if we don't already have one (Bug 2004797).
+  // Recreating it would discard any existing frames, causing flicker.
+  if (!mImageContainer) {
+    mImageContainer = MakeRefPtr<layers::ImageContainer>(
+        layers::ImageUsageType::OffscreenCanvas,
+        layers::ImageContainer::ASYNCHRONOUS);
+  }
 
   mOffscreenCanvas = aOffscreenCanvas;
   mWorkerRef = std::move(aWorkerRef);
   mType = aType;
   mContextChildId = aChildId;
-  mImageContainer = std::move(imageContainer);
 
   if (aChildId) {
     mContextManagerId = Some(gfx::CanvasManagerChild::Get()->Id());
@@ -302,6 +302,10 @@ bool OffscreenCanvasDisplayHelper::CommitFrameToCompositor(
     if (paintCallbacks) {
       aContext->OnDidPaintTransaction();
     }
+  }
+
+  if (!mCanvasElement || !mImageContainer) {
+    return false;
   }
 
   // We save any current surface because we might need it in GetSnapshot. If we
@@ -570,6 +574,38 @@ already_AddRefed<layers::Image> OffscreenCanvasDisplayHelper::GetAsImage() {
   return MakeAndAddRef<layers::SourceSurfaceImage>(surface);
 }
 
+void OffscreenCanvasDisplayHelper::MaybeRandomizePixels(
+    CanvasUtils::ImageExtraction aExtractionBehavior, uint8_t* aData,
+    gfx::IntSize aSize) {
+  nsIPrincipal* principal = nullptr;
+  nsICookieJarSettings* cookieJarSettings = nullptr;
+  {
+    MutexAutoLock lock(mMutex);
+    if (mCanvasElement) {
+      principal = mCanvasElement->NodePrincipal();
+      cookieJarSettings = mCanvasElement->OwnerDoc()->CookieJarSettings();
+    } else if (mOffscreenCanvas) {
+      principal = mOffscreenCanvas->GetParentObject()
+                      ? mOffscreenCanvas->GetParentObject()->PrincipalOrNull()
+                      : nullptr;
+      cookieJarSettings =
+          mOffscreenCanvas->GetParentObject()
+              ? mOffscreenCanvas->GetParentObject()->GetCookieJarSettings()
+              : nullptr;
+    }
+  }
+
+  nsRFPService::PotentiallyDumpImage(principal, aData, aSize.width,
+                                     aSize.height,
+                                     aSize.width * aSize.height * 4);
+
+  if (aExtractionBehavior == CanvasUtils::ImageExtraction::Randomize) {
+    nsRFPService::RandomizePixels(
+        cookieJarSettings, principal, aData, aSize.width, aSize.height,
+        aSize.width * aSize.height * 4, gfx::SurfaceFormat::A8R8G8B8_UINT32);
+  }
+}
+
 UniquePtr<uint8_t[]> OffscreenCanvasDisplayHelper::GetImageBuffer(
     CanvasUtils::ImageExtraction aExtractionBehavior, int32_t* aOutFormat,
     gfx::IntSize* aOutImageSize) {
@@ -591,27 +627,8 @@ UniquePtr<uint8_t[]> OffscreenCanvasDisplayHelper::GetImageBuffer(
     return nullptr;
   }
 
-  if (aExtractionBehavior == CanvasUtils::ImageExtraction::Randomize) {
-    nsIPrincipal* principal = nullptr;
-    nsICookieJarSettings* cookieJarSettings = nullptr;
-    {
-      // This function is never called with mOffscreenCanvas set, so we skip
-      // the check for it.
-      MutexAutoLock lock(mMutex);
-      MOZ_ASSERT(!mOffscreenCanvas);
-
-      if (mCanvasElement) {
-        principal = mCanvasElement->NodePrincipal();
-        cookieJarSettings = mCanvasElement->OwnerDoc()->CookieJarSettings();
-      }
-    }
-
-    nsRFPService::RandomizePixels(
-        cookieJarSettings, principal, imageBuffer.get(),
-        dataSurface->GetSize().width, dataSurface->GetSize().height,
-        dataSurface->GetSize().width * dataSurface->GetSize().height * 4,
-        gfx::SurfaceFormat::A8R8G8B8_UINT32);
-  }
+  MaybeRandomizePixels(aExtractionBehavior, imageBuffer.get(),
+                       dataSurface->GetSize());
 
   return imageBuffer;
 }

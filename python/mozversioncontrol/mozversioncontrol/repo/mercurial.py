@@ -10,7 +10,7 @@ import subprocess
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from mozpack.files import FileListFinder
 
@@ -18,7 +18,7 @@ from mozversioncontrol.errors import (
     CannotDeleteFromRootOfRepositoryException,
     MissingVCSExtension,
 )
-from mozversioncontrol.repo.base import Repository
+from mozversioncontrol.repo.base import HG_TRY_URL, Repository
 
 
 class HgRepository(Repository):
@@ -27,7 +27,7 @@ class HgRepository(Repository):
     def __init__(self, path: Path, hg="hg"):
         import hglib.client
 
-        super(HgRepository, self).__init__(path, tool=hg)
+        super().__init__(path, tool=hg)
         self._env["HGPLAIN"] = "1"
 
         # Setting this modifies a global variable and makes all future hglib
@@ -48,6 +48,10 @@ class HgRepository(Repository):
 
     @property
     def head_ref(self):
+        return self.branch or self.head_rev
+
+    @property
+    def head_rev(self):
         return self._run("log", "-r", ".", "-T", "{node}")
 
     def is_cinnabar_repo(self) -> bool:
@@ -90,8 +94,8 @@ class HgRepository(Repository):
         self._client.close()
 
     def _run(self, *args, **runargs):
-        if not self._client.server:
-            return super(HgRepository, self)._run(*args, **runargs)
+        if not self._client.server or runargs.get("env"):
+            return super()._run(*args, **runargs)
 
         # hglib requires bytes on python 3
         args = [a.encode("utf-8") if not isinstance(a, bytes) else a for a in args]
@@ -147,6 +151,14 @@ class HgRepository(Repository):
             return None
         return match.group(1)
 
+    def get_remote_url(self, remote=None, push=False):
+        remote = remote or "default"
+        if push:
+            remote = f"{remote}-push"
+
+        url = self._run("paths", remote, return_codes=[0, 1], stderr=subprocess.DEVNULL)
+        return url.strip() if url else None
+
     def _format_diff_filter(self, diff_filter, for_status=False):
         df = diff_filter.lower()
         assert all(f in self._valid_diff_filter for f in df)
@@ -201,12 +213,12 @@ class HgRepository(Repository):
 
         paths = [str(path) for path in paths]
 
-        args = ["addremove"] + paths
+        args = ["addremove"]
         m = re.search(r"\d+\.\d+", self.tool_version)
         simplified_version = float(m.group(0)) if m else 0
         if simplified_version >= 3.9:
             args = ["--config", "extensions.automv="] + args
-        self._run(*args)
+        self._run_batched(*args, paths=paths)
 
     def forget_add_remove_files(self, *paths: Union[str, Path]):
         if not paths:
@@ -214,7 +226,7 @@ class HgRepository(Repository):
 
         paths = [str(path) for path in paths]
 
-        self._run("forget", *paths)
+        self._run_batched("forget", paths=paths)
 
     def get_tracked_files_finder(self, path=None):
         # Can return backslashes on Windows. Normalize to forward slashes.
@@ -276,17 +288,46 @@ class HgRepository(Repository):
         except subprocess.CalledProcessError:
             raise MissingVCSExtension(extension)
 
-    def push_to_try(
+    def push(
+        self,
+        remote: Optional[str] = None,
+        ref: Optional[str] = None,
+        dest_branch: Optional[str] = None,
+        force: bool = False,
+        env: Optional[dict] = None,
+    ):
+        if ref and not remote:
+            raise ValueError("Cannot specify ref without specifying remote")
+
+        args = ["push"]
+        if force:
+            args.append("--force")
+        if remote:
+            args.append(remote)
+        if ref:
+            args.extend(["-r", ref])
+
+        kwargs = {"env": env} if env else {}
+        self._run(*args, **kwargs)
+
+    def _resolve_try_branch(self):
+        return self.branch
+
+    def _push_to_git_try(self, *args, **kwargs):
+        raise ValueError("Unable to push to Git from a Mercurial repo")
+
+    def _push_to_hg_try(
         self,
         message: str,
         changed_files: dict[str, str] = {},
+        remote: str = HG_TRY_URL,
         allow_log_capture: bool = False,
     ):
         if changed_files:
             self.stage_changes(changed_files)
 
         try:
-            cmd = (str(self._tool), "push-to-try", "-m", message)
+            cmd = (str(self._tool), "push-to-try", "--message", message)
             if allow_log_capture:
                 self._push_to_try_with_log_capture(
                     cmd,
@@ -309,7 +350,7 @@ class HgRepository(Repository):
             self.raise_for_missing_extension("push-to-try")
             raise
         finally:
-            self._run("revert", "-a")
+            self._run("revert", "--all")
 
     def get_commits(
         self,
@@ -380,20 +421,40 @@ class HgRepository(Repository):
         `changed_files` may contain a dict of file paths and their contents,
         see `stage_changes`.
         """
+        head_ref, cleanup = self.prepare_try_push(commit_message, changed_files)
+        yield head_ref
+        cleanup()
+
+    def prepare_try_push(
+        self, commit_message: str, changed_files: Optional[dict[str, str]] = None
+    ) -> tuple[Optional[str], Callable]:
+        """Create a temporary try commit as a context manager.
+
+        Create a new commit using `commit_message` as the commit message. The commit
+        may be empty, for example when only including try syntax.
+
+        `changed_files` may contain a dict of file paths and their contents,
+        see `stage_changes`.
+
+        This function returns a tuple of the changeset of the new head and a
+        function that can be called to remove the head from the local
+        repository.
+        """
         if changed_files:
             self.stage_changes(changed_files)
 
         # Allow empty commit messages in case we only use try-syntax.
         self._run("--config", "ui.allowemptycommit=1", "commit", "-m", commit_message)
 
-        yield self.head_ref
+        def cleanup():
+            try:
+                self._run("prune", ".")
+            except subprocess.CalledProcessError:
+                # The `evolve` extension is required for `uncommit` and `prune`.
+                self.raise_for_missing_extension("evolve")
+                raise
 
-        try:
-            self._run("prune", ".")
-        except subprocess.CalledProcessError:
-            # The `evolve` extension is required for `uncommit` and `prune`.
-            self.raise_for_missing_extension("evolve")
-            raise
+        return self.head_ref, cleanup
 
     def get_last_modified_time_for_file(self, path: Path):
         """Return last modified in VCS time for the specified file."""
@@ -427,12 +488,10 @@ class HgRepository(Repository):
         print(f"Ensuring {url} is up to date at {dest}")
 
         env = os.environ.copy()
-        env.update(
-            {
-                "HGPLAIN": "1",
-                "HGRCPATH": "!",
-            }
-        )
+        env.update({
+            "HGPLAIN": "1",
+            "HGRCPATH": "!",
+        })
 
         try:
             subprocess.check_call(pull_args, cwd=str(cwd), env=env)

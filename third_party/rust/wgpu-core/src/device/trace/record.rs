@@ -1,18 +1,14 @@
-use alloc::{
-    borrow::Cow,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
-use core::convert::Infallible;
+use alloc::{borrow::Cow, string::ToString, sync::Arc, vec::Vec};
+use core::{any::Any, convert::Infallible, marker::PhantomData};
 use std::io::Write as _;
 
 use crate::{
     command::{
-        ArcCommand, ArcComputeCommand, ArcPassTimestampWrites, ArcReferences, ArcRenderCommand,
-        BasePass, ColorAttachments, Command, ComputeCommand, PointerReferences, RenderCommand,
+        ArcCommand, ArcComputeCommand, ArcReferences, ArcRenderCommand, BasePass, ColorAttachments,
+        Command, ComputeCommand, PassTimestampWrites, PointerReferences, RenderCommand,
         RenderPassColorAttachment, ResolvedRenderPassDepthStencilAttachment,
     },
+    device::trace::{Data, DataKind},
     id::{markers, PointerId},
     storage::StorageItem,
 };
@@ -43,35 +39,59 @@ pub(crate) fn new_render_bundle_encoder_descriptor(
     }
 }
 
+pub trait Trace: Any + Send + Sync {
+    fn make_binary(&mut self, kind: DataKind, data: &[u8]) -> Data;
+
+    fn make_string(&mut self, kind: DataKind, data: &str) -> Data;
+
+    fn add(&mut self, action: Action<'_, PointerReferences>)
+    where
+        for<'a> Action<'a, PointerReferences>: serde::Serialize;
+}
+
 #[derive(Debug)]
-pub struct Trace {
+pub struct DiskTrace {
     path: std::path::PathBuf,
     file: std::fs::File,
     config: ron::ser::PrettyConfig,
-    binary_id: usize,
+    data_id: usize,
 }
 
-impl Trace {
+impl DiskTrace {
     pub fn new(path: std::path::PathBuf) -> Result<Self, std::io::Error> {
-        log::info!("Tracing into '{path:?}'");
+        log::debug!("Tracing into '{path:?}'");
         let mut file = std::fs::File::create(path.join(FILE_NAME))?;
         file.write_all(b"[\n")?;
         Ok(Self {
             path,
             file,
             config: ron::ser::PrettyConfig::default(),
-            binary_id: 0,
+            data_id: 0,
         })
     }
+}
 
-    pub fn make_binary(&mut self, kind: &str, data: &[u8]) -> String {
-        self.binary_id += 1;
-        let name = std::format!("data{}.{}", self.binary_id, kind);
+impl Trace for DiskTrace {
+    /// Store `[u8]` data in the trace.
+    ///
+    /// Using a string `kind` is probably a bug, but should work as long as the
+    /// data is UTF-8.
+    fn make_binary(&mut self, kind: DataKind, data: &[u8]) -> Data {
+        self.data_id += 1;
+        let name = std::format!("data{}.{}", self.data_id, kind);
         let _ = std::fs::write(self.path.join(&name), data);
-        name
+        Data::File(name)
     }
 
-    pub(crate) fn add(&mut self, action: Action<'_, PointerReferences>)
+    /// Store `str` data in the trace.
+    ///
+    /// Using a binary `kind` is fine, but it's not clear why not use
+    /// `make_binary` instead.
+    fn make_string(&mut self, kind: DataKind, data: &str) -> Data {
+        self.make_binary(kind, data.as_bytes())
+    }
+
+    fn add(&mut self, action: Action<'_, PointerReferences>)
     where
         for<'a> Action<'a, PointerReferences>: serde::Serialize,
     {
@@ -86,9 +106,49 @@ impl Trace {
     }
 }
 
-impl Drop for Trace {
+impl Drop for DiskTrace {
     fn drop(&mut self) {
         let _ = self.file.write_all(b"]");
+    }
+}
+
+#[derive(Default)]
+pub struct MemoryTrace {
+    actions: Vec<Action<'static, PointerReferences>>,
+}
+
+impl MemoryTrace {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn actions(&self) -> &[Action<'static, PointerReferences>] {
+        &self.actions
+    }
+}
+
+impl Trace for MemoryTrace {
+    /// Store `[u8]` data in the trace.
+    ///
+    /// Using a string `kind` is probably a bug, but should work as long as the
+    /// data is UTF-8.
+    fn make_binary(&mut self, kind: DataKind, data: &[u8]) -> Data {
+        Data::Binary(kind, data.to_vec())
+    }
+
+    /// Store `str` data in the trace.
+    ///
+    /// Using a binary `kind` is fine, but it's not clear why not use
+    /// `make_binary` instead.
+    fn make_string(&mut self, kind: DataKind, data: &str) -> Data {
+        Data::String(kind, data.to_string())
+    }
+
+    fn add(&mut self, action: Action<'_, PointerReferences>)
+    where
+        for<'a> Action<'a, PointerReferences>: serde::Serialize,
+    {
+        self.actions.push(action_to_owned(action))
     }
 }
 
@@ -113,6 +173,15 @@ impl<T: StorageItem> IntoTrace for Arc<T> {
     fn to_trace(&self) -> Self::Output {
         PointerId::from(self)
     }
+}
+
+/// This will work as expected on heap-allocated types that are not moved around.
+pub(crate) unsafe fn to_trace<T: StorageItem>(t: &T) -> PointerId<T::Marker> {
+    PointerId::PointerId(
+        #[expect(trivial_casts)]
+        core::num::NonZeroUsize::new(t as *const T as usize).unwrap(),
+        PhantomData,
+    )
 }
 
 impl IntoTrace for ArcCommand {
@@ -244,10 +313,10 @@ impl<T: IntoTrace> IntoTrace for wgt::TexelCopyTextureInfo<T> {
     }
 }
 
-impl IntoTrace for ArcPassTimestampWrites {
-    type Output = crate::command::PassTimestampWrites<PointerId<markers::QuerySet>>;
+impl IntoTrace for PassTimestampWrites {
+    type Output = PassTimestampWrites<PointerId<markers::QuerySet>>;
     fn into_trace(self) -> Self::Output {
-        crate::command::PassTimestampWrites {
+        PassTimestampWrites {
             query_set: self.query_set.into_trace(),
             beginning_of_pass_write_index: self.beginning_of_pass_write_index,
             end_of_pass_write_index: self.end_of_pass_write_index,
@@ -302,6 +371,11 @@ impl IntoTrace for crate::ray_tracing::OwnedBlasGeometries<ArcReferences> {
                     geos.into_iter().map(|g| g.into_trace()).collect(),
                 )
             }
+            crate::ray_tracing::OwnedBlasGeometries::AabbGeometries(geos) => {
+                crate::ray_tracing::OwnedBlasGeometries::AabbGeometries(
+                    geos.into_iter().map(|g| g.into_trace()).collect(),
+                )
+            }
         }
     }
 }
@@ -318,6 +392,18 @@ impl IntoTrace for crate::ray_tracing::OwnedBlasTriangleGeometry<ArcReferences> 
             vertex_stride: self.vertex_stride,
             first_index: self.first_index,
             transform_buffer_offset: self.transform_buffer_offset,
+        }
+    }
+}
+
+impl IntoTrace for crate::ray_tracing::OwnedBlasAabbGeometry<ArcReferences> {
+    type Output = crate::ray_tracing::OwnedBlasAabbGeometry<PointerReferences>;
+    fn into_trace(self) -> Self::Output {
+        crate::ray_tracing::OwnedBlasAabbGeometry {
+            size: self.size,
+            stride: self.stride,
+            aabb_buffer: self.aabb_buffer.into_trace(),
+            primitive_offset: self.primitive_offset,
         }
     }
 }
@@ -363,7 +449,6 @@ impl<C: IntoTrace> IntoTrace for BasePass<C, Infallible> {
                 .collect(),
             dynamic_offsets: self.dynamic_offsets,
             string_data: self.string_data,
-            push_constant_data: self.push_constant_data,
         }
     }
 }
@@ -383,17 +468,9 @@ impl IntoTrace for ArcComputeCommand {
                 bind_group: bind_group.map(|bg| bg.into_trace()),
             },
             C::SetPipeline(id) => C::SetPipeline(id.into_trace()),
-            C::SetPushConstant {
-                offset,
-                size_bytes,
-                values_offset,
-            } => C::SetPushConstant {
-                offset,
-                size_bytes,
-                values_offset,
-            },
-            C::Dispatch(groups) => C::Dispatch(groups),
-            C::DispatchIndirect { buffer, offset } => C::DispatchIndirect {
+            C::SetImmediate { offset, data } => C::SetImmediate { offset, data },
+            C::DispatchWorkgroups(groups) => C::DispatchWorkgroups(groups),
+            C::DispatchWorkgroupsIndirect { buffer, offset } => C::DispatchWorkgroupsIndirect {
                 buffer: buffer.into_trace(),
                 offset,
             },
@@ -415,6 +492,26 @@ impl IntoTrace for ArcComputeCommand {
                 query_index,
             },
             C::EndPipelineStatisticsQuery => C::EndPipelineStatisticsQuery,
+            C::TransitionResources {
+                buffer_transitions,
+                texture_transitions,
+            } => C::TransitionResources {
+                buffer_transitions: buffer_transitions
+                    .into_iter()
+                    .map(|buffer_transition| wgt::BufferTransition {
+                        buffer: buffer_transition.buffer.into_trace(),
+                        state: buffer_transition.state,
+                    })
+                    .collect(),
+                texture_transitions: texture_transitions
+                    .into_iter()
+                    .map(|texture_transition| wgt::TextureTransition {
+                        texture: texture_transition.texture.into_trace(),
+                        selector: texture_transition.selector,
+                        state: texture_transition.state,
+                    })
+                    .collect(),
+            },
         }
     }
 }
@@ -468,17 +565,7 @@ impl IntoTrace for ArcRenderCommand {
                 depth_max,
             },
             C::SetScissor(rect) => C::SetScissor(rect),
-            C::SetPushConstant {
-                stages,
-                offset,
-                size_bytes,
-                values_offset,
-            } => C::SetPushConstant {
-                stages,
-                offset,
-                size_bytes,
-                values_offset,
-            },
+            C::SetImmediate { offset, data } => C::SetImmediate { offset, data },
             C::Draw {
                 vertex_count,
                 instance_count,
@@ -567,9 +654,11 @@ impl IntoTrace for ArcRenderCommand {
     }
 }
 
-impl<'a> IntoTrace for crate::binding_model::ResolvedPipelineLayoutDescriptor<'a> {
-    type Output =
-        crate::binding_model::PipelineLayoutDescriptor<'a, PointerId<markers::BindGroupLayout>>;
+impl IntoTrace for crate::binding_model::PipelineLayoutDescriptor<'_> {
+    type Output = crate::binding_model::PipelineLayoutDescriptor<
+        'static,
+        PointerId<markers::BindGroupLayout>,
+    >;
     fn into_trace(self) -> Self::Output {
         crate::binding_model::PipelineLayoutDescriptor {
             label: self.label.map(|l| Cow::Owned(l.into_owned())),
@@ -578,18 +667,16 @@ impl<'a> IntoTrace for crate::binding_model::ResolvedPipelineLayoutDescriptor<'a
                 .iter()
                 .map(|bgl| bgl.to_trace())
                 .collect(),
-            push_constant_ranges: self.push_constant_ranges.clone(),
+            immediate_size: self.immediate_size,
         }
     }
 }
 
-impl<'a> IntoTrace for &'_ crate::binding_model::ResolvedBindGroupDescriptor<'a> {
+impl<'a> IntoTrace for &'_ crate::binding_model::BindGroupDescriptor<'a> {
     type Output = TraceBindGroupDescriptor<'a>;
 
     fn into_trace(self) -> Self::Output {
-        use crate::binding_model::{
-            BindGroupEntry, BindingResource, BufferBinding, ResolvedBindingResource,
-        };
+        use crate::binding_model::{BindGroupEntry, BindingResource, BufferBinding};
         TraceBindGroupDescriptor {
             label: self.label.clone(),
             layout: self.layout.to_trace(),
@@ -598,14 +685,14 @@ impl<'a> IntoTrace for &'_ crate::binding_model::ResolvedBindGroupDescriptor<'a>
                     .iter()
                     .map(|entry| {
                         let resource = match &entry.resource {
-                            ResolvedBindingResource::Buffer(buffer_binding) => {
+                            BindingResource::Buffer(buffer_binding) => {
                                 BindingResource::Buffer(BufferBinding {
                                     buffer: buffer_binding.buffer.to_trace(),
                                     offset: buffer_binding.offset,
                                     size: buffer_binding.size,
                                 })
                             }
-                            ResolvedBindingResource::BufferArray(buffer_bindings) => {
+                            BindingResource::BufferArray(buffer_bindings) => {
                                 let resolved_buffers: Vec<_> = buffer_bindings
                                     .iter()
                                     .map(|bb| BufferBinding {
@@ -616,26 +703,31 @@ impl<'a> IntoTrace for &'_ crate::binding_model::ResolvedBindGroupDescriptor<'a>
                                     .collect();
                                 BindingResource::BufferArray(Cow::Owned(resolved_buffers))
                             }
-                            ResolvedBindingResource::Sampler(sampler_id) => {
+                            BindingResource::Sampler(sampler_id) => {
                                 BindingResource::Sampler(sampler_id.to_trace())
                             }
-                            ResolvedBindingResource::SamplerArray(sampler_ids) => {
+                            BindingResource::SamplerArray(sampler_ids) => {
                                 let resolved: Vec<_> =
                                     sampler_ids.iter().map(|id| id.to_trace()).collect();
                                 BindingResource::SamplerArray(Cow::Owned(resolved))
                             }
-                            ResolvedBindingResource::TextureView(texture_view_id) => {
+                            BindingResource::TextureView(texture_view_id) => {
                                 BindingResource::TextureView(texture_view_id.to_trace())
                             }
-                            ResolvedBindingResource::TextureViewArray(texture_view_ids) => {
+                            BindingResource::TextureViewArray(texture_view_ids) => {
                                 let resolved: Vec<_> =
                                     texture_view_ids.iter().map(|id| id.to_trace()).collect();
                                 BindingResource::TextureViewArray(Cow::Owned(resolved))
                             }
-                            ResolvedBindingResource::AccelerationStructure(tlas_id) => {
+                            BindingResource::AccelerationStructure(tlas_id) => {
                                 BindingResource::AccelerationStructure(tlas_id.to_trace())
                             }
-                            ResolvedBindingResource::ExternalTexture(external_texture_id) => {
+                            BindingResource::AccelerationStructureArray(tlas_ids) => {
+                                let resolved: Vec<_> =
+                                    tlas_ids.iter().map(|id| id.to_trace()).collect();
+                                BindingResource::AccelerationStructureArray(Cow::Owned(resolved))
+                            }
+                            BindingResource::ExternalTexture(external_texture_id) => {
                                 BindingResource::ExternalTexture(external_texture_id.to_trace())
                             }
                         };
@@ -668,7 +760,7 @@ impl<'a> IntoTrace for crate::pipeline::ResolvedGeneralRenderPipelineDescriptor<
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedComputePipelineDescriptor<'a> {
+impl<'a> IntoTrace for crate::pipeline::ComputePipelineDescriptor<'a> {
     type Output = TraceComputePipelineDescriptor<'a>;
 
     fn into_trace(self) -> Self::Output {
@@ -681,7 +773,7 @@ impl<'a> IntoTrace for crate::pipeline::ResolvedComputePipelineDescriptor<'a> {
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedProgrammableStageDescriptor<'a> {
+impl<'a> IntoTrace for crate::pipeline::ProgrammableStageDescriptor<'a> {
     type Output =
         crate::pipeline::ProgrammableStageDescriptor<'a, PointerId<markers::ShaderModule>>;
     fn into_trace(self) -> Self::Output {
@@ -714,7 +806,7 @@ impl<'a> IntoTrace
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedTaskState<'a> {
+impl<'a> IntoTrace for crate::pipeline::TaskState<'a> {
     type Output = crate::pipeline::TaskState<'a, PointerId<markers::ShaderModule>>;
     fn into_trace(self) -> Self::Output {
         crate::pipeline::TaskState {
@@ -723,7 +815,7 @@ impl<'a> IntoTrace for crate::pipeline::ResolvedTaskState<'a> {
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedMeshState<'a> {
+impl<'a> IntoTrace for crate::pipeline::MeshState<'a> {
     type Output = crate::pipeline::MeshState<'a, PointerId<markers::ShaderModule>>;
     fn into_trace(self) -> Self::Output {
         crate::pipeline::MeshState {
@@ -732,7 +824,7 @@ impl<'a> IntoTrace for crate::pipeline::ResolvedMeshState<'a> {
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedVertexState<'a> {
+impl<'a> IntoTrace for crate::pipeline::VertexState<'a> {
     type Output = crate::pipeline::VertexState<'a, PointerId<markers::ShaderModule>>;
     fn into_trace(self) -> Self::Output {
         crate::pipeline::VertexState {
@@ -742,7 +834,7 @@ impl<'a> IntoTrace for crate::pipeline::ResolvedVertexState<'a> {
     }
 }
 
-impl<'a> IntoTrace for crate::pipeline::ResolvedFragmentState<'a> {
+impl<'a> IntoTrace for crate::pipeline::FragmentState<'a> {
     type Output = crate::pipeline::FragmentState<'a, PointerId<markers::ShaderModule>>;
     fn into_trace(self) -> Self::Output {
         crate::pipeline::FragmentState {
@@ -757,4 +849,327 @@ impl<T: IntoTrace> IntoTrace for Option<T> {
     fn into_trace(self) -> Self::Output {
         self.map(|v| v.into_trace())
     }
+}
+
+/// Return a copy of [`Action`] with `'static` lifetime.
+///
+/// This is used for in-memory tracing.
+fn action_to_owned(action: Action<'_, PointerReferences>) -> Action<'static, PointerReferences> {
+    use Action as A;
+    match action {
+        A::Init { desc, backend } => A::Init {
+            desc: desc.map_label(owned_label),
+            backend,
+        },
+        A::ConfigureSurface(surface, config) => A::ConfigureSurface(surface, config),
+        A::CreateBuffer(buffer, desc) => A::CreateBuffer(buffer, desc.map_label(owned_label)),
+        A::DestroyBuffer(buffer) => A::DestroyBuffer(buffer),
+        A::DropBuffer(buffer) => A::DropBuffer(buffer),
+        A::DestroyTexture(texture) => A::DestroyTexture(texture),
+        A::DropTexture(texture) => A::DropTexture(texture),
+        A::DropTextureView(texture_view) => A::DropTextureView(texture_view),
+        A::DestroyExternalTexture(external_texture) => A::DestroyExternalTexture(external_texture),
+        A::DropExternalTexture(external_texture) => A::DropExternalTexture(external_texture),
+        A::DropSampler(sampler) => A::DropSampler(sampler),
+        A::GetSurfaceTexture { id, parent } => A::GetSurfaceTexture { id, parent },
+        A::Present(surface) => A::Present(surface),
+        A::DiscardSurfaceTexture(surface) => A::DiscardSurfaceTexture(surface),
+        A::ReleaseSurfaceTexture(surface) => A::ReleaseSurfaceTexture(surface),
+        A::DropBindGroupLayout(layout) => A::DropBindGroupLayout(layout),
+        A::GetRenderPipelineBindGroupLayout {
+            id,
+            pipeline,
+            index,
+        } => A::GetRenderPipelineBindGroupLayout {
+            id,
+            pipeline,
+            index,
+        },
+        A::GetComputePipelineBindGroupLayout {
+            id,
+            pipeline,
+            index,
+        } => A::GetComputePipelineBindGroupLayout {
+            id,
+            pipeline,
+            index,
+        },
+        A::DropPipelineLayout(layout) => A::DropPipelineLayout(layout),
+        A::DropBindGroup(bind_group) => A::DropBindGroup(bind_group),
+        A::DropShaderModule(shader_module) => A::DropShaderModule(shader_module),
+        A::DropComputePipeline(pipeline) => A::DropComputePipeline(pipeline),
+        A::DropRenderPipeline(pipeline) => A::DropRenderPipeline(pipeline),
+        A::DropPipelineCache(cache) => A::DropPipelineCache(cache),
+        A::DropRenderBundle(render_bundle) => A::DropRenderBundle(render_bundle),
+        A::DestroyQuerySet(query_set) => A::DestroyQuerySet(query_set),
+        A::DropQuerySet(query_set) => A::DropQuerySet(query_set),
+        A::WriteBuffer {
+            id,
+            data,
+            offset,
+            size,
+            queued,
+        } => A::WriteBuffer {
+            id,
+            data,
+            offset,
+            size,
+            queued,
+        },
+        A::WriteTexture {
+            to,
+            data,
+            layout,
+            size,
+        } => A::WriteTexture {
+            to,
+            data,
+            layout,
+            size,
+        },
+        A::Submit(index, commands) => A::Submit(index, commands),
+        A::FailedCommands {
+            commands,
+            failed_at_submit,
+            error,
+        } => A::FailedCommands {
+            commands,
+            failed_at_submit,
+            error,
+        },
+        A::DropBlas(blas) => A::DropBlas(blas),
+        A::DropTlas(tlas) => A::DropTlas(tlas),
+
+        A::CreateTexture(id, desc) => A::CreateTexture(id, desc.map_label(owned_label)),
+        A::CreateTextureError(id, desc) => A::CreateTextureError(id, desc.map_label(owned_label)),
+        A::CreateTextureView { id, parent, desc } => A::CreateTextureView {
+            id,
+            parent,
+            desc: crate::resource::TextureViewDescriptor {
+                label: owned_label(&desc.label),
+                format: desc.format,
+                dimension: desc.dimension,
+                usage: desc.usage,
+                range: desc.range,
+            },
+        },
+        A::CreateExternalTexture { id, desc, planes } => A::CreateExternalTexture {
+            id,
+            desc: desc.map_label(owned_label),
+            planes,
+        },
+        A::CreateSampler(id, desc) => A::CreateSampler(
+            id,
+            crate::resource::SamplerDescriptor {
+                label: owned_label(&desc.label),
+                address_modes: desc.address_modes,
+                mag_filter: desc.mag_filter,
+                min_filter: desc.min_filter,
+                mipmap_filter: desc.mipmap_filter,
+                lod_min_clamp: desc.lod_min_clamp,
+                lod_max_clamp: desc.lod_max_clamp,
+                compare: desc.compare,
+                anisotropy_clamp: desc.anisotropy_clamp,
+                border_color: desc.border_color,
+            },
+        ),
+        A::CreateBindGroupLayout(id, desc) => A::CreateBindGroupLayout(
+            id,
+            crate::binding_model::BindGroupLayoutDescriptor {
+                label: owned_label(&desc.label),
+                entries: Cow::Owned(desc.entries.into_owned()),
+            },
+        ),
+        A::CreatePipelineLayout(id, desc) => A::CreatePipelineLayout(
+            id,
+            crate::binding_model::PipelineLayoutDescriptor {
+                label: owned_label(&desc.label),
+                bind_group_layouts: Cow::Owned(desc.bind_group_layouts.into_owned()),
+                immediate_size: desc.immediate_size,
+            },
+        ),
+        A::CreateBindGroup(id, desc) => A::CreateBindGroup(
+            id,
+            crate::binding_model::BindGroupDescriptor {
+                label: owned_label(&desc.label),
+                layout: desc.layout,
+                entries: desc
+                    .entries
+                    .iter()
+                    .map(|e| crate::binding_model::BindGroupEntry {
+                        binding: e.binding,
+                        resource: match &e.resource {
+                            crate::binding_model::BindingResource::Buffer(buffer_binding) => {
+                                crate::binding_model::BindingResource::Buffer(
+                                    buffer_binding.clone(),
+                                )
+                            }
+                            crate::binding_model::BindingResource::BufferArray(cow) => {
+                                crate::binding_model::BindingResource::BufferArray(Cow::Owned(
+                                    cow.clone().into_owned(),
+                                ))
+                            }
+                            crate::binding_model::BindingResource::Sampler(sampler) => {
+                                crate::binding_model::BindingResource::Sampler(*sampler)
+                            }
+                            crate::binding_model::BindingResource::SamplerArray(cow) => {
+                                crate::binding_model::BindingResource::SamplerArray(Cow::Owned(
+                                    cow.clone().into_owned(),
+                                ))
+                            }
+                            crate::binding_model::BindingResource::TextureView(texture_view) => {
+                                crate::binding_model::BindingResource::TextureView(*texture_view)
+                            }
+                            crate::binding_model::BindingResource::TextureViewArray(cow) => {
+                                crate::binding_model::BindingResource::TextureViewArray(Cow::Owned(
+                                    cow.clone().into_owned(),
+                                ))
+                            }
+                            crate::binding_model::BindingResource::AccelerationStructure(
+                                acceleration_structure,
+                            ) => crate::binding_model::BindingResource::AccelerationStructure(
+                                *acceleration_structure,
+                            ),
+                            crate::binding_model::BindingResource::AccelerationStructureArray(
+                                cow,
+                            ) => crate::binding_model::BindingResource::AccelerationStructureArray(
+                                Cow::Owned(cow.clone().into_owned()),
+                            ),
+                            crate::binding_model::BindingResource::ExternalTexture(
+                                external_texture,
+                            ) => crate::binding_model::BindingResource::ExternalTexture(
+                                *external_texture,
+                            ),
+                        },
+                    })
+                    .collect(),
+            },
+        ),
+        A::CreateShaderModule { id, desc, data } => A::CreateShaderModule {
+            id,
+            desc: crate::pipeline::ShaderModuleDescriptor {
+                label: owned_label(&desc.label),
+                runtime_checks: desc.runtime_checks,
+            },
+            data,
+        },
+        A::CreateShaderModulePassthrough {
+            id,
+            data,
+            label,
+            entry_points,
+        } => A::CreateShaderModulePassthrough {
+            id,
+            data,
+            label: owned_label(&label),
+            entry_points: entry_points
+                .iter()
+                .map(|ep| wgt::PassthroughShaderEntryPoint {
+                    name: Cow::Owned(ep.name.to_string()),
+                    workgroup_size: ep.workgroup_size,
+                })
+                .collect(),
+        },
+        A::CreateComputePipeline { id, desc } => A::CreateComputePipeline {
+            id,
+            desc: crate::pipeline::ComputePipelineDescriptor {
+                label: owned_label(&desc.label),
+                layout: desc.layout,
+                stage: owned_stage(desc.stage),
+                cache: desc.cache,
+            },
+        },
+        A::CreateGeneralRenderPipeline { id, desc } => A::CreateGeneralRenderPipeline {
+            id,
+            desc: crate::pipeline::GeneralRenderPipelineDescriptor {
+                label: owned_label(&desc.label),
+                layout: desc.layout,
+                vertex: match desc.vertex {
+                    crate::pipeline::RenderPipelineVertexProcessor::Vertex(
+                        crate::pipeline::VertexState { stage, buffers },
+                    ) => crate::pipeline::RenderPipelineVertexProcessor::Vertex(
+                        crate::pipeline::VertexState {
+                            stage: owned_stage(stage),
+                            buffers: buffers
+                                .iter()
+                                .map(|b| {
+                                    b.clone().map(|buffer| crate::pipeline::VertexBufferLayout {
+                                        array_stride: buffer.array_stride,
+                                        step_mode: buffer.step_mode,
+                                        attributes: Cow::Owned(buffer.attributes.into_owned()),
+                                    })
+                                })
+                                .collect(),
+                        },
+                    ),
+                    crate::pipeline::RenderPipelineVertexProcessor::Mesh(task, mesh) => {
+                        crate::pipeline::RenderPipelineVertexProcessor::Mesh(
+                            task.map(|t| crate::pipeline::TaskState {
+                                stage: owned_stage(t.stage),
+                            }),
+                            crate::pipeline::MeshState {
+                                stage: owned_stage(mesh.stage),
+                            },
+                        )
+                    }
+                },
+                primitive: desc.primitive,
+                depth_stencil: desc.depth_stencil,
+                multisample: desc.multisample,
+                fragment: desc.fragment.map(|f| crate::pipeline::FragmentState {
+                    stage: owned_stage(f.stage),
+                    targets: Cow::Owned(f.targets.into_owned()),
+                }),
+                multiview_mask: desc.multiview_mask,
+                cache: desc.cache,
+            },
+        },
+        A::CreatePipelineCache { id, desc } => A::CreatePipelineCache {
+            id,
+            desc: crate::pipeline::PipelineCacheDescriptor {
+                label: owned_label(&desc.label),
+                data: desc.data.map(|d| Cow::Owned(d.to_vec())),
+                fallback: desc.fallback,
+            },
+        },
+        A::CreateRenderBundle { id, desc, base } => A::CreateRenderBundle {
+            id,
+            desc: crate::command::RenderBundleEncoderDescriptor {
+                label: owned_label(&desc.label),
+                color_formats: Cow::Owned(desc.color_formats.into_owned()),
+                depth_stencil: desc.depth_stencil,
+                sample_count: desc.sample_count,
+                multiview: desc.multiview,
+            },
+            base,
+        },
+        A::CreateQuerySet { id, desc } => A::CreateQuerySet {
+            id,
+            desc: desc.map_label(owned_label),
+        },
+        A::CreateBlas { id, desc, sizes } => A::CreateBlas {
+            id,
+            desc: desc.map_label(owned_label),
+            sizes,
+        },
+        A::CreateTlas { id, desc } => A::CreateTlas {
+            id,
+            desc: desc.map_label(owned_label),
+        },
+    }
+}
+
+fn owned_stage<SM>(
+    stage: crate::pipeline::ProgrammableStageDescriptor<'_, SM>,
+) -> crate::pipeline::ProgrammableStageDescriptor<'static, SM> {
+    crate::pipeline::ProgrammableStageDescriptor {
+        module: stage.module,
+        entry_point: owned_label(&stage.entry_point),
+        constants: stage.constants,
+        zero_initialize_workgroup_memory: stage.zero_initialize_workgroup_memory,
+    }
+}
+
+fn owned_label(l: &Option<Cow<'_, str>>) -> Option<Cow<'static, str>> {
+    l.as_ref().map(|l| Cow::Owned(l.to_string()))
 }

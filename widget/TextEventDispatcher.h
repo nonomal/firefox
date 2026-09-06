@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,15 +5,15 @@
 #ifndef mozilla_textcompositionsynthesizer_h_
 #define mozilla_textcompositionsynthesizer_h_
 
-#include "mozilla/RefPtr.h"
-#include "nsString.h"
+#include "WritingModes.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/Maybe.h"
+#include "mozilla/RefPtr.h"
 #include "mozilla/TextEventDispatcherListener.h"
 #include "mozilla/TextRange.h"
 #include "mozilla/widget/IMEData.h"
-#include "WritingModes.h"
+#include "nsString.h"
 
 class nsIWidget;
 
@@ -71,9 +70,13 @@ class TextEventDispatcher final {
    * EndInputTransaction() should be called when the listener stops using
    * the TextEventDispatcher.
    *
+   * FYI: This is marked as MOZ_CAN_RUN_SCRIPT but it's for the safety in the
+   * future because of calling a callback which can do anything unexpected.
+   *
    * @param aListener       The listener using the TextEventDispatcher instance.
    */
-  void EndInputTransaction(TextEventDispatcherListener* aListener);
+  MOZ_CAN_RUN_SCRIPT void EndInputTransaction(
+      TextEventDispatcherListener* aListener);
 
   /**
    * OnDestroyWidget() is called when mWidget is being destroyed.
@@ -139,9 +142,16 @@ class TextEventDispatcher final {
   }
 
   /**
-   * IsDispatchingEvent() returns true while this instance dispatching an event.
+   * Return true if this instance dispatching an event.
    */
-  bool IsDispatchingEvent() const { return mDispatchingEvent > 0; }
+  [[nodiscard]] bool IsDispatchingEvent() const { return mDispatchingEvent; }
+
+  /**
+   * Return true if this instance dispatching aEvent.
+   */
+  [[nodiscard]] bool IsDispatching(const WidgetEvent& aEvent) const {
+    return mDispatchingEvent && mDispatchingEvent->IsDispatching(aEvent);
+  }
 
   /**
    * GetPseudoIMEContext() returns pseudo native IME context if there is an
@@ -403,8 +413,31 @@ class TextEventDispatcher final {
   };
   PendingComposition mPendingComposition;
 
+  class MOZ_STACK_CLASS AutoDispatchingEvent {
+   public:
+    AutoDispatchingEvent(TextEventDispatcher& aDispatcher, WidgetEvent& aEvent)
+        : mDispatcher(aDispatcher),
+          mPrevDispatchingEvent(aDispatcher.mDispatchingEvent),
+          mEvent(aEvent) {
+      mDispatcher->mDispatchingEvent = this;
+    }
+    ~AutoDispatchingEvent() {
+      mDispatcher->mDispatchingEvent = mPrevDispatchingEvent;
+    }
+
+    bool IsDispatching(const WidgetEvent& aEvent) const {
+      return &mEvent == &aEvent ||
+             (mPrevDispatchingEvent &&
+              mPrevDispatchingEvent->IsDispatching(aEvent));
+    }
+
+   private:
+    const OwningNonNull<TextEventDispatcher> mDispatcher;
+    const AutoDispatchingEvent* const mPrevDispatchingEvent;
+    const WidgetEvent& mEvent;
+  };
   // While dispatching an event, this is incremented.
-  uint16_t mDispatchingEvent;
+  const AutoDispatchingEvent* mDispatchingEvent = nullptr;
 
   enum InputTransactionType : uint8_t {
     // No input transaction has been started.

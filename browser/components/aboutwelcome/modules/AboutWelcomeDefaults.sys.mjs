@@ -13,13 +13,19 @@ const { AppConstants } = ChromeUtils.importESModule(
   "resource://gre/modules/AppConstants.sys.mjs"
 );
 
+import {
+  SET_DEFAULT_OS_PROMPT_ENABLED,
+  WIN_OS_PIN_PROMPT_ENABLED,
+} from "resource:///modules/asrouter/MessagingTargetingConstants.sys.mjs";
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   AddonRepository: "resource://gre/modules/addons/AddonRepository.sys.mjs",
   AttributionCode:
     "moz-src:///browser/components/attribution/AttributionCode.sys.mjs",
-  AWScreenUtils: "resource:///modules/aboutwelcome/AWScreenUtils.sys.mjs",
+  ASRouterScreenUtils:
+    "resource:///modules/asrouter/ASRouterScreenUtils.sys.mjs",
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
 });
 
@@ -42,7 +48,7 @@ const MR_ABOUT_WELCOME_DEFAULT = {
     {
       id: "AW_BACKUP_RESTORE_EMBEDDED_BACKUP_FOUND",
       targeting:
-        "backupRestoreEnabled && (backupsInfo.found || backupsInfo.multipleBackupsFound)",
+        "backupRestoreEnabled && !hasSelectableProfiles && (backupsInfo.found && !backupsInfo.multipleBackupsFound)",
       content: {
         fullscreen: true,
         logo: {},
@@ -58,7 +64,66 @@ const MR_ABOUT_WELCOME_DEFAULT = {
         position: "split",
         split_narrow_bkg_position: "-42px",
         background:
-          "url('chrome://activity-stream/content/data/content/assets/fox-doodle-backup-restore.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-backup-fox-in-box.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
+        progress_bar: true,
+        hide_secondary_section: "responsive",
+        backup_show_filepicker: {
+          action: {},
+        },
+        skip_button: {
+          label: {
+            string_id: "restore-from-backup-secondary-button",
+          },
+          action: {
+            navigate: true,
+          },
+        },
+      },
+    },
+    {
+      id: "AW_BACKUP_RESTORE_EMBEDDED_MULTIPLE_BACKUPS_FOUND",
+      targeting:
+        "backupRestoreEnabled && !hasSelectableProfiles && backupsInfo.multipleBackupsFound",
+      content: {
+        fullscreen: true,
+        logo: {},
+        title: {
+          string_id: "restore-from-backup-title",
+        },
+        subtitle: {
+          string_id: "restore-from-backup-subtitle",
+        },
+        cta_paragraph: {
+          icon: {
+            iconURL: "chrome://global/skin/icons/info-filled.svg",
+            height: "16px",
+            width: "16px",
+            marginInline: "0 4px",
+          },
+          info_tile: true,
+          text: {
+            string_id: "multiple-backups-info-tile",
+            string_name: "settings-label",
+          },
+          style: {
+            marginBlock: "20px 0",
+            letterSpacing: "revert",
+          },
+          action: {
+            type: "OPEN_ABOUT_PAGE",
+            data: {
+              args: "preferences#sync-backup",
+              where: "tabshifted",
+            },
+          },
+        },
+        tiles: {
+          type: "backup_restore",
+        },
+        position: "split",
+        split_narrow_bkg_position: "-42px",
+        background:
+          "url('chrome://activity-stream/content/data/content/assets/br-backup-fox-in-box.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         hide_secondary_section: "responsive",
         backup_show_filepicker: {
@@ -85,7 +150,7 @@ const MR_ABOUT_WELCOME_DEFAULT = {
           string_id: "onboarding-device-migration-image-alt",
         },
         background:
-          "url('chrome://activity-stream/content/data/content/assets/device-migration.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-migration-fox-juggle.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         logo: {},
         title: {
@@ -121,6 +186,20 @@ const MR_ABOUT_WELCOME_DEFAULT = {
             navigate: true,
           },
           has_arrow_icon: true,
+        },
+        secondary_button_top: {
+          label: {
+            string_id: "mr1-onboarding-sign-in-button-label",
+          },
+          action: {
+            data: {
+              entrypoint: "activity-stream-firstrun",
+              where: "tab",
+            },
+            type: "SHOW_FIREFOX_ACCOUNTS",
+            addFlowParams: true,
+          },
+          targeting: "!isFxASignedIn",
         },
       },
     },
@@ -173,26 +252,26 @@ const MR_ABOUT_WELCOME_DEFAULT = {
       },
     },
     {
-      id: "AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN",
-      targeting:
-        "doesAppNeedPin && (unhandledCampaignAction != 'SET_DEFAULT_BROWSER') && (unhandledCampaignAction != 'PIN_FIREFOX_TO_TASKBAR') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser",
+      id: "AW_SMART_WINDOW",
+      targeting: "isSmartWindowOnboarding",
+      force_hide_steps_indicator: true,
       content: {
         fullscreen: true,
         position: "split",
         split_narrow_bkg_position: "-60px",
         image_alt_text: {
-          string_id: "mr2022-onboarding-default-image-alt",
+          string_id: "smartwindow-onboarding-image-alt",
         },
         background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-settodefault.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/mr-kit-smart-window.svg') var(--mr-secondary-position) no-repeat",
         progress_bar: true,
         hide_secondary_section: "responsive",
         logo: {},
         title: {
-          string_id: "onboarding-easy-setup-security-and-privacy-title",
+          string_id: "smartwindow-onboarding-title",
         },
         subtitle: {
-          string_id: "onboarding-easy-setup-security-and-privacy-subtitle",
+          string_id: "smartwindow-onboarding-subtitle",
         },
         tiles: {
           type: "multiselect",
@@ -200,6 +279,120 @@ const MR_ABOUT_WELCOME_DEFAULT = {
             {
               id: "checkbox-1",
               defaultValue: true,
+              targeting:
+                "(unhandledCampaignAction != 'SET_DEFAULT_BROWSER') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser",
+              label: {
+                string_id:
+                  "mr2022-onboarding-easy-setup-set-default-checkbox-label",
+              },
+              action: {
+                type: "SET_DEFAULT_BROWSER",
+              },
+            },
+            {
+              id: "checkbox-2",
+              defaultValue: true,
+              targeting:
+                "doesAppNeedPin && (unhandledCampaignAction != 'PIN_FIREFOX_TO_TASKBAR') && (unhandledCampaignAction != 'PIN_AND_DEFAULT')",
+              label: {
+                string_id: isMSIX
+                  ? "mr2022-onboarding-pin-primary-button-label-msix"
+                  : "mr2022-onboarding-pin-primary-button-label",
+              },
+              action: {
+                type: "MULTI_ACTION",
+                data: {
+                  actions: [
+                    {
+                      type: "PIN_FIREFOX_TO_TASKBAR",
+                    },
+                    {
+                      type: "PIN_FIREFOX_TO_START_MENU",
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        primary_button: {
+          label: {
+            string_id: "smartwindow-onboarding-primary-button",
+          },
+          action: {
+            type: "MULTI_ACTION",
+            collectSelect: true,
+            navigate: true,
+            data: {
+              actions: [
+                {
+                  type: "OPEN_ABOUT_PAGE",
+                  data: {
+                    args: "newtab",
+                    where: "current",
+                  },
+                },
+                {
+                  type: "FXA_AIWINDOW_SIGNIN_FLOW",
+                },
+              ],
+            },
+          },
+        },
+        secondary_button: {
+          label: {
+            string_id: "mr2022-onboarding-secondary-skip-button-label",
+          },
+          action: {
+            type: "MULTI_ACTION",
+            navigate: true,
+            data: {
+              actions: [
+                {
+                  type: "OPEN_ABOUT_PAGE",
+                  data: {
+                    args: "newtab",
+                    where: "current",
+                  },
+                },
+                {
+                  type: "FXA_AIWINDOW_SIGNIN_FLOW",
+                },
+              ],
+            },
+          },
+          has_arrow_icon: true,
+        },
+      },
+    },
+    {
+      id: "AW_EASY_SETUP",
+      targeting: `doesAppNeedPin && !${WIN_OS_PIN_PROMPT_ENABLED} && (unhandledCampaignAction != 'PIN_FIREFOX_TO_TASKBAR') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') || ((!doesAppNeedPin || ${WIN_OS_PIN_PROMPT_ENABLED}) && !${SET_DEFAULT_OS_PROMPT_ENABLED} && (unhandledCampaignAction != 'SET_DEFAULT_BROWSER') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser)`,
+      content: {
+        fullscreen: true,
+        position: "split",
+        split_narrow_bkg_position: "-60px",
+        image_alt_text: {
+          string_id: "mr2022-onboarding-default-image-alt",
+        },
+        background:
+          "url('chrome://activity-stream/content/data/content/assets/br-set-default-fox-heart.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
+        progress_bar: true,
+        hide_secondary_section: "responsive",
+        logo: {},
+        title: {
+          string_id: "onboarding-refresh-pin-set-default-title",
+        },
+        subtitle: {
+          string_id: "onboarding-refresh-pin-set-default-subtitle",
+        },
+        tiles: {
+          type: "multiselect",
+          data: [
+            {
+              id: "checkbox-1",
+              defaultValue: true,
+              targeting: `doesAppNeedPin && !${WIN_OS_PIN_PROMPT_ENABLED} && (unhandledCampaignAction != 'PIN_FIREFOX_TO_TASKBAR') && (unhandledCampaignAction != 'PIN_AND_DEFAULT')`,
               label: {
                 string_id: isMSIX
                   ? "mr2022-onboarding-pin-primary-button-label-msix"
@@ -222,6 +415,7 @@ const MR_ABOUT_WELCOME_DEFAULT = {
             {
               id: "checkbox-2",
               defaultValue: true,
+              targeting: `!${SET_DEFAULT_OS_PROMPT_ENABLED} && (unhandledCampaignAction != 'SET_DEFAULT_BROWSER') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser`,
               label: {
                 string_id:
                   "mr2022-onboarding-easy-setup-set-default-checkbox-label",
@@ -230,44 +424,6 @@ const MR_ABOUT_WELCOME_DEFAULT = {
                 type: "SET_DEFAULT_BROWSER",
               },
             },
-            {
-              id: "checkbox-3",
-              defaultValue: true,
-              label: {
-                string_id: "mr2022-onboarding-easy-setup-import-checkbox-label",
-              },
-              uncheckedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-              checkedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                          value: true,
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
           ],
         },
         primary_button: {
@@ -294,15 +450,6 @@ const MR_ABOUT_WELCOME_DEFAULT = {
         },
         secondary_button_top: [
           {
-            label: { string_id: "mr1-onboarding-sign-in-button-label" },
-            action: {
-              data: { entrypoint: "activity-stream-firstrun", where: "tab" },
-              type: "SHOW_FIREFOX_ACCOUNTS",
-              addFlowParams: true,
-            },
-            targeting: "!isFxASignedIn",
-          },
-          {
             label: { string_id: "restore-from-backup-secondary-top-button" },
             action: {
               type: "SET_PREF",
@@ -313,107 +460,6 @@ const MR_ABOUT_WELCOME_DEFAULT = {
             },
             targeting: "backupRestoreEnabled",
           },
-        ],
-      },
-    },
-    {
-      id: "AW_EASY_SETUP_NEEDS_DEFAULT",
-      targeting:
-        "!doesAppNeedPin && (unhandledCampaignAction != 'SET_DEFAULT_BROWSER') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser",
-      content: {
-        fullscreen: true,
-        position: "split",
-        split_narrow_bkg_position: "-60px",
-        image_alt_text: {
-          string_id: "mr2022-onboarding-default-image-alt",
-        },
-        background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-settodefault.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
-        progress_bar: true,
-        logo: {},
-        title: {
-          string_id: "onboarding-easy-setup-security-and-privacy-title",
-        },
-        subtitle: {
-          string_id: "onboarding-easy-setup-security-and-privacy-subtitle",
-        },
-        tiles: {
-          type: "multiselect",
-          data: [
-            {
-              id: "checkbox-1",
-              defaultValue: true,
-              label: {
-                string_id:
-                  "mr2022-onboarding-easy-setup-set-default-checkbox-label",
-              },
-              action: {
-                type: "SET_DEFAULT_BROWSER",
-              },
-            },
-            {
-              id: "checkbox-2",
-              defaultValue: true,
-              label: {
-                string_id: "mr2022-onboarding-easy-setup-import-checkbox-label",
-              },
-              uncheckedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-              checkedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                          value: true,
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          ],
-        },
-        primary_button: {
-          label: {
-            string_id: "mr2022-onboarding-easy-setup-primary-button-label",
-          },
-          action: {
-            type: "MULTI_ACTION",
-            collectSelect: true,
-            navigate: true,
-            data: {
-              actions: [],
-            },
-          },
-        },
-        secondary_button: {
-          label: {
-            string_id: "mr2022-onboarding-secondary-skip-button-label",
-          },
-          action: {
-            navigate: true,
-          },
-          has_arrow_icon: true,
-        },
-        secondary_button_top: [
           {
             label: { string_id: "mr1-onboarding-sign-in-button-label" },
             action: {
@@ -422,259 +468,6 @@ const MR_ABOUT_WELCOME_DEFAULT = {
               addFlowParams: true,
             },
             targeting: "!isFxASignedIn",
-          },
-          {
-            label: { string_id: "restore-from-backup-secondary-top-button" },
-            action: {
-              type: "SET_PREF",
-              data: {
-                pref: { name: "showRestoreFromBackup", value: true },
-              },
-              navigate: true,
-            },
-            targeting: "backupRestoreEnabled",
-          },
-        ],
-      },
-    },
-    {
-      id: "AW_EASY_SETUP_NEEDS_PIN",
-      targeting:
-        "(unhandledCampaignAction != 'PIN_FIREFOX_TO_TASKBAR') && (unhandledCampaignAction != 'PIN_AND_DEFAULT') && doesAppNeedPin && (!'browser.shell.checkDefaultBrowser'|preferenceValue || isDefaultBrowser || (unhandledCampaignAction == 'SET_DEFAULT_BROWSER'))",
-      content: {
-        fullscreen: true,
-        position: "split",
-        split_narrow_bkg_position: "-60px",
-        image_alt_text: {
-          string_id: "mr2022-onboarding-default-image-alt",
-        },
-        background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-settodefault.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
-        progress_bar: true,
-        logo: {},
-        title: {
-          string_id: "onboarding-easy-setup-security-and-privacy-title",
-        },
-        subtitle: {
-          string_id: "onboarding-easy-setup-security-and-privacy-subtitle",
-        },
-        tiles: {
-          type: "multiselect",
-          data: [
-            {
-              id: "checkbox-1",
-              defaultValue: true,
-              label: {
-                string_id: isMSIX
-                  ? "mr2022-onboarding-pin-primary-button-label-msix"
-                  : "mr2022-onboarding-pin-primary-button-label",
-              },
-              action: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "PIN_FIREFOX_TO_TASKBAR",
-                    },
-                    {
-                      type: "PIN_FIREFOX_TO_START_MENU",
-                    },
-                  ],
-                },
-              },
-            },
-            {
-              id: "checkbox-2",
-              defaultValue: true,
-              label: {
-                string_id: "mr2022-onboarding-easy-setup-import-checkbox-label",
-              },
-              uncheckedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-              checkedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                          value: true,
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          ],
-        },
-        primary_button: {
-          label: {
-            string_id: "mr2022-onboarding-easy-setup-primary-button-label",
-          },
-          action: {
-            type: "MULTI_ACTION",
-            collectSelect: true,
-            navigate: true,
-            data: {
-              actions: [],
-            },
-          },
-        },
-        secondary_button: {
-          label: {
-            string_id: "mr2022-onboarding-secondary-skip-button-label",
-          },
-          action: {
-            navigate: true,
-          },
-          has_arrow_icon: true,
-        },
-        secondary_button_top: [
-          {
-            label: { string_id: "mr1-onboarding-sign-in-button-label" },
-            action: {
-              data: { entrypoint: "activity-stream-firstrun", where: "tab" },
-              type: "SHOW_FIREFOX_ACCOUNTS",
-              addFlowParams: true,
-            },
-            targeting: "!isFxASignedIn",
-          },
-          {
-            label: { string_id: "restore-from-backup-secondary-top-button" },
-            action: {
-              type: "SET_PREF",
-              data: {
-                pref: { name: "showRestoreFromBackup", value: true },
-              },
-              navigate: true,
-            },
-            targeting: "backupRestoreEnabled",
-          },
-        ],
-      },
-    },
-    {
-      id: "AW_EASY_SETUP_ONLY_IMPORT",
-      targeting:
-        "(!doesAppNeedPin || (unhandledCampaignAction == 'PIN_FIREFOX_TO_TASKBAR') || (unhandledCampaignAction == 'PIN_AND_DEFAULT')) && (!'browser.shell.checkDefaultBrowser'|preferenceValue || isDefaultBrowser || (unhandledCampaignAction == 'SET_DEFAULT_BROWSER') || (unhandledCampaignAction == 'PIN_AND_DEFAULT'))",
-      content: {
-        fullscreen: true,
-        position: "split",
-        split_narrow_bkg_position: "-60px",
-        image_alt_text: {
-          string_id: "mr2022-onboarding-default-image-alt",
-        },
-        background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-settodefault.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
-        progress_bar: true,
-        logo: {},
-        title: {
-          string_id: "onboarding-easy-setup-security-and-privacy-title",
-        },
-        subtitle: {
-          string_id: "onboarding-easy-setup-security-and-privacy-subtitle",
-        },
-        tiles: {
-          type: "multiselect",
-          data: [
-            {
-              id: "checkbox-1",
-              defaultValue: true,
-              label: {
-                string_id: "mr2022-onboarding-easy-setup-import-checkbox-label",
-              },
-              uncheckedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-              checkedAction: {
-                type: "MULTI_ACTION",
-                data: {
-                  actions: [
-                    {
-                      type: "SET_PREF",
-                      data: {
-                        pref: {
-                          name: "showEmbeddedImport",
-                          value: true,
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          ],
-        },
-        primary_button: {
-          label: {
-            string_id: "mr2022-onboarding-easy-setup-primary-button-label",
-          },
-          action: {
-            type: "MULTI_ACTION",
-            collectSelect: true,
-            navigate: true,
-            data: {
-              actions: [],
-            },
-          },
-        },
-        secondary_button: {
-          label: {
-            string_id: "mr2022-onboarding-secondary-skip-button-label",
-          },
-          action: {
-            navigate: true,
-          },
-          has_arrow_icon: true,
-        },
-        secondary_button_top: [
-          {
-            label: { string_id: "mr1-onboarding-sign-in-button-label" },
-            action: {
-              data: { entrypoint: "activity-stream-firstrun", where: "tab" },
-              type: "SHOW_FIREFOX_ACCOUNTS",
-              addFlowParams: true,
-            },
-            targeting: "!isFxASignedIn",
-          },
-          {
-            label: { string_id: "restore-from-backup-secondary-top-button" },
-            action: {
-              type: "SET_PREF",
-              data: {
-                pref: { name: "showRestoreFromBackup", value: true },
-              },
-              navigate: true,
-            },
-            targeting: "backupRestoreEnabled",
           },
         ],
       },
@@ -698,7 +491,7 @@ const MR_ABOUT_WELCOME_DEFAULT = {
         position: "split",
         split_narrow_bkg_position: "-42px",
         background:
-          "url('chrome://activity-stream/content/data/content/assets/fox-doodle-backup-restore.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-backup-fox-in-box.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         hide_secondary_section: "responsive",
         backup_show_filepicker: {
@@ -762,7 +555,7 @@ const MR_ABOUT_WELCOME_DEFAULT = {
     },
     {
       id: "AW_IMPORT_SETTINGS_EMBEDDED",
-      targeting: `("messaging-system-action.showEmbeddedImport" |preferenceValue == true) && useEmbeddedMigrationWizard`,
+      targeting: "useEmbeddedMigrationWizard",
       content: {
         fullscreen: true,
         tiles: { type: "migration-wizard" },
@@ -771,14 +564,87 @@ const MR_ABOUT_WELCOME_DEFAULT = {
         image_alt_text: {
           string_id: "mr2022-onboarding-import-image-alt",
         },
+        title: {
+          string_id: "onboarding-refresh-import-title",
+        },
+        subtitle: {
+          string_id: "onboarding-refresh-import-subtitle",
+        },
         background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-import.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-import-fox-house.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         hide_secondary_section: "responsive",
         migrate_start: {
           action: {},
         },
         migrate_close: {
+          action: {
+            navigate: true,
+          },
+        },
+        secondary_button: {
+          label: {
+            string_id: "mr2022-onboarding-secondary-skip-button-label",
+          },
+          action: {
+            navigate: true,
+          },
+          has_arrow_icon: true,
+        },
+        secondary_button_top: [
+          {
+            label: { string_id: "restore-from-backup-secondary-top-button" },
+            action: {
+              type: "SET_PREF",
+              data: {
+                pref: { name: "showRestoreFromBackup", value: true },
+              },
+              navigate: true,
+            },
+            targeting:
+              "backupRestoreEnabled && isDefaultBrowser && !doesAppNeedPin",
+          },
+          {
+            label: {
+              string_id: "mr1-onboarding-sign-in-button-label",
+            },
+            action: {
+              data: {
+                entrypoint: "activity-stream-firstrun",
+                where: "tab",
+              },
+              type: "SHOW_FIREFOX_ACCOUNTS",
+              addFlowParams: true,
+            },
+            targeting: "!isFxASignedIn",
+          },
+        ],
+      },
+    },
+    {
+      id: "AW_THEME_PICKER",
+      targeting: "'browser.nova.enabled'|preferenceValue",
+      content: {
+        fullscreen: true,
+        position: "split",
+        tiles: {
+          type: "theme-picker",
+          data: { installSource: "about:welcome" },
+        },
+        title: {
+          string_id: "onboarding-theme-picker-title",
+        },
+        subtitle: {
+          string_id: "onboarding-theme-picker-subtitle",
+        },
+        background:
+          "url('chrome://activity-stream/content/data/content/assets/br-amo-fox-paint.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
+        progress_bar: true,
+        hide_secondary_section: "responsive",
+        primary_button: {
+          label: {
+            string_id: "onboarding-theme-picker-button-label",
+          },
           action: {
             navigate: true,
           },
@@ -802,14 +668,14 @@ const MR_ABOUT_WELCOME_DEFAULT = {
         fullscreen: true,
         split_narrow_bkg_position: "-58px",
         background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-amo-collection.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-amo-fox-paint.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         logo: {},
         title: {
-          string_id: "amo-screen-title",
+          string_id: "onboarding-refresh-onboarding-addons-title",
         },
         subtitle: {
-          raw: "Extensions are tiny apps that let you customize Firefox. They can boost your privacy, enhance productivity, improve media, change the way Firefox looks, and so much more.",
+          string_id: "onboarding-refresh-onboarding-addons-subtitle",
         },
         primary_button: {
           label: {
@@ -833,6 +699,20 @@ const MR_ABOUT_WELCOME_DEFAULT = {
           },
           has_arrow_icon: true,
         },
+        secondary_button_top: {
+          label: {
+            string_id: "mr1-onboarding-sign-in-button-label",
+          },
+          action: {
+            data: {
+              entrypoint: "activity-stream-firstrun",
+              where: "tab",
+            },
+            type: "SHOW_FIREFOX_ACCOUNTS",
+            addFlowParams: true,
+          },
+          targeting: "!isFxASignedIn",
+        },
       },
     },
     {
@@ -845,14 +725,14 @@ const MR_ABOUT_WELCOME_DEFAULT = {
           string_id: "mr2022-onboarding-gratitude-image-alt",
         },
         background:
-          "url('chrome://activity-stream/content/data/content/assets/mr-gratitude.svg') var(--mr-secondary-position) no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-gratitude-fox-rock.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         logo: {},
         title: {
-          string_id: "onboarding-gratitude-security-and-privacy-title",
+          string_id: "onboarding-refresh-gratitude-title",
         },
         subtitle: {
-          string_id: "onboarding-gratitude-security-and-privacy-subtitle",
+          string_id: "onboarding-refresh-gratitude-subtitle",
         },
         primary_button: {
           label: {
@@ -875,14 +755,14 @@ const MR_ABOUT_WELCOME_DEFAULT = {
           string_id: "mr2022-onboarding-gratitude-image-alt",
         },
         background:
-          "url('chrome://activity-stream/content/data/content/assets/fox-doodle-waving-laptop.svg') center center / 80% no-repeat var(--mr-screen-background-color)",
+          "url('chrome://activity-stream/content/data/content/assets/br-fxa-fox-mirror.svg') var(--mr-secondary-position) no-repeat light-dark(rgba(252, 245, 240, 1), rgba(33, 3, 64, 1))",
         progress_bar: true,
         logo: {},
         title: {
-          string_id: "onboarding-sign-up-title",
+          string_id: "onboarding-refresh-sync-title",
         },
         subtitle: {
-          string_id: "onboarding-sign-up-description",
+          string_id: "onboarding-refresh-sync-subtitle",
         },
         secondary_button: {
           label: {
@@ -970,9 +850,14 @@ async function getAttributionContent() {
       };
     }
   }
-  if (attribution?.ua) {
+  // Display the Smart Window switcher icon
+  if (attribution?.campaign === "smart_window") {
+    Services.prefs.setBoolPref("browser.smartwindow.enabled", true);
+  }
+  if (attribution) {
     return {
-      ua: decodeURIComponent(attribution.ua),
+      ...attribution,
+      ua: attribution.ua ? decodeURIComponent(attribution.ua) : undefined,
     };
   }
   return null;
@@ -1020,14 +905,6 @@ function prepareMobileDownload(content) {
       string_id: "mr2022-onboarding-no-mobile-download-cta-text",
     };
   }
-  // Update CN specific QRCode url
-  if (lazy.BrowserUtils.isChinaRepack()) {
-    mobileContent.hero_image.url = `${mobileContent.hero_image.url.slice(
-      0,
-      mobileContent.hero_image.url.indexOf(".svg")
-    )}-cn.svg`;
-  }
-
   return content;
 }
 
@@ -1040,6 +917,10 @@ async function prepareContentForReact(content) {
 
   if (content?.template === "return_to_amo") {
     return content;
+  }
+
+  if (content?.campaign === "smart_window") {
+    content.backdrop = "var(--mr-smart-window-background-gradient)";
   }
 
   // Set the primary import button source based on attribution.
@@ -1098,7 +979,7 @@ async function prepareContentForReact(content) {
   }
 
   if (shouldRemoveLanguageMismatchScreen) {
-    await lazy.AWScreenUtils.removeScreens(
+    await lazy.ASRouterScreenUtils.removeScreens(
       screens,
       screen => screen.id === "AW_LANGUAGE_MISMATCH"
     );

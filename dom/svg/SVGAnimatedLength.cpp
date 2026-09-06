@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,10 +10,12 @@
 #include "SVGAttrTearoffTable.h"
 #include "SVGGeometryProperty.h"
 #include "SVGLengthSMILType.h"
+#include "gfx2DGlue.h"
 #include "mozAutoDocUpdate.h"
 #include "mozilla/GeckoBindings.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ReflowInput.h"
 #include "mozilla/SMILValue.h"
 #include "mozilla/SVGIntegrationUtils.h"
 #include "mozilla/StaticPresData.h"
@@ -64,8 +64,7 @@ class MOZ_RAII AutoChangeLengthNotifier {
   bool mDoSetAttr;
 };
 
-MOZ_CONSTINIT static SVGAttrTearoffTable<SVGAnimatedLength,
-                                         DOMSVGAnimatedLength>
+constinit static SVGAttrTearoffTable<SVGAnimatedLength, DOMSVGAnimatedLength>
     sSVGAnimatedLengthTearoffTable;
 
 /* Helper functions */
@@ -195,6 +194,8 @@ SVGElementMetrics::SVGElementMetrics(const SVGElement* aSVGElement,
                                      const SVGViewportElement* aCtx)
     : mSVGElement(aSVGElement), mCtx(aCtx) {}
 
+SVGElementMetrics::~SVGElementMetrics() = default;
+
 const Element* SVGElementMetrics::GetElementForType(Type aType) const {
   switch (aType) {
     case Type::This:
@@ -224,12 +225,12 @@ float SVGElementMetrics::GetRootZoom() const {
       mSVGElement ? mSVGElement->OwnerDoc()->GetRootElement() : nullptr);
 }
 
-float SVGElementMetrics::GetAxisLength(uint8_t aCtxType) const {
+float SVGElementMetrics::GetAxisLength(SVGLength::Axis aAxis) const {
   if (!EnsureCtx()) {
     return 1.0f;
   }
 
-  return FixAxisLength(mCtx->GetLength(aCtxType));
+  return FixAxisLength(mCtx->GetLength(aAxis));
 }
 
 CSSSize SVGElementMetrics::GetCSSViewportSize() const {
@@ -339,8 +340,7 @@ float NonSVGFrameUserSpaceMetrics::GetLineHeight(Type aType) const {
   switch (aType) {
     case Type::This: {
       const auto lineHeightAu = ReflowInput::CalcLineHeight(
-          *mFrame->Style(), context, mFrame->GetContent(), NS_UNCONSTRAINEDSIZE,
-          1.0f);
+          *mFrame->Style(), context, mFrame->GetContent(), 1.0f);
       return CSSPixel::FromAppUnits(lineHeightAu);
     }
     case Type::Root:
@@ -351,62 +351,46 @@ float NonSVGFrameUserSpaceMetrics::GetLineHeight(Type aType) const {
   return 1.0f;
 }
 
-float UserSpaceMetricsWithSize::GetAxisLength(uint8_t aCtxType) const {
-  gfx::Size size = GetSize();
-  float length;
-  switch (aCtxType) {
-    case SVGContentUtils::X:
-      length = size.width;
-      break;
-    case SVGContentUtils::Y:
-      length = size.height;
-      break;
-    case SVGContentUtils::XY:
-      length =
-          SVGContentUtils::ComputeNormalizedHypotenuse(size.width, size.height);
-      break;
-    default:
-      MOZ_ASSERT_UNREACHABLE("Unknown axis type");
-      length = 1;
-      break;
-  }
+float UserSpaceMetricsWithSize::GetAxisLength(SVGLength::Axis aAxis) const {
+  float length =
+      float(SVGContentUtils::AxisLength(ThebesSize(GetSize()), aAxis));
   return FixAxisLength(length);
 }
 
 float SVGAnimatedLength::GetPixelsPerUnit(const SVGElement* aSVGElement,
-                                          uint8_t aUnitType) const {
+                                          uint16_t aUnitType) const {
   return SVGLength::GetPixelsPerUnit(SVGElementMetrics(aSVGElement), aUnitType,
-                                     mCtxType, false);
+                                     mAxis, false);
 }
 
 float SVGAnimatedLength::GetPixelsPerUnitWithZoom(const SVGElement* aSVGElement,
-                                                  uint8_t aUnitType) const {
+                                                  uint16_t aUnitType) const {
   return SVGLength::GetPixelsPerUnit(SVGElementMetrics(aSVGElement), aUnitType,
-                                     mCtxType, true);
+                                     mAxis, true);
 }
 
 float SVGAnimatedLength::GetPixelsPerUnitWithZoom(
-    const SVGViewportElement* aCtx, uint8_t aUnitType) const {
+    const SVGViewportElement* aCtx, uint16_t aUnitType) const {
   return SVGLength::GetPixelsPerUnit(SVGElementMetrics(aCtx, aCtx), aUnitType,
-                                     mCtxType, true);
+                                     mAxis, true);
 }
 
 float SVGAnimatedLength::GetPixelsPerUnitWithZoom(nsIFrame* aFrame,
-                                                  uint8_t aUnitType) const {
+                                                  uint16_t aUnitType) const {
   const nsIContent* content = aFrame->GetContent();
   MOZ_ASSERT(!content->IsText(), "Not expecting text content");
   if (content->IsSVGElement()) {
     return SVGLength::GetPixelsPerUnit(
         SVGElementMetrics(static_cast<const SVGElement*>(content)), aUnitType,
-        mCtxType, true);
+        mAxis, true);
   }
   return SVGLength::GetPixelsPerUnit(NonSVGFrameUserSpaceMetrics(aFrame),
-                                     aUnitType, mCtxType, true);
+                                     aUnitType, mAxis, true);
 }
 
 float SVGAnimatedLength::GetPixelsPerUnitWithZoom(
-    const UserSpaceMetrics& aMetrics, uint8_t aUnitType) const {
-  return SVGLength::GetPixelsPerUnit(aMetrics, aUnitType, mCtxType, true);
+    const UserSpaceMetrics& aMetrics, uint16_t aUnitType) const {
+  return SVGLength::GetPixelsPerUnit(aMetrics, aUnitType, mAxis, true);
 }
 
 void SVGAnimatedLength::SetBaseValueInSpecifiedUnits(float aValue,
@@ -590,8 +574,9 @@ DOMSVGAnimatedLength::~DOMSVGAnimatedLength() {
   sSVGAnimatedLengthTearoffTable.RemoveTearoff(mVal);
 }
 
-UniquePtr<SMILAttr> SVGAnimatedLength::ToSMILAttr(SVGElement* aSVGElement) {
-  return MakeUnique<SMILLength>(this, aSVGElement);
+std::unique_ptr<SMILAttr> SVGAnimatedLength::ToSMILAttr(
+    SVGElement* aSVGElement) {
+  return std::make_unique<SMILLength>(this, aSVGElement);
 }
 
 nsresult SVGAnimatedLength::SMILLength::ValueFromString(
@@ -606,7 +591,7 @@ nsresult SVGAnimatedLength::SMILLength::ValueFromString(
 
   SMILValue val(SVGLengthSMILType::Singleton());
   SVGLengthAndInfo* lai = static_cast<SVGLengthAndInfo*>(val.mU.mPtr);
-  lai->Set(value, unitType, mVal->GetCtxType());
+  lai->Set(value, unitType, mVal->Axis());
   lai->SetInfo(mSVGElement);
   aValue = std::move(val);
   aPreventCachingOfSandwich = !SVGLength::IsAbsoluteUnit(unitType);
@@ -646,13 +631,13 @@ float SVGLengthAndInfo::ConvertUnits(const SVGLengthAndInfo& aTo) const {
     return mValue;
   }
   return SVGLength(mValue, mUnitType)
-      .GetValueInSpecifiedUnit(aTo.mUnitType, aTo.Element(), aTo.mCtxType);
+      .GetValueInSpecifiedUnit(aTo.mUnitType, aTo.Element(), aTo.mAxis);
 }
 
 float SVGLengthAndInfo::ValueInPixels(const UserSpaceMetrics& aMetrics) const {
   return mValue == 0.0f ? 0.0f
                         : mValue * SVGLength::GetPixelsPerUnit(
-                                       aMetrics, mUnitType, mCtxType, false);
+                                       aMetrics, mUnitType, mAxis, false);
 }
 
 void SVGLengthAndInfo::Add(const SVGLengthAndInfo& aValueToAdd,
@@ -670,9 +655,9 @@ void SVGLengthAndInfo::Add(const SVGLengthAndInfo& aValueToAdd,
   // And then we give the resulting value the same units as the value
   // that we're animating to/by (i.e. the same as aValueToAdd):
   mUnitType = aValueToAdd.mUnitType;
-  mCtxType = aValueToAdd.mCtxType;
+  mAxis = aValueToAdd.mAxis;
   mValue = (currentLength + lengthToAdd) /
-           SVGLength::GetPixelsPerUnit(metrics, mUnitType, mCtxType, false);
+           SVGLength::GetPixelsPerUnit(metrics, mUnitType, mAxis, false);
 }
 
 void SVGLengthAndInfo::Interpolate(const SVGLengthAndInfo& aStart,
@@ -685,17 +670,17 @@ void SVGLengthAndInfo::Interpolate(const SVGLengthAndInfo& aStart,
   float startValue, endValue;
   if (!aStart.mElement || aUnitDistance > 0.5) {
     aResult.mUnitType = aEnd.mUnitType;
-    aResult.mCtxType = aEnd.mCtxType;
+    aResult.mAxis = aEnd.mAxis;
     startValue = aStart.ConvertUnits(aEnd);
     endValue = aEnd.mValue;
   } else {
     aResult.mUnitType = aStart.mUnitType;
-    aResult.mCtxType = aStart.mCtxType;
+    aResult.mAxis = aStart.mAxis;
     startValue = aStart.mValue;
     endValue = aEnd.ConvertUnits(aStart);
   }
   aResult.mElement = aEnd.mElement;
-  aResult.mValue = startValue + (endValue - startValue) * aUnitDistance;
+  aResult.mValue = std::lerp(startValue, endValue, aUnitDistance);
 }
 
 }  // namespace mozilla

@@ -13,15 +13,18 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import io.mockk.verifyAll
+import java.util.Locale
+import mozilla.components.browser.state.action.BrowserAction
 import mozilla.components.browser.state.action.SearchAction
+import mozilla.components.browser.state.state.BrowserState
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.support.locale.LocaleManager
 import mozilla.components.support.locale.LocaleUseCases
+import mozilla.components.support.test.middleware.CaptureActionsMiddleware
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
-import java.util.Locale
 
 @RunWith(AndroidJUnit4::class)
 class LocaleSettingsControllerTest {
@@ -29,7 +32,9 @@ class LocaleSettingsControllerTest {
     val activity: Activity = Robolectric.buildActivity(Activity::class.java).setup().get()
 
     private val localeSettingsStore: LocaleSettingsStore = mockk(relaxed = true)
-    private val browserStore: BrowserStore = mockk(relaxed = true)
+    private val captureActionsMiddleware = CaptureActionsMiddleware<BrowserState, BrowserAction>()
+
+    private val browserStore = BrowserStore(middleware = listOf(captureActionsMiddleware))
     private val localeUseCases: LocaleUseCases = mockk(relaxed = true)
     private val mockState = LocaleSettingsState(emptyList(), emptyList(), mockk())
 
@@ -37,14 +42,15 @@ class LocaleSettingsControllerTest {
 
     @Before
     fun setup() {
-        controller = spyk(
-            DefaultLocaleSettingsController(
-                activity,
-                localeSettingsStore,
-                browserStore,
-                localeUseCases,
-            ),
-        )
+        controller =
+            spyk(
+                DefaultLocaleSettingsController(
+                    activity,
+                    localeSettingsStore,
+                    browserStore,
+                    localeUseCases,
+                )
+            )
 
         every { localeUseCases.notifyLocaleChanged(any()) } just Runs
     }
@@ -76,7 +82,7 @@ class LocaleSettingsControllerTest {
         controller.handleLocaleSelected(selectedLocale)
 
         verify { localeSettingsStore.dispatch(LocaleSettingsAction.Select(selectedLocale)) }
-        verify { browserStore.dispatch(SearchAction.RefreshSearchEnginesAction) }
+        captureActionsMiddleware.findFirstAction(SearchAction.RefreshSearchEnginesAction::class)
         controller.updateLocale(selectedLocale)
         controller.recreateActivity()
         verify { controller.updateBaseConfiguration(activity, selectedLocale) }
@@ -92,7 +98,7 @@ class LocaleSettingsControllerTest {
         controller.handleLocaleSelected(selectedLocale)
 
         verify { localeSettingsStore.dispatch(LocaleSettingsAction.Select(selectedLocale)) }
-        verify { browserStore.dispatch(SearchAction.RefreshSearchEnginesAction) }
+        captureActionsMiddleware.findFirstAction(SearchAction.RefreshSearchEnginesAction::class)
         verify { controller.updateLocale(selectedLocale) }
         verify { controller.recreateActivity() }
         verify { controller.updateBaseConfiguration(activity, selectedLocale) }
@@ -108,11 +114,11 @@ class LocaleSettingsControllerTest {
 
         verifyAll(inverse = true) {
             localeSettingsStore.dispatch(LocaleSettingsAction.Select(selectedLocale))
-            browserStore.dispatch(SearchAction.RefreshSearchEnginesAction)
             controller.resetToSystemDefault()
             controller.recreateActivity()
             controller.updateBaseConfiguration(activity, selectedLocale)
         }
+        captureActionsMiddleware.assertNotDispatched(SearchAction.RefreshSearchEnginesAction::class)
     }
 
     @Test
@@ -123,7 +129,7 @@ class LocaleSettingsControllerTest {
         controller.handleDefaultLocaleSelected()
 
         verify { localeSettingsStore.dispatch(LocaleSettingsAction.Select(selectedLocale)) }
-        verify { browserStore.dispatch(SearchAction.RefreshSearchEnginesAction) }
+        captureActionsMiddleware.findFirstAction(SearchAction.RefreshSearchEnginesAction::class)
         verify { controller.resetToSystemDefault() }
         verify { controller.recreateActivity() }
         verify { controller.updateBaseConfiguration(activity, selectedLocale) }

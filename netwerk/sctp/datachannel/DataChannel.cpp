@@ -1,41 +1,39 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <algorithm>
 #include <stdio.h>
-#include <stdlib.h>
+
+#include <algorithm>
 
 #ifdef XP_WIN
 #  include <winsock.h>  // for htonl, htons, ntohl, ntohs
 #endif
 
-#include "nsIInputStream.h"
-#include "nsIPrefBranch.h"
-#include "nsIPrefService.h"
-#include "mozilla/Sprintf.h"
-#include "nsProxyRelease.h"
-#include "nsThread.h"
-#include "nsThreadUtils.h"
-#include "nsNetUtil.h"
 #include "mozilla/Components.h"
+#include "mozilla/Sprintf.h"
 #include "mozilla/StaticMutex.h"
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/dom/RTCDataChannel.h"
 #include "mozilla/dom/RTCDataChannelBinding.h"
+#include "nsIInputStream.h"
+#include "nsIPrefBranch.h"
+#include "nsIPrefService.h"
+#include "nsNetUtil.h"
+#include "nsProxyRelease.h"
+#include "nsThread.h"
+#include "nsThreadUtils.h"
 #ifdef MOZ_PEERCONNECTION
-#  include "transport/runnable_utils.h"
 #  include "jsapi/MediaTransportHandler.h"
 #  include "mediapacket.h"
+#  include "transport/runnable_utils.h"
 #endif
 
 #include "DataChannel.h"
 #include "DataChannelDcSctp.h"
-#include "DataChannelUsrsctp.h"
 #include "DataChannelLog.h"
 #include "DataChannelProtocol.h"
+#include "DataChannelUsrsctp.h"
 
 namespace mozilla {
 
@@ -270,18 +268,20 @@ bool DataChannelConnection::ConnectToTransport(const std::string& aTransportId,
       if (id != INVALID_STREAM) {
         channel->SetStream(id);
         mChannels.Insert(channel);
-        DC_DEBUG(("%p: Inserting auto-selected id %u", this,
-                  static_cast<unsigned>(id)));
+        DC_DEBUG(("%p: Inserting auto-selected id %u for channel %p", this,
+                  static_cast<unsigned>(id), channel.get()));
         mStreamIds.InsertElementSorted(id);
         hasStreamId.AppendElement(std::move(channel));
       } else {
+        DC_WARN(("%p: Could not find id for channel %p, calling AnnounceClosed",
+                 this, channel.get()));
         // Spec language is very similar to AnnounceClosed, the differences
         // being a lack of a closed check at the top, a different error event,
         // and no removal of the channel from the [[DataChannels]] slot.
         // We don't support firing errors right now, and we probabaly want the
         // closed check anyway, and we don't really have something equivalent
         // to the [[DataChannels]] slot, so just use AnnounceClosed for now.
-        channel->AnnounceClosed();
+        channel->AnnounceClosed(Nothing());
       }
     }
 
@@ -334,7 +334,8 @@ void DataChannelConnection::SetSignals(const std::string& aTransportId) {
 }
 
 void DataChannelConnection::TransportStateChange(
-    const std::string& aTransportId, TransportLayer::State aState) {
+    const std::string& aTransportId, TransportLayer::State aState,
+    const nsTArray<nsTArray<uint8_t>>&, Maybe<dom::RTCErrorParams>) {
   MOZ_ASSERT(mSTS->IsOnCurrentThread());
   if (aTransportId == mTransportId) {
     if (aState == TransportLayer::TS_OPEN) {
@@ -356,7 +357,7 @@ void DataChannelConnection::ProcessQueuedOpens() {
   // Technically in an unspecified state, although no reasonable impl will leave
   // anything in here.
   mPending.clear();
-  for (auto channel : temp) {
+  for (const auto& channel : temp) {
     DC_DEBUG(("%p: Processing queued open for %p (%u)", this, channel.get(),
               channel->mStream));
     OpenFinish(channel);  // may end up back in mPending
@@ -403,7 +404,7 @@ uint16_t DataChannelConnection::FindFreeStream() const {
 
   // Find the lowest odd/even id that is not present in mStreamIds
   for (auto id : mStreamIds) {
-    if (i >= MAX_NUM_STREAMS) {
+    if (i >= GetStreamIdCeiling()) {
       return INVALID_STREAM;
     }
 
@@ -443,6 +444,7 @@ int DataChannelConnection::SendControlMessage(DataChannel& aChannel,
 // Returns a POSIX error code.
 int DataChannelConnection::SendOpenAckMessage(DataChannel& aChannel) {
   MOZ_ASSERT(mSTS->IsOnCurrentThread());
+  DC_INFO(("%p: Sending DataChannel open ack, channel %p", this, &aChannel));
   struct rtcweb_datachannel_ack ack = {};
   ack.msg_type = DATA_CHANNEL_ACK;
 
@@ -451,6 +453,8 @@ int DataChannelConnection::SendOpenAckMessage(DataChannel& aChannel) {
 
 // Returns a POSIX error code.
 int DataChannelConnection::SendOpenRequestMessage(DataChannel& aChannel) {
+  DC_INFO(
+      ("%p: Sending DataChannel open request, channel %p", this, &aChannel));
   const nsACString& label = aChannel.mLabel;
   const nsACString& protocol = aChannel.mProtocol;
   const bool unordered = !aChannel.mOrdered;
@@ -658,6 +662,10 @@ void DataChannelConnection::HandleOpenAckMessage(
            channel.get(), stream, channel->mWaitingForAck ? 1 : 0));
 
   channel->mWaitingForAck = false;
+
+  // Either externally negotiated or we sent Open
+  channel->AnnounceOpen();
+  OnStreamOpen(stream);
 }
 
 // Caller must ensure that length <= SIZE_MAX
@@ -980,10 +988,11 @@ void DataChannelConnection::OpenFinish(RefPtr<DataChannel> aChannel) {
   aChannel->mSendStreamNeedsReset = true;
   aChannel->mRecvStreamNeedsReset = true;
 
-  // Either externally negotiated or we sent Open
-  // FIX?  Move into DOMDataChannel?  I don't think we can send it yet here
-  aChannel->AnnounceOpen();
-  OnStreamOpen(stream);
+  if (aChannel->mNegotiated) {
+    // Either externally negotiated or we sent Open
+    aChannel->AnnounceOpen();
+    OnStreamOpen(stream);
+  }
 }
 
 nsISerialEventTarget* DataChannelConnection::GetIOThread() {
@@ -1014,9 +1023,10 @@ void DataChannelConnection::SetState(DataChannelConnectionState aState) {
   if (mState == DataChannelConnectionState::Open) {
     Dispatch(NS_NewCancelableRunnableFunction(
                  __func__,
-                 [this, self = RefPtr<DataChannelConnection>(this)]() {
+                 [this, self = RefPtr<DataChannelConnection>(this),
+                  maxChannels = Some(mNegotiatedIdLimit)]() {
                    if (mListener) {
-                     mListener->NotifySctpConnected();
+                     mListener->NotifySctpConnected(maxChannels);
                    }
                  }),
              NS_DISPATCH_FALLIBLE);
@@ -1032,8 +1042,8 @@ void DataChannelConnection::SetState(DataChannelConnectionState aState) {
   }
 }
 
-void DataChannelConnection::SendDataMessage(uint16_t aStream, nsACString&& aMsg,
-                                            bool aIsBinary) {
+void DataChannelConnection::SendDataMessage(DataChannel& aChannel,
+                                            nsACString&& aMsg, bool aIsBinary) {
   // Could be main, could be a worker
 
   nsCString temp(std::move(aMsg));
@@ -1041,14 +1051,9 @@ void DataChannelConnection::SendDataMessage(uint16_t aStream, nsACString&& aMsg,
   mSTS->Dispatch(
       NS_NewCancelableRunnableFunction(
           __func__,
-          [this, self = RefPtr<DataChannelConnection>(this), aStream,
-           msg = std::move(temp), aIsBinary]() mutable {
-            RefPtr<DataChannel> channel = FindChannelByStream(aStream);
-            if (!channel) {
-              // Must have closed due to a transport error?
-              return;
-            }
-
+          [this, self = RefPtr<DataChannelConnection>(this),
+           channel = RefPtr(&aChannel), msg = std::move(temp),
+           aIsBinary]() mutable {
             Maybe<uint16_t> maxRetransmissions;
             Maybe<uint16_t> maxLifetimeMs;
 
@@ -1141,7 +1146,16 @@ void DataChannel::EndOfStream() {
   }
 }
 
-void DataChannelConnection::FinishClose_s(const RefPtr<DataChannel>& aChannel) {
+RefPtr<dom::RTCDataChannel> DataChannel::GetDomDataChannel() const {
+  MOZ_ASSERT(mDomEventTarget->IsOnCurrentThread());
+  if (NS_IsMainThread()) {
+    return mMainthreadDomDataChannel;
+  }
+  return mWorkerDomDataChannel;
+}
+
+void DataChannelConnection::FinishClose_s(const RefPtr<DataChannel>& aChannel,
+                                          Maybe<dom::RTCErrorParams> aError) {
   MOZ_ASSERT(mSTS->IsOnCurrentThread());
 
   // We're removing this from all containers, make sure the passed pointer
@@ -1154,10 +1168,10 @@ void DataChannelConnection::FinishClose_s(const RefPtr<DataChannel>& aChannel) {
 
   // Close the channel's data transport by following the associated
   // procedure.
-  aChannel->AnnounceClosed();
+  aChannel->AnnounceClosed(std::move(aError));
 }
 
-void DataChannelConnection::CloseAll_s() {
+void DataChannelConnection::CloseAll_s(Maybe<dom::RTCErrorParams> aError) {
   // Make sure no more channels will be opened
   SetState(DataChannelConnectionState::Closed);
 
@@ -1175,7 +1189,7 @@ void DataChannelConnection::CloseAll_s() {
     }
     // We do not wait for the reset to finish in this case; we won't be around
     // to see the response.
-    FinishClose_s(channel);
+    FinishClose_s(channel, aError);
   }
 
   // Clean up any pending opens for channels
@@ -1256,7 +1270,14 @@ bool DataChannelConnection::Channels::Remove(
     return mChannels.RemoveElement(aChannel);
   }
 
-  return mChannels.RemoveElementSorted(aChannel, IdComparator());
+  auto index = mChannels.BinaryIndexOf(aChannel->mStream, IdComparator());
+  if (index != ChannelArray::NoIndex) {
+    if (mChannels[index].get() == aChannel.get()) {
+      mChannels.RemoveElementAt(index);
+      return true;
+    }
+  }
+  return false;
 }
 
 RefPtr<DataChannel> DataChannelConnection::Channels::Get(uint16_t aId) const {
@@ -1406,7 +1427,8 @@ void DataChannel::AnnounceOpen() {
       NS_NewCancelableRunnableFunction(
           "DataChannel::AnnounceOpen",
           [this, self = RefPtr<DataChannel>(this)] {
-            if (GetDomDataChannel()) {
+            if (GetDomDataChannel() && !mAnnouncedOpen) {
+              mAnnouncedOpen = true;
               DC_INFO(("Calling AnnounceOpen on RTCDataChannel."));
               GetDomDataChannel()->AnnounceOpen();
             }
@@ -1432,7 +1454,7 @@ void DataChannel::AnnounceOpen() {
       NS_DISPATCH_FALLIBLE);
 }
 
-void DataChannel::AnnounceClosed() {
+void DataChannel::AnnounceClosed(Maybe<dom::RTCErrorParams> aError) {
   // When an RTCDataChannel object's underlying data transport has been closed,
   // the user agent MUST queue a task to run the following steps:
   DC_INFO(
@@ -1443,7 +1465,8 @@ void DataChannel::AnnounceClosed() {
   GetMainThreadSerialEventTarget()->Dispatch(
       NS_NewCancelableRunnableFunction(
           "DataChannel::AnnounceClosed",
-          [this, self = RefPtr<DataChannel>(this), connection = mConnection]() {
+          [this, self = RefPtr<DataChannel>(this), connection = mConnection,
+           aError = std::move(aError)]() mutable {
             if (mAnnouncedClosed) {
               return;
             }
@@ -1464,13 +1487,14 @@ void DataChannel::AnnounceClosed() {
             mDomEventTarget->Dispatch(
                 NS_NewCancelableRunnableFunction(
                     "DataChannel::AnnounceClosed",
-                    [this, self = RefPtr<DataChannel>(this)] {
+                    [this, self = RefPtr<DataChannel>(this),
+                     aError = std::move(aError)] {
                       DC_INFO(("%p: Attempting to call AnnounceClosed.", this));
                       if (GetDomDataChannel()) {
                         DC_INFO(
                             ("%p: Calling AnnounceClosed on RTCDataChannel.",
                              this));
-                        GetDomDataChannel()->AnnounceClosed();
+                        GetDomDataChannel()->AnnounceClosed(std::move(aError));
                       }
                     }),
                 NS_DISPATCH_FALLIBLE);
@@ -1513,7 +1537,7 @@ void DataChannel::SendBuffer(nsCString&& aMsg, bool aBinary) {
          aBinary](
             const GenericNonExclusivePromise::ResolveOrRejectValue&) mutable {
           if (mConnection) {
-            mConnection->SendDataMessage(mStream, std::move(msg), aBinary);
+            mConnection->SendDataMessage(*this, std::move(msg), aBinary);
             return GenericNonExclusivePromise::CreateAndResolve(true, __func__);
           }
           return GenericNonExclusivePromise::CreateAndResolve(false, __func__);
@@ -1522,7 +1546,7 @@ void DataChannel::SendBuffer(nsCString&& aMsg, bool aBinary) {
     UnsetMessagesSentPromiseWhenSettled();
     return;
   }
-  mConnection->SendDataMessage(mStream, std::move(aMsg), aBinary);
+  mConnection->SendDataMessage(*this, std::move(aMsg), aBinary);
 }
 
 void DataChannel::SendBinaryBlob(nsIInputStream* aBlob) {
@@ -1540,7 +1564,7 @@ void DataChannel::SendBinaryBlob(nsIInputStream* aBlob) {
         if (NS_SUCCEEDED(NS_ReadInputStreamToString(blob, data, -1))) {
           if (mConnection) {
             // This dispatches to STS, which is when we're supposed to resolve
-            mConnection->SendDataMessage(mStream, std::move(data), true);
+            mConnection->SendDataMessage(*this, std::move(data), true);
           }
           blob->Close();
           return GenericNonExclusivePromise::CreateAndResolve(true, __func__);
@@ -1634,6 +1658,10 @@ void DataChannel::OnMessageReceived(nsCString&& aMsg, bool aIsBinary) {
                                 [this, self = RefPtr<DataChannel>(this),
                                  msg = std::move(aMsg), aIsBinary]() {
                                   if (GetDomDataChannel()) {
+                                    if (!mAnnouncedOpen) {
+                                      mAnnouncedOpen = true;
+                                      GetDomDataChannel()->AnnounceOpen();
+                                    }
                                     GetDomDataChannel()->DoOnMessageAvailable(
                                         msg, aIsBinary);
                                   }

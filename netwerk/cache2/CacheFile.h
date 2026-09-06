@@ -2,16 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef CacheFile__h__
-#define CacheFile__h__
+#ifndef CacheFile_h_
+#define CacheFile_h_
 
 #include "CacheFileChunk.h"
 #include "CacheFileIOManager.h"
 #include "CacheFileMetadata.h"
 #include "Dictionary.h"
-#include "nsRefPtrHashtable.h"
-#include "nsClassHashtable.h"
 #include "mozilla/Mutex.h"
+#include "nsClassHashtable.h"
+#include "nsRefPtrHashtable.h"
 
 class nsIAsyncOutputStream;
 class nsICacheEntry;
@@ -203,6 +203,10 @@ class MOZ_CAPABILITY("mutex") CacheFile final
   nsresult SetAltMetadata(const char* aAltMetadata);
 
   nsresult InitIndexEntry();
+
+  // Marks a new disk-backed entry as encrypted and assigns its stable per-file
+  // salt when disk cache encryption is enabled. No-op otherwise.
+  void SetupEncryption() MOZ_REQUIRES(this);
 
   bool mOpeningFile MOZ_GUARDED_BY(this){false};
   bool mReady MOZ_GUARDED_BY(this){false};

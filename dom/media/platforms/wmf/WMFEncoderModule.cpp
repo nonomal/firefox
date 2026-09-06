@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +5,7 @@
 #include "WMFEncoderModule.h"
 
 #include "EncoderConfig.h"
+#include "MFTEncoder.h"
 #include "WMFMediaDataEncoder.h"
 
 using mozilla::media::EncodeSupportSet;
@@ -21,6 +20,8 @@ static EncodeSupportSet IsSupported(const EncoderConfig& aConfig) {
   }
   return CanCreateWMFEncoder(aConfig);
 }
+
+void WMFEncoderModule::ClearCache() { MFTEncoder::ClearCache(); }
 
 EncodeSupportSet WMFEncoderModule::SupportsCodec(CodecType aCodecType) const {
   gfx::IntSize kDefaultSize(640, 480);
@@ -39,6 +40,12 @@ EncodeSupportSet WMFEncoderModule::Supports(
     return EncodeSupportSet{};
   }
   if (aConfig.IsAudio()) {
+    return EncodeSupportSet{};
+  }
+  // Declining here rather than failing per frame lets PEMFactory fall through
+  // to an encoder that can produce the requested size. Matters for VP8 and VP9,
+  // which can express an odd width; H.264 cannot and is declined above.
+  if (!IsFrameSizeSupportedForNV12Input(aConfig.mSize)) {
     return EncodeSupportSet{};
   }
   if (aConfig.mScalabilityMode != ScalabilityMode::None &&

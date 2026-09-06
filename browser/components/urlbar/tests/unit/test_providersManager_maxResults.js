@@ -9,15 +9,15 @@ add_task(async function test_maxResults() {
   for (let i = 0; i < MATCHES_LENGTH; i++) {
     matches.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.TAB_SWITCH,
-        source: UrlbarUtils.RESULT_SOURCE.TABS,
+        type: UrlbarShared.RESULT_TYPE.TAB_SWITCH,
+        source: UrlbarShared.RESULT_SOURCE.TABS,
         payload: { url: `http://mozilla.org/foo/${i}` },
       })
     );
   }
   let provider = registerBasicTestProvider(matches);
   let context = createContext(undefined, { providers: [provider.name] });
-  let controller = UrlbarTestUtils.newMockController();
+  let controller = UrlbarTestUtils.mockChildController();
 
   async function test_count(count) {
     let promise = promiseControllerNotification(controller, "onQueryFinished");

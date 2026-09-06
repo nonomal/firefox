@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,7 +12,9 @@
 #include "mozilla/StaticPrefs_privacy.h"
 #include "mozilla/intl/AppDateTimeFormat.h"
 #include "mozilla/intl/Locale.h"
+#include "mozilla/intl/FluentBindings.h"
 #include "mozilla/intl/OSPreferences.h"
+#include "mozilla/intl/RegistryBindings.h"
 #include "mozilla/intl/locale_service_glue_generated.h"
 #include "nsContentUtils.h"
 #include "nsDirectoryService.h"
@@ -34,6 +35,7 @@
 
 #define ACCEPT_LANGUAGES_PREF "intl.accept_languages"
 #define FONT_LANGUAGE_GROUP_PREF "font.language.group"
+#define URL_FIXUP_SUFFIX_PREF "browser.fixup.alternate.suffix"
 
 #define PSEUDO_LOCALE_PREF "intl.l10n.pseudo"
 #define REQUESTED_LOCALES_PREF "intl.locale.requested"
@@ -664,6 +666,40 @@ LocaleService::GetIsAppLocaleRTL(bool* aRetVal) {
   return NS_OK;
 }
 
+static bool OverrideEnabled(const nsACString& aOverridePref) {
+  return !aOverridePref.IsEmpty() &&
+         Preferences::GetBool(PromiseFlatCString(aOverridePref).get(), false);
+}
+
+NS_IMETHODIMP
+LocaleService::IsLocalizedEnough(const nsACString& aFtlPath,
+                                 const nsACString& aOverridePref,
+                                 double aMinCoverage, bool* aRetVal) {
+  if (OverrideEnabled(aOverridePref)) {
+    *aRetVal = true;
+    return NS_OK;
+  }
+
+  float coverage = 1.0f;
+  ffi::l10nregistry_get_coverage(&aFtlPath, &coverage);
+  *aRetVal = static_cast<double>(coverage) >= aMinCoverage;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LocaleService::AreMessagesLocalized(const nsACString& aFtlPath,
+                                    const nsTArray<nsCString>& aRequiredIds,
+                                    const nsACString& aOverridePref,
+                                    bool* aRetVal) {
+  if (OverrideEnabled(aOverridePref)) {
+    *aRetVal = true;
+    return NS_OK;
+  }
+
+  *aRetVal = ffi::l10nregistry_are_messages_localized(&aFtlPath, &aRequiredIds);
+  return NS_OK;
+}
+
 NS_IMETHODIMP
 LocaleService::SetAvailableLocales(const nsTArray<nsCString>& aAvailable) {
   MOZ_ASSERT(mIsServer, "This should only be called in the server mode.");
@@ -770,6 +806,26 @@ LocaleService::GetFontLanguageGroup(nsACString& aRetVal) {
     NegotiateAppLocales(mAppLocales);
   }
   ffi::locale_service_default_font_language_group(&mAppLocales[0], &aRetVal);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LocaleService::GetUrlFixupSuffix(nsACString& aRetVal) {
+  // if there is a user (or locked) value, use it
+  if (Preferences::HasUserValue(URL_FIXUP_SUFFIX_PREF) ||
+      Preferences::IsLocked(URL_FIXUP_SUFFIX_PREF)) {
+    nsresult rv = Preferences::GetCString(URL_FIXUP_SUFFIX_PREF, aRetVal);
+    if (NS_SUCCEEDED(rv)) {
+      return NS_OK;
+    }
+  }
+
+  // if we need to fetch the default value, do that instead
+  if (mAppLocales.IsEmpty()) {
+    NegotiateAppLocales(mAppLocales);
+  }
+  ffi::locale_service_default_url_fixup_suffix(&mAppLocales[0], &aRetVal);
 
   return NS_OK;
 }

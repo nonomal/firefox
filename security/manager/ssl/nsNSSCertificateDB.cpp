@@ -14,6 +14,7 @@
 #include "mozilla/Casting.h"
 #include "mozilla/Logging.h"
 #include "mozilla/Services.h"
+#include "mozilla/dom/Promise.h"
 #include "mozpkix/Time.h"
 #include "mozpkix/pkixnss.h"
 #include "mozpkix/pkixtypes.h"
@@ -23,6 +24,7 @@
 #include "nsComponentManagerUtils.h"
 #include "nsICertificateDialogs.h"
 #include "nsIFile.h"
+#include "nsIInterfaceRequestorUtils.h"
 #include "nsIMutableArray.h"
 #include "nsIObserverService.h"
 #include "nsIPrompt.h"
@@ -30,7 +32,6 @@
 #include "nsNSSCertTrust.h"
 #include "nsNSSCertificate.h"
 #include "nsNSSComponent.h"
-#include "nsNSSHelper.h"
 #include "nsPKCS12Blob.h"
 #include "nsPromiseFlatString.h"
 #include "nsProxyRelease.h"
@@ -52,6 +53,8 @@
 
 using namespace mozilla;
 using namespace mozilla::psm;
+
+using mozilla::dom::Promise;
 
 extern LazyLogModule gPIPNSSLog;
 
@@ -81,7 +84,7 @@ nsNSSCertificateDB::FindCertByDBKey(const nsACString& aDBKey,
   if (!cert) {
     return NS_OK;
   }
-  nsCOMPtr<nsIX509Cert> nssCert = new nsNSSCertificate(cert.get());
+  RefPtr nssCert = MakeRefPtr<nsNSSCertificate>(cert.get());
   nssCert.forget(_cert);
   return NS_OK;
 }
@@ -308,12 +311,10 @@ nsresult nsNSSCertificateDB::handleCACertDownload(NotNull<nsIArray*> x509Certs,
 
   if (!certToShow) return NS_ERROR_FAILURE;
 
-  nsCOMPtr<nsICertificateDialogs> dialogs;
-  nsresult rv = ::getNSSDialogs(getter_AddRefs(dialogs),
-                                NS_GET_IID(nsICertificateDialogs),
-                                NS_CERTIFICATEDIALOGS_CONTRACTID);
-  if (NS_FAILED(rv)) {
-    return rv;
+  nsCOMPtr<nsICertificateDialogs> dialogs(
+      do_GetService(NS_CERTIFICATEDIALOGS_CONTRACTID));
+  if (!dialogs) {
+    return NS_ERROR_FAILURE;
   }
 
   UniqueCERTCertificate tmpCert(certToShow->GetCert());
@@ -333,7 +334,8 @@ nsresult nsNSSCertificateDB::handleCACertDownload(NotNull<nsIArray*> x509Certs,
 
   uint32_t trustBits;
   bool allows;
-  rv = dialogs->ConfirmDownloadCACert(ctx, certToShow, &trustBits, &allows);
+  nsresult rv =
+      dialogs->ConfirmDownloadCACert(ctx, certToShow, &trustBits, &allows);
   if (NS_FAILED(rv)) return rv;
 
   if (!allows) return NS_ERROR_NOT_AVAILABLE;
@@ -407,8 +409,8 @@ nsresult nsNSSCertificateDB::ConstructCertArrayFromUniqueCertList(
 
   for (CERTCertListNode* node = CERT_LIST_HEAD(aCertListIn.get());
        !CERT_LIST_END(node, aCertListIn.get()); node = CERT_LIST_NEXT(node)) {
-    RefPtr<nsIX509Cert> cert = new nsNSSCertificate(node->cert);
-    aCertListOut.AppendElement(cert);
+    RefPtr cert = MakeRefPtr<nsNSSCertificate>(node->cert);
+    aCertListOut.AppendElement(std::move(cert));
   }
   return NS_OK;
 }
@@ -435,7 +437,8 @@ nsNSSCertificateDB::ImportCertificates(uint8_t* data, uint32_t length,
 
   // Now let's create some certs to work with
   for (nsTArray<uint8_t>& certDER : certsArray) {
-    nsCOMPtr<nsIX509Cert> cert = new nsNSSCertificate(std::move(certDER));
+    nsCOMPtr<nsIX509Cert> cert =
+        MakeRefPtr<nsNSSCertificate>(std::move(certDER));
     nsresult rv = array->AppendElement(cert);
     if (NS_FAILED(rv)) {
       return rv;
@@ -529,19 +532,17 @@ void nsNSSCertificateDB::DisplayCertificateAlert(nsIInterfaceRequestor* ctx,
     return;
   }
 
-  nsCOMPtr<nsIInterfaceRequestor> my_ctx = ctx;
-  if (!my_ctx) {
-    my_ctx = new PipUIContext();
-  }
-
   // This shall be replaced by embedding ovverridable prompts
   // as discussed in bug 310446, and should make use of certToShow.
 
   nsAutoString tmpMessage;
   GetPIPNSSBundleString(stringID, tmpMessage);
-  nsCOMPtr<nsIPrompt> prompt(do_GetInterface(my_ctx));
+  nsCOMPtr<nsIPrompt> prompt(do_GetInterface(ctx));
   if (!prompt) {
-    return;
+    if (NS_FAILED(nsNSSComponent::GetNewPrompter(getter_AddRefs(prompt))) ||
+        !prompt) {
+      return;
+    }
   }
 
   prompt->Alert(nullptr, tmpMessage.get());
@@ -580,7 +581,7 @@ nsNSSCertificateDB::ImportUserCertificate(uint8_t* data, uint32_t length,
 
   UniquePK11SlotInfo slot(PK11_KeyForCertExists(cert.get(), nullptr, ctx));
   if (!slot) {
-    nsCOMPtr<nsIX509Cert> certToShow = new nsNSSCertificate(cert.get());
+    RefPtr certToShow = MakeRefPtr<nsNSSCertificate>(cert.get());
     DisplayCertificateAlert(ctx, "UserCertIgnoredNoPrivateKey", certToShow);
     return NS_ERROR_FAILURE;
   }
@@ -602,7 +603,7 @@ nsNSSCertificateDB::ImportUserCertificate(uint8_t* data, uint32_t length,
   slot = nullptr;
 
   {
-    nsCOMPtr<nsIX509Cert> certToShow = new nsNSSCertificate(cert.get());
+    RefPtr certToShow = MakeRefPtr<nsNSSCertificate>(cert.get());
     DisplayCertificateAlert(ctx, "UserCertImported", certToShow);
   }
 
@@ -791,13 +792,11 @@ nsNSSCertificateDB::ImportCertsFromFile(nsIFile* aFile, uint32_t aType) {
     return NS_ERROR_FAILURE;
   }
 
-  nsCOMPtr<nsIInterfaceRequestor> cxt = new PipUIContext();
-
   switch (aType) {
     case nsIX509Cert::CA_CERT:
-      return ImportCertificates(buf.get(), bytesObtained, aType, cxt);
+      return ImportCertificates(buf.get(), bytesObtained, aType, nullptr);
     case nsIX509Cert::EMAIL_CERT:
-      return ImportEmailCertificate(buf.get(), bytesObtained, cxt);
+      return ImportEmailCertificate(buf.get(), bytesObtained, nullptr);
     default:
       MOZ_ASSERT(false, "Unsupported type should have been filtered out");
       break;
@@ -902,7 +901,7 @@ nsresult nsNSSCertificateDB::ConstructX509FromSpan(
     return (PORT_GetError() == SEC_ERROR_NO_MEMORY) ? NS_ERROR_OUT_OF_MEMORY
                                                     : NS_ERROR_FAILURE;
 
-  nsCOMPtr<nsIX509Cert> nssCert = new nsNSSCertificate(cert.get());
+  RefPtr nssCert = MakeRefPtr<nsNSSCertificate>(cert.get());
   nssCert.forget(_retval);
   return NS_OK;
 }
@@ -1168,8 +1167,7 @@ NS_IMETHODIMP nsNSSCertificateDB::AsPKCS7Blob(
   return NS_OK;
 }
 
-NS_IMETHODIMP
-nsNSSCertificateDB::GetCerts(nsTArray<RefPtr<nsIX509Cert>>& _retval) {
+static nsresult GetCertsSync(nsTArray<RefPtr<nsIX509Cert>>& certs) {
   nsresult rv = BlockUntilLoadableCertsLoaded();
   if (NS_FAILED(rv)) {
     return rv;
@@ -1180,14 +1178,52 @@ nsNSSCertificateDB::GetCerts(nsTArray<RefPtr<nsIX509Cert>>& _retval) {
     return rv;
   }
 
-  nsCOMPtr<nsIInterfaceRequestor> ctx = new PipUIContext();
   AutoSearchingForClientAuthCertificates _;
-  UniqueCERTCertList certList(PK11_ListCerts(PK11CertListUnique, ctx));
+  UniqueCERTCertList certList(PK11_ListCerts(PK11CertListUnique, nullptr));
   if (!certList) {
     return NS_ERROR_FAILURE;
   }
   return nsNSSCertificateDB::ConstructCertArrayFromUniqueCertList(certList,
-                                                                  _retval);
+                                                                  certs);
+}
+
+NS_IMETHODIMP
+nsNSSCertificateDB::GetCerts(JSContext* aCx, mozilla::dom::Promise** aPromise) {
+  NS_ENSURE_ARG_POINTER(aCx);
+
+  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
+  if (!globalObject) {
+    return NS_ERROR_UNEXPECTED;
+  }
+  mozilla::ErrorResult result;
+  RefPtr<Promise> promise = Promise::Create(globalObject, result);
+  if (result.Failed()) {
+    return result.StealNSResult();
+  }
+  auto promiseHolder =
+      MakeRefPtr<nsMainThreadPtrHolder<Promise>>(__func__, promise);
+
+  nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
+      __func__, [promiseHolder(std::move(promiseHolder))]() {
+        nsTArray<RefPtr<nsIX509Cert>> certs;
+        nsresult rv = GetCertsSync(certs);
+        NS_DispatchToMainThread(NS_NewRunnableFunction(
+            __func__, [rv, certs(std::move(certs)),
+                       promiseHolder(std::move(promiseHolder))]() {
+              if (NS_SUCCEEDED(rv)) {
+                promiseHolder->get()->MaybeResolve(std::move(certs));
+              } else {
+                promiseHolder->get()->MaybeReject(rv);
+              }
+            }));
+      }));
+  nsresult rv =
+      NS_DispatchBackgroundTask(runnable.forget(), NS_DISPATCH_EVENT_MAY_BLOCK);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  promise.forget(aPromise);
+  return NS_OK;
 }
 
 static mozilla::Result<VerifyUsage, nsresult> MapX509UsageToVerifierUsage(
@@ -1267,8 +1303,8 @@ nsresult VerifyCertAtTime(nsIX509Cert* aCert, nsIX509CertDB::VerifyUsage aUsage,
 
   if (result == mozilla::pkix::Success) {
     for (auto& certDER : resultChain) {
-      RefPtr<nsIX509Cert> cert = new nsNSSCertificate(std::move(certDER));
-      aVerifiedChain.AppendElement(cert);
+      RefPtr cert = MakeRefPtr<nsNSSCertificate>(std::move(certDER));
+      aVerifiedChain.AppendElement(std::move(cert));
     }
 
     if (evStatus == EVStatus::EV) {

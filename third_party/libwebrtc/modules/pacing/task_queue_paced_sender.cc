@@ -43,28 +43,43 @@ TaskQueuePacedSender::TaskQueuePacedSender(
     PacingController::PacketSender* packet_sender,
     const FieldTrialsView& field_trials,
     TimeDelta max_hold_back_window,
-    int max_hold_back_window_in_packets)
+    int max_hold_back_window_in_packets,
+    TaskQueueBase* task_queue,
+    PacerConfig initial_pacer_config)
+    : TaskQueuePacedSender(clock,
+                           packet_sender,
+                           field_trials,
+                           max_hold_back_window,
+                           max_hold_back_window_in_packets,
+                           task_queue,
+                           PacingController::Configuration{
+                               .initial_pacer_config = initial_pacer_config}) {}
+
+TaskQueuePacedSender::TaskQueuePacedSender(
+    Clock* clock,
+    PacingController::PacketSender* packet_sender,
+    const FieldTrialsView& field_trials,
+    TimeDelta max_hold_back_window,
+    int max_hold_back_window_in_packets,
+    TaskQueueBase* task_queue,
+    PacingController::Configuration pacing_config)
     : clock_(clock),
       max_hold_back_window_(max_hold_back_window),
       max_hold_back_window_in_packets_(max_hold_back_window_in_packets),
-      pacing_controller_(clock, packet_sender, field_trials),
+      pacing_controller_(clock, packet_sender, field_trials, pacing_config),
       next_process_time_(Timestamp::MinusInfinity()),
       is_started_(false),
       is_shutdown_(false),
       packet_size_(/*alpha=*/0.95),
       include_overhead_(false),
-      task_queue_(TaskQueueBase::Current()) {
+      task_queue_(task_queue) {
+  RTC_DCHECK(task_queue_);
   RTC_DCHECK_GE(max_hold_back_window_, PacingController::kMinSleepTime);
 }
 
 TaskQueuePacedSender::~TaskQueuePacedSender() {
   RTC_DCHECK_RUN_ON(task_queue_);
   is_shutdown_ = true;
-}
-
-void TaskQueuePacedSender::SetSendBurstInterval(TimeDelta burst_interval) {
-  RTC_DCHECK_RUN_ON(task_queue_);
-  pacing_controller_.SetSendBurstInterval(burst_interval);
 }
 
 void TaskQueuePacedSender::SetAllowProbeWithoutMediaPacket(bool allow) {
@@ -108,10 +123,9 @@ void TaskQueuePacedSender::SetCongested(bool congested) {
   PostMaybeProcessPackets();
 }
 
-void TaskQueuePacedSender::SetPacingRates(DataRate pacing_rate,
-                                          DataRate padding_rate) {
+void TaskQueuePacedSender::SetConfig(const PacerConfig& pacer_config) {
   RTC_DCHECK_RUN_ON(task_queue_);
-  pacing_controller_.SetPacingRates(pacing_rate, padding_rate);
+  pacing_controller_.SetPacerConfig(pacer_config);
   PostMaybeProcessPackets();
 }
 

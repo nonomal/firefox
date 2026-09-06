@@ -608,7 +608,6 @@ bool ZeroHertzAdapterMode::HasQualityConverged() const {
 
 void ZeroHertzAdapterMode::ResetQualityConvergenceInfo() {
   RTC_DCHECK_RUN_ON(&sequence_checker_);
-  RTC_DLOG(LS_INFO) << __func__ << " this " << this;
   for (auto& layer_tracker : layer_trackers_) {
     if (layer_tracker.quality_converged.has_value())
       layer_tracker.quality_converged = false;
@@ -691,6 +690,7 @@ void ZeroHertzAdapterMode::ProcessRepeatedFrameOnDelayedCadence(int frame_id) {
 
   // Schedule another repeat before sending the frame off which could take time.
   ScheduleRepeat(frame_id, HasQualityConverged());
+  frame.set_is_repeat_frame(true);
   SendFrameNow(std::nullopt, frame);
 }
 
@@ -935,15 +935,16 @@ void FrameCadenceAdapterImpl::OnFrame(const VideoFrame& frame) {
   // Local time in webrtc time base.
   Timestamp post_time = clock_->CurrentTime();
   frames_scheduled_for_processing_.fetch_add(1, std::memory_order_relaxed);
-  queue_->PostTask(SafeTask(safety_.flag(), [this, post_time, frame] {
-    RTC_DCHECK_RUN_ON(queue_);
+  queue_->PostTask(SafeTask(
+      safety_.flag(), [this, post_time, frame = std::move(frame)]() mutable {
+        RTC_DCHECK_RUN_ON(queue_);
 
-    const int frames_scheduled_for_processing =
-        frames_scheduled_for_processing_.fetch_sub(1,
-                                                   std::memory_order_relaxed);
-    OnFrameOnMainQueue(post_time, frames_scheduled_for_processing > 1,
-                       std::move(frame));
-  }));
+        const int frames_scheduled_for_processing =
+            frames_scheduled_for_processing_.fetch_sub(
+                1, std::memory_order_relaxed);
+        OnFrameOnMainQueue(post_time, frames_scheduled_for_processing > 1,
+                           std::move(frame));
+      }));
 }
 
 void FrameCadenceAdapterImpl::OnDiscardedFrame() {

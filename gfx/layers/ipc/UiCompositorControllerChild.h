@@ -1,18 +1,14 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #ifndef include_gfx_ipc_UiCompositorControllerChild_h
 #define include_gfx_ipc_UiCompositorControllerChild_h
 
-#include "mozilla/layers/PUiCompositorControllerChild.h"
-
-#include "mozilla/gfx/2D.h"
 #include "mozilla/Maybe.h"
-#include "mozilla/ipc/Shmem.h"
-#include "mozilla/layers/UiCompositorControllerParent.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/layers/PUiCompositorControllerChild.h"
+#include "mozilla/layers/UiCompositorControllerParent.h"
 #include "nsThread.h"
 #ifdef MOZ_WIDGET_ANDROID
 #  include "SurfaceTexture.h"
@@ -23,6 +19,8 @@ class nsIWidget;
 
 namespace mozilla {
 namespace layers {
+
+class AndroidHardwareBuffer;
 
 class UiCompositorControllerChild final
     : protected PUiCompositorControllerChild {
@@ -46,12 +44,15 @@ class UiCompositorControllerChild final
   bool SetFixedBottomOffset(int32_t aOffset);
   bool ToolbarAnimatorMessageFromUI(const int32_t& aMessage);
   bool SetDefaultClearColor(const uint32_t& aColor);
-  bool RequestScreenPixels();
+#ifdef MOZ_WIDGET_ANDROID
+  using ScreenPixelsPromise =
+      MozPromise<RefPtr<layers::AndroidHardwareBuffer>, nsresult, true>;
+  RefPtr<ScreenPixelsPromise> RequestScreenPixels(gfx::IntRect aSourceRect,
+                                                  gfx::IntSize aDestSize);
+#endif
   bool EnableLayerUpdateNotifications(const bool& aEnable);
 
   void Destroy();
-
-  bool DeallocPixelBuffer(Shmem& aMem);
 
 #ifdef MOZ_WIDGET_ANDROID
   // Set mCompositorSurfaceManager. Must be called straight after initialization
@@ -79,11 +80,11 @@ class UiCompositorControllerChild final
   void HandleFatalError(const char* aMsg) override;
   mozilla::ipc::IPCResult RecvToolbarAnimatorMessageFromCompositor(
       const int32_t& aMessage);
-  mozilla::ipc::IPCResult RecvNotifyCompositorScrollUpdate(
-      const CompositorScrollUpdate& aUpdate);
-  mozilla::ipc::IPCResult RecvScreenPixels(Shmem&& aMem,
-                                           const ScreenIntSize& aSize,
-                                           bool aNeedsYFlip);
+  mozilla::ipc::IPCResult RecvNotifyCompositorScrollUpdates(
+      const nsTArray<mozilla::layers::CompositorScrollUpdate>& aUpdates);
+  mozilla::ipc::IPCResult RecvScreenPixels(
+      uint64_t aRequestId, bool aSuccess,
+      Maybe<ipc::FileDescriptor>&& aAcquireFence);
 
  private:
   explicit UiCompositorControllerChild(const uint64_t& aProcessToken,
@@ -103,6 +104,26 @@ class UiCompositorControllerChild final
   Maybe<uint32_t> mDefaultClearColor;
   Maybe<bool> mLayerUpdateEnabled;
   RefPtr<nsIWidget> mWidget;
+
+#ifdef MOZ_WIDGET_ANDROID
+  // Promise created by RequestScreenPixels() that will be resolved when the
+  // result is returned by RecvScreenPixels(). The uint64_t is assigned from a
+  // monotonic counter and is unique for each request sent. It is used to check
+  // whether a received result is for the most recent request made.
+  // In an ideal world PUiCompositorControllerChild::SendRequestScreenPixels()
+  // would return a promise and RequestScreenPixels() could just chain to that
+  // rather than managing its own promise. This would allow us to remove
+  // RecvScreenPixels() altogether. Unfortunately, however, we cannot chain to a
+  // promise returned from an IPDL function on the Android UI thread, as the
+  // thread does not support direct task dispatch.
+  struct ScreenPixelsRequest {
+    uint64_t mRequestId;
+    RefPtr<layers::AndroidHardwareBuffer> mHardwareBuffer;
+    RefPtr<ScreenPixelsPromise::Private> mPromise;
+  };
+  Maybe<ScreenPixelsRequest> mScreenPixelsRequest;
+#endif
+
   // Should only be set when compositor is in process.
   RefPtr<UiCompositorControllerParent> mParent;
 

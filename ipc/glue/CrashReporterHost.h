@@ -1,13 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #ifndef mozilla_ipc_CrashReporterHost_h
 #define mozilla_ipc_CrashReporterHost_h
-
-#include <functional>
 
 #include "base/process.h"
 #include "nsExceptionHandler.h"
@@ -22,6 +18,12 @@ class CrashReporterInitArgs;
 
 namespace mozilla::ipc {
 
+#if defined(XP_DARWIN)
+typedef mozilla::UniqueMachSendRight ChildThreadId;
+#else
+typedef CrashReporter::ThreadId ChildThreadId;
+#endif  // defined(XP_DARWIN)
+
 // This is the newer replacement for CrashReporterParent. It is created in
 // response to a InitCrashReporter message on a top-level actor. When the
 // process terminates abnormally, the top-level should call GenerateCrashReport
@@ -30,7 +32,7 @@ class CrashReporterHost {
   typedef CrashReporter::AnnotationTable AnnotationTable;
 
  public:
-  CrashReporterHost(GeckoProcessType aProcessType, base::ProcessId aPid,
+  CrashReporterHost(GeckoProcessType aProcessType, GeckoChildID aChildID,
                     const CrashReporter::CrashReporterInitArgs& aInitArgs);
   ~CrashReporterHost();
 
@@ -78,7 +80,7 @@ class CrashReporterHost {
 #endif
 
     nsCOMPtr<nsIFile> targetDump;
-    if (!CrashReporter::CreateMinidumpsAndPair(childHandle, mThreadId,
+    if (!CrashReporter::CreateMinidumpsAndPair(childHandle, GetRawThreadId(),
                                                aPairName, mExtraAnnotations,
                                                getter_AddRefs(targetDump))) {
       return false;
@@ -111,8 +113,13 @@ class CrashReporterHost {
                           const nsString& aChildDumpID);
 
  private:
-  // Get the nsICrashService crash type to use for an impending crash.
-  int32_t GetCrashType();
+  CrashReporter::ThreadId GetRawThreadId() const {
+#if defined(XP_DARWIN)
+    return mThreadId.get();
+#else
+    return mThreadId;
+#endif  // defined(XP_DARWIN)
+  }
 
   static void RecordCrashWithTelemetry(GeckoProcessType aProcessType,
                                        int32_t aCrashType);
@@ -122,8 +129,8 @@ class CrashReporterHost {
 
  private:
   GeckoProcessType mProcessType;
-  base::ProcessId mPid;
-  CrashReporter::ThreadId mThreadId;
+  GeckoChildID mChildID;
+  ChildThreadId mThreadId;
   time_t mStartTime;
   AnnotationTable mExtraAnnotations;
   nsString mDumpID;

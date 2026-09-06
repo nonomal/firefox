@@ -120,6 +120,9 @@ const shortcutHandlers = {
     }
   },
   "markupView.edit.key": markupView => {
+    if (!markupView.canEditSelectedNodeHTML()) {
+      return;
+    }
     markupView.beginEditingHTML(markupView._selectedContainer.node);
   },
   "markupView.scrollInto.key": markupView => {
@@ -243,7 +246,7 @@ class MarkupView extends EventEmitter {
    * @param  {Inspector} inspector
    *         The inspector we're watching.
    * @param  {iframe} frame
-   *         An iframe in which the caller has kindly loaded markup.xhtml.
+   *         An iframe in which the caller has kindly loaded markup.html.
    * @param  {XULWindow} controllerWindow
    *         Will enable the undo/redo feature from devtools/client/shared/undo.
    *         Should be a XUL window, will typically point to the toolbox window.
@@ -379,6 +382,7 @@ class MarkupView extends EventEmitter {
     this._initShortcuts();
 
     this._walkerEventListener = new WalkerEventListener(this.inspector, {
+      "anchor-name-change": this._onWalkerNodeStatesChanged,
       "container-type-change": this._onWalkerNodeStatesChanged,
       "display-change": this._onWalkerNodeStatesChanged,
       "scrollable-change": this._onWalkerNodeStatesChanged,
@@ -386,7 +390,7 @@ class MarkupView extends EventEmitter {
       mutations: this._onWalkerMutations,
     });
 
-    this.resourceCommand = this.inspector.toolbox.resourceCommand;
+    this.resourceCommand = this.inspector.commands.resourceCommand;
     this.resourceCommand.watchResources(
       [this.resourceCommand.TYPES.ROOT_NODE],
       {
@@ -1058,6 +1062,10 @@ class MarkupView extends EventEmitter {
     // TODO: use resource api listeners?
     if (nodeFront) {
       nodeFront.walkerFront.on(
+        "anchor-name-change",
+        this._onWalkerNodeStatesChanged
+      );
+      nodeFront.walkerFront.on(
         "container-type-change",
         this._onWalkerNodeStatesChanged
       );
@@ -1189,6 +1197,12 @@ class MarkupView extends EventEmitter {
     let scrolled = false;
 
     while (currentNode) {
+      // Don't highlight text in badges (e.g. `flex`, `grid`, …)
+      if (currentNode.parentNode.closest("[data-skip-markupview-search]")) {
+        currentNode = treeWalker.nextNode();
+        continue;
+      }
+
       const text = currentNode.textContent.toLowerCase();
       let startPos = 0;
       while (startPos < text.length) {
@@ -1306,7 +1320,7 @@ class MarkupView extends EventEmitter {
 
   _onCopy(evt) {
     // Ignore copy events from editors
-    if (this._isInputOrTextarea(evt.target)) {
+    if (this.isInputOrTextareaOrInCodeMirrorEditor(evt.target)) {
       return;
     }
 
@@ -1373,7 +1387,7 @@ class MarkupView extends EventEmitter {
           if (type === "uri") {
             openContentLink(url);
           } else if (type === "cssresource") {
-            return this.toolbox.viewGeneratedSourceInStyleEditor(url);
+            return this.toolbox.viewStyleGeneratedSource(url);
           } else if (type === "jsresource") {
             return this.toolbox.viewGeneratedSourceInDebugger(url);
           }
@@ -1448,7 +1462,7 @@ class MarkupView extends EventEmitter {
    * Key shortcut listener.
    */
   _onShortcut(name, event) {
-    if (this._isInputOrTextarea(event.target)) {
+    if (this.isInputOrTextareaOrInCodeMirrorEditor(event.target)) {
       return;
     }
 
@@ -1472,11 +1486,19 @@ class MarkupView extends EventEmitter {
   }
 
   /**
-   * Check if a node is an input or textarea
+   * Check if a node is used to type text (i.e. an input or textarea, or in a CodeMirror editor)
    */
-  _isInputOrTextarea(element) {
+  isInputOrTextareaOrInCodeMirrorEditor(element) {
     const name = element.tagName.toLowerCase();
-    return name === "input" || name === "textarea";
+    if (name === "input" || name === "textarea") {
+      return true;
+    }
+
+    if (element.closest(".cm-editor")) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -2210,6 +2232,16 @@ class MarkupView extends EventEmitter {
     });
   }
 
+  canEditSelectedNodeHTML() {
+    const { selection } = this.inspector;
+    const isFragment = selection.isDocumentFragmentNode();
+    const isAnonymous = selection.isNativeAnonymousNode();
+    const isElement =
+      selection.isElementNode() && !selection.isPseudoElementNode();
+
+    return !isAnonymous && (isElement || isFragment);
+  }
+
   /**
    * Open an editor in the UI to allow editing of a node's html.
    *
@@ -2728,14 +2760,6 @@ class MarkupView extends EventEmitter {
     this._walkerEventListener.destroy();
     this._walkerEventListener = null;
 
-    this._prefObserver.off(
-      ATTR_COLLAPSE_ENABLED_PREF,
-      this._onCollapseAttributesPrefChange
-    );
-    this._prefObserver.off(
-      ATTR_COLLAPSE_LENGTH_PREF,
-      this._onCollapseAttributesPrefChange
-    );
     this._prefObserver.destroy();
 
     for (const [, container] of this._containers) {

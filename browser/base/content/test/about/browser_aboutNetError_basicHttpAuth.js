@@ -4,7 +4,7 @@
 "use strict";
 
 const AUTH_ROUTE =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://example.com/browser/browser/base/content/test/about/basic_auth_route.sjs";
 
 // From appstrings.properties
@@ -19,6 +19,7 @@ add_task(async function test_basicHttpAuth() {
       ["network.http.basic_http_auth.enabled", false],
       // blank page with error is priortized
       ["browser.http.blank_page_with_error_response.enabled", true],
+      ["security.certerrors.felt-privacy-v1", false],
     ],
   });
 

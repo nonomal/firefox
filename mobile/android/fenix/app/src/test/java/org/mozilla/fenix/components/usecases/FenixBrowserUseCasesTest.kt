@@ -10,6 +10,7 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import io.mockk.verifyOrder
+import kotlinx.coroutines.test.TestScope
 import mozilla.components.browser.state.engine.EngineMiddleware
 import mozilla.components.browser.state.search.SearchEngine
 import mozilla.components.browser.state.state.BrowserState
@@ -26,9 +27,7 @@ import mozilla.components.feature.search.ext.createSearchEngine
 import mozilla.components.feature.session.SessionUseCases
 import mozilla.components.feature.tabs.TabsUseCases
 import mozilla.components.support.test.robolectric.testContext
-import mozilla.components.support.test.rule.MainCoroutineRule
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.R
@@ -42,7 +41,7 @@ class FenixBrowserUseCasesTest {
     private lateinit var searchEngine: SearchEngine
     private lateinit var browserStore: BrowserStore
     private lateinit var profiler: Profiler
-    private lateinit var addNewTabUseCase: TabsUseCases.AddNewTabUseCase
+    private lateinit var tabsUseCases: TabsUseCases
     private lateinit var loadUrlUseCase: SessionUseCases.DefaultLoadUrlUseCase
     private lateinit var searchUseCases: SearchUseCases
     private lateinit var defaultSearchUseCase: SearchUseCases.DefaultSearchUseCase
@@ -50,47 +49,47 @@ class FenixBrowserUseCasesTest {
     private lateinit var homepageTitle: String
     private lateinit var appStore: AppStore
 
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
-
     @Before
     fun setup() {
-        addNewTabUseCase = mockk(relaxed = true)
+        tabsUseCases = mockk(relaxed = true)
         loadUrlUseCase = mockk(relaxed = true)
         searchUseCases = mockk(relaxed = true)
 
-        profiler = mockk(relaxed = true) {
-            every { getProfilerTime() } returns PROFILER_START_TIME
-            every { isProfilerActive() } returns true
-        }
+        profiler =
+            mockk(relaxed = true) {
+                every { getProfilerTime() } returns PROFILER_START_TIME
+                every { isProfilerActive() } returns true
+            }
 
-        searchEngine = createSearchEngine(
-            name = "name",
-            url = "https://www.example.org/?q={searchTerms}",
-            icon = mockk(relaxed = true),
-        )
-        browserStore = BrowserStore(
-            initialState = BrowserState(
-                tabs = listOf(
-                    createTab("https://www.mozilla.org", id = "1"),
-                ),
-                selectedTabId = "1",
-                search = SearchState(
-                    regionSearchEngines = listOf(searchEngine),
-                ),
-            ),
-            middleware = EngineMiddleware.create(
-                mockk<Engine>(),
-                coroutinesTestRule.scope,
-            ),
-        )
-        defaultSearchUseCase = spyk(
-            SearchUseCases(
-                browserStore,
-                mockk(relaxed = true),
-                mockk(relaxed = true),
-            ).defaultSearch,
-        )
+        searchEngine =
+            createSearchEngine(
+                name = "name",
+                url = "https://www.example.org/?q={searchTerms}",
+                icon = mockk(relaxed = true),
+            )
+        browserStore =
+            BrowserStore(
+                initialState =
+                    BrowserState(
+                        tabs = listOf(createTab("https://www.mozilla.org", id = "1")),
+                        selectedTabId = "1",
+                        search = SearchState(regionSearchEngines = listOf(searchEngine)),
+                    ),
+                middleware =
+                    EngineMiddleware.create(
+                        mockk<Engine>(),
+                        TestScope(),
+                    ),
+            )
+        defaultSearchUseCase =
+            spyk(
+                SearchUseCases(
+                        browserStore,
+                        mockk(relaxed = true),
+                        mockk(relaxed = true),
+                    )
+                    .defaultSearch
+            )
 
         every { searchUseCases.defaultSearch } returns defaultSearchUseCase
 
@@ -98,14 +97,15 @@ class FenixBrowserUseCasesTest {
 
         appStore = AppStore(AppState())
 
-        useCases = FenixBrowserUseCases(
-            addNewTabUseCase = addNewTabUseCase,
-            loadUrlUseCase = loadUrlUseCase,
-            searchUseCases = searchUseCases,
-            homepageTitle = homepageTitle,
-            profiler = profiler,
-            appStore = appStore,
-        )
+        useCases =
+            FenixBrowserUseCases(
+                tabsUseCases = tabsUseCases,
+                loadUrlUseCase = loadUrlUseCase,
+                searchUseCases = searchUseCases,
+                homepageTitle = homepageTitle,
+                profiler = profiler,
+                appStore = appStore,
+            )
     }
 
     @Test
@@ -144,7 +144,7 @@ class FenixBrowserUseCasesTest {
         )
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = url,
                 flags = EngineSession.LoadUrlFlags.none(),
                 private = private,
@@ -168,7 +168,7 @@ class FenixBrowserUseCasesTest {
         )
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = url,
                 flags = EngineSession.LoadUrlFlags.none(),
                 private = private,
@@ -215,7 +215,7 @@ class FenixBrowserUseCasesTest {
         )
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = url,
                 flags = EngineSession.LoadUrlFlags.none(),
                 private = private,
@@ -334,7 +334,7 @@ class FenixBrowserUseCasesTest {
         useCases.addNewHomepageTab(private = true)
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = ABOUT_HOME_URL,
                 title = homepageTitle,
                 private = true,
@@ -344,7 +344,7 @@ class FenixBrowserUseCasesTest {
         useCases.addNewHomepageTab(private = false)
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = ABOUT_HOME_URL,
                 title = homepageTitle,
                 private = false,
@@ -368,14 +368,15 @@ class FenixBrowserUseCasesTest {
     fun `GIVEN store is normal WHEN normal omitted and loading URL in new tab THEN open new normal tab`() {
         val url = "https://www.mozilla.org"
         appStore = AppStore(initialState = AppState(mode = BrowsingMode.Normal))
-        useCases = FenixBrowserUseCases(
-            appStore = appStore,
-            addNewTabUseCase = addNewTabUseCase,
-            loadUrlUseCase = loadUrlUseCase,
-            searchUseCases = searchUseCases,
-            homepageTitle = homepageTitle,
-            profiler = profiler,
-        )
+        useCases =
+            FenixBrowserUseCases(
+                appStore = appStore,
+                tabsUseCases = tabsUseCases,
+                loadUrlUseCase = loadUrlUseCase,
+                searchUseCases = searchUseCases,
+                homepageTitle = homepageTitle,
+                profiler = profiler,
+            )
 
         useCases.loadUrlOrSearch(
             searchTermOrURL = url,
@@ -385,7 +386,7 @@ class FenixBrowserUseCasesTest {
         )
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = url,
                 flags = EngineSession.LoadUrlFlags.none(),
                 private = false,
@@ -398,14 +399,15 @@ class FenixBrowserUseCasesTest {
     fun `GIVEN store is private WHEN private omitted and loading URL in new tab THEN open new private tab`() {
         val url = "https://www.mozilla.org"
         appStore = AppStore(initialState = AppState(mode = BrowsingMode.Private))
-        useCases = FenixBrowserUseCases(
-            appStore = appStore,
-            addNewTabUseCase = addNewTabUseCase,
-            loadUrlUseCase = loadUrlUseCase,
-            searchUseCases = searchUseCases,
-            homepageTitle = homepageTitle,
-            profiler = profiler,
-        )
+        useCases =
+            FenixBrowserUseCases(
+                appStore = appStore,
+                tabsUseCases = tabsUseCases,
+                loadUrlUseCase = loadUrlUseCase,
+                searchUseCases = searchUseCases,
+                homepageTitle = homepageTitle,
+                profiler = profiler,
+            )
 
         useCases.loadUrlOrSearch(
             searchTermOrURL = url,
@@ -415,7 +417,7 @@ class FenixBrowserUseCasesTest {
         )
 
         verify {
-            addNewTabUseCase.invoke(
+            tabsUseCases.addTab.invoke(
                 url = url,
                 flags = EngineSession.LoadUrlFlags.none(),
                 private = true,

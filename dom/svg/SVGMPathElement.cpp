@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -50,7 +48,7 @@ NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED_0(SVGMPathElement,
 
 // Constructor
 SVGMPathElement::SVGMPathElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : SVGMPathElementBase(std::move(aNodeInfo)) {}
 
 //----------------------------------------------------------------------
@@ -59,7 +57,8 @@ SVGMPathElement::SVGMPathElement(
 NS_IMPL_ELEMENT_CLONE_WITH_INIT(SVGMPathElement)
 
 already_AddRefed<DOMSVGAnimatedString> SVGMPathElement::Href() {
-  return mStringAttributes[HREF].IsExplicitlySet()
+  return mStringAttributes[HREF].IsExplicitlySet() ||
+                 !mStringAttributes[XLINK_HREF].IsExplicitlySet()
              ? mStringAttributes[HREF].ToDOMAnimatedString(this)
              : mStringAttributes[XLINK_HREF].ToDOMAnimatedString(this);
 }

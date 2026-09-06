@@ -26,7 +26,7 @@ add_task(async function test_enable_backup_encryption_checkbox_confirm() {
       set: [[SCHEDULED_BACKUPS_ENABLED_PREF, true]],
     });
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    let settings = await waitForBackupSettings(browser);
 
     /**
      * For this test, we can pretend that browser-settings receives a backupServiceState
@@ -118,19 +118,6 @@ add_task(async function test_enable_backup_encryption_checkbox_confirm() {
       "Backup reason is set"
     );
 
-    let legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "password_added",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(
-      legacyEvents.length,
-      1,
-      "Found the password_added legacy event."
-    );
     let events = Glean.browserBackup.passwordAdded.testGetValue();
     Assert.equal(events.length, 1, "Found the passwordAdded Glean event.");
 
@@ -155,9 +142,6 @@ add_task(
         let enableEncryptionStub = sandbox
           .stub(BackupService.prototype, "enableEncryption")
           .resolves(true);
-        let disableEncryptionStub = sandbox
-          .stub(BackupService.prototype, "disableEncryption")
-          .resolves(true);
         let createBackupStub = sandbox
           .stub(BackupService.prototype, "createBackup")
           .resolves(true);
@@ -166,7 +150,7 @@ add_task(
           set: [[SCHEDULED_BACKUPS_ENABLED_PREF, true]],
         });
 
-        let settings = browser.contentDocument.querySelector("backup-settings");
+        let settings = await waitForBackupSettings(browser);
         settings.backupServiceState.encryptionEnabled = true;
         await settings.requestUpdate();
         await settings.updateComplete;
@@ -228,17 +212,19 @@ add_task(
         await settings.updateComplete;
         confirmButton = settings.enableBackupEncryptionEl.confirmButtonEl;
 
+        let initialState = BackupService.get().state;
+        sandbox.stub(BackupService.get(), "state").get(() => ({
+          ...initialState,
+          encryptionEnabled: true,
+        }));
+
         let promise = BrowserTestUtils.waitForEvent(
           window,
-          "BackupUI:RerunEncryption"
+          "BackupUI:EnableEncryption"
         );
         confirmButton.click();
         await promise;
 
-        Assert.ok(
-          disableEncryptionStub.calledOnce,
-          "BackupService was called to disable encryption first before registering the changed password"
-        );
         Assert.ok(
           enableEncryptionStub.calledOnceWith(MOCK_PASSWORD),
           "BackupService was called to re-run encryption with changed password"
@@ -248,19 +234,6 @@ add_task(
           "A new backup was started for the right reason"
         );
 
-        let legacyEvents = TelemetryTestUtils.getEvents(
-          {
-            category: "browser.backup",
-            method: "password_changed",
-            object: "BackupService",
-          },
-          { process: "parent" }
-        );
-        Assert.equal(
-          legacyEvents.length,
-          1,
-          "Found the password_changed legacy event."
-        );
         let events = Glean.browserBackup.passwordChanged.testGetValue();
         Assert.equal(
           events.length,
@@ -280,7 +253,7 @@ add_task(
  */
 add_task(async function test_turn_on_scheduled_backups_encryption_error() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    let settings = await waitForBackupSettings(browser);
 
     await SpecialPowers.pushPrefEnv({
       set: [[SCHEDULED_BACKUPS_ENABLED_PREF, true]],

@@ -30,7 +30,7 @@ function uploadProfileUrl() {
  * YYYYMMDDHHMMSS, that can be used in a file name.
  *
  * @param {Date} date
- * @reurns {string}
+ * @returns {string}
  */
 function getStringifiedDateAndTime(date) {
   const pad = val => String(val).padStart(2, "0");
@@ -167,7 +167,7 @@ export class ProfileSaveOrUploadDialog {
    */
   #doUploadProfileData({ onProgress }) {
     // The content of this function is heavily inspired by the code in
-    // https://github.com/firefox-devtools/profiler/blob/5e9182064f18954cfd04b9da276d322a57f93406/src/profile-logic/profile-store.js
+    // https://github.com/firefox-devtools/profiler/blob/8f4935823ec06507c3125d4c6c1e78eef31361f3/src/profile-logic/profile-store.ts
     const xhr = new XMLHttpRequest();
     return new Promise((resolve, reject) => {
       xhr.onload = () => {
@@ -279,9 +279,8 @@ export class ProfileSaveOrUploadDialog {
         },
       });
 
-      const { extractProfileTokenFromJwt } = await import(
-        "chrome://global/content/aboutLogging/jwt.mjs"
-      );
+      const { extractProfileTokenFromJwt } =
+        await import("chrome://global/content/aboutLogging/jwt.mjs");
       const hash = extractProfileTokenFromJwt(uploadResult);
       const profileUrl = "https://profiler.firefox.com/public/" + hash;
       document.l10n.setArgs(this.#uploadedMessageText, {
@@ -291,9 +290,8 @@ export class ProfileSaveOrUploadDialog {
 
       // Save the uploaded profile information to IndexedDB
       try {
-        const { saveUploadedProfile } = await import(
-          "chrome://global/content/aboutLogging/profileStorage.mjs"
-        );
+        const { saveUploadedProfile } =
+          await import("chrome://global/content/aboutLogging/profileStorage.mjs");
 
         const uploadDate = new Date();
         const profileName = await document.l10n.formatValue(

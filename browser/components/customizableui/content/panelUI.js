@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+ChromeUtils.importESModule(
+  "chrome://browser/content/tabbrowser/tab-groups-list.mjs",
+  { global: "current" }
+);
+
 ChromeUtils.defineESModuleGetters(this, {
   AppMenuNotifications: "resource://gre/modules/AppMenuNotifications.sys.mjs",
   ASRouter: "resource:///modules/asrouter/ASRouter.sys.mjs",
@@ -9,6 +14,8 @@ ChromeUtils.defineESModuleGetters(this, {
   NewTabUtils: "resource://gre/modules/NewTabUtils.sys.mjs",
   PanelMultiView:
     "moz-src:///browser/components/customizableui/PanelMultiView.sys.mjs",
+  ReportBrokenSite:
+    "moz-src:///browser/components/reportbrokensite/ReportBrokenSite.sys.mjs",
   updateZoomUI: "resource:///modules/ZoomUI.sys.mjs",
 });
 
@@ -46,13 +53,13 @@ const PanelUI = {
   _notifications: null,
   _notificationPanel: null,
 
-  init(shouldSuppress) {
-    this._shouldSuppress = shouldSuppress;
+  init() {
     this._initElements();
 
     this.menuButton.addEventListener("mousedown", this);
     this.menuButton.addEventListener("keypress", this);
 
+    Services.obs.addObserver(this, "ai-window-state-changed");
     Services.obs.addObserver(this, "fullscreen-nav-toolbox");
     Services.obs.addObserver(this, "appMenu-notifications");
     Services.obs.addObserver(this, "show-update-progress");
@@ -83,6 +90,56 @@ const PanelUI = {
       autoHidePref => autoHidePref && Services.appinfo.OS !== "Darwin"
     );
 
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "isAIWindowEnabled",
+      "browser.smartwindow.enabled",
+      false,
+      (_pref, _previousValue, _newValue) => {
+        this._showAIMenuItem();
+      }
+    );
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "AIControlDefault",
+      "browser.ai.control.default",
+      "available",
+      (_pref, _previousValue, _newValue) => {
+        this._showAIMenuItem();
+      }
+    );
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "AIControlSmartWindow",
+      "browser.ai.control.smartWindow",
+      "default",
+      (_pref, _previousValue, _newValue) => {
+        this._showAIMenuItem();
+      }
+    );
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "tabGroupsAlternateMenu",
+      "browser.tabs.groups.alternateMenu",
+      false,
+      (_pref, _previousValue, _newValue) => {
+        this._showTabGroupsMenuItem();
+      }
+    );
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "referralsEnabled",
+      "browser.referrals.enabled",
+      false,
+      (_pref, _previousValue, _newValue) => {
+        this._showReferralsMenuItem();
+      }
+    );
+
     if (this.autoHideToolbarInFullScreen) {
       window.addEventListener("fullscreen", this);
     } else {
@@ -110,6 +167,9 @@ const PanelUI = {
       "refresh"
     );
 
+    this._showAIMenuItem();
+    this._showTabGroupsMenuItem();
+    this._showReferralsMenuItem();
     this._initialized = true;
   },
 
@@ -147,6 +207,7 @@ const PanelUI = {
       "appMenu-libraryView"
     ).addEventListener("command", this._onLibraryCommand);
     this.mainView.addEventListener("command", this);
+    this.mainView.addEventListener("click", this);
     this.mainView.addEventListener("ViewShowing", this._onMainViewShow);
     this._eventListenersAdded = true;
   },
@@ -163,6 +224,7 @@ const PanelUI = {
       "appMenu-libraryView"
     ).removeEventListener("command", this._onLibraryCommand);
     this.mainView.removeEventListener("command", this);
+    this.mainView.removeEventListener("click", this);
     this._eventListenersAdded = false;
   },
 
@@ -178,6 +240,7 @@ const PanelUI = {
       }
     }
 
+    Services.obs.removeObserver(this, "ai-window-state-changed");
     Services.obs.removeObserver(this, "fullscreen-nav-toolbox");
     Services.obs.removeObserver(this, "appMenu-notifications");
     Services.obs.removeObserver(this, "show-update-progress");
@@ -263,6 +326,12 @@ const PanelUI = {
 
   observe(subject, topic, status) {
     switch (topic) {
+      case "ai-window-state-changed":
+        if (subject == window) {
+          this._showAIMenuItem();
+        }
+        break;
+
       case "fullscreen-nav-toolbox":
         if (this._notifications) {
           this.updateNotifications(false);
@@ -331,6 +400,13 @@ const PanelUI = {
       case "activate":
         this.updateNotifications();
         break;
+      case "click": {
+        let novaFxaButton = aEvent.target.closest("#appMenu-nova-fxa-label");
+        if (novaFxaButton) {
+          gSync.toggleAccountPanel(novaFxaButton, aEvent);
+        }
+        break;
+      }
       case "command":
         this.onCommand(aEvent);
         break;
@@ -366,6 +442,9 @@ const PanelUI = {
         break;
       case "appMenu-history-button":
         this.showSubView("PanelUI-history", target);
+        break;
+      case "appMenu-tab-groups-button":
+        this.showSubView("appMenu-tabGroupsListView", target);
         break;
       case "appMenu-passwords-button":
         LoginHelper.openPasswordManager(window, { entryPoint: "Mainmenu" });
@@ -518,6 +597,7 @@ const PanelUI = {
         tempPanel.setAttribute("animate", "false");
       }
       tempPanel.setAttribute("context", "");
+
       document.getElementById("mainPopupSet").appendChild(tempPanel);
 
       let multiView = document.createXULElement("panelmultiview");
@@ -527,6 +607,16 @@ const PanelUI = {
       multiView.appendChild(viewNode);
       tempPanel.appendChild(multiView);
       viewNode.classList.add("cui-widget-panelview", "PanelUI-subView");
+
+      // Set a role and name on the panel.
+      // If the panelview provides either data-panelrole or
+      // data-panelname, use it.
+      tempPanel.role = viewNode.dataset.panelrole || "group";
+      if (viewNode.dataset.panelname) {
+        tempPanel.ariaLabel = viewNode.dataset.panelname;
+      } else {
+        tempPanel.ariaLabelledByElements = [aAnchor];
+      }
 
       let viewShown = false;
       let panelRemover = event => {
@@ -707,6 +797,12 @@ const PanelUI = {
         button.id = "appMenu_" + node.id;
       }
 
+      if (node.id == "help_reportBrokenSite") {
+        button.removeAttribute("command");
+        button.classList.add("subviewbutton-nav");
+        button.setAttribute("closemenu", "none");
+      }
+
       button.classList.add("subviewbutton");
       fragment.appendChild(button);
     }
@@ -725,10 +821,41 @@ const PanelUI = {
     }
 
     items.appendChild(fragment);
+
+    if (Services.prefs.getBoolPref("browser.nova.enabled", false)) {
+      let switchDeviceButton = items.querySelector("#appMenu_helpSwitchDevice");
+      if (switchDeviceButton) {
+        const HTML_NS = "http://www.w3.org/1999/xhtml";
+        let novaPromo = document.createElementNS(HTML_NS, "moz-promo");
+        novaPromo.id = "appMenu-nova-switch-device-promo";
+        novaPromo.setAttribute("type", "vibrant");
+        novaPromo.setAttribute(
+          "data-l10n-id",
+          "appmenu-nova-switch-device-promo"
+        );
+        novaPromo.setAttribute("data-l10n-attrs", "message");
+
+        let link = document.createElementNS(HTML_NS, "a");
+        link.id = "appMenu-nova-switch-device-link";
+        link.slot = "support-link";
+        link.href = "#";
+        link.setAttribute("data-l10n-id", "appmenu-nova-switch-device-link");
+        link.addEventListener("click", e => {
+          e.preventDefault();
+          openSwitchingDevicesPage();
+        });
+        novaPromo.appendChild(link);
+
+        switchDeviceButton.replaceWith(novaPromo);
+      }
+    }
   },
 
   _onHelpCommand(aEvent) {
     switch (aEvent.target.id) {
+      case "appMenu_help_reportBrokenSite":
+        ReportBrokenSite.handleParentMenuButtonCommand(aEvent.target);
+        break;
       case "appMenu_menu_openHelp":
         openHelpLink("firefox-help");
         break;
@@ -770,7 +897,7 @@ const PanelUI = {
 
   _onLibraryCommand(aEvent) {
     let button = aEvent.target;
-    let { BookmarkingUI, DownloadsPanel } = button.ownerGlobal;
+    let { BookmarkingUI, DownloadsPanel } = button.documentGlobal;
     switch (button.id) {
       case "appMenu-library-bookmarks-button":
         BookmarkingUI.showSubView(button);
@@ -888,7 +1015,7 @@ const PanelUI = {
     if (
       (window.fullScreen && FullScreen.navToolboxHidden) ||
       document.fullscreenElement ||
-      this._shouldSuppress()
+      shouldSuppressPopupNotifications()
     ) {
       this._hidePopup();
       return;
@@ -1052,6 +1179,54 @@ const PanelUI = {
     popupnotification.show();
   },
 
+  _showAIMenuItem() {
+    const isAIWindowActive = document.documentElement.hasAttribute("ai-window");
+    const isBlocked =
+      (this.AIControlSmartWindow === "default" &&
+        this.AIControlDefault === "blocked") ||
+      this.AIControlSmartWindow === "blocked";
+    const isSmartWindowAvailable = this.isAIWindowEnabled && !isBlocked;
+    const aiMenuItem = PanelMultiView.getViewNode(
+      document,
+      "appMenu-new-ai-window-button"
+    );
+    const classicWindowMenuItem = PanelMultiView.getViewNode(
+      document,
+      "appMenu-new-classic-window-button"
+    );
+    const chatHistoryMenuItem = PanelMultiView.getViewNode(
+      document,
+      "appMenu-chats-history-button"
+    );
+
+    aiMenuItem.hidden = !isSmartWindowAvailable || isAIWindowActive;
+    classicWindowMenuItem.hidden = !isSmartWindowAvailable || !isAIWindowActive;
+
+    chatHistoryMenuItem.hidden = !isSmartWindowAvailable || !isAIWindowActive;
+  },
+
+  _showTabGroupsMenuItem() {
+    const button = PanelMultiView.getViewNode(
+      document,
+      "appMenu-tab-groups-button"
+    );
+    button.hidden = !this.tabGroupsAlternateMenu;
+  },
+
+  _showReferralsMenuItem() {
+    const button = PanelMultiView.getViewNode(
+      document,
+      "appMenu-referrals-button"
+    );
+    const separator = PanelMultiView.getViewNode(
+      document,
+      "appMenu-referrals-separator"
+    );
+    const hidden = !this.referralsEnabled;
+    button.hidden = hidden;
+    separator.hidden = hidden;
+  },
+
   _showBadge(notification) {
     let badgeStatus = this._getBadgeStatus(notification);
     this.menuButton.setAttribute("badge-status", badgeStatus);
@@ -1087,6 +1262,26 @@ const PanelUI = {
       this._panelBannerItem,
       messageIDs[notification.id]
     );
+
+    const isNovaUpdateRestart =
+      notification.id === "update-restart" &&
+      Services.prefs.getBoolPref("browser.nova.enabled", false);
+
+    // Drop the description in private windows
+    const noDescription =
+      isNovaUpdateRestart && PrivateBrowsingUtils.isWindowPrivate(window);
+    this._panelBannerItem.toggleAttribute("no-description", noDescription);
+
+    if (isNovaUpdateRestart) {
+      this._panelBannerItem.setAttribute(
+        "aria-labelledby",
+        noDescription
+          ? "appMenu-update-banner-title"
+          : "appMenu-update-banner-title appMenu-update-banner-description"
+      );
+    } else {
+      this._panelBannerItem.removeAttribute("aria-labelledby");
+    }
 
     this._panelBannerItem.setAttribute("notificationid", notification.id);
     this._panelBannerItem.hidden = false;

@@ -82,7 +82,9 @@ class InputModule extends RootBiDiModule {
       (eventName === "synthesizeWheelAtPoint" &&
         lazy.actions.useAsyncWheelEvents) ||
       (eventName == "synthesizeMouseAtPoint" &&
-        lazy.actions.useAsyncMouseEvents);
+        lazy.actions.useAsyncMouseEvents) ||
+      (eventName == "synthesizeTouchAtPoint" &&
+        lazy.actions.useAsyncTouchEvents);
 
     // TODO: Call the _dispatchEvent method of the windowglobal module once
     // chrome support was added for the message handler.
@@ -99,6 +101,12 @@ class InputModule extends RootBiDiModule {
           await lazy.event.synthesizeMouseAtPoint(
             details.x,
             details.y,
+            details.eventData,
+            context.topChromeWindow
+          );
+          break;
+        case "synthesizeTouchAtPoint":
+          await lazy.event.synthesizeTouchAtPoint(
             details.eventData,
             context.topChromeWindow
           );
@@ -251,12 +259,17 @@ class InputModule extends RootBiDiModule {
    * @param {BrowsingContext} context - The Browsing Context to convert the
    *     coordinates for.
    */
-  #toBrowserWindowCoordinates(position, context) {
-    return this._forwardToWindowGlobal(
+  async #toBrowserWindowCoordinates(position, context) {
+    const chromeWindow = context.topChromeWindow;
+    const dpr = chromeWindow.devicePixelRatio;
+
+    const val = await this._forwardToWindowGlobal(
       "_toBrowserWindowCoordinates",
       context.id,
       { position }
     );
+
+    return [val.x / dpr, val.y / dpr];
   }
 
   /**

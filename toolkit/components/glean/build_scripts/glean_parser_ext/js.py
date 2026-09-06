@@ -55,15 +55,6 @@ TYPE_BITS = 5
 
 PING_INDEX_BITS = 16
 
-# Size of the PHF intermediate table.
-# This ensures the algorithm finds empty slots in the buckets
-# with the number of metrics we now have in-tree.
-# toolkit/components/telemetry uses 1024, some others 512.
-# FOG is bigger.
-# See https://bugzilla.mozilla.org/show_bug.cgi?id=1822477
-# And https://bugzilla.mozilla.org/show_bug.cgi?id=1923973
-PHF_SIZE = 2048
-
 
 def ping_entry(ping_id, ping_string_index):
     """
@@ -167,9 +158,9 @@ def write_metrics(
         template_filename,
     )
 
-    assert (
-        INDEX_BITS + TYPE_BITS + ID_BITS <= ENTRY_WIDTH
-    ), "INDEX_BITS, TYPE_BITS, or ID_BITS are larger than allowed"
+    assert INDEX_BITS + TYPE_BITS + ID_BITS <= ENTRY_WIDTH, (
+        "INDEX_BITS, TYPE_BITS, or ID_BITS are larger than allowed"
+    )
 
     get_metric_id = generate_metric_ids(objs, options)
     # Mapping from a metric's identifier to the entry (metric ID | type id | index)
@@ -223,17 +214,17 @@ def write_metrics(
     # TODO: Merge the method here that creates the metric_type_ids dict with `type_ids_and_categories` in `util.py` - https://bugzilla.mozilla.org/show_bug.cgi?id=1999421
     other_type_ids = list(type_ids_and_categories(objs)[0].items())
     for i, v in enumerate(metric_type_ids):
-        assert (
-            v[1][1] == other_type_ids[i][0]
-        ), f"Metric {v[1][1]} is at index {i} in `glean_parser_ext/js.py`, but {other_type_ids[i][0]} is at that index in `glean_parser_ext/util.py`"
-        assert (
-            v[1][0] == other_type_ids[i][1]["id"]
-        ), f"Metric {v[1][1]} has type_id {v[1][0]} in `glean_parser_ext/js.py`, but its type_id in `glean_parser_ext/util.py` is {other_type_ids[i][1]['id']}"
+        assert v[1][1] == other_type_ids[i][0], (
+            f"Metric {v[1][1]} is at index {i} in `glean_parser_ext/js.py`, but {other_type_ids[i][0]} is at that index in `glean_parser_ext/util.py`"
+        )
+        assert v[1][0] == other_type_ids[i][1]["id"], (
+            f"Metric {v[1][1]} has type_id {v[1][0]} in `glean_parser_ext/js.py`, but its type_id in `glean_parser_ext/util.py` is {other_type_ids[i][1]['id']}"
+        )
 
     # Create a lookup table for the metric categories only
     category_string_table = category_string_table.writeToString("gCategoryStringTable")
     category_map = [(bytearray(category, "ascii"), id) for (category, id) in categories]
-    name_phf = PerfectHash(category_map, PHF_SIZE)
+    name_phf = PerfectHash(category_map)
     category_by_name_lookup = name_phf.cxx_codegen(
         name="CategoryByNameLookup",
         entry_type="category_entry_t",
@@ -251,7 +242,7 @@ def write_metrics(
         (bytearray(metric_name, "ascii"), metric_id)
         for (metric_name, metric_id) in metric_id_mapping.items()
     ]
-    metric_phf = PerfectHash(metric_map, PHF_SIZE)
+    metric_phf = PerfectHash(metric_map)
     metric_by_name_lookup = metric_phf.cxx_codegen(
         name="MetricByNameLookup",
         entry_type="metric_entry_t",
@@ -323,7 +314,7 @@ def write_pings(objs, output_fd, template_filename, output_fd_h, template_filena
         for (ping_name, ping_entry) in pings.items()
     ]
     ping_string_table = ping_string_table.writeToString("gPingStringTable")
-    ping_phf = PerfectHash(ping_map, PHF_SIZE)
+    ping_phf = PerfectHash(ping_map)
     ping_by_name_lookup = ping_phf.cxx_codegen(
         name="PingByNameLookup",
         entry_type="ping_entry_t",

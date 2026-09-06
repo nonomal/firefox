@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 sw=2 et tw=78: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,7 +11,6 @@
 #include "mozilla/dom/FetchPriority.h"
 #include "mozilla/dom/ShadowRoot.h"
 #include "mozilla/dom/ShadowRootBinding.h"
-#include "mozilla/glean/ParserHtmlMetrics.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/Likely.h"
 #include "mozilla/StaticPrefs_dom.h"
@@ -144,16 +141,18 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
         aIntendedParent ? static_cast<nsIContent*>(aIntendedParent) : nullptr;
 
     // intendedParent == nullptr is a special case where the
-    // intended parent is the document.
-    nsNodeInfoManager* nodeInfoManager =
-        intendedParent ? intendedParent->OwnerDoc()->NodeInfoManager()
-                       : mBuilder->GetNodeInfoManager();
+    // intended parent is the document. FIXME(emilio): Seems using
+    // mBuilder->GetNodeInfoManager() should always be fine?
+    nsNodeInfoManager* nodeInfoManager = intendedParent
+                                             ? intendedParent->NodeInfoManager()
+                                             : mBuilder->GetNodeInfoManager();
 
     nsIContent* elem;
     if (aNamespace == kNameSpaceID_XHTML) {
       elem = nsHtml5TreeOperation::CreateHTMLElement(
           aName, aAttributes, mozilla::dom::FROM_PARSER_FRAGMENT,
-          nodeInfoManager, mBuilder, aCreator.html);
+          nodeInfoManager, mBuilder, aCreator.html, intendedParent,
+          mCustomElementRegistry);
     } else if (aNamespace == kNameSpaceID_SVG) {
       elem = nsHtml5TreeOperation::CreateSVGElement(
           aName, aAttributes, mozilla::dom::FROM_PARSER_FRAGMENT,
@@ -220,9 +219,11 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
                 aAttributes->getValue(nsHtml5AttributeName::ATTR_SIZES);
             nsHtml5String fetchPriority =
                 aAttributes->getValue(nsHtml5AttributeName::ATTR_FETCHPRIORITY);
+            nsHtml5String type =
+                aAttributes->getValue(nsHtml5AttributeName::ATTR_TYPE);
             mSpeculativeLoadQueue.AppendElement()->InitImage(
                 url, crossOrigin, /* aMedia = */ nullptr, referrerPolicy,
-                srcset, sizes, false, fetchPriority);
+                srcset, sizes, false, fetchPriority, type);
           }
         } else if (nsGkAtoms::source == aName) {
           nsHtml5String srcset =
@@ -397,9 +398,16 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
             } else if (rel.LowerCaseEqualsASCII("preload")) {
               nsHtml5String url =
                   aAttributes->getValue(nsHtml5AttributeName::ATTR_HREF);
-              if (url) {
-                nsHtml5String as =
-                    aAttributes->getValue(nsHtml5AttributeName::ATTR_AS);
+              nsHtml5String as =
+                  aAttributes->getValue(nsHtml5AttributeName::ATTR_AS);
+              bool isImage = as.LowerCaseEqualsASCII("image");
+              nsHtml5String srcset;
+              if (isImage) {
+                srcset = aAttributes->getValue(
+                    nsHtml5AttributeName::ATTR_IMAGESRCSET);
+              }
+
+              if (url || (isImage && srcset)) {
                 nsHtml5String charset =
                     aAttributes->getValue(nsHtml5AttributeName::ATTR_CHARSET);
                 nsHtml5String crossOrigin = aAttributes->getValue(
@@ -435,13 +443,14 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
                       url, charset, crossOrigin, media, referrerPolicy, nonce,
                       integrity, true, fetchPriority);
                 } else if (as.LowerCaseEqualsASCII("image")) {
-                  nsHtml5String srcset = aAttributes->getValue(
-                      nsHtml5AttributeName::ATTR_IMAGESRCSET);
                   nsHtml5String sizes = aAttributes->getValue(
                       nsHtml5AttributeName::ATTR_IMAGESIZES);
+                  nsHtml5String type =
+                      aAttributes->getValue(nsHtml5AttributeName::ATTR_TYPE);
                   mSpeculativeLoadQueue.AppendElement()->InitImage(
-                      url, crossOrigin, media, referrerPolicy, srcset, sizes,
-                      true, fetchPriority);
+                      url ? url : nsHtml5String::EmptyString(), crossOrigin,
+                      media, referrerPolicy, srcset, sizes, true, fetchPriority,
+                      type);
                 } else if (as.LowerCaseEqualsASCII("font")) {
                   mSpeculativeLoadQueue.AppendElement()->InitFont(
                       url, crossOrigin, media, referrerPolicy, fetchPriority);
@@ -500,7 +509,7 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
 
             mSpeculativeLoadQueue.AppendElement()->InitImage(
                 url, nullptr, nullptr, nullptr, nullptr, nullptr, false,
-                fetchPriority);
+                fetchPriority, nullptr);
           }
         } else if (nsGkAtoms::style == aName) {
           mImportScanner.Start();
@@ -562,7 +571,7 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
 
             mSpeculativeLoadQueue.AppendElement()->InitImage(
                 url, crossOrigin, /* aMedia = */ nullptr, nullptr, nullptr,
-                nullptr, false, fetchPriority);
+                nullptr, false, fetchPriority, nullptr);
           }
         } else if (nsGkAtoms::script == aName) {
           nsHtml5TreeOperation* treeOp =
@@ -829,6 +838,11 @@ nsIContentHandle* nsHtml5TreeBuilder::createAndInsertFosterParentedElement(
   return child;
 }
 
+void nsHtml5TreeBuilder::optionElementPopped(nsIContentHandle* aOption) {
+  // TODO: Implement "maybe clone an option into selectedcontent" for
+  // customizable <select>.
+}
+
 void nsHtml5TreeBuilder::detachFromParent(nsIContentHandle* aElement) {
   MOZ_ASSERT(aElement, "Null element");
 
@@ -1089,7 +1103,7 @@ void nsHtml5TreeBuilder::addAttributesToElement(
   MOZ_ASSERT(aElement, "Null element");
   MOZ_ASSERT(aAttributes, "Null attributes");
 
-  if (aAttributes == nsHtml5HtmlAttributes::EMPTY_ATTRIBUTES) {
+  if (aAttributes->isEmpty()) {
     return;
   }
 
@@ -1134,8 +1148,6 @@ void nsHtml5TreeBuilder::markMalformedIfScript(nsIContentHandle* aElement) {
 
 void nsHtml5TreeBuilder::start(bool fragment) {
   mCurrentHtmlScriptCannotDocumentWriteOrBlock = false;
-  mozilla::glean::parsing::svg_unusual_pcdata.AddToDenominator(1);
-
 #ifdef DEBUG
   mActive = true;
 #endif
@@ -1203,21 +1215,6 @@ void nsHtml5TreeBuilder::elementPushed(int32_t aNamespace, nsAtom* aName,
    * table elements shouldn't be used as surrogate parents for user experience
    * reasons.
    */
-
-  if (MOZ_UNLIKELY(isInSVGOddPCData)) {
-    // We are seeing an element that has children, which could not have child
-    // elements in HTML, i.e., is parsed as PCDATA in SVG but CDATA in HTML.
-    mozilla::glean::parsing::svg_unusual_pcdata.AddToNumerator(1);
-  }
-  if (MOZ_UNLIKELY(aNamespace == kNameSpaceID_SVG)) {
-    if ((aName == nsGkAtoms::style) || (aName == nsGkAtoms::xmp) ||
-        (aName == nsGkAtoms::iframe) || (aName == nsGkAtoms::noembed) ||
-        (aName == nsGkAtoms::noframes) || (aName == nsGkAtoms::noscript) ||
-        (aName == nsGkAtoms::script)) {
-      isInSVGOddPCData++;
-    }
-  }
-
   if (aNamespace != kNameSpaceID_XHTML) {
     return;
   }
@@ -1266,14 +1263,6 @@ void nsHtml5TreeBuilder::elementPopped(int32_t aNamespace, nsAtom* aName,
   NS_ASSERTION(aElement, "No element!");
   if (aNamespace == kNameSpaceID_MathML) {
     return;
-  }
-  if (MOZ_UNLIKELY(aNamespace == kNameSpaceID_SVG)) {
-    if ((aName == nsGkAtoms::style) || (aName == nsGkAtoms::xmp) ||
-        (aName == nsGkAtoms::iframe) || (aName == nsGkAtoms::noembed) ||
-        (aName == nsGkAtoms::noframes) || (aName == nsGkAtoms::noscript) ||
-        (aName == nsGkAtoms::script)) {
-      isInSVGOddPCData--;
-    }
   }
   // we now have only SVG and HTML
   if (aName == nsGkAtoms::script) {
@@ -1744,14 +1733,25 @@ nsIContentHandle* nsHtml5TreeBuilder::getShadowRootFromHost(
     nsIContentHandle* aHost, nsIContentHandle* aTemplateNode,
     nsHtml5String aShadowRootMode, bool aShadowRootIsClonable,
     bool aShadowRootIsSerializable, bool aShadowRootDelegatesFocus,
+    bool aShadowRootCustomElementRegistry,
+    nsHtml5String aShadowRootSlotAssignment,
     nsHtml5String aShadowRootReferenceTarget) {
-  mozilla::dom::ShadowRootMode mode;
+  using mozilla::dom::ShadowRootMode;
+  using mozilla::dom::SlotAssignmentMode;
+
+  ShadowRootMode mode;
   if (aShadowRootMode.LowerCaseEqualsASCII("open")) {
-    mode = mozilla::dom::ShadowRootMode::Open;
+    mode = ShadowRootMode::Open;
   } else if (aShadowRootMode.LowerCaseEqualsASCII("closed")) {
-    mode = mozilla::dom::ShadowRootMode::Closed;
+    mode = ShadowRootMode::Closed;
   } else {
     return nullptr;
+  }
+
+  SlotAssignmentMode slotAssignment = SlotAssignmentMode::Named;
+  if (mozilla::StaticPrefs::dom_shadowdom_shadowRootSlotAssignment_enabled() &&
+      aShadowRootSlotAssignment.LowerCaseEqualsASCII("manual")) {
+    slotAssignment = SlotAssignmentMode::Manual;
   }
 
   nsString shadowRootReferenceTarget;
@@ -1761,6 +1761,7 @@ nsIContentHandle* nsHtml5TreeBuilder::getShadowRootFromHost(
     nsIContent* root = nsContentUtils::AttachDeclarativeShadowRoot(
         static_cast<nsIContent*>(aHost), mode, aShadowRootIsClonable,
         aShadowRootIsSerializable, aShadowRootDelegatesFocus,
+        aShadowRootCustomElementRegistry, slotAssignment,
         shadowRootReferenceTarget);
     if (!root) {
       nsContentUtils::LogSimpleConsoleError(
@@ -1780,6 +1781,7 @@ nsIContentHandle* nsHtml5TreeBuilder::getShadowRootFromHost(
   opGetShadowRootFromHost operation(
       aHost, fragHandle, aTemplateNode, mode, aShadowRootIsClonable,
       aShadowRootIsSerializable, aShadowRootDelegatesFocus,
+      aShadowRootCustomElementRegistry, slotAssignment,
       shadowRootReferenceTarget);
   treeOp->Init(mozilla::AsVariant(operation));
   return fragHandle;

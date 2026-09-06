@@ -70,10 +70,11 @@ struct nssPKIObjectStr {
     NSSArena *arena;
     /* Atomically incremented/decremented reference counting */
     PRInt32 refCount;
-    /* lock protects the array of nssCryptokiInstance's of the object */
+    /* lock protects the array of nssCryptokiInstance's of the object,
+     * as well as the NSSCryptoContext (cryptoContext). */
     union {
-        PZLock *lock;
-        PZMonitor *mlock;
+        PRLock *lock;
+        PRMonitor *mlock;
     } sync;
     nssPKILockType lockType;
     /* XXX with LRU cache, this cannot be guaranteed up-to-date.  It cannot

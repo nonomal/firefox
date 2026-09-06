@@ -33,8 +33,8 @@ import mozilla.components.ui.icons.R as iconsR
  * @param action the [Action] to display.
  * @param listener a callback to be invoked when this menu item is clicked.
  * @param isCollapsingMenuLimit Whether this menu item can serve as the limit of a collapsing menu.
- * @param isSticky whether this item menu should not be scrolled offscreen (downwards or upwards
- * depending on the menu position).
+ * @param isSticky whether this item menu should not be scrolled offscreen (downwards or upwards depending on the menu
+ *   position).
  */
 class WebExtensionBrowserMenuItem(
     internal var action: Action,
@@ -48,8 +48,7 @@ class WebExtensionBrowserMenuItem(
 
     override fun getLayoutResource() = R.layout.mozac_browser_menu_web_extension
 
-    @VisibleForTesting
-    internal var iconTintColorResource: Int? = null
+    @VisibleForTesting internal var iconTintColorResource: Int? = null
 
     @Suppress("TooGenericExceptionCaught")
     override fun bind(menu: BrowserMenu, view: View) {
@@ -102,26 +101,25 @@ class WebExtensionBrowserMenuItem(
         }
     }
 
-    override fun asCandidate(context: Context) = TextMenuCandidate(
-        action.title.orEmpty(),
-        start = AsyncDrawableMenuIcon(
-            loadDrawable = { _, height -> loadIcon(context, height) },
-        ),
-        end = action.badgeText?.let { badgeText ->
-            TextMenuIcon(
-                badgeText,
-                backgroundTint = action.badgeBackgroundColor,
-                textStyle = TextStyle(
-                    color = action.badgeTextColor,
+    override fun asCandidate(context: Context) =
+        TextMenuCandidate(
+            action.title.orEmpty(),
+            start = AsyncDrawableMenuIcon(loadDrawable = { _, height -> loadIcon(context, height) }),
+            end =
+                action.badgeText?.let { badgeText ->
+                    TextMenuIcon(
+                        badgeText,
+                        backgroundTint = action.badgeBackgroundColor,
+                        textStyle = TextStyle(color = action.badgeTextColor),
+                    )
+                },
+            containerStyle =
+                ContainerStyle(
+                    isVisible = visible(),
+                    isEnabled = action.enabled ?: false,
                 ),
-            )
-        },
-        containerStyle = ContainerStyle(
-            isVisible = visible(),
-            isEnabled = action.enabled ?: false,
-        ),
-        onClick = listener,
-    )
+            onClick = listener,
+        )
 
     @VisibleForTesting
     internal fun setupIcon(view: View, imageView: ImageView, iconTintColorResource: Int?) {
@@ -145,21 +143,17 @@ class WebExtensionBrowserMenuItem(
                 "Failed to load browser action icon, falling back to default.",
             )
 
-            getDrawable(context, iconsR.drawable.mozac_ic_web_extension_default_icon)
+            getDrawable(context, iconsR.drawable.mozac_ic_extension_fill_24)
         }
     }
 
-    /**
-     * Sets the tint to be applied to the extension icon
-     */
+    /** Sets the tint to be applied to the extension icon */
     fun setIconTint(iconTintColorResource: Int?) {
         iconTintColorResource?.let { this.iconTintColorResource = it }
     }
 }
 
-/**
- * Sets the badgeText and the visibility of the TextView based on empty/nullability of the badgeText.
- */
+/** Sets the badgeText and the visibility of the TextView based on empty/nullability of the badgeText. */
 fun TextView.setBadgeText(badgeText: String?) {
     if (badgeText.isNullOrEmpty()) {
         visibility = View.INVISIBLE

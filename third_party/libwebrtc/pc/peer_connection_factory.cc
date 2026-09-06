@@ -32,10 +32,8 @@
 #include "api/scoped_refptr.h"
 #include "api/sequence_checker.h"
 #include "api/transport/bitrate_settings.h"
-#include "api/transport/network_control.h"
 #include "api/units/data_rate.h"
 #include "call/call_config.h"
-#include "call/rtp_transport_controller_send_factory.h"
 #include "media/base/codec.h"
 #include "media/base/media_engine.h"
 #include "p2p/base/basic_async_resolver_factory.h"
@@ -88,22 +86,22 @@ Environment AssembleEnvironment(PeerConnectionFactoryDependencies& deps) {
 // Static
 scoped_refptr<PeerConnectionFactory> PeerConnectionFactory::Create(
     PeerConnectionFactoryDependencies dependencies) {
-  auto context = ConnectionContext::Create(AssembleEnvironment(dependencies),
-                                           &dependencies);
+  Environment env = AssembleEnvironment(dependencies);
+  auto context = ConnectionContext::Create(env, &dependencies);
   if (!context) {
     return nullptr;
   }
-  return make_ref_counted<PeerConnectionFactory>(context, &dependencies);
+  return make_ref_counted<PeerConnectionFactory>(env, context, &dependencies);
 }
 
 PeerConnectionFactory::PeerConnectionFactory(
+    Environment env,
     scoped_refptr<ConnectionContext> context,
     PeerConnectionFactoryDependencies* dependencies)
-    : context_(context),
-      codec_vendor_(context_->media_engine(),
-                    context_->use_rtx(),
-                    context_->env().field_trials()),
-
+    : env_(env),
+      context_(context ? context
+                       : ConnectionContext::Create(env_, dependencies)),
+      codec_vendor_(media_engine(), context_->use_rtx(), env_.field_trials()),
       event_log_factory_(std::move(dependencies->event_log_factory)),
       fec_controller_factory_(std::move(dependencies->fec_controller_factory)),
       network_state_predictor_factory_(
@@ -111,26 +109,31 @@ PeerConnectionFactory::PeerConnectionFactory(
       injected_network_controller_factory_(
           std::move(dependencies->network_controller_factory)),
       neteq_factory_(std::move(dependencies->neteq_factory)),
-      transport_controller_send_factory_(
-          (dependencies->transport_controller_send_factory)
-              ? std::move(dependencies->transport_controller_send_factory)
-              : std::make_unique<RtpTransportControllerSendFactory>()),
+      video_jitter_timing_factory_(
+          std::move(dependencies->video_jitter_timing_factory)),
       decode_metronome_(std::move(dependencies->decode_metronome)),
       encode_metronome_(std::move(dependencies->encode_metronome)) {}
 
 PeerConnectionFactory::PeerConnectionFactory(
     PeerConnectionFactoryDependencies dependencies)
-    : PeerConnectionFactory(
-          ConnectionContext::Create(AssembleEnvironment(dependencies),
-                                    &dependencies),
-          &dependencies) {}
+    : PeerConnectionFactory(AssembleEnvironment(dependencies),
+                            /* context= */ nullptr,
+                            &dependencies) {}
 
 PeerConnectionFactory::~PeerConnectionFactory() {
   RTC_DCHECK_RUN_ON(signaling_thread());
-  worker_thread()->BlockingCall([this] {
+  // The metronomes must be destroyed on the worker thread. Since BlockingCall
+  // uses FunctionView, the lambda object is destroyed on the calling thread
+  // (signaling thread) after execution (together with its captures). We release
+  // them here and delete them inside the lambda body to ensure destruction on
+  // the worker thread.
+  worker_thread()->BlockingCall([decode_metronome = decode_metronome_.release(),
+                                 encode_metronome = encode_metronome_.release(),
+                                 this] {
     RTC_DCHECK_RUN_ON(worker_thread());
-    decode_metronome_ = nullptr;
-    encode_metronome_ = nullptr;
+    delete decode_metronome;
+    delete encode_metronome;
+    StopAecDump();
   });
 }
 
@@ -146,15 +149,17 @@ RtpCapabilities PeerConnectionFactory::GetRtpSenderCapabilities(
     case MediaType::AUDIO: {
       Codecs cricket_codecs;
       cricket_codecs = codec_vendor_.audio_send_codecs().codecs();
-      auto extensions =
-          GetDefaultEnabledRtpHeaderExtensions(media_engine()->voice());
+      std::vector<RtpHeaderExtensionCapability> extensions =
+          GetDefaultEnabledRtpHeaderCapabilities(media_engine()->voice(),
+                                                 /* field_trials= */ nullptr);
       return ToRtpCapabilities(cricket_codecs, extensions);
     }
     case MediaType::VIDEO: {
       Codecs cricket_codecs;
       cricket_codecs = codec_vendor_.video_send_codecs().codecs();
-      auto extensions =
-          GetDefaultEnabledRtpHeaderExtensions(media_engine()->video());
+      std::vector<RtpHeaderExtensionCapability> extensions =
+          GetDefaultEnabledRtpHeaderCapabilities(media_engine()->video(),
+                                                 /* field_trials= */ nullptr);
       return ToRtpCapabilities(cricket_codecs, extensions);
     }
     default:
@@ -171,14 +176,16 @@ RtpCapabilities PeerConnectionFactory::GetRtpReceiverCapabilities(
     case MediaType::AUDIO: {
       Codecs cricket_codecs;
       cricket_codecs = codec_vendor_.audio_recv_codecs().codecs();
-      auto extensions =
-          GetDefaultEnabledRtpHeaderExtensions(media_engine()->voice());
+      std::vector<RtpHeaderExtensionCapability> extensions =
+          GetDefaultEnabledRtpHeaderCapabilities(media_engine()->voice(),
+                                                 /* field_trials= */ nullptr);
       return ToRtpCapabilities(cricket_codecs, extensions);
     }
     case MediaType::VIDEO: {
       Codecs cricket_codecs = codec_vendor_.video_recv_codecs().codecs();
-      auto extensions =
-          GetDefaultEnabledRtpHeaderExtensions(media_engine()->video());
+      std::vector<RtpHeaderExtensionCapability> extensions =
+          GetDefaultEnabledRtpHeaderCapabilities(media_engine()->video(),
+                                                 /* field_trials= */ nullptr);
       return ToRtpCapabilities(cricket_codecs, extensions);
     }
     default:
@@ -191,22 +198,45 @@ RtpCapabilities PeerConnectionFactory::GetRtpReceiverCapabilities(
 scoped_refptr<AudioSourceInterface> PeerConnectionFactory::CreateAudioSource(
     const AudioOptions& options) {
   RTC_DCHECK(signaling_thread()->IsCurrent());
+#if !defined(WEBRTC_CHROMIUM_BUILD) && !defined(WEBRTC_WEBKIT_BUILD)
+  if (context_->media_engine() != nullptr) {
+    worker_thread()->BlockingCall(
+        [&] { context_->ApplyGlobalAudioOptions(options); });
+  }
+#endif
   scoped_refptr<LocalAudioSource> source(LocalAudioSource::Create(&options));
   return source;
 }
 
 bool PeerConnectionFactory::StartAecDump(FILE* file, int64_t max_size_bytes) {
   RTC_DCHECK_RUN_ON(worker_thread());
-  return media_engine()->voice().StartAecDump(FileWrapper(file),
-                                              max_size_bytes);
+  if (!file) {
+    RTC_LOG(LS_ERROR) << "Cannot start AEC dump with null file pointer.";
+    return false;
+  }
+  if (media_engine_ref_) {
+    RTC_LOG(LS_WARNING) << "Replacing ongoing AEC dump.";
+  } else {
+    media_engine_ref_ =
+        std::make_unique<ConnectionContext::MediaEngineReference>(context_);
+  }
+  const bool started = media_engine_ref_->media_engine()->voice().StartAecDump(
+      FileWrapper(file), max_size_bytes);
+  if (!started) {  // E.g. if the file couldn't be opened/created.
+    StopAecDump();
+  }
+  return started;
 }
 
 void PeerConnectionFactory::StopAecDump() {
   RTC_DCHECK_RUN_ON(worker_thread());
-  media_engine()->voice().StopAecDump();
+  if (!media_engine_ref_)
+    return;
+  media_engine_ref_->media_engine()->voice().StopAecDump();
+  media_engine_ref_ = nullptr;
 }
 
-MediaEngineInterface* PeerConnectionFactory::media_engine() const {
+const MediaEngineInterface* PeerConnectionFactory::media_engine() const {
   RTC_DCHECK(context_);
   return context_->media_engine();
 }
@@ -229,6 +259,12 @@ PeerConnectionFactory::CreatePeerConnectionOrError(
     return err;
   }
 
+  if (configuration.certificates.size() >
+      PeerConnectionInterface::RTCConfiguration::kMaxCertificates) {
+    return RTCError(RTCErrorType::INVALID_PARAMETER,
+                    "Too many certificates in RTCConfiguration.");
+  }
+
   ServerAddresses stun_servers;
   std::vector<RelayServerConfig> turn_servers;
   err = ParseAndValidateIceServersFromConfiguration(configuration, stun_servers,
@@ -244,7 +280,7 @@ PeerConnectionFactory::CreatePeerConnectionOrError(
                     "Attempt to create a PeerConnection without an observer");
   }
 
-  EnvironmentFactory env_factory(context_->env());
+  EnvironmentFactory env_factory(env_);
 
   // Field trials active for this PeerConnection is the first of:
   // a) Specified in the PeerConnectionDependencies
@@ -291,14 +327,7 @@ PeerConnectionFactory::CreatePeerConnectionOrError(
   dependencies.allocator->SetNetworkIgnoreMask(options().network_ignore_mask);
   dependencies.allocator->SetVpnList(configuration.vpn_list);
 
-  std::unique_ptr<NetworkControllerFactoryInterface>
-      network_controller_factory =
-          std::move(dependencies.network_controller_factory);
-  std::unique_ptr<Call> call = worker_thread()->BlockingCall(
-      [this, &env, &configuration, &network_controller_factory] {
-        return CreateCall_w(env, std::move(configuration),
-                            std::move(network_controller_factory));
-      });
+  std::unique_ptr<Call> call = CreateCall_s(env, configuration);
 
   auto pc = PeerConnection::Create(env, context_, options_, std::move(call),
                                    configuration, dependencies, stun_servers,
@@ -338,15 +367,13 @@ scoped_refptr<AudioTrackInterface> PeerConnectionFactory::CreateAudioTrack(
   return AudioTrackProxy::Create(signaling_thread(), track);
 }
 
-std::unique_ptr<Call> PeerConnectionFactory::CreateCall_w(
+std::unique_ptr<Call> PeerConnectionFactory::CreateCall_s(
     const Environment& env,
-    const PeerConnectionInterface::RTCConfiguration& configuration,
-    std::unique_ptr<NetworkControllerFactoryInterface>
-        per_call_network_controller_factory) {
-  RTC_DCHECK_RUN_ON(worker_thread());
+    const PeerConnectionInterface::RTCConfiguration& configuration) {
+  RTC_DCHECK_RUN_ON(signaling_thread());
 
-  CallConfig call_config(env, network_thread());
-  if (!media_engine() || !context_->call_factory()) {
+  CallConfig call_config(env, worker_thread(), network_thread());
+  if (!context_->media_engine() || !context_->call_factory()) {
     return nullptr;
   }
   call_config.audio_state = media_engine()->voice().GetAudioState();
@@ -371,22 +398,15 @@ std::unique_ptr<Call> PeerConnectionFactory::CreateCall_w(
   call_config.network_state_predictor_factory =
       network_state_predictor_factory_.get();
   call_config.neteq_factory = neteq_factory_.get();
+  call_config.video_jitter_timing_factory = video_jitter_timing_factory_.get();
 
-  if (per_call_network_controller_factory != nullptr) {
-    RTC_LOG(LS_INFO) << "Using pc injected network controller factory";
-    call_config.per_call_network_controller_factory =
-        std::move(per_call_network_controller_factory);
-  } else if (field_trials().IsEnabled(
-                 "WebRTC-Bwe-InjectedCongestionController")) {
+  if (field_trials().IsEnabled("WebRTC-Bwe-InjectedCongestionController")) {
     RTC_LOG(LS_INFO) << "Using pcf injected network controller factory";
     call_config.network_controller_factory =
         injected_network_controller_factory_.get();
   } else {
     RTC_LOG(LS_INFO) << "Using default network controller factory";
   }
-
-  call_config.rtp_transport_controller_send_factory =
-      transport_controller_send_factory_.get();
   call_config.decode_metronome = decode_metronome_.get();
   call_config.encode_metronome = encode_metronome_.get();
   call_config.pacer_burst_interval = configuration.pacer_burst_interval;

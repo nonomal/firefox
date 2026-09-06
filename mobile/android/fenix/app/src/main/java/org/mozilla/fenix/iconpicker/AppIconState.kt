@@ -23,32 +23,25 @@ data class AppIconState(
     val warningDialogState: AppIconWarningDialog = AppIconWarningDialog.None,
 ) : State
 
-/**
- * The state of the snackbar to display.
- */
+/** The state of the snackbar to display. */
 sealed class AppIconSnackbarState {
-    /**
-     * There is no snackbar to display.
-     */
+    /** There is no snackbar to display. */
     data object None : AppIconSnackbarState()
 
     /**
      * Display a snackbar of the app icon update failure.
+     *
+     * @property oldIcon the currently used app icon.
+     * @property newIcon the app icon that the system tried and failed to apply.
      */
-    data object ApplyingNewIconError : AppIconSnackbarState()
+    data class ApplyingNewIconError(val oldIcon: AppIcon, val newIcon: AppIcon) : AppIconSnackbarState()
 }
 
-/**
- * The state of the app reset warning dialog
- */
+/** The state of the app reset warning dialog */
 sealed class AppIconWarningDialog {
-    /**
-     * No dialog to display.
-     */
+    /** No dialog to display. */
     data object None : AppIconWarningDialog()
 
-    /**
-     * The dialog is visible.
-     */
+    /** The dialog is visible. */
     data class Presenting(val newIcon: AppIcon) : AppIconWarningDialog()
 }

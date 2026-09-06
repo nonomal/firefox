@@ -1,5 +1,4 @@
-/* -*- Mode: Java; c-basic-offset: 4; tab-width: 4; indent-tabs-mode: nil; -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -25,10 +24,6 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
 import android.hardware.display.DisplayManager;
 import android.location.Criteria;
 import android.location.Location;
@@ -45,13 +40,13 @@ import android.os.Debug;
 import android.os.LocaleList;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
 import android.view.Display;
+import android.view.Display.HdrCapabilities;
 import android.view.InputDevice;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
@@ -67,7 +62,6 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.StringTokenizer;
 import org.jetbrains.annotations.NotNull;
-import org.mozilla.gecko.annotation.RobocopTarget;
 import org.mozilla.gecko.annotation.WrapForJNI;
 import org.mozilla.gecko.util.HardwareUtils;
 import org.mozilla.gecko.util.InputDeviceUtils;
@@ -79,18 +73,6 @@ import org.mozilla.geckoview.R;
 
 public class GeckoAppShell {
   private static final String LOGTAG = "GeckoAppShell";
-
-  /*
-   * Keep these values consistent with |SensorType| in HalSensor.h
-   */
-  public static final int SENSOR_ORIENTATION = 0;
-  public static final int SENSOR_ACCELERATION = 1;
-  public static final int SENSOR_PROXIMITY = 2;
-  public static final int SENSOR_LINEAR_ACCELERATION = 3;
-  public static final int SENSOR_GYROSCOPE = 4;
-  public static final int SENSOR_LIGHT = 5;
-  public static final int SENSOR_ROTATION_VECTOR = 6;
-  public static final int SENSOR_GAME_ROTATION_VECTOR = 7;
 
   // We have static members only.
   private GeckoAppShell() {}
@@ -210,17 +192,9 @@ public class GeckoAppShell {
    */
   private static long sVibrationEndTime;
 
-  private static Sensor gAccelerometerSensor;
-  private static Sensor gLinearAccelerometerSensor;
-  private static Sensor gGyroscopeSensor;
-  private static Sensor gOrientationSensor;
-  private static Sensor gLightSensor;
-  private static Sensor gRotationVectorSensor;
-  private static Sensor gGameRotationVectorSensor;
-
   /*
    * Keep in sync with constants found here:
-   * http://searchfox.org/mozilla-central/source/uriloader/base/nsIWebProgressListener.idl
+   * http://searchfox.org/firefox-main/source/uriloader/base/nsIWebProgressListener.idl
    */
   public static final int WPL_STATE_START = 0x00000001;
   public static final int WPL_STATE_STOP = 0x00000010;
@@ -228,7 +202,7 @@ public class GeckoAppShell {
   public static final int WPL_STATE_IS_NETWORK = 0x00040000;
 
   /* Keep in sync with constants found here:
-    http://searchfox.org/mozilla-central/source/netwerk/base/nsINetworkLinkService.idl
+    http://searchfox.org/firefox-main/source/netwerk/base/nsINetworkLinkService.idl
   */
   public static final int LINK_TYPE_UNKNOWN = 0;
   public static final int LINK_TYPE_ETHERNET = 1;
@@ -255,7 +229,6 @@ public class GeckoAppShell {
   @WrapForJNI(stubName = "AppendAppNotesToCrashReport", dispatchTo = "gecko")
   public static native void nativeAppendAppNotesToCrashReport(final String notes);
 
-  @RobocopTarget
   public static void notifyObservers(final String topic, final String data) {
     notifyObservers(topic, data, GeckoThread.State.RUNNING);
   }
@@ -420,10 +393,6 @@ public class GeckoAppShell {
     locationHighAccuracyEnabled = enable;
   }
 
-  @WrapForJNI(calledFrom = "ui", dispatchTo = "gecko")
-  /* package */ static native void onSensorChanged(
-      int halType, float x, float y, float z, float w, long time);
-
   @WrapForJNI(calledFrom = "any", dispatchTo = "gecko")
   /* package */ static native void onLocationChanged(
       double latitude,
@@ -434,74 +403,7 @@ public class GeckoAppShell {
       float heading,
       float speed);
 
-  private static class AndroidListeners implements SensorEventListener, LocationListener {
-    @Override
-    public void onAccuracyChanged(final Sensor sensor, final int accuracy) {}
-
-    @Override
-    public void onSensorChanged(final SensorEvent s) {
-      final int sensorType = s.sensor.getType();
-      int halType = 0;
-      float x = 0.0f, y = 0.0f, z = 0.0f, w = 0.0f;
-      // SensorEvent timestamp is in nanoseconds, Gecko expects microseconds.
-      final long time = s.timestamp / 1000;
-
-      switch (sensorType) {
-        case Sensor.TYPE_ACCELEROMETER:
-        case Sensor.TYPE_LINEAR_ACCELERATION:
-        case Sensor.TYPE_ORIENTATION:
-          if (sensorType == Sensor.TYPE_ACCELEROMETER) {
-            halType = SENSOR_ACCELERATION;
-          } else if (sensorType == Sensor.TYPE_LINEAR_ACCELERATION) {
-            halType = SENSOR_LINEAR_ACCELERATION;
-          } else {
-            halType = SENSOR_ORIENTATION;
-          }
-          x = s.values[0];
-          y = s.values[1];
-          z = s.values[2];
-          break;
-
-        case Sensor.TYPE_GYROSCOPE:
-          halType = SENSOR_GYROSCOPE;
-          x = (float) Math.toDegrees(s.values[0]);
-          y = (float) Math.toDegrees(s.values[1]);
-          z = (float) Math.toDegrees(s.values[2]);
-          break;
-
-        case Sensor.TYPE_LIGHT:
-          halType = SENSOR_LIGHT;
-          x = s.values[0];
-          break;
-
-        case Sensor.TYPE_ROTATION_VECTOR:
-        case Sensor.TYPE_GAME_ROTATION_VECTOR: // API >= 18
-          halType =
-              (sensorType == Sensor.TYPE_ROTATION_VECTOR
-                  ? SENSOR_ROTATION_VECTOR
-                  : SENSOR_GAME_ROTATION_VECTOR);
-          x = s.values[0];
-          y = s.values[1];
-          z = s.values[2];
-          if (s.values.length >= 4) {
-            w = s.values[3];
-          } else {
-            // s.values[3] was optional in API <= 18, so we need to compute it
-            // The values form a unit quaternion, so we can compute the angle of
-            // rotation purely based on the given 3 values.
-            w =
-                1.0f
-                    - s.values[0] * s.values[0]
-                    - s.values[1] * s.values[1]
-                    - s.values[2] * s.values[2];
-            w = (w > 0.0f) ? (float) Math.sqrt(w) : 0.0f;
-          }
-          break;
-      }
-
-      GeckoAppShell.onSensorChanged(halType, x, y, z, w, time);
-    }
-
+  private static class AndroidListeners implements LocationListener {
     // Geolocation.
     @Override
     public void onLocationChanged(final Location location) {
@@ -606,148 +508,6 @@ public class GeckoAppShell {
     }
   }
 
-  @SuppressWarnings("fallthrough")
-  @WrapForJNI(calledFrom = "gecko")
-  private static void enableSensor(final int aSensortype) {
-    final SensorManager sm =
-        (SensorManager) getApplicationContext().getSystemService(Context.SENSOR_SERVICE);
-
-    switch (aSensortype) {
-      case SENSOR_GAME_ROTATION_VECTOR:
-        if (gGameRotationVectorSensor == null) {
-          gGameRotationVectorSensor = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
-        }
-        if (gGameRotationVectorSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gGameRotationVectorSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        if (gGameRotationVectorSensor != null) {
-          break;
-        }
-      // Fallthrough
-
-      case SENSOR_ROTATION_VECTOR:
-        if (gRotationVectorSensor == null) {
-          gRotationVectorSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-        }
-        if (gRotationVectorSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gRotationVectorSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        if (gRotationVectorSensor != null) {
-          break;
-        }
-      // Fallthrough
-
-      case SENSOR_ORIENTATION:
-        if (gOrientationSensor == null) {
-          gOrientationSensor = sm.getDefaultSensor(Sensor.TYPE_ORIENTATION);
-        }
-        if (gOrientationSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gOrientationSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        break;
-
-      case SENSOR_ACCELERATION:
-        if (gAccelerometerSensor == null) {
-          gAccelerometerSensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        }
-        if (gAccelerometerSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gAccelerometerSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        break;
-
-      case SENSOR_LIGHT:
-        if (gLightSensor == null) {
-          gLightSensor = sm.getDefaultSensor(Sensor.TYPE_LIGHT);
-        }
-        if (gLightSensor != null) {
-          sm.registerListener(sAndroidListeners, gLightSensor, SensorManager.SENSOR_DELAY_NORMAL);
-        }
-        break;
-
-      case SENSOR_LINEAR_ACCELERATION:
-        if (gLinearAccelerometerSensor == null) {
-          gLinearAccelerometerSensor = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
-        }
-        if (gLinearAccelerometerSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gLinearAccelerometerSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        break;
-
-      case SENSOR_GYROSCOPE:
-        if (gGyroscopeSensor == null) {
-          gGyroscopeSensor = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-        }
-        if (gGyroscopeSensor != null) {
-          sm.registerListener(
-              sAndroidListeners, gGyroscopeSensor, SensorManager.SENSOR_DELAY_FASTEST);
-        }
-        break;
-
-      default:
-        Log.w(LOGTAG, "Error! Can't enable unknown SENSOR type " + aSensortype);
-    }
-  }
-
-  @SuppressWarnings("fallthrough")
-  @WrapForJNI(calledFrom = "gecko")
-  private static void disableSensor(final int aSensortype) {
-    final SensorManager sm =
-        (SensorManager) getApplicationContext().getSystemService(Context.SENSOR_SERVICE);
-
-    switch (aSensortype) {
-      case SENSOR_GAME_ROTATION_VECTOR:
-        if (gGameRotationVectorSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gGameRotationVectorSensor);
-          break;
-        }
-      // Fallthrough
-
-      case SENSOR_ROTATION_VECTOR:
-        if (gRotationVectorSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gRotationVectorSensor);
-          break;
-        }
-      // Fallthrough
-
-      case SENSOR_ORIENTATION:
-        if (gOrientationSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gOrientationSensor);
-        }
-        break;
-
-      case SENSOR_ACCELERATION:
-        if (gAccelerometerSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gAccelerometerSensor);
-        }
-        break;
-
-      case SENSOR_LIGHT:
-        if (gLightSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gLightSensor);
-        }
-        break;
-
-      case SENSOR_LINEAR_ACCELERATION:
-        if (gLinearAccelerometerSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gLinearAccelerometerSensor);
-        }
-        break;
-
-      case SENSOR_GYROSCOPE:
-        if (gGyroscopeSensor != null) {
-          sm.unregisterListener(sAndroidListeners, gGyroscopeSensor);
-        }
-        break;
-      default:
-        Log.w(LOGTAG, "Error! Can't disable unknown SENSOR type " + aSensortype);
-    }
-  }
-
   @WrapForJNI(calledFrom = "gecko")
   private static void moveTaskToBack() {
     final Context applicationContext = getApplicationContext();
@@ -841,7 +601,7 @@ public class GeckoAppShell {
     if (sDensityDpiOverride != 0) {
       return sDensityDpiOverride;
     }
-    return sScreenCompat.getDensityDpi();
+    return sScreenCompat.getDensityDpi(sDisplayId);
   }
 
   public static synchronized void setDisplayDensityOverride(@Nullable final Float density) {
@@ -861,7 +621,7 @@ public class GeckoAppShell {
       return sDensityOverride;
     }
 
-    return sScreenCompat.getDensity();
+    return sScreenCompat.getDensity(sDisplayId);
   }
 
   private static int sTotalRam;
@@ -893,17 +653,19 @@ public class GeckoAppShell {
     sUseMaxScreenDepth = enable;
   }
 
-  /** Returns the colour depth of the default screen. This will either be 32, 24 or 16. */
+  /**
+   * Returns the colour depth of the default screen. This will typically be 24 as by default it only
+   * includes the bits used for color values, not alpha. However, if useMaxScreenDepth() has been
+   * enabled this will return the full depth.
+   */
   @WrapForJNI(calledFrom = "gecko")
   public static synchronized int getScreenDepth() {
     if (sScreenDepth == 0) {
-      sScreenDepth = 16;
+      sScreenDepth = 24;
       final Context applicationContext = getApplicationContext();
       final PixelFormat info = new PixelFormat();
-      final WindowManager wm =
-          (WindowManager) applicationContext.getSystemService(Context.WINDOW_SERVICE);
-      PixelFormat.getPixelFormatInfo(wm.getDefaultDisplay().getPixelFormat(), info);
-      if (info.bitsPerPixel >= 24 && isHighMemoryDevice(applicationContext)) {
+      PixelFormat.getPixelFormatInfo(sScreenCompat.getDisplay(sDisplayId).getPixelFormat(), info);
+      if (info.bitsPerPixel >= 24) {
         sScreenDepth = sUseMaxScreenDepth ? info.bitsPerPixel : 24;
       }
     }
@@ -912,14 +674,12 @@ public class GeckoAppShell {
   }
 
   @WrapForJNI(calledFrom = "gecko")
-  public static synchronized float getScreenRefreshRate() {
+  private static synchronized float getScreenRefreshRate() {
     if (sScreenRefreshRate != null) {
       return sScreenRefreshRate;
     }
 
-    final WindowManager wm =
-        (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
-    final float refreshRate = wm.getDefaultDisplay().getRefreshRate();
+    final float refreshRate = sScreenCompat.getDisplay(sDisplayId).getRefreshRate();
     // Android 11+ supports multiple refresh rate. So we have to get refresh rate per call.
     // https://source.android.com/docs/core/graphics/multiple-refresh-rate
     if (Build.VERSION.SDK_INT < 30) {
@@ -931,58 +691,41 @@ public class GeckoAppShell {
 
   @WrapForJNI(calledFrom = "gecko")
   private static boolean hasHDRScreen() {
-    final Display display =
-        ((DisplayManager) getApplicationContext().getSystemService(Context.DISPLAY_SERVICE))
-            .getDisplay(Display.DEFAULT_DISPLAY);
+    final Display display = sScreenCompat.getDisplay(sDisplayId);
     return display != null && display.isHdr();
   }
 
   @WrapForJNI(calledFrom = "gecko")
-  private static void performHapticFeedback(final boolean aIsLongPress) {
-    // Don't perform haptic feedback if a vibration is currently playing,
-    // because the haptic feedback will nuke the vibration.
-    if (System.nanoTime() >= sVibrationEndTime) {
-      final VibrationEffect effect;
-      if (Build.VERSION.SDK_INT >= 29) {
-        // API level 29 introduces pre-defined vibration effects for better
-        // haptic feedback, prefer to use them.
-        if (aIsLongPress) {
-          effect = VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK);
-        } else {
-          effect = VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK);
-        }
-      } else {
-        if (aIsLongPress) {
-          effect = VibrationEffect.createWaveform(new long[] {0, 1, 20, 21}, -1);
-        } else {
-          effect = VibrationEffect.createWaveform(new long[] {0, 10, 20, 30}, -1);
-        }
-      }
-      vibrateOnHapticFeedbackEnabled(effect);
+  private static float getSDRContentBrightness() {
+    // We need API level 34 (Android 14) for getHdrCapabilities and thus
+    // getHdrSdrRatio.
+    if (Build.VERSION.SDK_INT < 34) {
+      return 80.0f;
     }
+    final Display display = sScreenCompat.getDisplay(sDisplayId);
+    if (display != null) {
+      final HdrCapabilities hdrCapabilities = display.getHdrCapabilities();
+      if (hdrCapabilities != null) {
+        return hdrCapabilities.getDesiredMaxLuminance() / display.getHdrSdrRatio();
+      }
+    }
+    return 80.0f;
+  }
+
+  @WrapForJNI(calledFrom = "gecko")
+  private static float getHDRPeakBrightness() {
+    final Display display = sScreenCompat.getDisplay(sDisplayId);
+    if (display != null) {
+      final HdrCapabilities hdrCapabilities = display.getHdrCapabilities();
+      if (hdrCapabilities != null) {
+        return hdrCapabilities.getDesiredMaxLuminance();
+      }
+    }
+    return 80.0f;
   }
 
   private static Vibrator vibrator() {
     return (Vibrator) getApplicationContext().getSystemService(Context.VIBRATOR_SERVICE);
-  }
-
-  // Vibrate only if haptic feedback is enabled.
-  @SuppressLint("MissingPermission")
-  private static void vibrateOnHapticFeedbackEnabled(final VibrationEffect effect) {
-    if (Settings.System.getInt(
-            getApplicationContext().getContentResolver(),
-            Settings.System.HAPTIC_FEEDBACK_ENABLED,
-            0)
-        > 0) {
-      // Here, sVibrationEndTime is not set. Compared to other kinds of
-      // vibration, haptic feedbacks are usually shorter and less important,
-      // which means it's ok to "nuke" them.
-      try {
-        vibrator().vibrate(effect);
-      } catch (final SecurityException ignore) {
-        Log.w(LOGTAG, "No VIBRATE permission");
-      }
-    }
   }
 
   @SuppressLint("MissingPermission")
@@ -1275,7 +1018,6 @@ public class GeckoAppShell {
 
   /* Called by JNI from AndroidBridge, and by reflection from tests/BaseTest.java.in */
   @WrapForJNI(calledFrom = "gecko")
-  @RobocopTarget
   public static boolean isTablet() {
     return HardwareUtils.isTablet(getApplicationContext());
   }
@@ -1307,7 +1049,7 @@ public class GeckoAppShell {
   }
 
   /* package */ static int getRotation() {
-    return sScreenCompat.getRotation();
+    return sScreenCompat.getRotation(sDisplayId);
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -1486,13 +1228,17 @@ public class GeckoAppShell {
   static final ScreenCompat sScreenCompat;
 
   private interface ScreenCompat {
-    Rect getScreenSize();
+    Rect getScreenSize(int displayId);
 
-    int getRotation();
+    int getRotation(int displayId);
 
-    int getDensityDpi();
+    int getDensityDpi(int displayId);
 
-    float getDensity();
+    float getDensity(int displayId);
+
+    Display getDisplay(int displayId);
+
+    void onDisplayRemoved(int displayId);
   }
 
   private static class JellyBeanMR1ScreenCompat implements ScreenCompat {
@@ -1504,24 +1250,20 @@ public class GeckoAppShell {
     }
 
     @Override
-    public Rect getScreenSize() {
-      final WindowManager wm =
-          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
-      final Display disp = wm.getDefaultDisplay();
+    public Rect getScreenSize(final int displayId) {
+      final Display disp = getDisplay(displayId);
       final Point size = new Point();
       disp.getRealSize(size);
       return new Rect(0, 0, size.x, size.y);
     }
 
     @Override
-    public int getRotation() {
-      final WindowManager wm =
-          (WindowManager) getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
-      return wm.getDefaultDisplay().getRotation();
+    public int getRotation(final int displayId) {
+      return getDisplay(displayId).getRotation();
     }
 
     @Override
-    public int getDensityDpi() {
+    public int getDensityDpi(final int displayId) {
       if (mDensityDpi == 0) {
         mDensityDpi = getDisplayMetrics().densityDpi;
       }
@@ -1529,69 +1271,121 @@ public class GeckoAppShell {
     }
 
     @Override
-    public float getDensity() {
+    public float getDensity(final int displayId) {
       if (mDensity == null) {
         mDensity = getDisplayMetrics().density;
       }
       return mDensity;
     }
+
+    @Override
+    public Display getDisplay(final int displayId) {
+      final DisplayManager displayManager =
+          (DisplayManager) getApplicationContext().getSystemService(Context.DISPLAY_SERVICE);
+      final Display display = displayManager.getDisplay(displayId);
+      if (display != null) {
+        return display;
+      }
+      if (displayId != Display.DEFAULT_DISPLAY) {
+        return getDisplay(Display.DEFAULT_DISPLAY);
+      }
+      // No display found even if default display. This should not happen.
+      throw new RuntimeException("No default display found");
+    }
+
+    @Override
+    public void onDisplayRemoved(final int displayId) {}
   }
 
   @RequiresApi(Build.VERSION_CODES.S)
   private static class AndroidSScreenCompat implements ScreenCompat {
-    @SuppressLint("StaticFieldLeak")
-    private static Context sWindowContext;
+    private final SimpleArrayMap<Integer, Context> mWindowContextMap = new SimpleArrayMap<>();
 
-    private static Context getWindowContext() {
-      if (sWindowContext == null) {
-        final DisplayManager displayManager =
-            (DisplayManager) getApplicationContext().getSystemService(Context.DISPLAY_SERVICE);
-        final Display display = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
-        sWindowContext =
-            getApplicationContext()
-                .createWindowContext(display, WindowManager.LayoutParams.TYPE_APPLICATION, null);
-        sWindowContext.registerComponentCallbacks(
-            new ComponentCallbacks() {
-              @Override
-              public void onConfigurationChanged(final Configuration newConfig) {
-                if (GeckoScreenOrientation.getInstance().update()) {
-                  // refreshScreenInfo is already called.
-                  return;
-                }
-                ScreenManagerHelper.refreshScreenInfo();
-              }
+    private final ComponentCallbacks mComponentCallbacks =
+        new ComponentCallbacks() {
+          @Override
+          public void onConfigurationChanged(final Configuration newConfig) {
+            if (GeckoScreenOrientation.getInstance().update()) {
+              // refreshScreenInfo is already called.
+              return;
+            }
+            ScreenManagerHelper.refreshScreenInfo();
+          }
 
-              @Override
-              public void onLowMemory() {}
-            });
+          @Override
+          public void onLowMemory() {}
+        };
+
+    private synchronized Context getWindowContext(final int displayId) {
+      Context windowContext = mWindowContextMap.get(displayId);
+      if (windowContext != null) {
+        return windowContext;
       }
-      return sWindowContext;
+
+      final DisplayManager displayManager =
+          (DisplayManager) getApplicationContext().getSystemService(Context.DISPLAY_SERVICE);
+      final Display display = displayManager.getDisplay(displayId);
+      if (display == null) {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+          return getWindowContext(Display.DEFAULT_DISPLAY);
+        }
+        // No display found even if default display. This should not happen.
+        throw new RuntimeException("No default display found");
+      }
+      windowContext =
+          getApplicationContext()
+              .createWindowContext(display, WindowManager.LayoutParams.TYPE_APPLICATION, null);
+      windowContext.registerComponentCallbacks(mComponentCallbacks);
+      mWindowContextMap.put(displayId, windowContext);
+
+      return windowContext;
     }
 
-    private static DisplayMetrics getDisplayMetrics() {
-      return getWindowContext().getResources().getDisplayMetrics();
+    private DisplayMetrics getDisplayMetrics(final int displayId) {
+      return getWindowContext(displayId).getResources().getDisplayMetrics();
     }
 
     @Override
-    public Rect getScreenSize() {
-      final WindowManager windowManager = getWindowContext().getSystemService(WindowManager.class);
+    public Rect getScreenSize(final int displayId) {
+      final WindowManager windowManager =
+          getWindowContext(displayId).getSystemService(WindowManager.class);
       return windowManager.getCurrentWindowMetrics().getBounds();
     }
 
     @Override
-    public int getRotation() {
-      final WindowManager windowManager = getWindowContext().getSystemService(WindowManager.class);
-      return windowManager.getDefaultDisplay().getRotation();
+    public int getRotation(final int displayId) {
+      return getDisplay(displayId).getRotation();
     }
 
     @Override
-    public int getDensityDpi() {
-      return getDisplayMetrics().densityDpi;
+    public int getDensityDpi(final int displayId) {
+      return getDisplayMetrics(displayId).densityDpi;
     }
 
     @Override
-    public float getDensity() {
-      return getDisplayMetrics().density;
+    public float getDensity(final int displayId) {
+      return getDisplayMetrics(displayId).density;
+    }
+
+    @Override
+    public Display getDisplay(final int displayId) {
+      final Display display = getWindowContext(displayId).getDisplay();
+      if (display != null) {
+        return display;
+      }
+      if (displayId != Display.DEFAULT_DISPLAY) {
+        return getWindowContext(Display.DEFAULT_DISPLAY).getDisplay();
+      }
+      // No display found even if default display. This should not happen.
+      throw new RuntimeException("No default display found");
+    }
+
+    @Override
+    public synchronized void onDisplayRemoved(final int displayId) {
+      final Context context = mWindowContextMap.remove(displayId);
+      if (context != null) {
+        context.unregisterComponentCallbacks(mComponentCallbacks);
+      }
     }
   }
 
@@ -1603,8 +1397,27 @@ public class GeckoAppShell {
     }
   }
 
+  /** The display id that is associated with the GeckoView object. */
+  private static volatile int sDisplayId = Display.DEFAULT_DISPLAY;
+
+  /** Initialize screen information. This should be called at startup */
+  public static void maybeInitScreen() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+      return;
+    }
+
+    ThreadUtils.postToBackgroundThread(
+        new Runnable() {
+          @Override
+          public void run() {
+            // Since creating window context is expensive, we initialize it at startup.
+            sScreenCompat.getDisplay(sDisplayId);
+          }
+        });
+  }
+
   /* package */ static Rect getScreenSizeIgnoreOverride() {
-    return sScreenCompat.getScreenSize();
+    return sScreenCompat.getScreenSize(sDisplayId);
   }
 
   @WrapForJNI(calledFrom = "gecko")
@@ -1614,6 +1427,37 @@ public class GeckoAppShell {
     }
 
     return getScreenSizeIgnoreOverride();
+  }
+
+  /* package */ static void onDisplayRemoved(final int displayId) {
+    sScreenCompat.onDisplayRemoved(displayId);
+  }
+
+  /* package */ static int getDisplayId() {
+    return sDisplayId;
+  }
+
+  /**
+   * Set the display id that is associated with the GeckoView object.
+   *
+   * @param displayId The display id.
+   */
+  public static void setDisplayId(final int displayId) {
+    final boolean isDisplayIdChanged = sDisplayId != displayId;
+    sDisplayId = displayId;
+
+    if (isDisplayIdChanged) {
+      if (GeckoScreenOrientation.getInstance().update()) {
+        // refreshScreenInfo is already called.
+        return;
+      }
+      ScreenManagerHelper.refreshScreenInfo();
+    }
+  }
+
+  @WrapForJNI
+  public static String getPackageResourcePath() {
+    return getApplicationContext().getPackageResourcePath();
   }
 
   @WrapForJNI(calledFrom = "any")

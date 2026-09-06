@@ -4,4 +4,8 @@ run-if = [
   "os == 'android'",
 ]
 
+["test_extensions_late_startup.html"]
+
+["test_geckoview_brokensitereporter.html"]
+
 ["test_geckoview_translations.html"]

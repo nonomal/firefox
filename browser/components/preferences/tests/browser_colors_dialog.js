@@ -2,10 +2,7 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
 async function launchPreferences() {
-  let prefs = await openPreferencesViaOpenPreferencesAPI("paneGeneral", {
-    leaveOpen: true,
-  });
-  Assert.equal(prefs.selectedPane, "paneGeneral", "General pane was selected");
+  return openPrefsTab("accessibility");
 }
 
 async function reset() {
@@ -34,44 +31,41 @@ add_setup(async function () {
 });
 
 add_task(async function testColorPicker() {
-  await launchPreferences();
+  let tab = await launchPreferences();
+  let doc = tab.linkedBrowser.contentDocument;
 
-  const button = gBrowser.contentDocument.getElementById("colors");
-
-  const radiogroup = content.document.getElementById("contrastControlSettings");
-  const radioOff = content.document.getElementById("contrastSettingsOff");
-  const radioCustom = content.document.getElementById("contrastSettingsOn");
-
-  // Focus "Off" Contrast radio button:
-  radiogroup.focus();
-  Assert.equal(
-    radiogroup,
-    gBrowser.contentDocument.activeElement,
-    "Radio group for Custom Colors is focused"
+  // Wait for the contrast setting-group to render before querying its elements.
+  await TestUtils.waitForCondition(
+    () => doc.querySelector("setting-group[groupid='contrast']"),
+    "Wait for contrast setting-group to render."
   );
+
+  const button = doc.getElementById("colors");
+
+  const radioOff = doc.getElementById("contrastSettingsOff");
+  const radioCustom = doc.getElementById("contrastSettingsOn");
+
+  radioOff.focus();
   Assert.equal(
     radioOff,
-    radiogroup.querySelector("radio[focused='true']"),
-    "Radio group with option 'Off' is focused"
+    doc.activeElement,
+    "Radio group for Custom Colors is focused"
   );
-  Assert.ok(button.disabled, "Manage Colors button is disabled");
+  Assert.ok(button.buttonEl.disabled, "Manage Colors button is disabled");
 
   // Focus "Custom" Contrast radio button:
   EventUtils.synthesizeKey("KEY_ArrowDown");
   Assert.equal(
     radioCustom,
-    radiogroup.querySelector("radio[focused='true']"),
+    doc.activeElement,
     "Radio group with option 'Custom' is focused"
   );
-  Assert.ok(!button.disabled, "Manage Colors button is now enabled");
+  await new Promise(r => requestAnimationFrame(r));
+  Assert.ok(!button.buttonEl.disabled, "Manage Colors button is now enabled");
 
   // Focus "Manage Colors" button:
   EventUtils.synthesizeKey("KEY_Tab");
-  Assert.equal(
-    button,
-    gBrowser.contentDocument.activeElement,
-    "Manage Colors button is focused"
-  );
+  Assert.equal(button, doc.activeElement, "Manage Colors button is focused");
 
   info("Open Colors dialog");
   // Open Colors sub-dialog:
@@ -212,9 +206,5 @@ add_task(async function testColorPicker() {
   EventUtils.synthesizeKey("KEY_Enter");
 
   // Confirm the focus is returned to the "Manage Colors" button:
-  Assert.equal(
-    button,
-    gBrowser.contentDocument.activeElement,
-    "Manage Colors button is focused"
-  );
+  Assert.equal(button, doc.activeElement, "Manage Colors button is focused");
 });

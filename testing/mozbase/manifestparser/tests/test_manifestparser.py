@@ -39,7 +39,7 @@ class TestManifestParser(unittest.TestCase):
         )
 
         # Ensure that capitalization and order aren't an issue:
-        lines = [f"[\"{test['name']}\"]" for test in tests]
+        lines = [f'["{test["name"]}"]' for test in tests]
         self.assertEqual(lines, open(mozmill_example).read().strip().splitlines())
 
         # Show how you select subsets of tests:
@@ -50,14 +50,11 @@ class TestManifestParser(unittest.TestCase):
         self.assertEqual(
             len(restart_tests), len(parser.get(manifest=mozmill_restart_example))
         )
-        self.assertFalse(
-            [
-                test
-                for test in restart_tests
-                if test["manifest"]
-                != os.path.join(here, "mozmill-restart-example.toml")
-            ]
-        )
+        self.assertFalse([
+            test
+            for test in restart_tests
+            if test["manifest"] != os.path.join(here, "mozmill-restart-example.toml")
+        ])
         self.assertEqual(
             parser.get("name", tags=["foo"]),
             [
@@ -92,13 +89,11 @@ class TestManifestParser(unittest.TestCase):
 
         # The including manifest is always reported as a part of the generated test object.
         self.assertTrue(
-            all(
-                [
-                    t["ancestor_manifest"] == "include-example.toml"
-                    for t in parser.tests
-                    if t["name"] != "fleem"
-                ]
-            )
+            all([
+                t["ancestor_manifest"] == "include-example.toml"
+                for t in parser.tests
+                if t["name"] != "fleem"
+            ])
         )
 
         # The manifests should be there too:
@@ -172,13 +167,11 @@ yellow = submarine"""  # noqa
 
         # The including manifest is always reported as a part of the generated test object.
         self.assertTrue(
-            all(
-                [
-                    t["ancestor_manifest"] == "include-example.toml"
-                    for t in parser.tests
-                    if t["name"] != "fleem"
-                ]
-            )
+            all([
+                t["ancestor_manifest"] == "include-example.toml"
+                for t in parser.tests
+                if t["name"] != "fleem"
+            ])
         )
 
         # The manifests should be there too:
@@ -667,7 +660,7 @@ yellow = submarine
         manifest = parser.source_documents[before_path]
 
         manifestparser.toml.remove_skip_if(
-            manifest, os_name="linux", os_version="18.04"
+            manifest, os_name="linux", os_version="22.04"
         )
 
         manifest_str = manifestparser.toml.alphabetize_toml_str(manifest)
@@ -680,7 +673,7 @@ yellow = submarine
         manifest = parser.source_documents[before_path]
 
         manifestparser.toml.remove_skip_if(
-            manifest, os_name="linux", os_version="18.04", processor="x86"
+            manifest, os_name="linux", os_version="22.04", processor="x86"
         )
 
         manifest_str = manifestparser.toml.alphabetize_toml_str(manifest)
@@ -693,7 +686,7 @@ yellow = submarine
         manifest = parser.source_documents[before_path]
 
         manifestparser.toml.remove_skip_if(
-            manifest, os_name="unknown", os_version="18.04", processor="x86"
+            manifest, os_name="unknown", os_version="22.04", processor="x86"
         )
 
         manifest_str = manifestparser.toml.alphabetize_toml_str(manifest)

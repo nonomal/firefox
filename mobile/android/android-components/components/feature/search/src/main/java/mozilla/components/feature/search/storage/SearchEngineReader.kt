@@ -4,12 +4,17 @@
 
 package mozilla.components.feature.search.storage
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.AtomicFile
 import android.util.Base64
 import androidx.core.net.toUri
+import java.io.IOException
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
 import mozilla.appservices.search.SearchEngineClassification
 import mozilla.appservices.search.SearchEngineDefinition
 import mozilla.appservices.search.SearchUrlParam
@@ -18,13 +23,10 @@ import mozilla.components.browser.icons.decoder.SvgIconDecoder
 import mozilla.components.browser.state.search.SearchEngine
 import mozilla.components.feature.search.middleware.SearchExtraParams
 import mozilla.components.support.images.DesiredSize
+import mozilla.components.support.locale.LocaleManager
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserException
 import org.xmlpull.v1.XmlPullParserFactory
-import java.io.IOException
-import java.io.InputStream
-import java.io.InputStreamReader
-import java.nio.charset.StandardCharsets
 
 internal const val URL_TYPE_SUGGEST_JSON = "application/x-suggestions+json"
 internal const val URL_TYPE_TRENDING_JSON = "application/x-trending+json"
@@ -37,29 +39,35 @@ private const val MAX_SIZE = 32
 
 // List of general search engine ids, taken from
 // https://searchfox.org/mozilla-central/rev/ef0aa879e94534ffd067a3748d034540a9fc10b0/toolkit/components/search/SearchUtils.sys.mjs#200
-internal val GENERAL_SEARCH_ENGINE_IDS = setOf(
-    GOOGLE_ID,
-    "ddg",
-    "bing",
-    "baidu",
-    "ecosia",
-    "qwant",
-    "yahoo-jp",
-    "seznam-cz",
-    "coccoc",
-    "baidu",
-)
+internal val GENERAL_SEARCH_ENGINE_IDS =
+    setOf(
+        GOOGLE_ID,
+        "ddg",
+        "bing",
+        "baidu",
+        "ecosia",
+        "qwant",
+        "yahoo-jp",
+        "seznam-cz",
+        "coccoc",
+        "baidu",
+    )
 
 /**
  * A simple XML reader for search engine plugins.
  *
+ * @param context the [Context] used to resolve the current locale dynamically. The application context will be stored
+ *   to ensure locale changes made by the user are reflected in search URLs.
  * @param type the [SearchEngine.Type] that the read [SearchEngine]s will get assigned.
  * @param searchExtraParams Optional search extra params.
  */
 internal class SearchEngineReader(
+    context: Context,
     private val type: SearchEngine.Type,
     private val searchExtraParams: SearchExtraParams? = null,
 ) {
+    private val applicationContext = context.applicationContext
+
     private class SearchEngineBuilder(
         private val type: SearchEngine.Type,
         private val identifier: String,
@@ -74,23 +82,24 @@ internal class SearchEngineReader(
         var isGeneral: Boolean = false
         var isOptional: Boolean = false
 
-        fun toSearchEngine() = SearchEngine(
-            id = identifier,
-            name = name!!,
-            icon = icon!!,
-            type = type,
-            resultUrls = resultsUrls,
-            suggestUrl = suggestUrl,
-            trendingUrl = trendingUrl,
-            inputEncoding = inputEncoding,
-            isGeneral = isGeneralSearchEngine(identifier, type), // Will be replaced with builder.isGeneral
-            isOptional = isOptional,
-            telemetrySuffix = telemetrySuffix,
-        )
+        fun toSearchEngine() =
+            SearchEngine(
+                id = identifier,
+                name = name!!,
+                icon = icon!!,
+                type = type,
+                resultUrls = resultsUrls,
+                suggestUrl = suggestUrl,
+                trendingUrl = trendingUrl,
+                inputEncoding = inputEncoding,
+                isGeneral = isGeneralSearchEngine(identifier, type), // Will be replaced with builder.isGeneral
+                isOptional = isOptional,
+                telemetrySuffix = telemetrySuffix,
+            )
 
         /**
-         * Returns true if the provided [type] is a custom search engine or the [identifier] is
-         * included in [GENERAL_SEARCH_ENGINE_IDS].
+         * Returns true if the provided [type] is a custom search engine or the [identifier] is included in
+         * [GENERAL_SEARCH_ENGINE_IDS].
          */
         private fun isGeneralSearchEngine(identifier: String, type: SearchEngine.Type): Boolean =
             type == SearchEngine.Type.CUSTOM ||
@@ -98,9 +107,7 @@ internal class SearchEngineReader(
                 GENERAL_SEARCH_ENGINE_IDS.contains(identifier)
     }
 
-    /**
-     * Loads [SearchEngine] from a provided [file]
-     */
+    /** Loads [SearchEngine] from a provided [file] */
     fun loadFile(identifier: String, file: AtomicFile): SearchEngine {
         return loadStream(identifier, file.openRead())
     }
@@ -131,7 +138,7 @@ internal class SearchEngineReader(
         val name = parser.name
         if ("SearchPlugin" != name && "OpenSearchDescription" != name) {
             throw XmlPullParserException(
-                "Expected <SearchPlugin> or <OpenSearchDescription> as root tag: ${parser.positionDescription}",
+                "Expected <SearchPlugin> or <OpenSearchDescription> as root tag: ${parser.positionDescription}"
             )
         }
 
@@ -216,7 +223,7 @@ internal class SearchEngineReader(
             when (parser.next()) {
                 XmlPullParser.END_TAG -> depth--
                 XmlPullParser.START_TAG -> depth++
-                // else: Do nothing - we're skipping content
+            // else: Do nothing - we're skipping content
             }
         }
     }
@@ -274,11 +281,12 @@ internal class SearchEngineReader(
         require(engineDefinition.charset.isNotBlank()) { "Search engine charset cannot be empty" }
         require(engineDefinition.identifier.isNotBlank()) { "Search engine identifier cannot be empty" }
 
-        val builder = SearchEngineBuilder(
-            type,
-            engineDefinition.identifier,
-            engineDefinition.telemetrySuffix,
-        )
+        val builder =
+            SearchEngineBuilder(
+                type,
+                engineDefinition.identifier,
+                engineDefinition.telemetrySuffix,
+            )
         builder.name = engineDefinition.name
         builder.inputEncoding = engineDefinition.charset
         builder.isGeneral = engineDefinition.classification == SearchEngineClassification.GENERAL
@@ -299,25 +307,27 @@ internal class SearchEngineReader(
                 template = engineDefinition.urls.search.base,
                 partnerCode = engineDefinition.partnerCode,
                 builderName = builder.name,
-            ),
+            )
         )
         engineDefinition.urls.suggestions?.let { suggestions ->
-            builder.suggestUrl = buildUrlWithParams(
-                searchTermParamName = suggestions.searchTermParamName,
-                params = suggestions.params,
-                template = suggestions.base,
-                partnerCode = engineDefinition.partnerCode,
-                builderName = builder.name,
-            )
+            builder.suggestUrl =
+                buildUrlWithParams(
+                    searchTermParamName = suggestions.searchTermParamName,
+                    params = suggestions.params,
+                    template = suggestions.base,
+                    partnerCode = engineDefinition.partnerCode,
+                    builderName = builder.name,
+                )
         }
         engineDefinition.urls.trending?.let { trending ->
-            builder.trendingUrl = buildUrlWithParams(
-                searchTermParamName = trending.searchTermParamName,
-                params = trending.params,
-                template = trending.base,
-                partnerCode = engineDefinition.partnerCode,
-                builderName = builder.name,
-            )
+            builder.trendingUrl =
+                buildUrlWithParams(
+                    searchTermParamName = trending.searchTermParamName,
+                    params = trending.params,
+                    template = trending.base,
+                    partnerCode = engineDefinition.partnerCode,
+                    builderName = builder.name,
+                )
         }
     }
 
@@ -337,7 +347,7 @@ internal class SearchEngineReader(
                         "{searchTerms}",
                         null,
                         null,
-                    ),
+                    )
                 )
             }
             append(readUriAPI(newParams, template, partnerCode))
@@ -359,6 +369,8 @@ internal class SearchEngineReader(
         for (param in params) {
             if (param.value == "{partnerCode}") {
                 uriBuilder.appendQueryParameter(param.name, partnerCode)
+            } else if (param.value == "{acceptLanguages}") {
+                uriBuilder.appendQueryParameter(param.name, applicationContext.getAcceptLanguage())
             } else if (param.value != null) {
                 uriBuilder.appendQueryParameter(param.name, param.value)
             }
@@ -378,21 +390,32 @@ internal class SearchEngineReader(
             return
         }
 
-        builder.icon = when (mimetype) {
-            "image/svg+xml" -> SvgIconDecoder().decode(
-                attachmentModel,
-                DesiredSize(TARGET_SIZE, TARGET_SIZE, MAX_SIZE, 2.0f),
-            ) ?: defaultIcon
-            "image/x-icon" -> ICOIconDecoder().decode(
-                attachmentModel,
-                DesiredSize(TARGET_SIZE, TARGET_SIZE, MAX_SIZE, 2.0f),
-            ) ?: defaultIcon
-            "image/jpeg", "image/png" -> BitmapFactory.decodeByteArray(
-                attachmentModel,
-                0,
-                attachmentModel.size,
-            ) ?: defaultIcon
-            else -> defaultIcon
-        }
+        builder.icon =
+            when (mimetype) {
+                "image/svg+xml" ->
+                    SvgIconDecoder()
+                        .decode(
+                            attachmentModel,
+                            DesiredSize(TARGET_SIZE, TARGET_SIZE, MAX_SIZE, 2.0f),
+                        ) ?: defaultIcon
+                "image/x-icon" ->
+                    ICOIconDecoder()
+                        .decode(
+                            attachmentModel,
+                            DesiredSize(TARGET_SIZE, TARGET_SIZE, MAX_SIZE, 2.0f),
+                        ) ?: defaultIcon
+                "image/jpeg",
+                "image/png" ->
+                    BitmapFactory.decodeByteArray(
+                        attachmentModel,
+                        0,
+                        attachmentModel.size,
+                    ) ?: defaultIcon
+                else -> defaultIcon
+            }
+    }
+
+    private fun Context.getAcceptLanguage(): String {
+        return LocaleManager.getCurrentLocale(this)?.toLanguageTag() ?: LocaleManager.getSystemDefault().toLanguageTag()
     }
 }

@@ -1,22 +1,27 @@
-From: Jan-Ivar Bruaroey <jib@mozilla.com>
-Date: Wed, 8 Oct 2025 17:05:00 +0000
-Subject: Bug 1868223 - Add api:frame_transformer_factory to BUILD.gn r=mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Tue, 7 Apr 2026 18:03:00 -0500
+Subject: Bug 2030139 - (fix-1ccc59d5c9) don't use
+ std::make_unique_for_overwrite for now to fix build error
 
-Differential Revision: https://phabricator.services.mozilla.com/D267541
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/8e7778c59894c284b8bddd39b731e999fe2e807c
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/a4e2ac07bd6f2deb8fde32b147422c3918c31eca
 ---
- BUILD.gn | 1 +
- 1 file changed, 1 insertion(+)
+ rtc_base/copy_on_write_buffer.cc | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
 
-diff --git a/BUILD.gn b/BUILD.gn
-index a3b738a7e1..2b3e510f76 100644
---- a/BUILD.gn
-+++ b/BUILD.gn
-@@ -629,6 +629,7 @@ if (!build_with_chromium) {
+diff --git a/rtc_base/copy_on_write_buffer.cc b/rtc_base/copy_on_write_buffer.cc
+index 68e98ce729..5877f323f6 100644
+--- a/rtc_base/copy_on_write_buffer.cc
++++ b/rtc_base/copy_on_write_buffer.cc
+@@ -28,7 +28,11 @@
+ namespace webrtc {
  
-     if (build_with_mozilla) {
-       deps += [
-+        "api:frame_transformer_factory",
-         "api/audio:builtin_audio_processing_builder",
-         "api/environment:environment_factory",
-         "api/video:video_frame",
+ CopyOnWriteBuffer::RawBuffer::RawBuffer(size_t size)
+-    : size_(size), data_(std::make_unique_for_overwrite<uint8_t[]>(size)) {}
++    : size_(size), data_(std::unique_ptr<uint8_t[]>(new uint8_t[size])) {}
++// We should be able to use the form below, but our current compile setup
++// doesn't find std::make_unique_for_overwrite.  See Bug 2030186 to revert
++// this change.
++//     : size_(size), data_(std::make_unique_for_overwrite<uint8_t[]>(size)) {}
+ 
+ scoped_refptr<CopyOnWriteBuffer::RefCountedBuffer>
+ CopyOnWriteBuffer::CreateBuffer(size_t capacity) {

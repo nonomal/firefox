@@ -1,4 +1,3 @@
-/* -*- Mode: IDL; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -33,10 +32,21 @@ enum VisibilityState { "hidden", "visible" };
 
 /* https://dom.spec.whatwg.org/#dictdef-elementcreationoptions */
 dictionary ElementCreationOptions {
+  [Pref="dom.scoped-custom-element-registries.enabled"]
+  CustomElementRegistry? customElementRegistry;
+
   DOMString is;
 
   [ChromeOnly]
   DOMString pseudo;
+};
+
+/* https://dom.spec.whatwg.org/#dictdef-importnodeoptions */
+dictionary ImportNodeOptions {
+  [Pref="dom.scoped-custom-element-registries.enabled"]
+  CustomElementRegistry customElementRegistry;
+
+  boolean selfOnly = false;
 };
 
 /* https://dom.spec.whatwg.org/#interface-document */
@@ -90,7 +100,7 @@ interface Document : Node {
   ProcessingInstruction createProcessingInstruction(DOMString target, DOMString data);
 
   [CEReactions, Throws, Func="IsNotUAWidget"]
-  Node importNode(Node node, optional boolean deep = false);
+  Node importNode(Node node, optional (boolean or ImportNodeOptions) options = false);
   [CEReactions, Throws, Func="IsNotUAWidget"]
   Node adoptNode(Node node);
 
@@ -118,7 +128,7 @@ interface Document : Node {
 
 // https://html.spec.whatwg.org/multipage/dom.html#the-document-object
 partial interface Document {
-  [Throws, NeedsSubjectPrincipal=NonSystem]
+  [UseCounter, Throws, NeedsSubjectPrincipal=NonSystem]
   static Document parseHTMLUnsafe((TrustedHTML or DOMString) html, optional SetHTMLUnsafeOptions options = {});
 
   [PutForwards=href, LegacyUnforgeable] readonly attribute Location? location;
@@ -176,7 +186,7 @@ partial interface Document {
   boolean queryCommandIndeterm(DOMString commandId);
   [Throws]
   boolean queryCommandState(DOMString commandId);
-  [Throws, NeedsCallerType]
+  [Throws, NeedsSubjectPrincipal]
   boolean queryCommandSupported(DOMString commandId);
   [Throws]
   DOMString queryCommandValue(DOMString commandId);
@@ -276,7 +286,9 @@ partial interface Document {
   // @deprecated These are old Netscape 4 methods. Do not use,
   //             the implementation is no-op.
   // XXXbz do we actually need these anymore?
+  [Deprecated=UseOfCaptureEvents]
   undefined captureEvents();
+  [Deprecated=UseOfReleaseEvents]
   undefined releaseEvents();
 
   [SameObject] readonly attribute HTMLAllCollection all;
@@ -303,6 +315,15 @@ partial interface Document {
   // Events handlers
   attribute EventHandler onfullscreenchange;
   attribute EventHandler onfullscreenerror;
+
+  [ChromeOnly, BinaryName="getFullscreenKeyboardLockStatus"]
+  readonly attribute FullscreenKeyboardLock fullscreenKeyboardLock;
+};
+
+// https://w3c.github.io/picture-in-picture/#extensions-to-the-document-interface
+partial interface Document {
+  [Pref="dom.media-pip.enabled"] readonly attribute boolean pictureInPictureEnabled;
+  [Pref="dom.media-pip.enabled", NewObject, Throws] Promise<undefined> exitPictureInPicture();
 };
 
 // https://w3c.github.io/pointerlock/#extensions-to-the-document-interface
@@ -355,6 +376,9 @@ dictionary CaretPositionFromPointOptions {
 // https://drafts.csswg.org/cssom-view/#extensions-to-the-document-interface
 partial interface Document {
     CaretPosition? caretPositionFromPoint(float x, float y, optional CaretPositionFromPointOptions options = {});
+
+    [Pref="dom.caretRangeFromPoint.enabled"]
+    Range? caretRangeFromPoint(optional long x = 0, optional long y = 0);
 
     readonly attribute Element? scrollingElement;
 };
@@ -546,11 +570,6 @@ partial interface Document {
   Promise<boolean> hasStorageAccess();
   [Pref="dom.storage_access.enabled", NewObject]
   Promise<undefined> requestStorageAccess();
-  // https://github.com/privacycg/storage-access/pull/100
-  [Pref="dom.storage_access.forward_declared.enabled", NewObject]
-  Promise<undefined> requestStorageAccessUnderSite(DOMString serializedSite);
-  [Pref="dom.storage_access.forward_declared.enabled", NewObject]
-  Promise<undefined> completeStorageAccessRequestFromSite(DOMString serializedSite);
 };
 
 // A privileged API to give chrome privileged code and the content script of the
@@ -593,6 +612,10 @@ partial interface Document {
 partial interface Document {
   [ChromeOnly] readonly attribute PolicyContainer? policyContainer;
   [ChromeOnly] readonly attribute DOMString cspJSON;
+};
+
+partial interface Document {
+  [ChromeOnly] readonly attribute URI? tlsCertificateBindingURI;
 };
 
 partial interface Document {
@@ -659,7 +682,7 @@ partial interface Document {
    * tracking, fingerprinting, cryptomining and so on. This method is for
    * testing only.
    */
-  [ChromeOnly, Pure]
+  [ChromeOnly]
   readonly attribute NodeList blockedNodesByClassifier;
 };
 
@@ -764,19 +787,25 @@ partial interface Document {
     readonly attribute FragmentDirective fragmentDirective;
 };
 
-// https://drafts.csswg.org/css-view-transitions-1/#additions-to-document-api
+
+callback ViewTransitionUpdateCallback = Promise<any> ();
+dictionary StartViewTransitionOptions {
+  ViewTransitionUpdateCallback? update = null;
+  sequence<DOMString>? types = null;
+};
+
+// https://drafts.csswg.org/css-view-transitions-2/#idl-index
 partial interface Document {
-  [Pref="dom.viewTransitions.enabled"]
-  ViewTransition startViewTransition(optional ViewTransitionUpdateCallback updateCallback);
-  [Pref="dom.viewTransitions.enabled"]
+  ViewTransition startViewTransition(
+    optional (ViewTransitionUpdateCallback or StartViewTransitionOptions) callbackOptions = {}
+  );
   readonly attribute ViewTransition? activeViewTransition;
 };
 
-// https://github.com/w3c/csswg-drafts/pull/10767 for the name divergence in the spec
-callback ViewTransitionUpdateCallback = Promise<any> ();
-
 // https://wicg.github.io/sanitizer-api/#sanitizer-api
 partial interface Document {
-  [Throws, Pref="dom.security.sanitizer.enabled"]
+  [UseCounter, Throws, Pref="dom.security.sanitizer.enabled"]
   static Document parseHTML(DOMString html, optional SetHTMLOptions options = {});
 };
+
+Document includes ARIANotifyMixin;

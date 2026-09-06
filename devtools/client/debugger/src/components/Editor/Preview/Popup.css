@@ -25,6 +25,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+
     .tree {
       padding: 5px;
       overflow: auto;
@@ -49,6 +50,7 @@
     .preview-tracer-header {
       margin-bottom: 5px;
     }
+
     .objectBox {
       padding: 0 5px;
     }
@@ -62,7 +64,7 @@
 }
 
 .preview-tracer-header {
-  --icon-url: url("chrome://devtools/content/debugger/images/trace.svg");
+  --icon-url: url("chrome://devtools/content/shared/components/images/trace.svg");
   --icon-color: var(--theme-inline-preview-label-trace-color);
   color: var(--theme-inline-preview-label-trace-color);
   background-color: var(--theme-inline-preview-label-trace-background);
@@ -140,6 +142,7 @@
     text-underline-offset: 2px;
     text-decoration-skip-ink: none;
   }
+
   100% {
     cursor: wait;
     text-decoration: grey underline solid;
@@ -148,6 +151,7 @@
     text-decoration-skip-ink: none;
   }
 }
+
 .preview-loading-token {
   animation: animateLoading 1s forwards;
 }
@@ -170,7 +174,7 @@
 /* Use a color other than yellow to highlight the hovered token on the paused line
    as the paused line is already yellow */
 .paused-line .preview-token {
-  background-color: light-dark(rgba(202, 227, 255, 0.5), rgba(202, 227, 255, 0.3));
+  background-color: light-dark(rgb(202 227 255 / 0.5), rgb(202 227 255 / 0.3));
 }
 
 /* This rule only make sure the text remains readable when hovering a token on the paused line. */
@@ -211,7 +215,7 @@
   align-items: center;
 }
 
-.exception-message .arrow {
+.exception-message .dbg-img-arrow {
   margin-inline-end: 4px;
 }
 
@@ -258,5 +262,5 @@
 }
 
 .theme-dark .exception-stacktrace .line {
-  color: hsl(210, 40%, 60%);
+  color: hsl(210 40% 60%);
 }

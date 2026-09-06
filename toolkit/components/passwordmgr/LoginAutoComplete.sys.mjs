@@ -7,7 +7,7 @@
  */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-import { GenericAutocompleteItem } from "resource://gre/modules/FillHelpers.sys.mjs";
+import { adaptExternalAutocompleteItem } from "resource://gre/modules/FillHelpers.sys.mjs";
 
 const lazy = {};
 
@@ -33,6 +33,17 @@ ChromeUtils.defineLazyGetter(lazy, "dateAndTimeFormatter", () => {
     dateStyle: "medium",
   });
 });
+ChromeUtils.defineLazyGetter(
+  lazy,
+  "l10n",
+  () => new Localization(["toolkit/main-window/autocomplete.ftl"], true)
+);
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "removeRecordsEnabled",
+  "browser.autocomplete.removeRecords.enabled",
+  false
+);
 
 function loginSort(formHostPort, a, b) {
   let maybeHostPortA = lazy.LoginHelper.maybeGetHostPortForURL(a.origin);
@@ -107,6 +118,10 @@ class InsecureLoginFormAutocompleteItem extends AutocompleteItem {
       "insecureFieldWarningDescription2",
       getLocalizedString("insecureFieldWarningLearnMore")
     );
+    this.comment = JSON.stringify({
+      fillMessageName: "PasswordManager:OpenInsecureFieldWarningLearnMore",
+      icon: "chrome://global/skin/icons/security-broken.svg",
+    });
   }
 }
 
@@ -152,18 +167,42 @@ class LoginAutocompleteItem extends AutocompleteItem {
         isOriginMatched && login.httpRealm === null
           ? getLocalizedString("displaySameOrigin")
           : login.displayOrigin,
+      secondaryAction: lazy.removeRecordsEnabled
+        ? {
+            type: "menupopup",
+            label: lazy.l10n.formatValueSync("autocomplete-more-actions"),
+            actions: [
+              {
+                label: lazy.l10n.formatValueSync("autocomplete-edit-password"),
+              },
+              {
+                label: lazy.l10n.formatValueSync(
+                  "autocomplete-delete-password"
+                ),
+              },
+            ],
+          }
+        : {
+            type: "edit",
+            label: getLocalizedString("autocompleteEditLogin"),
+            fillMessageName: "PasswordManager:OpenPreferences",
+            fillMessageData: {
+              loginGuid: login.guid,
+              entryPoint: "Autocomplete",
+            },
+          },
     });
     this.image = `page-icon:${login.origin}`;
   }
 
-  removeFromStorage() {
+  async removeFromStorage() {
     if (this.#actor) {
       let vanilla = lazy.LoginHelper.loginToVanillaObject(this.login);
       this.#actor.sendAsyncMessage("PasswordManager:removeLogin", {
         login: vanilla,
       });
     } else {
-      Services.logins.removeLogin(this.login);
+      await Services.logins.removeLoginAsync(this.login);
     }
   }
 }
@@ -178,8 +217,28 @@ class GeneratedPasswordAutocompleteItem extends AutocompleteItem {
       fillMessageName: "PasswordManager:FillGeneratedPassword",
       generatedPassword,
       willAutoSaveGeneratedPassword,
+      primary: this.label,
+      secondary: this._autoSaveString(),
     });
+    // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
     this.image = "chrome://browser/skin/login.svg";
+  }
+
+  _autoSaveString() {
+    let brandShorterName;
+    try {
+      brandShorterName = Services.strings
+        .createBundle("chrome://branding/locale/brand.properties")
+        .GetStringFromName("brandShorterName");
+    } catch (e) {
+      // The branding package isn't always registered (e.g. in xpcshell tests),
+      // in which case we can't build the localized string.
+      return "";
+    }
+
+    return Services.strings
+      .createBundle("chrome://passwordmgr/locale/passwordmgr.properties")
+      .formatStringFromName("generatedPasswordWillBeSaved", [brandShorterName]);
   }
 }
 
@@ -188,6 +247,9 @@ class ImportableLearnMoreAutocompleteItem extends AutocompleteItem {
     super("importableLearnMore");
     this.comment = JSON.stringify({
       fillMessageName: "PasswordManager:OpenImportableLearnMore",
+      l10n: {
+        id: "autocomplete-import-learn-more",
+      },
     });
   }
 }
@@ -204,6 +266,12 @@ class ImportableLoginsAutocompleteItem extends AutocompleteItem {
       fillMessageData: {
         browserId,
       },
+      l10n: {
+        id: `autocomplete-import-logins-${browserId}`,
+        args: { host: hostname.replace(/^www\./, "") },
+      },
+      // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
+      icon: "chrome://browser/skin/import.svg",
     });
     this.#actor = actor;
 
@@ -332,16 +400,7 @@ export class LoginAutoCompleteResult {
     if (isFooterEnabled()) {
       if (autocompleteItems) {
         this.#rows.push(
-          ...autocompleteItems.map(
-            item =>
-              new GenericAutocompleteItem(
-                item.image,
-                item.label,
-                item.secondary,
-                item.fillMessageName,
-                item.fillMessageData
-              )
-          )
+          ...autocompleteItems.map(adaptExternalAutocompleteItem)
         );
       }
 
@@ -354,8 +413,10 @@ export class LoginAutoCompleteResult {
         );
       }
 
-      // Suggest importing logins if there are none found.
-      if (!logins.length && importableBrowsers) {
+      // Suggest importing logins. The importable descriptor is only populated
+      // when there are no saved logins for the origin, so no further check
+      // against the (display-filtered) matching logins is needed here.
+      if (importableBrowsers) {
         this.#rows.push(
           ...importableBrowsers.map(
             browserId =>

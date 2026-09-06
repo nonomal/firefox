@@ -17,7 +17,6 @@ mod compute_command;
 mod draw;
 mod encoder;
 mod encoder_command;
-pub mod ffi;
 mod memory_init;
 mod pass;
 mod query;
@@ -33,70 +32,102 @@ use core::convert::Infallible;
 use core::mem::{self, ManuallyDrop};
 use core::{ops, panic};
 
-pub(crate) use self::clear::clear_texture;
 #[cfg(feature = "serde")]
 pub(crate) use self::encoder_command::serde_object_reference_struct;
 #[cfg(any(feature = "trace", feature = "replay"))]
 #[doc(hidden)]
 pub use self::encoder_command::PointerReferences;
+// This module previously did `pub use *` for some of the submodules. When that
+// was removed, every type that was previously public via `use *` was listed
+// here. Some types (in particular `CopySide`) may be exported unnecessarily.
 pub use self::{
-    bundle::*,
+    bundle::{
+        CreateRenderBundleError, ExecutionError, RenderBundle, RenderBundleDescriptor,
+        RenderBundleEncoder, RenderBundleEncoderDescriptor, RenderBundleError,
+        RenderBundleErrorInner,
+    },
     clear::ClearError,
-    compute::*,
+    compute::{
+        ComputeBasePass, ComputePass, ComputePassDescriptor, ComputePassError,
+        ComputePassErrorInner, DispatchError,
+    },
     compute_command::ArcComputeCommand,
-    draw::*,
-    encoder_command::{ArcCommand, ArcReferences, Command, IdReferences, ReferenceType},
-    query::*,
-    render::*,
+    draw::{DrawError, Rect, RenderCommandError},
+    encoder_command::{ArcCommand, ArcReferences, Command, ReferenceType},
+    query::{QueryError, QueryUseError, ResolveError, SimplifiedQueryType},
+    render::{
+        AttachmentError, AttachmentErrorLocation, ColorAttachmentError, ColorAttachments, LoadOp,
+        PassChannel, RenderBasePass, RenderPass, RenderPassColorAttachment,
+        RenderPassDepthStencilAttachment, RenderPassError, RenderPassErrorInner,
+        ResolvedPassChannel, ResolvedRenderPassDepthStencilAttachment,
+        ResolvedRenderPassDescriptor, StoreOp,
+    },
     render_command::ArcRenderCommand,
-    transfer::*,
+    transfer::{CopySide, TransferError},
+    transition_resources::TransitionResourcesError,
 };
+pub(crate) use self::{
+    clear::clear_texture,
+    encoder::EncodingState,
+    memory_init::CommandBufferTextureMemoryActions,
+    render::{get_dst_stride_of_indirect_args, get_src_stride_of_indirect_args, VertexState},
+    transfer::{
+        extract_texture_selector, validate_linear_texture_data, validate_texture_buffer_copy,
+        validate_texture_copy_dst_format, validate_texture_copy_range,
+    },
+};
+
 pub(crate) use allocator::CommandAllocator;
 
 /// cbindgen:ignore
 pub use self::{compute_command::ComputeCommand, render_command::RenderCommand};
 
-pub(crate) use timestamp_writes::ArcPassTimestampWrites;
 pub use timestamp_writes::PassTimestampWrites;
 
-use self::{
-    clear::{clear_buffer, clear_texture_cmd},
-    memory_init::CommandBufferTextureMemoryActions,
-    ray_tracing::build_acceleration_structures,
-    transition_resources::transition_resources,
-};
-
-use crate::binding_model::BindingError;
-use crate::command::encoder::EncodingState;
-use crate::command::transition_resources::TransitionResourcesError;
+use crate::binding_model::{BindGroup, BindingError};
 use crate::device::queue::TempResource;
 use crate::device::{Device, DeviceError, MissingFeatures};
-use crate::id::Id;
 use crate::lock::{rank, Mutex};
 use crate::snatch::SnatchGuard;
 
 use crate::init_tracker::BufferInitTrackerAction;
 use crate::ray_tracing::{AsAction, BuildAccelerationStructureError};
 use crate::resource::{
-    DestroyedResourceError, Fallible, InvalidResourceError, Labeled, ParentDevice as _, QuerySet,
+    DestroyedResourceError, InvalidOrDestroyedResourceError, InvalidResourceError, Labeled,
+    ParentDevice as _, QuerySet,
 };
-use crate::storage::Storage;
 use crate::track::{DeviceTracker, ResourceUsageCompatibilityError, Tracker, UsageScope};
-use crate::{api_log, global::Global, id, resource_log, Label};
+use crate::{api_log, resource_log, Label};
 use crate::{hal_label, LabelHelpers};
 
 use wgt::error::{ErrorType, WebGpuError};
 
 use thiserror::Error;
 
-/// cbindgen:ignore
-pub type TexelCopyBufferInfo = ffi::TexelCopyBufferInfo;
-/// cbindgen:ignore
-pub type TexelCopyTextureInfo = ffi::TexelCopyTextureInfo;
-/// cbindgen:ignore
-pub type CopyExternalImageDestInfo = ffi::CopyExternalImageDestInfo;
+pub(crate) struct EncoderErrorState {
+    error: CommandEncoderError,
 
-const PUSH_CONSTANT_CLEAR_ARRAY: &[u32] = &[0_u32; 64];
+    #[cfg(feature = "trace")]
+    trace_commands: Option<Vec<Command<PointerReferences>>>,
+}
+
+/// Construct an `EncoderErrorState` with only a `CommandEncoderError` (without
+/// any traced commands).
+///
+/// This is used in cases where pass begin/end were mismatched, if the same
+/// encoder was finished multiple times, or in the status of a command buffer
+/// (in which case the commands were already saved to the trace). In some of
+/// these cases there may be commands that could be saved to the trace, but if
+/// the application is that confused about using encoders, it's not clear
+/// whether it's worth the effort to try and preserve the commands.
+fn make_error_state<E: Into<CommandEncoderError>>(error: E) -> CommandEncoderStatus {
+    CommandEncoderStatus::Error(EncoderErrorState {
+        error: error.into(),
+
+        #[cfg(feature = "trace")]
+        trace_commands: None,
+    })
+}
 
 /// The current state of a command or pass encoder.
 ///
@@ -106,15 +137,12 @@ const PUSH_CONSTANT_CLEAR_ARRAY: &[u32] = &[0_u32; 64];
 pub(crate) enum CommandEncoderStatus {
     /// Ready to record commands. An encoder's initial state.
     ///
-    /// Command building methods like [`command_encoder_clear_buffer`] and
-    /// [`compute_pass_end`] require the encoder to be in this
+    /// Command building methods like [`CommandEncoder::clear_buffer`] and
+    /// [`ComputePass::end`] require the encoder to be in this
     /// state.
     ///
     /// This corresponds to WebGPU's "open" state.
     /// See <https://www.w3.org/TR/webgpu/#encoder-state-open>
-    ///
-    /// [`command_encoder_clear_buffer`]: Global::command_encoder_clear_buffer
-    /// [`compute_pass_end`]: Global::compute_pass_end
     Recording(CommandBufferMutable),
 
     /// Locked by a render or compute pass.
@@ -131,21 +159,23 @@ pub(crate) enum CommandEncoderStatus {
 
     /// Command recording is complete, and the buffer is ready for submission.
     ///
-    /// [`Global::command_encoder_finish`] transitions a
+    /// [`CommandEncoder::finish`] transitions a
     /// `CommandBuffer` from the `Recording` state into this state.
     ///
-    /// [`Global::queue_submit`] requires that command buffers are
+    /// [`Queue::submit`] requires that command buffers are
     /// in this state.
     ///
     /// This corresponds to WebGPU's "ended" state.
     /// See <https://www.w3.org/TR/webgpu/#encoder-state-ended>
+    ///
+    /// [`Queue::submit`]: crate::device::queue::Queue::submit
     Finished(CommandBufferMutable),
 
     /// The command encoder is invalid.
     ///
     /// The error that caused the invalidation is stored here, and will
     /// be raised by `CommandEncoder.finish()`.
-    Error(CommandEncoderError),
+    Error(EncoderErrorState),
 
     /// Temporary state used internally by methods on `CommandEncoderStatus`.
     /// Encoder should never be left in this state.
@@ -333,7 +363,7 @@ impl CommandEncoderStatus {
                 Err(EncoderStateError::Ended)
             }
             Self::Recording(_) => {
-                *self = Self::Error(EncoderStateError::Unlocked.into());
+                *self = make_error_state(EncoderStateError::Unlocked);
                 Err(EncoderStateError::Unlocked)
             }
             st @ Self::Consumed => {
@@ -362,22 +392,39 @@ impl CommandEncoderStatus {
                 }
                 Self::Finished(inner)
             }
-            Self::Consumed | Self::Finished(_) => Self::Error(EncoderStateError::Ended.into()),
-            Self::Locked(_) => Self::Error(EncoderStateError::Locked.into()),
+            Self::Consumed | Self::Finished(_) => make_error_state(EncoderStateError::Ended),
+            Self::Locked(_) => make_error_state(EncoderStateError::Locked),
             st @ Self::Error(_) => st,
             Self::Transitioning => unreachable!(),
         }
     }
 
-    // Invalidate the command encoder and store the error `err` causing the
-    // invalidation for diagnostic purposes.
-    //
-    // Since we do not track the state of an invalid encoder, it is not
-    // necessary to unlock an encoder that has been invalidated.
+    /// Invalidate the command encoder due to an error.
+    ///
+    /// The error `err` is stored so that it can be reported when the encoder is
+    /// finished. If tracing is enabled, the traced commands are also stored.
+    ///
+    /// Since we do not track the state of an invalid encoder, it is not
+    /// necessary to unlock an encoder that has been invalidated.
     fn invalidate<E: Clone + Into<CommandEncoderError>>(&mut self, err: E) -> E {
+        #[cfg(feature = "trace")]
+        let trace_commands = match self {
+            Self::Recording(cmd_buf_data) => Some(
+                mem::take(&mut cmd_buf_data.commands)
+                    .into_iter()
+                    .map(crate::device::trace::IntoTrace::into_trace)
+                    .collect(),
+            ),
+            _ => None,
+        };
+
         let enc_err = err.clone().into();
         api_log!("Invalidating command encoder: {enc_err:?}");
-        *self = Self::Error(enc_err);
+        *self = Self::Error(EncoderErrorState {
+            error: enc_err,
+            #[cfg(feature = "trace")]
+            trace_commands,
+        });
         err
     }
 }
@@ -460,7 +507,7 @@ impl<'a> ops::DerefMut for RecordingGuard<'a> {
     }
 }
 
-pub(crate) struct CommandEncoder {
+pub struct CommandEncoder {
     pub(crate) device: Arc<Device>,
 
     pub(crate) label: String,
@@ -475,7 +522,10 @@ crate::impl_parent_device!(CommandEncoder);
 crate::impl_storage_item!(CommandEncoder);
 
 impl Drop for CommandEncoder {
+    #[allow(trivial_casts)]
     fn drop(&mut self) {
+        profiling::scope!("CommandEncoder::drop");
+        api_log!("CommandEncoder::drop {:?}", self as *const _);
         resource_log!("Drop {}", self.error_ident());
     }
 }
@@ -593,18 +643,17 @@ impl InnerCommandEncoder {
     ///
     /// - If the encoder is not open.
     ///
+    /// # Warning
+    ///
+    /// Any [`DeferredQuerySetResolve::insertion_point`] pointing to the
+    /// last element will be invalidated.
+    ///
     /// [l]: InnerCommandEncoder::list
     /// [`transition_buffers`]: hal::CommandEncoder::transition_buffers
     /// [`transition_textures`]: hal::CommandEncoder::transition_textures
+    /// [`DeferredQuerySetResolve::insertion_point`]: query::DeferredQuerySetResolve::insertion_point
     fn close_and_swap(&mut self) -> Result<(), DeviceError> {
-        assert!(self.is_open);
-        self.is_open = false;
-
-        let new =
-            unsafe { self.raw.end_encoding() }.map_err(|e| self.device.handle_hal_error(e))?;
-        self.list.insert(self.list.len() - 1, new);
-
-        Ok(())
+        self.close_and_insert_at(self.list.len() - 1)
     }
 
     /// Finish the current command buffer and insert it at the beginning
@@ -616,14 +665,40 @@ impl InnerCommandEncoder {
     ///
     /// - If the encoder is not open.
     ///
+    /// # Warning
+    ///
+    /// All existing [`DeferredQuerySetResolve::insertion_point`] values
+    /// will be invalidated.
+    ///
     /// [l]: InnerCommandEncoder::list
+    /// [`DeferredQuerySetResolve::insertion_point`]: query::DeferredQuerySetResolve::insertion_point
     pub(crate) fn close_and_push_front(&mut self) -> Result<(), DeviceError> {
+        self.close_and_insert_at(0)
+    }
+
+    /// Finish the current command buffer and insert it at the given index
+    /// in [`self.list`][l].
+    ///
+    /// On return, the underlying hal encoder is closed.
+    ///
+    /// # Panics
+    ///
+    /// - If the encoder is not open.
+    ///
+    /// # Warning
+    ///
+    /// Any [`DeferredQuerySetResolve::insertion_point`] value that is
+    /// >= `index` will be invalidated.
+    ///
+    /// [l]: InnerCommandEncoder::list
+    /// [`DeferredQuerySetResolve::insertion_point`]: query::DeferredQuerySetResolve::insertion_point
+    pub(crate) fn close_and_insert_at(&mut self, index: usize) -> Result<(), DeviceError> {
         assert!(self.is_open);
         self.is_open = false;
 
-        let new =
+        let cmd_buf =
             unsafe { self.raw.end_encoding() }.map_err(|e| self.device.handle_hal_error(e))?;
-        self.list.insert(0, new);
+        self.list.insert(index, cmd_buf);
 
         Ok(())
     }
@@ -677,10 +752,10 @@ impl InnerCommandEncoder {
     /// In both cases, returns a reference to the raw encoder.
     fn open_if_closed(&mut self) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
         if !self.is_open {
-            self.is_open = true;
             let hal_label = hal_label(Some(self.label.as_str()), self.device.instance_flags);
             unsafe { self.raw.begin_encoding(hal_label) }
                 .map_err(|e| self.device.handle_hal_error(e))?;
+            self.is_open = true;
         }
 
         Ok(self.raw.as_mut())
@@ -691,10 +766,10 @@ impl InnerCommandEncoder {
     /// The underlying hal encoder is put in the "recording" state.
     pub(crate) fn open(&mut self) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
         if !self.is_open {
-            self.is_open = true;
             let hal_label = hal_label(Some(self.label.as_str()), self.device.instance_flags);
             unsafe { self.raw.begin_encoding(hal_label) }
                 .map_err(|e| self.device.handle_hal_error(e))?;
+            self.is_open = true;
         }
 
         Ok(self.raw.as_mut())
@@ -713,11 +788,11 @@ impl InnerCommandEncoder {
         label: Option<&str>,
     ) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
         assert!(!self.is_open);
-        self.is_open = true;
 
         let hal_label = hal_label(label, self.device.instance_flags);
         unsafe { self.raw.begin_encoding(hal_label) }
             .map_err(|e| self.device.handle_hal_error(e))?;
+        self.is_open = true;
 
         Ok(self.raw.as_mut())
     }
@@ -746,6 +821,8 @@ pub(crate) struct BakedCommands {
     pub(crate) indirect_draw_validation_resources: crate::indirect_validation::DrawResources,
     buffer_memory_init_actions: Vec<BufferInitTrackerAction>,
     texture_memory_actions: CommandBufferTextureMemoryActions,
+    pub(crate) query_set_writes: query::QuerySetWrites,
+    pub(crate) deferred_query_set_resolves: Vec<query::DeferredQuerySetResolve>,
 }
 
 /// The mutable state of a [`CommandBuffer`].
@@ -779,6 +856,11 @@ pub struct CommandBufferMutable {
     /// with integer pointers, and moves them into `trace_commands`.
     #[cfg(feature = "trace")]
     pub(crate) trace_commands: Option<Vec<Command<PointerReferences>>>,
+
+    /// Tracks which query slots have been written by commands in this encoder.
+    pub(crate) query_set_writes: query::QuerySetWrites,
+    /// Query set resolves that had to be deferred to submit time.
+    pub(crate) deferred_query_set_resolves: Vec<query::DeferredQuerySetResolve>,
 }
 
 impl CommandBufferMutable {
@@ -790,6 +872,8 @@ impl CommandBufferMutable {
             indirect_draw_validation_resources: self.indirect_draw_validation_resources,
             buffer_memory_init_actions: self.buffer_memory_init_actions,
             texture_memory_actions: self.texture_memory_actions,
+            query_set_writes: self.query_set_writes,
+            deferred_query_set_resolves: self.deferred_query_set_resolves,
         }
     }
 }
@@ -809,7 +893,10 @@ pub struct CommandBuffer {
 }
 
 impl Drop for CommandBuffer {
+    #[allow(trivial_casts)]
     fn drop(&mut self) {
+        profiling::scope!("CommandBuffer::drop");
+        api_log!("CommandBuffer::drop {:?}", self as *const _);
         resource_log!("Drop {}", self.error_ident());
     }
 }
@@ -834,7 +921,10 @@ impl CommandEncoder {
                         api: EncodingApi::Undecided,
                         label: label.to_string(),
                     },
-                    trackers: Tracker::new(),
+                    trackers: Tracker::new(
+                        device.ordered_buffer_usages,
+                        device.ordered_texture_usages,
+                    ),
                     buffer_memory_init_actions: Default::default(),
                     texture_memory_actions: Default::default(),
                     as_actions: Default::default(),
@@ -842,6 +932,8 @@ impl CommandEncoder {
                     indirect_draw_validation_resources:
                         crate::indirect_validation::DrawResources::new(device.clone()),
                     commands: Vec::new(),
+                    query_set_writes: Default::default(),
+                    deferred_query_set_resolves: Default::default(),
                     #[cfg(feature = "trace")]
                     trace_commands: if device.trace.lock().is_some() {
                         Some(Vec::new())
@@ -857,12 +949,61 @@ impl CommandEncoder {
         device: &Arc<Device>,
         label: &Label,
         err: CommandEncoderError,
-    ) -> Self {
-        CommandEncoder {
+    ) -> Arc<Self> {
+        Arc::new(CommandEncoder {
             device: device.clone(),
             label: label.to_string(),
-            data: Mutex::new(rank::COMMAND_BUFFER_DATA, CommandEncoderStatus::Error(err)),
+            data: Mutex::new(rank::COMMAND_BUFFER_DATA, make_error_state(err)),
+        })
+    }
+
+    pub(crate) fn validate_pass_timestamp_writes<E>(
+        device: &Device,
+        timestamp_writes: &PassTimestampWrites<Arc<QuerySet>>,
+    ) -> Result<PassTimestampWrites, E>
+    where
+        E: From<TimestampWritesError>
+            + From<QueryUseError>
+            + From<DeviceError>
+            + From<MissingFeatures>
+            + From<InvalidResourceError>,
+    {
+        let &PassTimestampWrites {
+            ref query_set,
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        } = timestamp_writes;
+
+        device.require_features(wgt::Features::TIMESTAMP_QUERY)?;
+
+        query_set.check_is_valid()?;
+        query_set.same_device(device)?;
+
+        for idx in [beginning_of_pass_write_index, end_of_pass_write_index]
+            .into_iter()
+            .flatten()
+        {
+            query_set.validate_query(SimplifiedQueryType::Timestamp, idx, None)?;
         }
+
+        if let Some((begin, end)) = beginning_of_pass_write_index.zip(end_of_pass_write_index) {
+            if begin == end {
+                return Err(TimestampWritesError::IndicesEqual { idx: begin }.into());
+            }
+        }
+
+        if beginning_of_pass_write_index
+            .or(end_of_pass_write_index)
+            .is_none()
+        {
+            return Err(TimestampWritesError::IndicesMissing.into());
+        }
+
+        Ok(PassTimestampWrites {
+            query_set: query_set.clone(),
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        })
     }
 
     pub(crate) fn insert_barriers_from_tracker(
@@ -941,246 +1082,284 @@ impl CommandEncoder {
         }
     }
 
-    fn finish(
-        self: &Arc<Self>,
-        desc: &wgt::CommandBufferDescriptor<Label>,
-    ) -> (Arc<CommandBuffer>, Option<CommandEncoderError>) {
-        let mut cmd_enc_status = self.data.lock();
+    fn encode_commands(
+        device: &Arc<Device>,
+        cmd_buf_data: &mut CommandBufferMutable,
+    ) -> Result<(), CommandEncoderError> {
+        device.check_is_valid()?;
+        let snatch_guard = device.snatchable_lock.read();
+        let mut debug_scope_depth = 0;
 
-        let res = match cmd_enc_status.finish() {
-            CommandEncoderStatus::Finished(cmd_buf_data) => Ok(cmd_buf_data),
-            CommandEncoderStatus::Error(err) => Err(err),
-            _ => unreachable!(),
-        };
+        if cmd_buf_data.encoder.api == EncodingApi::Raw {
+            // Should have panicked on the first call that switched APIs,
+            // but lets be sure.
+            assert!(cmd_buf_data.commands.is_empty());
+        }
 
-        let res = res.and_then(|mut cmd_buf_data| {
-            self.device.check_is_valid()?;
-            let snatch_guard = self.device.snatchable_lock.read();
-            let mut debug_scope_depth = 0;
+        let commands = mem::take(&mut cmd_buf_data.commands);
 
-            if cmd_buf_data.encoder.api == EncodingApi::Raw {
-                // Should have panicked on the first call that switched APIs,
-                // but lets be sure.
-                assert!(cmd_buf_data.commands.is_empty());
-            }
+        #[cfg(feature = "trace")]
+        if device.trace.lock().is_some() {
+            cmd_buf_data.trace_commands = Some(
+                commands
+                    .iter()
+                    .map(crate::device::trace::IntoTrace::to_trace)
+                    .collect(),
+            );
+        }
 
-            let mut commands = mem::take(&mut cmd_buf_data.commands);
-            #[cfg(not(feature = "trace"))]
-            let command_iter = commands.drain(..);
-            #[cfg(feature = "trace")]
-            let mut trace_commands = None;
+        for command in commands {
+            if matches!(
+                command,
+                ArcCommand::RunRenderPass { .. }
+                    | ArcCommand::RunComputePass { .. }
+                    | ArcCommand::ResolveQuerySet { .. }
+            ) {
+                // Compute passes and render passes can accept either an
+                // open or closed encoder. Resolving query sets needs to
+                // potentially close and open the encoder. This state
+                // object holds an `InnerCommandEncoder`. See the
+                // documentation of [`EncodingState`].
+                let mut state = EncodingState {
+                    device,
+                    raw_encoder: &mut cmd_buf_data.encoder,
+                    tracker: &mut cmd_buf_data.trackers,
+                    buffer_memory_init_actions: &mut cmd_buf_data.buffer_memory_init_actions,
+                    texture_memory_actions: &mut cmd_buf_data.texture_memory_actions,
+                    as_actions: &mut cmd_buf_data.as_actions,
+                    temp_resources: &mut cmd_buf_data.temp_resources,
+                    indirect_draw_validation_resources: &mut cmd_buf_data
+                        .indirect_draw_validation_resources,
+                    snatch_guard: &snatch_guard,
+                    debug_scope_depth: &mut debug_scope_depth,
+                    query_set_writes: &mut cmd_buf_data.query_set_writes,
+                    deferred_query_set_resolves: &mut cmd_buf_data.deferred_query_set_resolves,
+                };
 
-            #[cfg(feature = "trace")]
-            let command_iter = {
-                if self.device.trace.lock().is_some() {
-                    trace_commands = Some(
-                        cmd_buf_data
-                            .trace_commands
-                            .insert(Vec::with_capacity(commands.len())),
-                    );
-                }
-
-                commands.drain(..).inspect(|cmd| {
-                    use crate::device::trace::IntoTrace;
-
-                    if let Some(ref mut trace) = trace_commands {
-                        trace.push(cmd.clone().to_trace());
-                    }
-                })
-            };
-
-            for command in command_iter {
-                if matches!(
-                    command,
-                    ArcCommand::RunRenderPass { .. } | ArcCommand::RunComputePass { .. }
-                ) {
-                    // Compute passes and render passes can accept either an
-                    // open or closed encoder. This state object holds an
-                    // `InnerCommandEncoder`. See the documentation of
-                    // [`EncodingState`].
-                    let mut state = EncodingState {
-                        device: &self.device,
-                        raw_encoder: &mut cmd_buf_data.encoder,
-                        tracker: &mut cmd_buf_data.trackers,
-                        buffer_memory_init_actions: &mut cmd_buf_data.buffer_memory_init_actions,
-                        texture_memory_actions: &mut cmd_buf_data.texture_memory_actions,
-                        as_actions: &mut cmd_buf_data.as_actions,
-                        temp_resources: &mut cmd_buf_data.temp_resources,
-                        indirect_draw_validation_resources: &mut cmd_buf_data
-                            .indirect_draw_validation_resources,
-                        snatch_guard: &snatch_guard,
-                        debug_scope_depth: &mut debug_scope_depth,
-                    };
-
-                    match command {
-                        ArcCommand::RunRenderPass {
+                match command {
+                    ArcCommand::RunRenderPass {
+                        pass,
+                        color_attachments,
+                        depth_stencil_attachment,
+                        timestamp_writes,
+                        occlusion_query_set,
+                        multiview_mask,
+                    } => {
+                        api_log!(
+                            "Begin encoding render pass with '{}' label",
+                            pass.label.as_deref().unwrap_or("")
+                        );
+                        let res = render::encode_render_pass(
+                            &mut state,
                             pass,
                             color_attachments,
                             depth_stencil_attachment,
                             timestamp_writes,
                             occlusion_query_set,
                             multiview_mask,
-                        } => {
-                            api_log!(
-                                "Begin encoding render pass with '{}' label",
-                                pass.label.as_deref().unwrap_or("")
-                            );
-                            let res = encode_render_pass(
-                                &mut state,
-                                pass,
-                                color_attachments,
-                                depth_stencil_attachment,
-                                timestamp_writes,
-                                occlusion_query_set,
-                                multiview_mask,
-                            );
-                            match res.as_ref() {
-                                Err(err) => api_log!("Finished encoding render pass ({err:?})"),
-                                Ok(_) => api_log!("Finished encoding render pass (success)"),
+                        );
+                        match res.as_ref() {
+                            Err(err) => {
+                                api_log!("Finished encoding render pass ({err:?})")
                             }
-                            res?;
-                        }
-                        ArcCommand::RunComputePass {
-                            pass,
-                            timestamp_writes,
-                        } => {
-                            api_log!(
-                                "Begin encoding compute pass with '{}' label",
-                                pass.label.as_deref().unwrap_or("")
-                            );
-                            let res = encode_compute_pass(&mut state, pass, timestamp_writes);
-                            match res.as_ref() {
-                                Err(err) => api_log!("Finished encoding compute pass ({err:?})"),
-                                Ok(_) => api_log!("Finished encoding compute pass (success)"),
+                            Ok(_) => {
+                                api_log!("Finished encoding render pass (success)")
                             }
-                            res?;
                         }
-                        _ => unreachable!(),
+                        res?;
                     }
-                } else {
-                    // All the other non-pass encoding routines assume the
-                    // encoder is open, so open it if necessary. This state
-                    // object holds an `&mut dyn hal::DynCommandEncoder`. By
-                    // convention, a bare HAL encoder reference in
-                    // [`EncodingState`] must always be an open encoder.
-                    let raw_encoder = cmd_buf_data.encoder.open_if_closed()?;
-                    let mut state = EncodingState {
-                        device: &self.device,
-                        raw_encoder,
-                        tracker: &mut cmd_buf_data.trackers,
-                        buffer_memory_init_actions: &mut cmd_buf_data.buffer_memory_init_actions,
-                        texture_memory_actions: &mut cmd_buf_data.texture_memory_actions,
-                        as_actions: &mut cmd_buf_data.as_actions,
-                        temp_resources: &mut cmd_buf_data.temp_resources,
-                        indirect_draw_validation_resources: &mut cmd_buf_data
-                            .indirect_draw_validation_resources,
-                        snatch_guard: &snatch_guard,
-                        debug_scope_depth: &mut debug_scope_depth,
-                    };
-                    match command {
-                        ArcCommand::CopyBufferToBuffer {
-                            src,
-                            src_offset,
-                            dst,
-                            dst_offset,
-                            size,
-                        } => {
-                            copy_buffer_to_buffer(
-                                &mut state, &src, src_offset, &dst, dst_offset, size,
-                            )?;
+                    ArcCommand::RunComputePass {
+                        pass,
+                        timestamp_writes,
+                    } => {
+                        api_log!(
+                            "Begin encoding compute pass with '{}' label",
+                            pass.label.as_deref().unwrap_or("")
+                        );
+                        let res = compute::encode_compute_pass(&mut state, pass, timestamp_writes);
+                        match res.as_ref() {
+                            Err(err) => {
+                                api_log!("Finished encoding compute pass ({err:?})")
+                            }
+                            Ok(_) => {
+                                api_log!("Finished encoding compute pass (success)")
+                            }
                         }
-                        ArcCommand::CopyBufferToTexture { src, dst, size } => {
-                            copy_buffer_to_texture(&mut state, &src, &dst, &size)?;
-                        }
-                        ArcCommand::CopyTextureToBuffer { src, dst, size } => {
-                            copy_texture_to_buffer(&mut state, &src, &dst, &size)?;
-                        }
-                        ArcCommand::CopyTextureToTexture { src, dst, size } => {
-                            copy_texture_to_texture(&mut state, &src, &dst, &size)?;
-                        }
-                        ArcCommand::ClearBuffer { dst, offset, size } => {
-                            clear_buffer(&mut state, dst, offset, size)?;
-                        }
-                        ArcCommand::ClearTexture {
-                            dst,
-                            subresource_range,
-                        } => {
-                            clear_texture_cmd(&mut state, dst, &subresource_range)?;
-                        }
-                        ArcCommand::WriteTimestamp {
-                            query_set,
-                            query_index,
-                        } => {
-                            write_timestamp(&mut state, query_set, query_index)?;
-                        }
-                        ArcCommand::ResolveQuerySet {
+                        res?;
+                    }
+                    ArcCommand::ResolveQuerySet {
+                        query_set,
+                        start_query,
+                        query_count,
+                        destination,
+                        destination_offset,
+                    } => {
+                        query::resolve_query_set(
+                            &mut state,
                             query_set,
                             start_query,
                             query_count,
                             destination,
                             destination_offset,
-                        } => {
-                            resolve_query_set(
-                                &mut state,
-                                query_set,
-                                start_query,
-                                query_count,
-                                destination,
-                                destination_offset,
-                            )?;
-                        }
-                        ArcCommand::PushDebugGroup(label) => {
-                            push_debug_group(&mut state, &label)?;
-                        }
-                        ArcCommand::PopDebugGroup => {
-                            pop_debug_group(&mut state)?;
-                        }
-                        ArcCommand::InsertDebugMarker(label) => {
-                            insert_debug_marker(&mut state, &label)?;
-                        }
-                        ArcCommand::BuildAccelerationStructures { blas, tlas } => {
-                            build_acceleration_structures(&mut state, blas, tlas)?;
-                        }
-                        ArcCommand::TransitionResources {
+                        )?;
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                // All the other non-pass encoding routines assume the
+                // encoder is open, so open it if necessary. This state
+                // object holds an `&mut dyn hal::DynCommandEncoder`. By
+                // convention, a bare HAL encoder reference in
+                // [`EncodingState`] must always be an open encoder.
+                let raw_encoder = cmd_buf_data.encoder.open_if_closed()?;
+                let mut state = EncodingState {
+                    device,
+                    raw_encoder,
+                    tracker: &mut cmd_buf_data.trackers,
+                    buffer_memory_init_actions: &mut cmd_buf_data.buffer_memory_init_actions,
+                    texture_memory_actions: &mut cmd_buf_data.texture_memory_actions,
+                    as_actions: &mut cmd_buf_data.as_actions,
+                    temp_resources: &mut cmd_buf_data.temp_resources,
+                    indirect_draw_validation_resources: &mut cmd_buf_data
+                        .indirect_draw_validation_resources,
+                    snatch_guard: &snatch_guard,
+                    debug_scope_depth: &mut debug_scope_depth,
+                    query_set_writes: &mut cmd_buf_data.query_set_writes,
+                    deferred_query_set_resolves: &mut cmd_buf_data.deferred_query_set_resolves,
+                };
+                match command {
+                    ArcCommand::CopyBufferToBuffer {
+                        src,
+                        src_offset,
+                        dst,
+                        dst_offset,
+                        size,
+                    } => {
+                        transfer::copy_buffer_to_buffer(
+                            &mut state, &src, src_offset, &dst, dst_offset, size,
+                        )?;
+                    }
+                    ArcCommand::CopyBufferToTexture { src, dst, size } => {
+                        transfer::copy_buffer_to_texture(&mut state, &src, &dst, &size)?;
+                    }
+                    ArcCommand::CopyTextureToBuffer { src, dst, size } => {
+                        transfer::copy_texture_to_buffer(&mut state, &src, &dst, &size)?;
+                    }
+                    ArcCommand::CopyTextureToTexture { src, dst, size } => {
+                        transfer::copy_texture_to_texture(&mut state, &src, &dst, &size)?;
+                    }
+                    ArcCommand::ClearBuffer { dst, offset, size } => {
+                        clear::clear_buffer(&mut state, dst, offset, size)?;
+                    }
+                    ArcCommand::ClearTexture {
+                        dst,
+                        subresource_range,
+                    } => {
+                        clear::clear_texture_cmd(&mut state, dst, &subresource_range)?;
+                    }
+                    ArcCommand::WriteTimestamp {
+                        query_set,
+                        query_index,
+                    } => {
+                        query::write_timestamp(&mut state, query_set, query_index)?;
+                    }
+                    ArcCommand::PushDebugGroup(label) => {
+                        push_debug_group(&mut state, &label)?;
+                    }
+                    ArcCommand::PopDebugGroup => {
+                        pop_debug_group(&mut state)?;
+                    }
+                    ArcCommand::InsertDebugMarker(label) => {
+                        insert_debug_marker(&mut state, &label)?;
+                    }
+                    ArcCommand::BuildAccelerationStructures { blas, tlas } => {
+                        ray_tracing::build_acceleration_structures(&mut state, blas, tlas)?;
+                    }
+                    ArcCommand::TransitionResources {
+                        buffer_transitions,
+                        texture_transitions,
+                    } => {
+                        transition_resources::transition_resources(
+                            &mut state,
                             buffer_transitions,
                             texture_transitions,
-                        } => {
-                            transition_resources(
-                                &mut state,
-                                buffer_transitions,
-                                texture_transitions,
-                            )?;
-                        }
-                        ArcCommand::RunComputePass { .. } | ArcCommand::RunRenderPass { .. } => {
-                            unreachable!()
-                        }
+                        )?;
+                    }
+                    ArcCommand::RunComputePass { .. }
+                    | ArcCommand::RunRenderPass { .. }
+                    | ArcCommand::ResolveQuerySet { .. } => {
+                        unreachable!()
                     }
                 }
             }
+        }
 
-            if debug_scope_depth > 0 {
-                Err(CommandEncoderError::DebugGroupError(
-                    DebugGroupError::MissingPop,
-                ))?;
+        if debug_scope_depth > 0 {
+            Err(CommandEncoderError::DebugGroupError(
+                DebugGroupError::MissingPop,
+            ))?;
+        }
+
+        // Close the encoder, unless it was closed already by a render or compute pass.
+        cmd_buf_data.encoder.close_if_open()?;
+
+        // Note: if we want to stop tracking the swapchain texture view,
+        // this is the place to do it.
+
+        Ok(())
+    }
+
+    /// Finishes a command encoder, creating a command buffer and returning errors that were
+    /// deferred until now.
+    fn finish_inner(
+        self: &Arc<Self>,
+        desc: &wgt::CommandBufferDescriptor<Label>,
+    ) -> (Arc<CommandBuffer>, Option<CommandEncoderError>) {
+        profiling::scope!("CommandEncoder::finish");
+
+        let status = self.data.lock().finish();
+
+        let res = match status {
+            CommandEncoderStatus::Finished(mut cmd_buf_data) => {
+                match Self::encode_commands(&self.device, &mut cmd_buf_data) {
+                    Ok(()) => Ok(cmd_buf_data),
+                    Err(error) => Err(EncoderErrorState {
+                        error,
+                        #[cfg(feature = "trace")]
+                        trace_commands: mem::take(&mut cmd_buf_data.trace_commands),
+                    }),
+                }
             }
-
-            // Close the encoder, unless it was closed already by a render or compute pass.
-            cmd_buf_data.encoder.close_if_open()?;
-
-            // Note: if we want to stop tracking the swapchain texture view,
-            // this is the place to do it.
-
-            Ok(cmd_buf_data)
-        });
+            CommandEncoderStatus::Error(error_state) => Err(error_state),
+            _ => unreachable!(),
+        };
 
         let (data, error) = match res {
-            Err(e) => {
-                if e.is_destroyed_error() {
+            Err(EncoderErrorState {
+                error,
+                #[cfg(feature = "trace")]
+                trace_commands,
+            }) => {
+                // Normally, commands are added to the trace when submitted, but
+                // since this command buffer won't be submitted, add it to the
+                // trace now.
+                #[cfg(feature = "trace")]
+                if let Some(trace) = self.device.trace.lock().as_mut() {
+                    use alloc::string::ToString;
+
+                    trace.add(crate::device::trace::Action::FailedCommands {
+                        commands: trace_commands,
+                        failed_at_submit: None,
+                        error: error.to_string(),
+                    });
+                }
+
+                if error.is_destroyed_error() {
                     // Errors related to destroyed resources are not reported until the
                     // command buffer is submitted.
-                    (CommandEncoderStatus::Error(e.clone()), None)
+                    (make_error_state(error), None)
                 } else {
-                    (CommandEncoderStatus::Error(e.clone()), Some(e))
+                    (make_error_state(error.clone()), Some(error))
                 }
             }
 
@@ -1195,6 +1374,18 @@ impl CommandEncoder {
 
         (cmd_buf, error)
     }
+
+    pub fn finish(
+        self: &Arc<Self>,
+        desc: &wgt::CommandBufferDescriptor<Label>,
+    ) -> Arc<CommandBuffer> {
+        let (cmd_buf, error) = self.finish_inner(desc);
+        if let Some(error) = error {
+            self.device
+                .handle_error(error, Some(self.label()), "CommandEncoder::finish");
+        }
+        cmd_buf
+    }
 }
 
 impl CommandBuffer {
@@ -1205,27 +1396,26 @@ impl CommandBuffer {
     /// entrypoints provide.
     #[doc(hidden)]
     pub fn from_trace(device: &Arc<Device>, commands: Vec<Command<ArcReferences>>) -> Arc<Self> {
-        let encoder = device.create_command_encoder(&None).unwrap();
+        let encoder = device.create_command_encoder(&wgt::CommandEncoderDescriptor { label: None });
         let mut cmd_enc_status = encoder.data.lock();
         cmd_enc_status.replay(commands);
         drop(cmd_enc_status);
 
-        let (cmd_buf, error) = encoder.finish(&wgt::CommandBufferDescriptor { label: None });
-        if let Some(err) = error {
-            panic!("CommandEncoder::finish failed: {err}");
-        }
-
-        cmd_buf
+        encoder.finish(&wgt::CommandBufferDescriptor { label: None })
     }
 
     pub fn take_finished(&self) -> Result<CommandBufferMutable, CommandEncoderError> {
         use CommandEncoderStatus as St;
         match mem::replace(
             &mut *self.data.lock(),
-            CommandEncoderStatus::Error(EncoderStateError::Submitted.into()),
+            make_error_state(EncoderStateError::Submitted),
         ) {
             St::Finished(command_buffer_mutable) => Ok(command_buffer_mutable),
-            St::Error(err) => Err(err),
+            St::Error(EncoderErrorState {
+                #[cfg(feature = "trace")]
+                    trace_commands: _,
+                error,
+            }) => Err(error),
             St::Recording(_) | St::Locked(_) | St::Consumed | St::Transitioning => unreachable!(),
         }
     }
@@ -1281,12 +1471,6 @@ pub struct BasePass<C, E> {
     /// Each successive [`PushDebugGroup`] or [`InsertDebugMarker`]
     /// instruction consumes the next `len` bytes from this vector.
     pub string_data: Vec<u8>,
-
-    /// Data used by `SetPushConstant` instructions.
-    ///
-    /// See the documentation for [`RenderCommand::SetPushConstant`]
-    /// and [`ComputeCommand::SetPushConstant`] for details.
-    pub push_constant_data: Vec<u32>,
 }
 
 impl<C: Clone, E: Clone> BasePass<C, E> {
@@ -1297,7 +1481,6 @@ impl<C: Clone, E: Clone> BasePass<C, E> {
             commands: Vec::new(),
             dynamic_offsets: Vec::new(),
             string_data: Vec::new(),
-            push_constant_data: Vec::new(),
         }
     }
 
@@ -1308,7 +1491,6 @@ impl<C: Clone, E: Clone> BasePass<C, E> {
             commands: Vec::new(),
             dynamic_offsets: Vec::new(),
             string_data: Vec::new(),
-            push_constant_data: Vec::new(),
         }
     }
 
@@ -1327,7 +1509,6 @@ impl<C: Clone, E: Clone> BasePass<C, E> {
                 commands: mem::take(&mut self.commands),
                 dynamic_offsets: mem::take(&mut self.dynamic_offsets),
                 string_data: mem::take(&mut self.string_data),
-                push_constant_data: mem::take(&mut self.push_constant_data),
             }),
         }
     }
@@ -1480,6 +1661,15 @@ pub enum CommandEncoderError {
     RenderPass(#[from] RenderPassError),
 }
 
+impl From<InvalidOrDestroyedResourceError> for CommandEncoderError {
+    fn from(err: InvalidOrDestroyedResourceError) -> Self {
+        match err {
+            InvalidOrDestroyedResourceError::InvalidResource(e) => Self::InvalidResource(e),
+            InvalidOrDestroyedResourceError::DestroyedResource(e) => Self::DestroyedResource(e),
+        }
+    }
+}
+
 impl CommandEncoderError {
     fn is_destroyed_error(&self) -> bool {
         matches!(
@@ -1491,45 +1681,39 @@ impl CommandEncoderError {
                     inner: ComputePassErrorInner::DestroyedResource(_),
                     ..
                 })
-                | Self::RenderPass(RenderPassError {
-                    inner: RenderPassErrorInner::DestroyedResource(_),
-                    ..
-                })
-                | Self::RenderPass(RenderPassError {
-                    inner: RenderPassErrorInner::RenderCommand(
-                        RenderCommandError::DestroyedResource(_)
-                    ),
-                    ..
-                })
-                | Self::RenderPass(RenderPassError {
-                    inner: RenderPassErrorInner::RenderCommand(RenderCommandError::BindingError(
-                        BindingError::DestroyedResource(_)
-                    )),
-                    ..
-                })
-        )
+        ) || if let Self::RenderPass(pass_error) = self {
+            matches!(
+                pass_error.inner.as_ref(),
+                RenderPassErrorInner::DestroyedResource(_)
+                    | RenderPassErrorInner::RenderCommand(RenderCommandError::DestroyedResource(_))
+                    | RenderPassErrorInner::RenderCommand(RenderCommandError::BindingError(
+                        BindingError::DestroyedResource(_),
+                    ))
+            )
+        } else {
+            false
+        }
     }
 }
 
 impl WebGpuError for CommandEncoderError {
     fn webgpu_error_type(&self) -> ErrorType {
-        let e: &dyn WebGpuError = match self {
-            Self::Device(e) => e,
-            Self::InvalidResource(e) => e,
-            Self::DebugGroupError(e) => e,
-            Self::MissingFeatures(e) => e,
-            Self::State(e) => e,
-            Self::DestroyedResource(e) => e,
-            Self::Transfer(e) => e,
-            Self::Clear(e) => e,
-            Self::Query(e) => e,
-            Self::BuildAccelerationStructure(e) => e,
-            Self::TransitionResources(e) => e,
-            Self::ResourceUsage(e) => e,
-            Self::ComputePass(e) => e,
-            Self::RenderPass(e) => e,
-        };
-        e.webgpu_error_type()
+        match self {
+            Self::Device(e) => e.webgpu_error_type(),
+            Self::InvalidResource(e) => e.webgpu_error_type(),
+            Self::DebugGroupError(e) => e.webgpu_error_type(),
+            Self::MissingFeatures(e) => e.webgpu_error_type(),
+            Self::State(e) => e.webgpu_error_type(),
+            Self::DestroyedResource(e) => e.webgpu_error_type(),
+            Self::Transfer(e) => e.webgpu_error_type(),
+            Self::Clear(e) => e.webgpu_error_type(),
+            Self::Query(e) => e.webgpu_error_type(),
+            Self::BuildAccelerationStructure(e) => e.webgpu_error_type(),
+            Self::TransitionResources(e) => e.webgpu_error_type(),
+            Self::ResourceUsage(e) => e.webgpu_error_type(),
+            Self::ComputePass(e) => e.webgpu_error_type(),
+            Self::RenderPass(e) => e.webgpu_error_type(),
+        }
     }
 }
 
@@ -1569,156 +1753,61 @@ impl WebGpuError for TimestampWritesError {
     }
 }
 
-impl Global {
-    fn resolve_buffer_id(
-        &self,
-        buffer_id: Id<id::markers::Buffer>,
-    ) -> Result<Arc<crate::resource::Buffer>, InvalidResourceError> {
-        self.hub.buffers.get(buffer_id).get()
-    }
-
-    fn resolve_texture_id(
-        &self,
-        texture_id: Id<id::markers::Texture>,
-    ) -> Result<Arc<crate::resource::Texture>, InvalidResourceError> {
-        self.hub.textures.get(texture_id).get()
-    }
-
-    fn resolve_query_set(
-        &self,
-        query_set_id: Id<id::markers::QuerySet>,
-    ) -> Result<Arc<QuerySet>, InvalidResourceError> {
-        self.hub.query_sets.get(query_set_id).get()
-    }
-
-    /// Finishes a command encoder, creating a command buffer and returning errors that were
-    /// deferred until now.
-    ///
-    /// The returned `String` is the label of the command encoder, supplied so that `wgpu` can
-    /// include the label when printing deferred errors without having its own copy of the label.
-    /// This is a kludge and should be replaced if we think of a better solution to propagating
-    /// labels.
-    pub fn command_encoder_finish(
-        &self,
-        encoder_id: id::CommandEncoderId,
-        desc: &wgt::CommandBufferDescriptor<Label>,
-        id_in: Option<id::CommandBufferId>,
-    ) -> (id::CommandBufferId, Option<(String, CommandEncoderError)>) {
-        profiling::scope!("CommandEncoder::finish");
-
-        let hub = &self.hub;
-        let cmd_enc = hub.command_encoders.get(encoder_id);
-
-        let (cmd_buf, opt_error) = cmd_enc.finish(desc);
-        let cmd_buf_id = hub.command_buffers.prepare(id_in).assign(cmd_buf);
-
-        (
-            cmd_buf_id,
-            opt_error.map(|error| (cmd_enc.label.clone(), error)),
-        )
-    }
-
-    pub fn command_encoder_push_debug_group(
-        &self,
-        encoder_id: id::CommandEncoderId,
-        label: &str,
-    ) -> Result<(), EncoderStateError> {
+impl CommandEncoder {
+    fn push_debug_group_inner(self: &Arc<Self>, label: &str) -> Result<(), EncoderStateError> {
         profiling::scope!("CommandEncoder::push_debug_group");
         api_log!("CommandEncoder::push_debug_group {label}");
 
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(encoder_id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
+        let mut cmd_buf_data = self.data.lock();
 
         cmd_buf_data.push_with(|| -> Result<_, CommandEncoderError> {
             Ok(ArcCommand::PushDebugGroup(label.to_owned()))
         })
     }
 
-    pub fn command_encoder_insert_debug_marker(
-        &self,
-        encoder_id: id::CommandEncoderId,
-        label: &str,
-    ) -> Result<(), EncoderStateError> {
+    pub fn push_debug_group(self: &Arc<Self>, label: &str) {
+        if let Err(err) = self.push_debug_group_inner(label) {
+            self.device
+                .handle_error(err, Some(self.label()), "CommandEncoder::push_debug_group");
+        }
+    }
+
+    fn insert_debug_marker_inner(self: &Arc<Self>, label: &str) -> Result<(), EncoderStateError> {
         profiling::scope!("CommandEncoder::insert_debug_marker");
         api_log!("CommandEncoder::insert_debug_marker {label}");
 
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(encoder_id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
+        let mut cmd_buf_data = self.data.lock();
 
         cmd_buf_data.push_with(|| -> Result<_, CommandEncoderError> {
             Ok(ArcCommand::InsertDebugMarker(label.to_owned()))
         })
     }
 
-    pub fn command_encoder_pop_debug_group(
-        &self,
-        encoder_id: id::CommandEncoderId,
-    ) -> Result<(), EncoderStateError> {
+    pub fn insert_debug_marker(self: &Arc<Self>, label: &str) {
+        if let Err(err) = self.insert_debug_marker_inner(label) {
+            self.device.handle_error(
+                err,
+                Some(self.label()),
+                "CommandEncoder::insert_debug_marker",
+            );
+        }
+    }
+
+    fn pop_debug_group_inner(self: &Arc<Self>) -> Result<(), EncoderStateError> {
         profiling::scope!("CommandEncoder::pop_debug_marker");
         api_log!("CommandEncoder::pop_debug_group");
 
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(encoder_id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
+        let mut cmd_buf_data = self.data.lock();
 
         cmd_buf_data
             .push_with(|| -> Result<_, CommandEncoderError> { Ok(ArcCommand::PopDebugGroup) })
     }
 
-    fn validate_pass_timestamp_writes<E>(
-        device: &Device,
-        query_sets: &Storage<Fallible<QuerySet>>,
-        timestamp_writes: &PassTimestampWrites,
-    ) -> Result<ArcPassTimestampWrites, E>
-    where
-        E: From<TimestampWritesError>
-            + From<QueryUseError>
-            + From<DeviceError>
-            + From<MissingFeatures>
-            + From<InvalidResourceError>,
-    {
-        let &PassTimestampWrites {
-            query_set,
-            beginning_of_pass_write_index,
-            end_of_pass_write_index,
-        } = timestamp_writes;
-
-        device.require_features(wgt::Features::TIMESTAMP_QUERY)?;
-
-        let query_set = query_sets.get(query_set).get()?;
-
-        query_set.same_device(device)?;
-
-        for idx in [beginning_of_pass_write_index, end_of_pass_write_index]
-            .into_iter()
-            .flatten()
-        {
-            query_set.validate_query(SimplifiedQueryType::Timestamp, idx, None)?;
+    pub fn pop_debug_group(self: &Arc<Self>) {
+        if let Err(err) = self.pop_debug_group_inner() {
+            self.device
+                .handle_error(err, Some(self.label()), "CommandEncoder::pop_debug_group");
         }
-
-        if let Some((begin, end)) = beginning_of_pass_write_index.zip(end_of_pass_write_index) {
-            if begin == end {
-                return Err(TimestampWritesError::IndicesEqual { idx: begin }.into());
-            }
-        }
-
-        if beginning_of_pass_write_index
-            .or(end_of_pass_write_index)
-            .is_none()
-        {
-            return Err(TimestampWritesError::IndicesMissing.into());
-        }
-
-        Ok(ArcPassTimestampWrites {
-            query_set,
-            beginning_of_pass_write_index,
-            end_of_pass_write_index,
-        })
     }
 }
 
@@ -1771,66 +1860,70 @@ pub(crate) fn pop_debug_group(state: &mut EncodingState) -> Result<(), CommandEn
     Ok(())
 }
 
-fn push_constant_clear<PushFn>(offset: u32, size_bytes: u32, mut push_fn: PushFn)
-where
-    PushFn: FnMut(u32, &[u32]),
-{
-    let mut count_words = 0_u32;
-    let size_words = size_bytes / wgt::PUSH_CONSTANT_ALIGNMENT;
-    while count_words < size_words {
-        let count_bytes = count_words * wgt::PUSH_CONSTANT_ALIGNMENT;
-        let size_to_write_words =
-            (size_words - count_words).min(PUSH_CONSTANT_CLEAR_ARRAY.len() as u32);
-
-        push_fn(
-            offset + count_bytes,
-            &PUSH_CONSTANT_CLEAR_ARRAY[0..size_to_write_words as usize],
-        );
-
-        count_words += size_to_write_words;
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 struct StateChange<T> {
     last_state: Option<T>,
 }
 
-impl<T: Copy + PartialEq> StateChange<T> {
-    fn new() -> Self {
+impl<T: Clone + PartialEq_> StateChange<T> {
+    const fn new() -> Self {
         Self { last_state: None }
     }
-    fn set_and_check_redundant(&mut self, new_state: T) -> bool {
-        let already_set = self.last_state == Some(new_state);
-        self.last_state = Some(new_state);
+
+    fn set_and_check_redundant(&mut self, new_state: &T) -> bool {
+        let already_set = self.last_state.as_ref().is_some_and(|s| s.eq(new_state));
+        if !already_set {
+            self.last_state = Some(new_state.clone());
+        }
         already_set
     }
+
     fn reset(&mut self) {
         self.last_state = None;
     }
 }
 
-impl<T: Copy + PartialEq> Default for StateChange<T> {
+impl<T: Clone + PartialEq_> Default for StateChange<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
+trait PartialEq_ {
+    fn eq(&self, other: &Self) -> bool;
+}
+
+impl<T> PartialEq_ for Arc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(self, other)
+    }
+}
+
+impl<T: PartialEq_> PartialEq_ for Option<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Some(a), Some(b)) => a.eq(b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct BindGroupStateChange {
-    last_states: [StateChange<Option<id::BindGroupId>>; hal::MAX_BIND_GROUPS],
+    last_states: [StateChange<Option<Arc<BindGroup>>>; hal::MAX_BIND_GROUPS],
 }
 
 impl BindGroupStateChange {
     fn new() -> Self {
         Self {
-            last_states: [StateChange::new(); hal::MAX_BIND_GROUPS],
+            last_states: [const { StateChange::new() }; hal::MAX_BIND_GROUPS],
         }
     }
 
     fn set_and_check_redundant(
         &mut self,
-        bind_group_id: Option<id::BindGroupId>,
+        bind_group: &Option<Arc<BindGroup>>,
         index: u32,
         dynamic_offsets: &mut Vec<u32>,
         offsets: &[wgt::DynamicOffset],
@@ -1841,7 +1934,7 @@ impl BindGroupStateChange {
             // so let the call through to get a proper error
             if let Some(current_bind_group) = self.last_states.get_mut(index as usize) {
                 // Bail out if we're binding the same bind group.
-                if current_bind_group.set_and_check_redundant(bind_group_id) {
+                if current_bind_group.set_and_check_redundant(bind_group) {
                     return true;
                 }
             }
@@ -1857,7 +1950,7 @@ impl BindGroupStateChange {
         false
     }
     fn reset(&mut self) {
-        self.last_states = [StateChange::new(); hal::MAX_BIND_GROUPS];
+        self.last_states = [const { StateChange::new() }; hal::MAX_BIND_GROUPS];
     }
 }
 
@@ -1927,8 +2020,8 @@ pub enum PassErrorScope {
     SetPipelineRender,
     #[error("In a set_pipeline command")]
     SetPipelineCompute,
-    #[error("In a set_push_constant command")]
-    SetPushConstant,
+    #[error("In a set_immediates command")]
+    SetImmediate,
     #[error("In a set_vertex_buffer command")]
     SetVertexBuffer,
     #[error("In a set_index_buffer command")]
@@ -1956,6 +2049,8 @@ pub enum PassErrorScope {
     BeginPipelineStatisticsQuery,
     #[error("In a end_pipeline_statistics_query command")]
     EndPipelineStatisticsQuery,
+    #[error("In a transition_resources command")]
+    TransitionResources,
     #[error("In a execute_bundle command")]
     ExecuteBundle,
     #[error("In a dispatch command, indirect:{indirect}")]

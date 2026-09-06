@@ -75,7 +75,18 @@ class NetworkEventContentWatcher {
     this.networkEvents.clear();
   }
 
-  httpFailedOpeningRequest = subject => {
+  httpFailedOpeningRequest = (subject, topic) => {
+    if (
+      topic != "http-on-failed-opening-request" ||
+      !(subject instanceof Ci.nsIHttpChannel)
+    ) {
+      const channel = subject.QueryInterface(Ci.nsIChannel);
+      console.warn(
+        `httpFailedOpeningRequest triggered on non-nsIHttpChannel for uri: ${channel.URI.spec}`
+      );
+      return;
+    }
+
     const channel = subject.QueryInterface(Ci.nsIHttpChannel);
 
     // Ignore preload requests to avoid duplicity request entries in
@@ -101,7 +112,7 @@ class NetworkEventContentWatcher {
     });
   };
 
-  httpOnResourceCacheResponse = (subject, topic) => {
+  httpOnResourceCacheResponse = (subject, topic, memoryCacheKey) => {
     if (
       topic != "http-on-resource-cache-response" ||
       !(subject instanceof Ci.nsIHttpChannel)
@@ -139,6 +150,7 @@ class NetworkEventContentWatcher {
 
     this.onNetworkEventAvailable(channel, {
       fromCache: true,
+      memoryCacheKey,
       networkEventOptions: {},
       type: RESOURCE_TYPES.CACHED,
     });
@@ -177,7 +189,10 @@ class NetworkEventContentWatcher {
     });
   };
 
-  onNetworkEventAvailable(channel, { fromCache, networkEventOptions, type }) {
+  onNetworkEventAvailable(
+    channel,
+    { fromCache, memoryCacheKey, networkEventOptions, type }
+  ) {
     const networkEventActor = new NetworkEventActor(
       this.targetActor.conn,
       this.targetActor.sessionContext,
@@ -217,6 +232,9 @@ class NetworkEventContentWatcher {
 
     this.onAvailable([resource]);
 
+    if (memoryCacheKey) {
+      networkEventActor.addMemoryCacheData(channel, memoryCacheKey);
+    }
     networkEventActor.addCacheDetails({ fromCache });
     if (type == RESOURCE_TYPES.BLOCKED) {
       lazy.NetworkUtils.setEventAsAvailable(networkEvent.resourceUpdates, [
@@ -272,7 +290,9 @@ class NetworkEventContentWatcher {
         resourceUpdates.remoteAddress = updateResource.remoteAddress;
         resourceUpdates.remotePort = updateResource.remotePort;
         resourceUpdates.waitingTime = updateResource.waitingTime;
-
+        if (Number.isInteger(updateResource.priority)) {
+          resourceUpdates.priority = updateResource.priority;
+        }
         lazy.NetworkUtils.setEventAsAvailable(resourceUpdates, [
           NETWORK_EVENT_TYPES.RESPONSE_COOKIES,
           NETWORK_EVENT_TYPES.RESPONSE_HEADERS,
@@ -280,7 +300,9 @@ class NetworkEventContentWatcher {
         break;
       }
       case NETWORK_EVENT_TYPES.RESPONSE_CONTENT:
-        resourceUpdates.contentSize = updateResource.contentSize;
+        if (updateResource.contentSize !== undefined) {
+          resourceUpdates.contentSize = updateResource.contentSize;
+        }
         resourceUpdates.mimeType = updateResource.mimeType;
         resourceUpdates.transferredSize = updateResource.transferredSize;
         break;

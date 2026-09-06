@@ -21,6 +21,14 @@ registerCleanupFunction(() =>
   Services.prefs.clearUserPref("browser.uiCustomization.skipSourceNodeCheck")
 );
 
+ChromeUtils.defineLazyGetter(this, "SidebarTestUtils", () => {
+  const { SidebarTestUtils: utils } = ChromeUtils.importESModule(
+    "resource://testing-common/SidebarTestUtils.sys.mjs"
+  );
+  utils.init(this);
+  return utils;
+});
+
 var { synthesizeDrop, synthesizeMouseAtCenter } = EventUtils;
 
 // As of bug 1960002, this width no longer technically forces overflow.
@@ -207,7 +215,7 @@ function getAreaWidgetIds(areaId) {
 function simulateItemDrag(aToDrag, aTarget, aEvent = {}, aOffset = 2) {
   let ev = aEvent;
   if (ev == "end" || ev == "start") {
-    let win = aTarget.ownerGlobal;
+    let win = aTarget.documentGlobal;
     const dwu = win.windowUtils;
     let bounds = dwu.getBoundsWithoutFlushing(aTarget);
     if (ev == "end") {
@@ -225,12 +233,12 @@ function simulateItemDrag(aToDrag, aTarget, aEvent = {}, aOffset = 2) {
     aTarget,
     null,
     null,
-    aToDrag.ownerGlobal,
-    aTarget.ownerGlobal,
+    aToDrag.documentGlobal,
+    aTarget.documentGlobal,
     ev
   );
   // Ensure dnd suppression is cleared.
-  synthesizeMouseAtCenter(aTarget, { type: "mouseup" }, aTarget.ownerGlobal);
+  synthesizeMouseAtCenter(aTarget, { type: "mouseup" }, aTarget.documentGlobal);
 }
 
 function endCustomizing(aWindow = window) {
@@ -245,16 +253,20 @@ function endCustomizing(aWindow = window) {
   return afterCustomizationPromise;
 }
 
-function startCustomizing(aWindow = window) {
+async function startCustomizing(aWindow = window) {
   if (aWindow.document.documentElement.hasAttribute("customizing")) {
-    return null;
+    return;
   }
   let customizationReadyPromise = BrowserTestUtils.waitForEvent(
     aWindow.gNavToolbox,
     "customizationready"
   );
   aWindow.gCustomizeMode.enter();
-  return customizationReadyPromise;
+  await customizationReadyPromise;
+
+  if (document.hasPendingL10nMutations) {
+    await BrowserTestUtils.waitForEvent(document, "L10nMutationsFinished");
+  }
 }
 
 function promiseObserverNotified(aTopic) {
@@ -326,6 +338,12 @@ function promiseOverflowHidden(win) {
   return promisePanelElementHidden(win, panelEl);
 }
 
+function hideOverflow() {
+  let panelHidePromise = promiseOverflowHidden(window);
+  PanelUI.overflowPanel.hidePopup();
+  return panelHidePromise;
+}
+
 function promisePanelElementHidden(win, aPanel) {
   return new Promise((resolve, reject) => {
     let timeoutId = win.setTimeout(() => {
@@ -351,7 +369,7 @@ function isOverflowOpen() {
 
 function subviewShown(aSubview) {
   return new Promise((resolve, reject) => {
-    let win = aSubview.ownerGlobal;
+    let win = aSubview.documentGlobal;
     let timeoutId = win.setTimeout(() => {
       reject("Subview (" + aSubview.id + ") did not show within 20 seconds.");
     }, 20000);
@@ -366,7 +384,7 @@ function subviewShown(aSubview) {
 
 function subviewHidden(aSubview) {
   return new Promise((resolve, reject) => {
-    let win = aSubview.ownerGlobal;
+    let win = aSubview.documentGlobal;
     let timeoutId = win.setTimeout(() => {
       reject("Subview (" + aSubview.id + ") did not hide within 20 seconds.");
     }, 20000);
@@ -383,21 +401,6 @@ function waitFor(aTimeout = 100) {
   return new Promise(resolve => {
     setTimeout(() => resolve(), aTimeout);
   });
-}
-
-/**
- * Starts a load in an existing tab and waits for it to finish (via some event).
- *
- * @param aTab       The tab to load into.
- * @param aUrl       The url to load.
- * @param aEventType The load event type to wait for.  Defaults to "load".
- * @return {Promise} resolved when the event is handled.
- */
-function promiseTabLoadEvent(aTab, aURL) {
-  let browser = aTab.linkedBrowser;
-
-  BrowserTestUtils.startLoadingURIString(browser, aURL);
-  return BrowserTestUtils.browserLoaded(browser);
 }
 
 /**
@@ -473,8 +476,8 @@ function checkContextMenu(aContextMenu, aExpectedEntries, aWindow = window) {
         ? aWindow.document.getElementById(commandValue)
         : null;
       let menuItemDisabled = relatedCommand
-        ? relatedCommand.getAttribute("disabled") == "true"
-        : menuitem.getAttribute("disabled") == "true";
+        ? relatedCommand.hasAttribute("disabled")
+        : menuitem.hasAttribute("disabled");
       is(
         menuItemDisabled,
         !aExpectedEntries[i][1],
@@ -492,7 +495,7 @@ function waitForOverflowButtonShown(win = window) {
   return waitForElementShown(ov.icon);
 }
 function waitForElementShown(element) {
-  return BrowserTestUtils.waitForCondition(() => {
+  return TestUtils.waitForCondition(() => {
     info("Checking if element has non-0 size");
     // We intentionally flush layout to ensure the element is actually shown.
     let rect = element.getBoundingClientRect();
@@ -563,6 +566,7 @@ function ensureToolbarOverflow(aWindow, shouldCleanup = true) {
     0
   );
   CustomizableUI.addWidgetToArea("panic-button", CustomizableUI.AREA_NAVBAR, 0);
+  CustomizableUI.addWidgetToArea("print-button", CustomizableUI.AREA_NAVBAR, 0);
 
   if (shouldCleanup) {
     registerCleanupFunction(() => {
@@ -583,4 +587,5 @@ function unensureToolbarOverflow(aWindow, originalWindowWidth) {
   CustomizableUI.removeWidgetFromArea("history-panelmenu");
   CustomizableUI.removeWidgetFromArea("email-link-button");
   CustomizableUI.removeWidgetFromArea("panic-button");
+  CustomizableUI.removeWidgetFromArea("print-button");
 }

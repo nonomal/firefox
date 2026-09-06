@@ -20,6 +20,7 @@ import mozilla.components.lib.state.helpers.StoreProvider.Companion.storeProvide
 import mozilla.telemetry.glean.private.NoExtras
 import org.mozilla.fenix.GleanMetrics.Addresses
 import org.mozilla.fenix.R
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.settings.address.controller.DefaultAddressManagementController
@@ -31,10 +32,8 @@ import org.mozilla.fenix.settings.autofill.AutofillFragmentState
 import org.mozilla.fenix.settings.autofill.AutofillFragmentStore
 import org.mozilla.fenix.theme.FirefoxTheme
 
-/**
- * Displays a list of saved addresses.
- */
-class AddressManagementFragment : Fragment() {
+/** Displays a list of saved addresses. */
+class AddressManagementFragment : Fragment(), SystemInsetsPaddedFragment {
 
     private lateinit var store: AutofillFragmentStore
     private lateinit var interactor: AddressManagementInteractor
@@ -48,11 +47,10 @@ class AddressManagementFragment : Fragment() {
             AutofillFragmentStore(restoredState ?: AutofillFragmentState())
         }
 
-        interactor = DefaultAddressManagementInteractor(
-            controller = DefaultAddressManagementController(
-                navController = findNavController(),
-            ),
-        )
+        interactor =
+            DefaultAddressManagementInteractor(
+                controller = DefaultAddressManagementController(navController = findNavController())
+            )
 
         loadAddresses()
 
@@ -90,8 +88,8 @@ class AddressManagementFragment : Fragment() {
     }
 
     /**
-     * Fetches all the addresses from the autofill storage and updates the
-     * [AutofillFragmentStore] with the list of addresses.
+     * Fetches all the addresses from the autofill storage and updates the [AutofillFragmentStore] with the list of
+     * addresses.
      */
     private fun loadAddresses() {
         lifecycleScope.launch {

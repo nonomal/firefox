@@ -9,6 +9,7 @@ import io.mockk.MockKAnnotations
 import io.mockk.Runs
 import io.mockk.every
 import io.mockk.impl.annotations.MockK
+import io.mockk.impl.annotations.RelaxedMockK
 import io.mockk.just
 import io.mockk.verify
 import org.junit.Assert.assertEquals
@@ -26,11 +27,9 @@ class DefaultBrowsingModeManagerTest {
 
     @MockK lateinit var settings: Settings
 
-    @MockK(relaxed = true)
-    lateinit var onModeChange: (BrowsingMode) -> Unit
+    @RelaxedMockK lateinit var onModeChange: (BrowsingMode) -> Unit
 
-    @get:Rule
-    val mockkRule = MockkRetryTestRule()
+    @get:Rule val mockkRule = MockkRetryTestRule()
 
     @Before
     fun before() {
@@ -164,9 +163,7 @@ class DefaultBrowsingModeManagerTest {
         assertEquals(BrowsingMode.Normal, manager.mode)
     }
 
-    private fun buildBrowsingModeManager(
-        intent: Intent? = null,
-    ): BrowsingModeManager {
+    private fun buildBrowsingModeManager(intent: Intent? = null): BrowsingModeManager {
         return DefaultBrowsingModeManager(
             intent = intent,
             settings = settings,

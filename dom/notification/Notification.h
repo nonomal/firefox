@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef mozilla_dom_notification_h__
-#define mozilla_dom_notification_h__
+#ifndef mozilla_dom_notification_h_
+#define mozilla_dom_notification_h_
 
 #include "mozilla/DOMEventTargetHelper.h"
 #include "mozilla/dom/DOMTypes.h"
@@ -23,7 +21,6 @@ namespace mozilla::dom {
 class NotificationRef;
 class WorkerNotificationObserver;
 class Promise;
-class StrongWorkerRef;
 
 namespace notification {
 enum class PermissionCheckPurpose : uint8_t;
@@ -108,6 +105,15 @@ class Notification : public DOMEventTargetHelper, public SupportsWeakPtr {
     iconUri->GetSpec(aRetval);
   }
 
+  void GetNavigate(nsACString& aRetval) {
+    nsIURI* navigateUri = mIPCNotification.options().navigate();
+    if (!navigateUri) {
+      aRetval.Truncate();
+      return;
+    }
+    navigateUri->GetSpec(aRetval);
+  }
+
   void MaybeNotifyClose();
 
   static bool RequestPermissionEnabledForScope(JSContext* aCx,
@@ -136,7 +142,7 @@ class Notification : public DOMEventTargetHelper, public SupportsWeakPtr {
 
   void Close();
 
-  nsIGlobalObject* GetParentObject() const { return GetOwnerGlobal(); }
+  nsIGlobalObject* GetParentObject() const { return GetRelevantGlobal(); }
 
   JSObject* WrapObject(JSContext*, JS::Handle<JSObject*> aGivenProto) override;
 
@@ -156,7 +162,7 @@ class Notification : public DOMEventTargetHelper, public SupportsWeakPtr {
 
   bool DispatchClickEvent();
 
-  nsresult DispatchToMainThread(already_AddRefed<nsIRunnable>&& aRunnable);
+  nsresult DispatchToMainThread(already_AddRefed<nsIRunnable> aRunnable);
 
  protected:
   Notification(nsIGlobalObject* aGlobal,
@@ -195,13 +201,23 @@ class Notification : public DOMEventTargetHelper, public SupportsWeakPtr {
       const NotificationOptions& aOptions, const nsAString& aScope,
       ErrorResult& aRv);
 
-  bool CreateActor();
-  bool SendShow(Promise* aPromise);
+  struct ContextInfo {
+    nsCOMPtr<nsISerialEventTarget> mTarget = nullptr;
+    nsCOMPtr<nsIPrincipal> mPrincipal = nullptr;
+    nsCOMPtr<nsIPrincipal> mEffectiveStoragePrincipal = nullptr;
+    bool mIsSecureContext = false;
+  };
+  ContextInfo GetContextInfo();
 
-  static already_AddRefed<nsIURI> ResolveIconURL(nsIGlobalObject* aGlobal,
-                                                 const nsACString& aIconUrl);
+  bool CreateActor(const ContextInfo& aInfo);
+  void LoadImageAndShow(Promise* aPromise, ContextInfo&& aInfo);
+  void SendShow(Promise* aPromise, Maybe<IPCImage>&& aIcon);
+
+  // Resolve possibly-relative URL either for icon or navigate.
+  static already_AddRefed<nsIURI> ResolveURL(nsIGlobalObject* aGlobal,
+                                             const nsACString& aUrl);
 };
 
 }  // namespace mozilla::dom
 
-#endif  // mozilla_dom_notification_h__
+#endif  // mozilla_dom_notification_h_

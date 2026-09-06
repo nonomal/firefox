@@ -1,5 +1,3 @@
-/* -*- tab-width: 2; indent-tabs-mode: nil; js-indent-level: 2 -*- */
-/* vim: set ts=2 sw=2 sts=2 et tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,12 +5,14 @@
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  AIWindow:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   BrowserSearchTelemetry:
     "moz-src:///browser/components/search/BrowserSearchTelemetry.sys.mjs",
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   ContextualIdentityService:
-    "resource://gre/modules/ContextualIdentityService.sys.mjs",
+    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   DevToolsShim: "chrome://devtools-startup/content/DevToolsShim.sys.mjs",
   E10SUtils: "resource://gre/modules/E10SUtils.sys.mjs",
   GenAI: "resource:///modules/GenAI.sys.mjs",
@@ -23,16 +23,21 @@ ChromeUtils.defineESModuleGetters(lazy, {
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  ScreenshotsUtils: "resource:///modules/ScreenshotsUtils.sys.mjs",
+  ScreenshotsUtils:
+    "moz-src:///browser/components/screenshots/ScreenshotsUtils.sys.mjs",
+  SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
   SearchUIUtils: "moz-src:///browser/components/search/SearchUIUtils.sys.mjs",
   SearchUtils: "moz-src:///toolkit/components/search/SearchUtils.sys.mjs",
   ShortcutUtils: "resource://gre/modules/ShortcutUtils.sys.mjs",
   TranslationsParent: "resource://gre/actors/TranslationsParent.sys.mjs",
+  TranslationsUtils:
+    "chrome://global/content/translations/TranslationsUtils.mjs",
   WebsiteFilter: "resource:///modules/policies/WebsiteFilter.sys.mjs",
 });
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+import { PdfJsContextMenu } from "resource://pdf.js/PdfJsContextMenu.sys.mjs";
 
 ChromeUtils.defineLazyGetter(lazy, "ReferrerInfo", () =>
   Components.Constructor(
@@ -53,13 +58,6 @@ XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
   "STRIP_ON_SHARE_ENABLED",
   "privacy.query_stripping.strip_on_share.enabled",
-  false
-);
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "PDFJS_ENABLE_COMMENT",
-  "pdfjs.enableComment",
   false
 );
 
@@ -91,15 +89,22 @@ XPCOMUtils.defineLazyPreferenceGetter(
   false
 );
 
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "TEXT_FRAGMENTS_SHOW_CONTEXT_MENU",
-  "dom.text_fragments.create_text_fragment.enabled",
-  false
-);
-
 const PASSWORD_FIELDNAME_HINTS = ["current-password", "new-password"];
 const USERNAME_FIELDNAME_HINT = "username";
+
+const ALLOWED_CHROME_IMAGE_URLS = new Set([
+  "chrome://global/skin/illustrations/security-error.svg",
+  "chrome://global/skin/illustrations/no-connection.svg",
+]);
+
+const IMAGE_ONLY_PROTOCOLS = [
+  "cached-favicon:",
+  "moz-icon:",
+  "moz-newtab-wallpaper:",
+  "moz-page-thumb:",
+  "moz-remote-image:",
+  "page-icon:",
+];
 
 export class nsContextMenu {
   /**
@@ -119,8 +124,25 @@ export class nsContextMenu {
    */
   #newFeatureBadgeL10nString;
 
+  /**
+   * Cancels the login lookup for this menu once the menu is gone, so that a
+   * result arriving late is discarded instead of being applied to a menu it was
+   * not looked up for.
+   *
+   * @type {?AbortController}
+   */
+  #passwordItemsAbortController = null;
+
+  /**
+   * Settles once the asynchronous part of the password manager items has been
+   * applied or discarded.
+   *
+   * @type {Promise<void>}
+   */
+  #passwordItemsReady = Promise.resolve();
+
   constructor(aXulMenu, aIsShift) {
-    this.window = aXulMenu.ownerGlobal;
+    this.window = aXulMenu.documentGlobal;
     this.document = aXulMenu.ownerDocument;
 
     // Get contextual info.
@@ -216,7 +238,6 @@ export class nsContextMenu {
     this.isDesignMode = context.isDesignMode;
     this.inFrame = context.inFrame;
     this.inPDFViewer = context.inPDFViewer;
-    this.inPDFEditor = context.inPDFEditor;
     this.inSrcdocFrame = context.inSrcdocFrame;
     this.inSyntheticDoc = context.inSyntheticDoc;
     this.inTabBrowser = context.inTabBrowser;
@@ -249,8 +270,6 @@ export class nsContextMenu {
     this.onSpellcheckable = context.onSpellcheckable;
     this.onTextInput = context.onTextInput;
     this.onVideo = context.onVideo;
-
-    this.pdfEditorStates = context.pdfEditorStates;
 
     this.target = context.target;
     this.targetIdentifier = context.targetIdentifier;
@@ -288,7 +307,7 @@ export class nsContextMenu {
 
       this.browser = this.ownerDoc.defaultView.docShell.chromeEventHandler;
       this.selectionInfo = SelectionUtils.getSelectionDetails(
-        this.browser.ownerGlobal
+        this.browser.documentGlobal
       );
       this.actor =
         this.browser.browsingContext.currentWindowGlobal.getActor(
@@ -332,6 +351,8 @@ export class nsContextMenu {
 
     this.hasTextFragments = context.hasTextFragments;
     this.textFragmentURL = null;
+
+    this.pdfjsContextMenu = new PdfJsContextMenu(this, context);
   } // setContext
 
   hiding(aXulMenu) {
@@ -342,6 +363,7 @@ export class nsContextMenu {
     aXulMenu.showHideSeparators = null;
 
     this.contentData = null;
+    this.#passwordItemsAbortController?.abort();
     this.window.InlineSpellCheckerUI.clearSuggestionsFromMenu();
     this.window.InlineSpellCheckerUI.clearDictionaryListFromMenu();
     this.window.InlineSpellCheckerUI.uninit();
@@ -375,8 +397,8 @@ export class nsContextMenu {
     this.initViewSourceItems();
     this.initScreenshotItem();
     this.initPasswordControlItems();
-    this.initPDFItems();
     this.initTextFragmentItems();
+    this.pdfjsContextMenu.initItems();
 
     this.showHideSeparators(aXulMenu);
     if (!aXulMenu.showHideSeparators) {
@@ -389,76 +411,9 @@ export class nsContextMenu {
     }
   }
 
-  initPDFItems() {
-    for (const id of [
-      "context-pdfjs-undo",
-      "context-pdfjs-redo",
-      "context-sep-pdfjs-redo",
-      "context-pdfjs-cut",
-      "context-pdfjs-copy",
-      "context-pdfjs-paste",
-      "context-pdfjs-delete",
-      "context-pdfjs-selectall",
-      "context-sep-pdfjs-selectall",
-    ]) {
-      this.showItem(id, this.inPDFEditor);
-    }
-
-    const hasSelectedText = this.pdfEditorStates?.hasSelectedText ?? false;
-    this.showItem(
-      "context-pdfjs-comment-selection",
-      lazy.PDFJS_ENABLE_COMMENT && hasSelectedText
-    );
-    this.showItem("context-pdfjs-highlight-selection", hasSelectedText);
-
-    if (!this.inPDFEditor) {
-      return;
-    }
-
-    const {
-      isEmpty,
-      hasSomethingToUndo,
-      hasSomethingToRedo,
-      hasSelectedEditor,
-    } = this.pdfEditorStates;
-
-    const hasEmptyClipboard = !Services.clipboard.hasDataMatchingFlavors(
-      ["application/pdfjs"],
-      Ci.nsIClipboard.kGlobalClipboard
-    );
-
-    this.setItemAttr("context-pdfjs-undo", "disabled", !hasSomethingToUndo);
-    this.setItemAttr("context-pdfjs-redo", "disabled", !hasSomethingToRedo);
-    this.setItemAttr(
-      "context-sep-pdfjs-redo",
-      "disabled",
-      !hasSomethingToUndo && !hasSomethingToRedo
-    );
-    this.setItemAttr(
-      "context-pdfjs-cut",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr(
-      "context-pdfjs-copy",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr("context-pdfjs-paste", "disabled", hasEmptyClipboard);
-    this.setItemAttr(
-      "context-pdfjs-delete",
-      "disabled",
-      isEmpty || !hasSelectedEditor
-    );
-    this.setItemAttr("context-pdfjs-selectall", "disabled", isEmpty);
-    this.setItemAttr("context-sep-pdfjs-selectall", "disabled", isEmpty);
-  }
-
   initTextFragmentItems() {
     const shouldShow =
-      lazy.TEXT_FRAGMENTS_SHOW_CONTEXT_MENU &&
       lazy.TEXT_FRAGMENTS_ENABLED &&
-      lazy.STRIP_ON_SHARE_ENABLED &&
       !(
         this.inPDFViewer ||
         this.inFrame ||
@@ -467,7 +422,10 @@ export class nsContextMenu {
       ) &&
       (this.hasTextFragments || this.isContentSelected);
     this.showItem("context-copy-link-to-highlight", shouldShow);
-    this.showItem("context-copy-clean-link-to-highlight", shouldShow);
+    this.showItem(
+      "context-copy-clean-link-to-highlight",
+      shouldShow && lazy.STRIP_ON_SHARE_ENABLED
+    );
 
     // disables both options by default, while API tries to build a text fragment
     this.setItemAttr("context-copy-link-to-highlight", "disabled", true);
@@ -479,12 +437,7 @@ export class nsContextMenu {
   }
 
   async getTextDirective() {
-    if (
-      !Services.prefs.getBoolPref(
-        "dom.text_fragments.create_text_fragment.enabled",
-        false
-      )
-    ) {
+    if (!lazy.TEXT_FRAGMENTS_ENABLED) {
       return;
     }
     this.textFragmentURL = await this.actor.getTextDirective();
@@ -572,10 +525,19 @@ export class nsContextMenu {
     let showContainers =
       Services.prefs.getBoolPref("privacy.userContext.enabled") &&
       lazy.ContextualIdentityService.getPublicIdentities().length;
+    let showSplitViews = Services.prefs.getBoolPref(
+      "browser.tabs.splitView.enabled"
+    );
+    let currentTabInSplitView = !!window.gBrowser?.selectedTab?.splitview;
+    let showSmartWindow = lazy.AIWindow.isAIWindowEnabled();
     this.showItem("context-openlink", shouldShow && !isWindowPrivate);
     this.showItem(
       "context-openlinkprivate",
       shouldShow && lazy.PrivateBrowsingUtils.enabled
+    );
+    this.showItem(
+      "context-openlinksmartwindow",
+      shouldShow && showSmartWindow && !isWindowPrivate
     );
     this.showItem("context-openlinkintab", shouldShow && !inContainer);
     this.showItem("context-openlinkincontainertab", shouldShow && inContainer);
@@ -588,6 +550,16 @@ export class nsContextMenu {
       "context-previewlink",
       lazy.LinkPreview.shouldShowContextMenu(this)
     );
+    let isHiddenTab = !!window.gBrowser?.getTabForBrowser(this.browser)?.hidden;
+    let isPinnedTab = !!window.gBrowser?.getTabForBrowser(this.browser)?.pinned;
+    this.showItem(
+      "context-openlinkinsplitview",
+      shouldShow &&
+        showSplitViews &&
+        !currentTabInSplitView &&
+        !isHiddenTab &&
+        !isPinnedTab
+    );
   }
 
   initNavigationItems() {
@@ -599,7 +571,8 @@ export class nsContextMenu {
         this.onCanvas ||
         this.onVideo ||
         this.onAudio ||
-        this.onTextInput
+        this.onTextInput ||
+        this.window.browsingContext.isDocumentPiP
       ) && this.inTabBrowser;
     if (AppConstants.platform == "macosx") {
       for (let id of [
@@ -741,6 +714,12 @@ export class nsContextMenu {
       this.onImage && !this.onCompletedImage
     );
 
+    // Some protocols only return images in an image context and can no longer
+    // be loaded otherwise.
+    const mediaURL = URL.parse(this.mediaURL);
+    const isImageOnlyProtocol =
+      mediaURL && IMAGE_ONLY_PROTOCOLS.includes(mediaURL.protocol);
+
     // View image depends on having an image that's not standalone
     // (or is in a frame), or a canvas. If this isn't an image, check
     // if there is a background image.
@@ -760,12 +739,15 @@ export class nsContextMenu {
       !this.onAudio &&
       !this.onLink &&
       !this.onTextInput;
-    this.showItem("context-viewimage", showViewImage || showBGImage);
+    this.showItem(
+      "context-viewimage",
+      (showViewImage || showBGImage) && !isImageOnlyProtocol
+    );
 
     // Save image depends on having loaded its content.
     this.showItem(
       "context-saveimage",
-      (this.onLoadedImage || this.onCanvas) && !this.inPDFEditor
+      (this.onLoadedImage && !isImageOnlyProtocol) || this.onCanvas
     );
 
     if (Services.policies.status === Services.policies.ACTIVE) {
@@ -779,10 +761,9 @@ export class nsContextMenu {
       );
     }
 
-    // Copy image contents depends on whether we're on an image.
     // Note: the element doesn't exist on all platforms, but showItem() takes
     // care of that by itself.
-    this.showItem("context-copyimage-contents", this.onImage);
+    this.showItem("context-copyimage-contents", this.onImage || this.onCanvas);
 
     // Copy image location depends on whether we're on an image.
     this.showItem("context-copyimage", this.onImage || showBGImage);
@@ -820,8 +801,8 @@ export class nsContextMenu {
 
     this.showAndFormatVisualSearchContextItem();
 
-    // Set as Desktop background depends on whether an image was clicked on,
-    // and only works if we have a shell service.
+    // Set as Desktop background depends on whether an image or canvas was
+    // clicked on, and only works if we have a shell service.
     var haveSetDesktopBackground = false;
 
     if (
@@ -835,12 +816,12 @@ export class nsContextMenu {
       }
     }
 
-    this.showItem(
-      "context-setDesktopBackground",
-      haveSetDesktopBackground && this.onLoadedImage
-    );
+    let canSetDesktopBackground =
+      haveSetDesktopBackground && (this.onLoadedImage || this.onCanvas);
 
-    if (haveSetDesktopBackground && this.onLoadedImage) {
+    this.showItem("context-setDesktopBackground", canSetDesktopBackground);
+
+    if (canSetDesktopBackground) {
       this.document.getElementById("context-setDesktopBackground").disabled =
         this.contentData.disableSetDesktopBackground;
     }
@@ -863,14 +844,15 @@ export class nsContextMenu {
         lazy.gPrintEnabled
     );
 
-    var shouldShow = !(
+    var showViewSource = !(
       this.isContentSelected ||
       this.onImage ||
       this.onCanvas ||
       this.onVideo ||
       this.onAudio ||
       this.onLink ||
-      this.onTextInput
+      this.onTextInput ||
+      this.window.browsingContext.isDocumentPiP
     );
 
     var showInspect =
@@ -889,7 +871,7 @@ export class nsContextMenu {
         // through normal use, and we've passed an ESR cycle (91).
         lazy.DevToolsShim.isDevToolsUser());
 
-    this.showItem("context-viewsource", shouldShow);
+    this.showItem("context-viewsource", showViewSource);
     this.showItem("context-inspect", showInspect);
 
     this.showItem("context-inspect-a11y", showInspectA11Y);
@@ -916,7 +898,8 @@ export class nsContextMenu {
         this.onVideo ||
         this.onAudio ||
         this.onCanvas ||
-        this.inWebExtBrowser
+        this.inWebExtBrowser ||
+        this.window.browsingContext.isDocumentPiP
       )
     );
 
@@ -992,7 +975,7 @@ export class nsContextMenu {
     this.showItem("spell-check-enabled", canSpell);
     document
       .getElementById("spell-check-enabled")
-      .setAttribute("checked", canSpell && InlineSpellCheckerUI.enabled);
+      .toggleAttribute("checked", canSpell && InlineSpellCheckerUI.enabled);
 
     this.showItem("spell-add-to-dictionary", onMisspelling);
     this.showItem("spell-undo-add-to-dictionary", showUndo);
@@ -1050,8 +1033,7 @@ export class nsContextMenu {
         this.onImage ||
         this.onVideo ||
         this.onAudio ||
-        this.inSyntheticDoc ||
-        this.inPDFEditor
+        this.inSyntheticDoc
       ) || this.isDesignMode
     );
 
@@ -1261,19 +1243,12 @@ export class nsContextMenu {
       }
 
       // Update sub-menu items.
-      let fragment = lazy.LoginManagerContextMenu.addLoginsToMenu(
-        this.targetIdentifier,
-        this.browser,
-        formOrigin
+      this.#passwordItemsAbortController = new AbortController();
+      this.#passwordItemsReady = this.updatePasswordManagerSubMenuItems(
+        document,
+        formOrigin,
+        this.#passwordItemsAbortController.signal
       );
-
-      if (!fragment) {
-        return;
-      }
-
-      showUseSavedLogin = true;
-      let popup = document.getElementById("fill-login-popup");
-      popup.appendChild(fragment);
     } finally {
       const documentURI = this.contentData?.documentURIObject;
       const showRelay =
@@ -1297,6 +1272,46 @@ export class nsContextMenu {
           : true
       );
     }
+  }
+
+  /**
+   * Settles once the password manager items are done being filled in, which
+   * happens after the menu is already shown. Tests await this instead of
+   * assuming the lookup won the race against `popupshown`.
+   *
+   * @type {Promise<void>}
+   */
+  get passwordItemsReady() {
+    return this.#passwordItemsReady;
+  }
+
+  /**
+   * @param {Document} document
+   *        The context menu owner document.
+   * @param {string} formOrigin
+   *        Origin of the document the menu was opened on.
+   * @param {AbortSignal} signal
+   *        Signalled when the menu these items were looked up for is gone.
+   */
+  async updatePasswordManagerSubMenuItems(document, formOrigin, signal) {
+    const fragment = await lazy.LoginManagerContextMenu.addLoginsToMenu(
+      this.targetIdentifier,
+      this.browser,
+      formOrigin
+    );
+
+    // The menu was dismissed while the logins were being looked up. Appending
+    // now would leave the items behind for whatever the menu shows next.
+    if (!fragment || signal.aborted) {
+      return;
+    }
+
+    let popup = document.getElementById("fill-login-popup");
+    popup.appendChild(fragment);
+
+    this.showItem("fill-login", true);
+
+    this.setItemAttr("passwordmgr-items-separator", "ensureHidden", null);
   }
 
   initSyncItems() {
@@ -1327,7 +1342,10 @@ export class nsContextMenu {
       }
     };
 
-    const onViewSource = this.browser.currentURI.schemeIs("view-source");
+    const onViewSource =
+      !!this.browser.browsingContext.currentWindowGlobal?.documentURI?.schemeIs(
+        "view-source"
+      );
 
     showViewSourceItem("goToLine", () => false, true);
     showViewSourceItem("wrapLongLines", () =>
@@ -1408,11 +1426,7 @@ export class nsContextMenu {
       let revealPassword = this.document.getElementById(
         "context-reveal-password"
       );
-      if (this.passwordRevealed) {
-        revealPassword.setAttribute("checked", "true");
-      } else {
-        revealPassword.removeAttribute("checked");
-      }
+      revealPassword.toggleAttribute("checked", this.passwordRevealed);
     }
     this.showItem("context-reveal-password", shouldShow);
   }
@@ -1546,10 +1560,21 @@ export class nsContextMenu {
     );
   }
 
+  // Open linked-to URL in a new smart window.
+  openLinkInSmartWindow() {
+    const params = this._getGlobalHistoryOptions();
+    this.window.openLinkIn(
+      this.linkURL,
+      "window",
+      this._openLinkInParameters({ ...params, aiWindow: true })
+    );
+  }
+
   // Open linked-to URL in a new tab.
   openLinkInTab(event) {
     let params = {
       userContextId: parseInt(event.target.getAttribute("data-usercontextid")),
+      eventDetail: { containerSource: "content_context_menu" },
       ...this._getGlobalHistoryOptions(),
     };
 
@@ -1558,6 +1583,29 @@ export class nsContextMenu {
       "tab",
       this._openLinkInParameters(params)
     );
+  }
+
+  // Open linked-to URL in a new split view
+  openLinkInSplitView() {
+    let win = this.window;
+    let currentTab = win.gBrowser.getTabForBrowser(this.browser);
+    let userContextId = currentTab ? currentTab.userContextId : 0;
+    let params = {
+      userContextId,
+      ...this._getGlobalHistoryOptions(),
+      inBackground: false,
+      resolveOnNewTabCreated: browser => {
+        let linkTab = win.gBrowser.getTabForBrowser(browser);
+        if (linkTab && currentTab) {
+          win.gBrowser.addTabSplitView([currentTab, linkTab], {
+            insertBefore: currentTab,
+          });
+          win.gBrowser.selectedTab = linkTab;
+        }
+      },
+    };
+
+    win.openLinkIn(this.linkURL, "tab", this._openLinkInParameters(params));
   }
 
   // open URL in current tab
@@ -1614,24 +1662,6 @@ export class nsContextMenu {
       "menuitem-screenshot",
       "ContextMenu"
     );
-  }
-
-  pdfJSCmd(aName) {
-    if (["cut", "copy", "paste"].includes(aName)) {
-      const cmd = `cmd_${aName}`;
-      this.document.commandDispatcher
-        .getControllerForCommand(cmd)
-        .doCommand(cmd);
-      if (Cu.isInAutomation) {
-        this.browser.sendMessageToActor(
-          "PDFJS:Editing",
-          { name: aName },
-          "Pdfjs"
-        );
-      }
-      return;
-    }
-    this.browser.sendMessageToActor("PDFJS:Editing", { name: aName }, "Pdfjs");
   }
 
   // View Partial Source
@@ -1736,8 +1766,23 @@ export class nsContextMenu {
     this.actor.reloadImage(this.targetIdentifier);
   }
 
-  _canvasToBlobURL(targetIdentifier) {
-    return this.actor.canvasToBlobURL(targetIdentifier);
+  async #canvasToBlobURL(targetIdentifier) {
+    let blobURL = await this.actor.canvasToBlobURL(targetIdentifier);
+
+    if (!ChromeUtils.isBlobURLValid(this.principal, blobURL)) {
+      throw new Error("Invalid blob: URL: " + blobURL);
+    }
+
+    return blobURL;
+  }
+
+  copyCanvasImage() {
+    this.actor
+      .canvasToBlob(this.targetIdentifier)
+      .then(blob => blob.arrayBuffer())
+      .then(arrayBuffer => {
+        lazy.BrowserUtils.copyImageToClipboard(arrayBuffer);
+      }, console.error);
   }
 
   // Change current window to the URL of the image, video, or audio.
@@ -1749,16 +1794,19 @@ export class nsContextMenu {
     let referrerInfo = this.contentData.referrerInfo;
     let systemPrincipal = Services.scriptSecurityManager.getSystemPrincipal();
     if (this.onCanvas) {
-      this._canvasToBlobURL(this.targetIdentifier).then(blobURL => {
+      this.#canvasToBlobURL(this.targetIdentifier).then(blobURL => {
         this.window.openLinkIn(blobURL, where, {
           referrerInfo,
           triggeringPrincipal: systemPrincipal,
         });
       }, console.error);
     } else {
+      const isAllowedChromeImage = ALLOWED_CHROME_IMAGE_URLS.has(this.mediaURL);
+      const principal = isAllowedChromeImage ? systemPrincipal : this.principal;
+
       this.window.urlSecurityCheck(
         this.mediaURL,
-        this.principal,
+        principal,
         Ci.nsIScriptSecurityManager.DISALLOW_SCRIPT
       );
 
@@ -1766,7 +1814,7 @@ export class nsContextMenu {
       this.window.openLinkIn(this.mediaURL, where, {
         referrerInfo,
         forceAllowDataURI: true,
-        triggeringPrincipal: this.principal,
+        triggeringPrincipal: principal,
         triggeringRemoteType: this.remoteType,
         policyContainer: this.policyContainer,
       });
@@ -1910,9 +1958,6 @@ export class nsContextMenu {
     linkDownload,
     isContentWindowPrivate
   ) {
-    // canonical def in nsURILoader.h
-    const NS_ERROR_SAVE_LINK_AS_TIMEOUT = 0x805d0020;
-
     // an object to proxy the data through to
     // nsIExternalHelperAppService.doContent, which will wait for the
     // appropriate MIME-type headers and then prompt the user with a
@@ -1928,7 +1973,7 @@ export class nsContextMenu {
         // if the timer fired, the error status will have been caused by that,
         // and we'll be restarting in onStopRequest, so no reason to notify
         // the user
-        if (aRequest.status == NS_ERROR_SAVE_LINK_AS_TIMEOUT) {
+        if (aRequest.status == Cr.NS_ERROR_SAVE_LINK_AS_TIMEOUT) {
           return;
         }
 
@@ -1982,7 +2027,7 @@ export class nsContextMenu {
       },
 
       onStopRequest: function saveLinkAs_onStopRequest(aRequest, aStatusCode) {
-        if (aStatusCode == NS_ERROR_SAVE_LINK_AS_TIMEOUT) {
+        if (aStatusCode == Cr.NS_ERROR_SAVE_LINK_AS_TIMEOUT) {
           // do it the old fashioned way, which will pick the best filename
           // it can without waiting.
           this._window.saveURL(
@@ -2029,7 +2074,7 @@ export class nsContextMenu {
           // and save as dialog would appear on the screen as we fall back to
           // the old fashioned way after the timeout.
           timer.cancel();
-          channel.cancel(NS_ERROR_SAVE_LINK_AS_TIMEOUT);
+          channel.cancel(Cr.NS_ERROR_SAVE_LINK_AS_TIMEOUT);
         }
         throw Components.Exception("", Cr.NS_ERROR_NO_INTERFACE);
       },
@@ -2041,7 +2086,7 @@ export class nsContextMenu {
     function timerCallback() {}
     timerCallback.prototype = {
       notify: function sLA_timer_notify() {
-        channel.cancel(NS_ERROR_SAVE_LINK_AS_TIMEOUT);
+        channel.cancel(Cr.NS_ERROR_SAVE_LINK_AS_TIMEOUT);
       },
     };
 
@@ -2136,14 +2181,14 @@ export class nsContextMenu {
     let cookieJarSettings = this.contentData.cookieJarSettings;
     if (this.onCanvas) {
       // Bypass cache, since it's a data: URL.
-      this._canvasToBlobURL(this.targetIdentifier).then(blobURL => {
+      this.#canvasToBlobURL(this.targetIdentifier).then(blobURL => {
         this.window.internalSave(
           blobURL,
           null, // originalURL
           null, // document
           "canvas.png",
           null, // content disposition
-          "image/png", // _canvasToBlobURL uses image/png by default.
+          "image/png", // #canvasToBlobURL uses image/png by default.
           true, // bypass cache
           "SaveImageTitle",
           null, // chosen data
@@ -2157,7 +2202,12 @@ export class nsContextMenu {
         );
       }, console.error);
     } else if (this.onImage) {
-      this.window.urlSecurityCheck(this.mediaURL, this.principal);
+      const isAllowedChromeImage = ALLOWED_CHROME_IMAGE_URLS.has(this.mediaURL);
+      const principal = isAllowedChromeImage
+        ? Services.scriptSecurityManager.getSystemPrincipal()
+        : this.principal;
+
+      this.window.urlSecurityCheck(this.mediaURL, principal);
       this.window.internalSave(
         this.mediaURL,
         null, // originalURL
@@ -2174,7 +2224,7 @@ export class nsContextMenu {
         false, // don't skip prompt for where to save
         null, // cache key
         isPrivate,
-        this.principal
+        principal
       );
     } else if (this.onVideo || this.onAudio) {
       let defaultFileName = "";
@@ -2313,7 +2363,7 @@ export class nsContextMenu {
     // If the user saved, engineInfo contains `name` and `alias`.
     // Otherwise, it's undefined.
     if (engineInfo) {
-      let searchEngine = await Services.search.addUserEngine({
+      let searchEngine = await lazy.SearchService.addUserEngine({
         name: engineInfo.name,
         alias: engineInfo.alias,
         url,
@@ -2353,15 +2403,25 @@ export class nsContextMenu {
   // nicely for the disabled attribute).
   setItemAttr(aID, aAttr, aVal) {
     var elem = this.document.getElementById(aID);
-    if (elem) {
-      if (aVal == null) {
-        // null indicates attr should be removed.
-        elem.removeAttribute(aAttr);
-      } else {
-        // Set attr=val.
-        elem.setAttribute(aAttr, aVal);
-      }
+    if (!elem) {
+      return;
     }
+    if (aVal == null) {
+      // null indicates attr should be removed.
+      elem.removeAttribute(aAttr);
+      return;
+    }
+    if (typeof aVal == "boolean") {
+      // TODO(emilio): Replace this with toggleAttribute, but needs test fixes.
+      if (aVal) {
+        elem.setAttribute(aAttr, aVal);
+      } else {
+        elem.removeAttribute(aAttr);
+      }
+      return;
+    }
+    // Set attr=val.
+    elem.setAttribute(aAttr, aVal);
   }
 
   // Temporary workaround for DOM api not yet implemented by XUL nodes.
@@ -2476,7 +2536,8 @@ export class nsContextMenu {
       this.onTextInput &&
       this.onSearchField &&
       !this.isLoginForm() &&
-      (uri.schemeIs("http") || uri.schemeIs("https"))
+      (uri.schemeIs("http") || uri.schemeIs("https")) &&
+      Services.policies.isAllowed("installSearchEngine")
     );
   }
 
@@ -2621,10 +2682,23 @@ export class nsContextMenu {
    * @returns {Promise<void>}
    */
   async localizeTranslateSelectionItem(translateSelectionItem) {
-    const { targetLanguage } = await this.#translationsLangPairPromise;
+    const { sourceLanguage, targetLanguage } =
+      await this.#translationsLangPairPromise;
 
     if (targetLanguage) {
-      // A valid to-language exists, so localize the menuitem for that language.
+      if (
+        lazy.TranslationsUtils.langTagsMatch(sourceLanguage, targetLanguage)
+      ) {
+        translateSelectionItem.removeAttribute("target-language");
+        this.document.l10n.setAttributes(
+          translateSelectionItem,
+          this.isTextSelected
+            ? "main-context-menu-translate-selection"
+            : "main-context-menu-translate-link-text"
+        );
+        return;
+      }
+
       let displayName;
 
       try {
@@ -2692,9 +2766,7 @@ export class nsContextMenu {
     const translateSelectionItem = this.document.getElementById(
       "context-translate-selection"
     );
-    const translationsEnabled = Services.prefs.getBoolPref(
-      "browser.translations.enable"
-    );
+    const translationsEnabled = lazy.TranslationsParent.AIFeature.isEnabled;
     const selectTranslationsEnabled = Services.prefs.getBoolPref(
       "browser.translations.select.enable"
     );
@@ -2775,8 +2847,8 @@ export class nsContextMenu {
 
     const { gNavigatorBundle } = this.window;
     // format "Search <engine> for <selection>" string to show in menu
-    let engineName = Services.search.defaultEngine.name;
-    let privateEngineName = Services.search.defaultPrivateEngine.name;
+    let engineName = lazy.SearchService.defaultEngine.name;
+    let privateEngineName = lazy.SearchService.defaultPrivateEngine.name;
     if (!menuItem.hidden) {
       const docIsPrivate = lazy.PrivateBrowsingUtils.isBrowserPrivate(
         this.browser
@@ -2820,7 +2892,7 @@ export class nsContextMenu {
     if (!menuitem) {
       return;
     }
-    if (!Services.search.hasSuccessfullyInitialized) {
+    if (!lazy.SearchService.hasSuccessfullyInitialized) {
       menuitem.hidden = true;
       return;
     }
@@ -2835,8 +2907,8 @@ export class nsContextMenu {
     );
     let engine =
       isBrowserPrivate || isPrivateSearchMenuitem
-        ? Services.search.defaultPrivateEngine
-        : Services.search.defaultEngine;
+        ? lazy.SearchService.defaultPrivateEngine
+        : lazy.SearchService.defaultEngine;
 
     menuitem.hidden =
       !isContextRelevant ||
@@ -2851,7 +2923,7 @@ export class nsContextMenu {
           )));
 
     if (!menuitem.hidden) {
-      let url = engine.wrappedJSObject.getURLOfType(searchUrlType);
+      let url = engine.getURLOfType(searchUrlType);
       if (
         url?.acceptedContentTypes &&
         (!this.contentData?.contentType ||
@@ -2904,7 +2976,7 @@ export class nsContextMenu {
         return;
       }
 
-      let visualSearchUrl = menuitem.engine.wrappedJSObject.getURLOfType(
+      let visualSearchUrl = menuitem.engine.getURLOfType(
         lazy.SearchUtils.URL_TYPE.VISUAL_SEARCH
       );
       this.window.document.l10n.setAttributes(
@@ -2944,7 +3016,7 @@ export class nsContextMenu {
       engine,
       policyContainer,
       searchUrlType,
-      usePrivate,
+      usePrivateWindow: usePrivate,
       window: this.window,
       searchText: searchTerms,
       triggeringPrincipal: principal,
@@ -2955,6 +3027,7 @@ export class nsContextMenu {
     let createMenuOptions = {
       isContextMenu: true,
       excludeUserContextId: this.contentData.userContextId,
+      containerSource: "content_context_menu",
     };
     return this.window.createUserContextMenu(aEvent, createMenuOptions);
   }

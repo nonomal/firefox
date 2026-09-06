@@ -22,26 +22,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import mozilla.components.compose.base.button.FilledButton
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import mozilla.components.concept.storage.CreditCard
 import mozilla.components.concept.storage.CreditCardsAddressesStorage
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.compose.list.TextListItem
 import org.mozilla.fenix.debugsettings.addresses.FakeCreditCardsAddressesStorage
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
-import mozilla.components.ui.icons.R as iconsR
 
-/**
- * CreditCards UI for the debug drawer that displays various creditCards related tools.
- */
+/** CreditCards UI for the debug drawer that displays various creditCards related tools. */
 @Composable
-fun CreditCardsTools(
-    creditCardsAddressesStorage: CreditCardsAddressesStorage,
-) {
+fun CreditCardsTools(creditCardsAddressesStorage: CreditCardsAddressesStorage) {
     val scope = rememberCoroutineScope()
     var creditCards by remember { mutableStateOf(listOf<CreditCard>()) }
     LaunchedEffect(Unit) {
@@ -123,22 +120,10 @@ private fun CreditCardsContent(
     }
 }
 
-@Composable
-@PreviewLightDark
-private fun CreditCardsScreenPreview() {
-    FirefoxTheme {
-        CreditCardsTools(
-            creditCardsAddressesStorage = FakeCreditCardsAddressesStorage(),
-        )
-    }
-}
-
-@Composable
 @Preview
-private fun CreditCardsScreenPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
-        CreditCardsTools(
-            creditCardsAddressesStorage = FakeCreditCardsAddressesStorage(),
-        )
+@Composable
+private fun CreditCardsScreenPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
+        CreditCardsTools(creditCardsAddressesStorage = FakeCreditCardsAddressesStorage())
     }
 }

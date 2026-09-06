@@ -11,9 +11,9 @@
 #import <Foundation/Foundation.h>
 #import <XCTest/XCTest.h>
 
-#include <memory>
+#include "test/gtest.h"
 
-#include "rtc_base/gunit.h"
+#include <memory>
 
 #import "api/peerconnection/RTCIceCandidate+Private.h"
 #import "api/peerconnection/RTCIceCandidate.h"
@@ -39,8 +39,7 @@
   EXPECT_EQ("audio", nativeCandidate->sdp_mid());
   EXPECT_EQ(0, nativeCandidate->sdp_mline_index());
 
-  std::string sdpString;
-  nativeCandidate->ToString(&sdpString);
+  std::string sdpString = nativeCandidate->ToString();
   EXPECT_EQ(sdp.stdString, sdpString);
 }
 

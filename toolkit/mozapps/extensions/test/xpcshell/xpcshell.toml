@@ -43,8 +43,6 @@ run-if = [
 ["test_AddonRepository_paging.js"]
 
 ["test_EnvironmentAddonBuilder_telemetry.js"]
- # Ensure EnvironmentAddonBuilder is managed by AMTelemetry on all builds.
-prefs = ["extensions.telemetry.EnvironmentAddonBuilder=true"]
 
 ["test_ModelHubProvider.js"]
 run-if = [
@@ -76,6 +74,8 @@ skip-if = [
 ["test_addonStartup_save_failures.js"]
 
 ["test_addon_manager_telemetry_events.js"]
+
+["test_addons_glean_ping.js"]
 
 ["test_amo_stats_telemetry.js"]
 skip-if = [
@@ -332,6 +332,8 @@ skip-if = [
 ["test_startup_scan.js"]
 head = "head_addons.js head_sideload.js"
 
+["test_startup_version.js"]
+
 ["test_strictcompatibility.js"]
 head = "head_addons.js head_compat.js"
 
@@ -417,10 +419,6 @@ run-if = [
 ]
 
 ["test_types.js"]
-# prevents test failure due to EnvironmentAddonBuilder calls
-# to getActiveAddons used to collect the Glean activeAddons
-# metric.
-prefs = ["extensions.telemetry.EnvironmentAddonBuilder=false"]
 
 ["test_undouninstall.js"]
 skip-if = [
@@ -507,3 +505,5 @@ tags = "webextensions"
 skip-if = [
   "os == 'android'", # Non-extension add-ons are not supported on Android, but test installs static theme.
 ]
+
+["test_xpi_relocated_location.js"]

@@ -4,7 +4,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use neqo_common::{qdebug, Datagram};
+use neqo_common::{Datagram, qdebug};
 use test_fixture::{
     assertions::{is_handshake, is_initial},
     now, split_datagram,
@@ -15,12 +15,13 @@ use super::{
         super::{CloseReason, ERROR_AEAD_LIMIT_REACHED},
         Connection, ConnectionParameters, Error, Output, State, StreamType,
     },
-    connect, connect_force_idle, default_client, default_server, maybe_authenticate,
-    send_and_receive, send_something, AT_LEAST_PTO,
+    AT_LEAST_PTO, connect, connect_force_idle, default_client, default_server, maybe_authenticate,
+    send_and_receive, send_something,
 };
 use crate::{
+    MIN_INITIAL_PACKET_SIZE,
     crypto::{OVERWRITE_INVOCATIONS, UPDATE_WRITE_KEYS_AT},
-    packet, MIN_INITIAL_PACKET_SIZE,
+    packet,
 };
 
 fn check_discarded(
@@ -219,6 +220,64 @@ fn key_update_consecutive() {
     // However, as the server didn't wait long enough to update again, the
     // client hasn't rotated its keys, so the packet gets dropped.
     check_discarded(&mut client, &dgram, false, 1, 0);
+}
+
+// Receiving the same key update packet twice must not be treated as two key
+// updates. The packet carrying a new key phase is decrypted with a key state
+// that has recorded a single packet number, which is how `needs_update` detects
+// a key update. Redelivering the packet leaves that state unchanged, so
+// `needs_update` fires again before the read keys rotate.
+#[test]
+fn key_update_received_twice() {
+    let mut client = default_client();
+    let mut server = default_server();
+    connect_force_idle(&mut client, &mut server);
+    let now = now();
+
+    // The server initiates a key update, so its next packet carries the new key
+    // phase.
+    assert!(server.initiate_key_update().is_ok());
+    assert_eq!(server.get_epochs(), (Some(4), Some(3)));
+    let dgram = send_something(&mut server, now);
+
+    // The client updates its write keys and arms the read-key timer, but does
+    // not rotate its read keys until that timer fires.
+    client.process_input(dgram.clone(), now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(3)));
+
+    // The same packet again, before the timer fires, used to trip a debug
+    // assertion in `CryptoStates::maybe_update_write`. It must be a no-op.
+    client.process_input(dgram, now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(3)));
+}
+
+// The same key update packet, redelivered after the read keys have rotated,
+// must not be treated as a fresh update. By then `read_update_time` is cleared,
+// so a guard keyed on it would let the duplicate through: the client would roll
+// its keys forward again (with assertions compiled out, no crash) and drive an
+// unsolicited key update, ratcheting the key phase ahead of the server.
+#[test]
+fn key_update_received_after_rotation() {
+    let mut client = default_client();
+    let mut server = default_server();
+    connect_force_idle(&mut client, &mut server);
+    let mut now = now();
+
+    assert!(server.initiate_key_update().is_ok());
+    let dgram = send_something(&mut server, now);
+
+    // The client responds to the update and arms the read-key timer.
+    client.process_input(dgram.clone(), now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(3)));
+
+    // Let the timer fire so the client rotates its read keys to the new epoch.
+    now += AT_LEAST_PTO;
+    drop(client.process_output(now));
+    assert_eq!(client.get_epochs(), (Some(4), Some(4)));
+
+    // Redelivering the packet now must not start another key update.
+    client.process_input(dgram, now);
+    assert_eq!(client.get_epochs(), (Some(4), Some(4)));
 }
 
 // Key updates can't be initiated too early.

@@ -4,6 +4,7 @@
 
 package mozilla.components.feature.accounts.push
 
+import java.util.UUID
 import kotlinx.coroutines.test.runTest
 import mozilla.components.concept.sync.ConstellationState
 import mozilla.components.concept.sync.Device
@@ -12,6 +13,7 @@ import mozilla.components.concept.sync.DeviceConstellation
 import mozilla.components.concept.sync.DeviceType
 import mozilla.components.concept.sync.OAuthAccount
 import mozilla.components.concept.sync.TabData
+import mozilla.components.concept.sync.TabPrivacy
 import mozilla.components.service.fxa.manager.FxaAccountManager
 import mozilla.components.support.test.any
 import mozilla.components.support.test.eq
@@ -23,7 +25,6 @@ import org.mockito.Mockito.never
 import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
-import java.util.UUID
 
 class SendTabUseCasesTest {
 
@@ -45,10 +46,9 @@ class SendTabUseCasesTest {
         val device: Device = generateDevice()
 
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(true)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(true)
 
-        useCases.sendToDeviceAsync(device.id, TabData("Title", "http://example.com"))
+        useCases.sendToDeviceAsync(device.id, TabData("Title", "http://example.com", TabPrivacy.Normal))
         testScheduler.advanceUntilIdle()
 
         verify(constellation).sendCommandToDevice(any(), any())
@@ -58,11 +58,10 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - tabs are sent to capable device`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = generateDevice()
-        val tab = TabData("Title", "http://example.com")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
 
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(true)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(true)
 
         useCases.sendToDeviceAsync(device.id, listOf(tab, tab))
         testScheduler.advanceUntilIdle()
@@ -74,7 +73,7 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - tabs are NOT sent to incapable devices`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = mock()
-        val tab = TabData("Title", "http://example.com")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
 
         useCases.sendToDeviceAsync("123", listOf(tab, tab))
         testScheduler.advanceUntilIdle()
@@ -83,8 +82,7 @@ class SendTabUseCasesTest {
 
         `when`(device.id).thenReturn("123")
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
         useCases.sendToDeviceAsync("123", listOf(tab, tab))
         testScheduler.advanceUntilIdle()
@@ -96,13 +94,12 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - ONLY tabs with valid schema are sent to capable device`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = generateDevice()
-        val tab = TabData("Title", "http://example.com")
-        val tab1 = TabData("PDFFile", "file://path/to/some/pdf")
-        val tab2 = TabData("AboutConfig", "about:config")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
+        val tab1 = TabData("PDFFile", "file://path/to/some/pdf", TabPrivacy.Normal)
+        val tab2 = TabData("AboutConfig", "about:config", TabPrivacy.Normal)
 
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(true)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(true)
 
         useCases.sendToDeviceAsync(device.id, listOf(tab, tab1, tab2))
         testScheduler.advanceUntilIdle()
@@ -114,7 +111,7 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - device id does not match when sending single tab`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = generateDevice("123")
-        val tab = TabData("Title", "http://example.com")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
 
         useCases.sendToDeviceAsync("123", tab)
         testScheduler.advanceUntilIdle()
@@ -122,8 +119,7 @@ class SendTabUseCasesTest {
         verify(constellation, never()).sendCommandToDevice(any(), any())
 
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
         useCases.sendToDeviceAsync("456", tab)
         testScheduler.advanceUntilIdle()
@@ -140,7 +136,7 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - device id does not match when sending tabs`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = generateDevice("123")
-        val tab = TabData("Title", "http://example.com")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
 
         useCases.sendToDeviceAsync("123", listOf(tab))
         testScheduler.advanceUntilIdle()
@@ -148,8 +144,7 @@ class SendTabUseCasesTest {
         verify(constellation, never()).sendCommandToDevice(any(), any())
 
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
         useCases.sendToDeviceAsync("456", listOf(tab))
         testScheduler.advanceUntilIdle()
@@ -169,10 +164,9 @@ class SendTabUseCasesTest {
         val device2: Device = generateDevice()
 
         `when`(state.otherDevices).thenReturn(listOf(device, device2))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
-        val tab = TabData("Mozilla", "https://mozilla.org")
+        val tab = TabData("Mozilla", "https://mozilla.org", TabPrivacy.Normal)
 
         useCases.sendToAllAsync(tab)
         testScheduler.advanceUntilIdle()
@@ -187,11 +181,10 @@ class SendTabUseCasesTest {
         val device2: Device = generateDevice()
 
         `when`(state.otherDevices).thenReturn(listOf(device, device2))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
-        val tab = TabData("Mozilla", "https://mozilla.org")
-        val tab2 = TabData("Firefox", "https://firefox.com")
+        val tab = TabData("Mozilla", "https://mozilla.org", TabPrivacy.Normal)
+        val tab2 = TabData("Firefox", "https://firefox.com", TabPrivacy.Normal)
 
         useCases.sendToAllAsync(listOf(tab, tab2))
         testScheduler.advanceUntilIdle()
@@ -202,7 +195,7 @@ class SendTabUseCasesTest {
     @Test
     fun `SendTabToAllUseCase - tab is NOT sent to incapable devices`() = runTest {
         val useCases = SendTabUseCases(manager)
-        val tab = TabData("Mozilla", "https://mozilla.org")
+        val tab = TabData("Mozilla", "https://mozilla.org", TabPrivacy.Normal)
         val device: Device = mock()
         val device2: Device = mock()
 
@@ -224,8 +217,8 @@ class SendTabUseCasesTest {
     @Test
     fun `SendTabToAllUseCase - tabs are NOT sent to capable devices`() = runTest {
         val useCases = SendTabUseCases(manager)
-        val tab = TabData("Mozilla", "https://mozilla.org")
-        val tab2 = TabData("Firefox", "https://firefox.com")
+        val tab = TabData("Mozilla", "https://mozilla.org", TabPrivacy.Normal)
+        val tab2 = TabData("Firefox", "https://firefox.com", TabPrivacy.Normal)
         val device: Device = mock()
         val device2: Device = mock()
 
@@ -252,15 +245,14 @@ class SendTabUseCasesTest {
         val device2: Device = generateDevice()
 
         `when`(state.otherDevices).thenReturn(listOf(device, device2))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(false)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(false)
 
-        val tab = TabData("Mozilla", "https://mozilla.org")
-        val tab2 = TabData("Firefox", "https://firefox.com")
+        val tab = TabData("Mozilla", "https://mozilla.org", TabPrivacy.Normal)
+        val tab2 = TabData("Firefox", "https://firefox.com", TabPrivacy.Normal)
         // Invalid url to send
-        val tab3 = TabData("PDFFile", "file://path/to/pdffile")
+        val tab3 = TabData("PDFFile", "file://path/to/pdffile", TabPrivacy.Normal)
         // Invalid url to send
-        val tab4 = TabData("AboutPage", "about:config")
+        val tab4 = TabData("AboutPage", "about:config", TabPrivacy.Normal)
 
         useCases.sendToAllAsync(listOf(tab, tab2, tab3, tab4))
         testScheduler.advanceUntilIdle()
@@ -272,7 +264,7 @@ class SendTabUseCasesTest {
     fun `SendTabUseCase - result is false if any send tab action fails`() = runTest {
         val useCases = SendTabUseCases(manager, coroutineContext)
         val device: Device = mock()
-        val tab = TabData("Title", "http://example.com")
+        val tab = TabData("Title", "http://example.com", TabPrivacy.Normal)
 
         useCases.sendToDeviceAsync("123", listOf(tab, tab))
         testScheduler.advanceUntilIdle()
@@ -281,9 +273,7 @@ class SendTabUseCasesTest {
 
         `when`(device.id).thenReturn("123")
         `when`(state.otherDevices).thenReturn(listOf(device))
-        `when`(constellation.sendCommandToDevice(any(), any()))
-            .thenReturn(true)
-            .thenReturn(true)
+        `when`(constellation.sendCommandToDevice(any(), any())).thenReturn(true).thenReturn(true)
 
         val result = useCases.sendToDeviceAsync("123", listOf(tab, tab))
         testScheduler.advanceUntilIdle()

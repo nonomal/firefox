@@ -17,9 +17,8 @@ autofill-edit-payment-method-os-prompt-macos = show stored payment method inform
 autofill-edit-payment-method-os-prompt-windows = { -brand-short-name } is trying to show stored payment method information. Confirm access to this Windows account below.
 autofill-edit-payment-method-os-prompt-other = { -brand-short-name } is trying to show stored payment method information.
 
-# The links lead users to Form Autofill browser preferences.
-autofill-options-link = Form Autofill Options
-autofill-options-link-osx = Form Autofill Preferences
+# The link leads users to Form Autofill browser preferences.
+autofill-options-link = Form autofill options
 
 ## The credit card capture doorhanger
 
@@ -62,6 +61,12 @@ autofill-manage-addresses-label = Manage addresses
 # Used as a label for the button, displayed at the bottom of the dropdown suggestion, to open Form Autofill browser preferences.
 autofill-manage-payment-methods-label = Manage payment methods
 
+# Used as the primary label of an autofill drop down suggestion when the focused
+# field is the card security code. The card's masked number is shown underneath
+# it as the secondary label. "CVC" is a common abbreviation for the code printed
+# on a payment card; use whichever abbreviation is most familiar in your locale.
+autofill-card-security-code-label = CVC
+
 ## These are brand names and should only be translated when a locale-specific name for that brand is in common use
 
 autofill-card-network-amex = American Express
@@ -73,18 +78,6 @@ autofill-card-network-mastercard = MasterCard
 autofill-card-network-mir = MIR
 autofill-card-network-unionpay = Union Pay
 autofill-card-network-visa = Visa
-
-# The warning text that is displayed for informing users what categories are
-# about to be filled.  The text would be, for example,
-#   Also autofills organization, phone, email.
-# Variables:
-#   $categories - one or more of the categories, see autofill-category-X below
-autofill-phishing-warningmessage-extracategory = Also autofills { $categories }
-
-# Variation when all are in the same category.
-# Variables:
-#   $categories - one or more of the categories
-autofill-phishing-warningmessage = Autofills { $categories }
 
 # Used in autofill drop down suggestion to indicate what other categories Form Autofill will attempt to fill.
 autofill-category-address = address

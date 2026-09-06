@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +5,7 @@
 #ifndef mozilla_dom_Sanitizer_h
 #define mozilla_dom_Sanitizer_h
 
+#include "mozilla/FunctionRef.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/DocumentFragment.h"
@@ -15,6 +14,7 @@
 #include "mozilla/dom/StaticAtomSet.h"
 #include "nsIGlobalObject.h"
 #include "nsIParserUtils.h"
+#include "nsNameSpaceManager.h"
 #include "nsString.h"
 
 class nsISupports;
@@ -25,7 +25,36 @@ class ErrorResult;
 
 namespace dom {
 
+class Element;
 class GlobalObject;
+
+enum class SanitizerElementAction : uint8_t {
+  Keep,
+  Remove,
+  ReplaceWithChildren
+};
+
+/**
+ * What a configuration does with an element, plus the per-element data that
+ * the element's attributes are matched against. Only valid for the Sanitizer
+ * that returned it, and only until that Sanitizer's configuration changes.
+ */
+class SanitizerElementMatch final {
+ public:
+  SanitizerElementAction Action() const { return mAction; }
+
+ private:
+  friend class Sanitizer;
+
+  SanitizerElementAction mAction = SanitizerElementAction::Keep;
+  bool mSafe = false;
+  nsAtom* mLocalName = nullptr;
+  int32_t mNamespaceID = kNameSpaceID_None;
+  // The element's entry in the configuration's element list, if any. Which of
+  // the two the match uses depends on Sanitizer::mIsDefaultConfig.
+  StaticAtomSet* mDefaultAttributes = nullptr;
+  sanitizer::CanonicalElementAttributes* mAttributes = nullptr;
+};
 
 class Sanitizer final : public nsISupports, public nsWrapperCache {
   explicit Sanitizer(nsIGlobalObject* aGlobal) : mGlobal(aGlobal) {
@@ -33,7 +62,7 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   }
 
  public:
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(Sanitizer);
 
   nsIGlobalObject* GetParentObject() const { return mGlobal; }
@@ -58,6 +87,10 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   bool RemoveElement(const StringOrSanitizerElementNamespace& aElement);
   bool ReplaceElementWithChildren(
       const StringOrSanitizerElementNamespace& aElement);
+  bool AllowProcessingInstruction(
+      const StringOrSanitizerProcessingInstruction& aPI);
+  bool RemoveProcessingInstruction(
+      const StringOrSanitizerProcessingInstruction& aPI);
   bool AllowAttribute(const StringOrSanitizerAttributeNamespace& aAttribute);
   bool RemoveAttribute(const StringOrSanitizerAttributeNamespace& aAttribute);
   bool SetComments(bool aAllow);
@@ -77,13 +110,13 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   ~Sanitizer() = default;
 
   void CanonicalizeConfiguration(const SanitizerConfig& aConfig,
-                                 bool aAllowCommentsAndDataAttributes,
+                                 bool aAllowCommentsPIsAndDataAttributes,
                                  ErrorResult& aRv);
   void IsValid(ErrorResult& aRv);
 
   void SetDefaultConfig();
   void SetConfig(const SanitizerConfig& aConfig,
-                 bool aAllowCommentsAndDataAttributes, ErrorResult& aRv);
+                 bool aAllowCommentsPIsAndDataAttributes, ErrorResult& aRv);
 
   void MaybeMaterializeDefaultConfig();
 
@@ -91,32 +124,38 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   bool RemoveAttributeCanonical(sanitizer::CanonicalAttribute&& aAttribute);
 
   template <bool IsDefaultConfig>
-  void SanitizeChildren(nsINode* aNode, bool aSafe);
-  void SanitizeAttributes(Element* aChild,
-                          const sanitizer::CanonicalElement& aElementName,
-                          bool aSafe);
-  void SanitizeDefaultConfigAttributes(Element* aChild,
-                                       StaticAtomSet* aElementAttributes,
-                                       bool aSafe);
+  void SanitizeChildren(nsINode* aNode, bool aSafe) const;
 
-  /**
-   * Logs localized message to either content console or browser console
-   * @param aName              Localization key
-   * @param aParams            Localization parameters
-   * @param aFlags             Logging Flag (see nsIScriptError)
-   */
-  void LogLocalizedString(const char* aName, const nsTArray<nsString>& aParams,
-                          uint32_t aFlags);
+  template <bool IsDefaultConfig>
+  SanitizerElementAction SanitizeElementInternal(Element* aElement,
+                                                 bool aSafe) const;
 
-  /**
-   * Logs localized message to either content console or browser console
-   * @param aMessage           Message to log
-   * @param aFlags             Logging Flag (see nsIScriptError)
-   * @param aInnerWindowID     Inner Window ID (Logged on browser console if 0)
-   * @param aFromPrivateWindow If from private window
-   */
-  static void LogMessage(const nsAString& aMessage, uint32_t aFlags,
-                         uint64_t aInnerWindowID, bool aFromPrivateWindow);
+  template <bool IsDefaultConfig>
+  SanitizerElementMatch MatchElementInternal(nsAtom* aLocalName,
+                                             int32_t aNamespaceID,
+                                             bool aSafe) const;
+
+  template <bool IsDefaultConfig>
+  bool ShouldRemoveAttributeInternal(
+      const SanitizerElementMatch& aMatch, nsAtom* aLocalName,
+      int32_t aNamespaceID, FunctionRef<void(nsAString&)> aGetValue) const;
+
+  // Whether the configuration allows an attribute on the element aMatch was
+  // obtained for: the spec's "sanitize" steps 5.2.-5.6.
+  template <bool IsDefaultConfig>
+  bool MatchAllowsAttribute(const SanitizerElementMatch& aMatch,
+                            nsAtom* aAttrLocalName, int32_t aAttrNs) const;
+
+  // Whether the configuration's global and per-element attribute lists allow
+  // an attribute, given the element's entry in the element list. The two
+  // overloads are the default configuration's and a canonicalized
+  // configuration's representation of that entry.
+  bool AttributeListsAllow(StaticAtomSet* aElementAttributes,
+                           nsAtom* aAttrLocalName, int32_t aAttrNs,
+                           bool aSafe) const;
+  bool AttributeListsAllow(
+      sanitizer::CanonicalElementAttributes* aElementAttributes,
+      nsAtom* aAttrLocalName, int32_t aAttrNs, bool aSafe) const;
 
   void AssertIsValid();
 
@@ -124,6 +163,8 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
     MOZ_ASSERT(!mElements);
     MOZ_ASSERT(!mRemoveElements);
     MOZ_ASSERT(!mReplaceWithChildrenElements);
+    MOZ_ASSERT(!mProcessingInstructions);
+    MOZ_ASSERT(!mRemoveProcessingInstructions);
     MOZ_ASSERT(!mAttributes);
     MOZ_ASSERT(!mRemoveAttributes);
   }
@@ -133,6 +174,9 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   Maybe<sanitizer::CanonicalElementMap> mElements;
   Maybe<sanitizer::CanonicalElementSet> mRemoveElements;
   Maybe<sanitizer::CanonicalElementSet> mReplaceWithChildrenElements;
+
+  Maybe<sanitizer::CanonicalPISet> mProcessingInstructions;
+  Maybe<sanitizer::CanonicalPISet> mRemoveProcessingInstructions;
 
   Maybe<sanitizer::CanonicalAttributeSet> mAttributes;
   Maybe<sanitizer::CanonicalAttributeSet> mRemoveAttributes;

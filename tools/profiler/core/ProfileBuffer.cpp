@@ -1,15 +1,13 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "ProfileBuffer.h"
 
-#include "BaseProfiler.h"
 #include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin
 #include "js/GCAPI.h"
 #include "jsfriendapi.h"
+#include "mozilla/BaseProfiler.h"
 #include "nsJSPrincipals.h"
 #include "nsScriptSecurityManager.h"
 
@@ -196,9 +194,10 @@ void ProfileBufferCollector::CollectJitReturnAddr(void* aAddr) {
   mBuf.AddEntry(ProfileBufferEntry::JitReturnAddr(aAddr));
 }
 
-void ProfileBufferCollector::CollectWasmFrame(
-    JS::ProfilingCategoryPair aCategory, const char* aLabel) {
-  mBuf.CollectCodeLocation("", aLabel, 0, 0, 0, Nothing(), Nothing(),
+void ProfileBufferCollector::CollectWasmOrSyncJITFrame(
+    JS::ProfilingCategoryPair aCategory, const char* aLabel,
+    uint32_t aSourceId) {
+  mBuf.CollectCodeLocation("", aLabel, 0, 0, aSourceId, Nothing(), Nothing(),
                            Some(aCategory));
 }
 

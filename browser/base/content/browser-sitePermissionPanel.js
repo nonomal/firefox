@@ -2,6 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+ChromeUtils.defineESModuleGetters(this, {
+  PermissionUI: "resource:///modules/PermissionUI.sys.mjs",
+  SerialDeviceSharingHelper:
+    "moz-src:///browser/modules/SerialDeviceSharingHelper.sys.mjs",
+});
+
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "SiteCategory",
+  "@mozilla.org/site-category;1",
+  Ci.nsISiteCategory
+);
+
 /**
  * Utility object to handle manipulations of the identity permission indicators
  * in the UI.
@@ -37,6 +50,22 @@ var gPermissionPanel = {
     this._popupPosition = popupPosition;
   },
 
+  // Return the current browser for which the permission panel applies.
+  // Allows sidebar context by temporarily overriding.
+  _browserOverride: null,
+  setBrowserOverride(browser) {
+    this._browserOverride = browser;
+  },
+  clearBrowserOverride() {
+    this._browserOverride = null;
+  },
+
+  get _activeBrowser() {
+    return this._browserOverride ?? gBrowser.selectedBrowser;
+  },
+  get browser() {
+    return this._activeBrowser;
+  },
   // smart getters
   get _popupAnchor() {
     if (this._popupAnchorNode) {
@@ -114,6 +143,13 @@ var gPermissionPanel = {
     return (this._xrSharingIcon = document.getElementById("xr-sharing-icon"));
   },
 
+  get _serialSharingIcon() {
+    delete this._serialSharingIcon;
+    return (this._serialSharingIcon = document.getElementById(
+      "serial-sharing-icon"
+    ));
+  },
+
   get _webRTCSharingIcon() {
     delete this._webRTCSharingIcon;
     return (this._webRTCSharingIcon = document.getElementById(
@@ -126,7 +162,9 @@ var gPermissionPanel = {
    * and the list of permissions.
    */
   _refreshPermissionPopup() {
-    let host = gIdentityHandler.getHostForDisplay();
+    let host = gIdentityHandler.getHostForDisplay(
+      this._browserOverride?.currentURI
+    );
 
     // Update header label
     this._permissionPopupMainViewHeaderLabel.textContent =
@@ -253,18 +291,19 @@ var gPermissionPanel = {
   },
 
   /**
-   * Update identity permission indicators based on sharing state of the
-   * selected tab. This should be called externally whenever the sharing state
-   * of the selected tab changes.
+   * Update identity permission indicators based on the browser's sharing state.
+   * This should be called externally whenever the sharing state
+   * for the selected tab's browser changes.
    */
   updateSharingIndicator() {
-    let tab = gBrowser.selectedTab;
-    this._sharingState = tab._sharingState;
+    let browser = gBrowser.selectedBrowser;
+    this._sharingState = browser._sharingState;
 
     this._webRTCSharingIcon.removeAttribute("paused");
     this._webRTCSharingIcon.removeAttribute("sharing");
     this._geoSharingIcon.removeAttribute("sharing");
     this._xrSharingIcon.removeAttribute("sharing");
+    this._serialSharingIcon.removeAttribute("sharing");
 
     let hasSharingIcon = false;
 
@@ -306,6 +345,11 @@ var gPermissionPanel = {
         this._xrSharingIcon.setAttribute("sharing", this._sharingState.xr);
         hasSharingIcon = true;
       }
+
+      if (this._sharingState.serial) {
+        this._serialSharingIcon.setAttribute("sharing", "serial");
+        hasSharingIcon = true;
+      }
     }
 
     this._identityPermissionBox.toggleAttribute(
@@ -339,9 +383,12 @@ var gPermissionPanel = {
     // being focused (and therefore, interacted with) by the user. However, we
     // want to allow opening the identity popup from the device control menu,
     // which calls click() on the identity button, so we don't return early.
+    // Persisted search terms also produce pageproxystate=invalid, but a real
+    // page is loaded underneath, so the permission popup is still meaningful.
     if (
       !this._sharingState &&
-      gURLBar.getAttribute("pageproxystate") != "valid"
+      gURLBar.getAttribute("pageproxystate") != "valid" &&
+      !gURLBar.hasAttribute("persistsearchterms")
     ) {
       return;
     }
@@ -418,7 +465,7 @@ var gPermissionPanel = {
     this._permissionLabelIndex = 0;
 
     let permissions = SitePermissions.getAllPermissionDetailsForBrowser(
-      gBrowser.selectedBrowser
+      this.browser
     );
 
     // Don't display origin-keyed 3rdPartyStorage permissions that are covered by
@@ -452,7 +499,7 @@ var gPermissionPanel = {
       }
     });
 
-    this._sharingState = gBrowser.selectedTab._sharingState;
+    this._sharingState = this.browser._sharingState;
 
     if (this._sharingState?.geo) {
       let geoPermission = permissions.find(perm => perm.id === "geo");
@@ -475,6 +522,20 @@ var gPermissionPanel = {
       } else {
         permissions.push({
           id: "xr",
+          state: SitePermissions.ALLOW,
+          scope: SitePermissions.SCOPE_REQUEST,
+          sharingState: true,
+        });
+      }
+    }
+
+    if (this._sharingState?.serial) {
+      let serialPermission = permissions.find(perm => perm.id === "serial");
+      if (serialPermission) {
+        serialPermission.sharingState = true;
+      } else {
+        permissions.push({
+          id: "serial",
           state: SitePermissions.ALLOW,
           scope: SitePermissions.SCOPE_REQUEST,
           sharingState: true,
@@ -515,9 +576,9 @@ var gPermissionPanel = {
     }
 
     let totalBlockedPopups =
-      gBrowser.selectedBrowser.popupAndRedirectBlocker.getBlockedPopupCount();
+      this.browser.popupAndRedirectBlocker.getBlockedPopupCount();
     let isRedirectBlocked =
-      gBrowser.selectedBrowser.popupAndRedirectBlocker.isRedirectBlocked();
+      this.browser.popupAndRedirectBlocker.isRedirectBlocked();
     let showBlockedIndicator = totalBlockedPopups || isRedirectBlocked;
 
     let hasBlockedIndicator = false;
@@ -696,6 +757,13 @@ var gPermissionPanel = {
       menulist.setAttribute("sizetopopup", "none");
       menulist.setAttribute("id", "permission-popup-menulist");
 
+      if (
+        idNoSuffix == "popup" &&
+        Services.prefs.prefIsLocked("dom.disable_open_during_load")
+      ) {
+        menulist.setAttribute("disabled", "true");
+      }
+
       for (let state of SitePermissions.getAvailableStates(idNoSuffix)) {
         let menuitem = document.createXULElement("menuitem");
         // We need to correctly display the default/unknown state, which has its
@@ -841,7 +909,8 @@ var gPermissionPanel = {
     let tooltiptext = gNavigatorBundle.getString("permissions.remove.tooltip");
     button.setAttribute("tooltiptext", tooltiptext);
     button.addEventListener("command", () => {
-      let browser = gBrowser.selectedBrowser;
+      let browser = this.browser;
+      let contentPrincipal = browser.contentPrincipal;
       container.remove();
       // For XR permissions we need to keep track of all origins which may have
       // started XR sharing. This is necessary, because XR does not use
@@ -887,7 +956,7 @@ var gPermissionPanel = {
         });
         for (let removePermission of removePermissions) {
           SitePermissions.removeFromPrincipal(
-            gBrowser.contentPrincipal,
+            contentPrincipal,
             removePermission.id,
             browser
           );
@@ -895,10 +964,17 @@ var gPermissionPanel = {
       }
 
       SitePermissions.removeFromPrincipal(
-        gBrowser.contentPrincipal,
+        contentPrincipal,
         permission.id,
         browser
       );
+
+      // Record telemetry for notification permission revocation via toolbar
+      if (idNoSuffix === "desktop-notification") {
+        Glean.webNotificationPermission.permissionRevokedToolbar.record({
+          site_category: SiteCategory.getCategory(gBrowser.contentPrincipal),
+        });
+      }
 
       this._permissionReloadHint.hidden = false;
 
@@ -906,6 +982,13 @@ var gPermissionPanel = {
         gBrowser.updateBrowserSharing(browser, { geo: false });
       } else if (idNoSuffix === "xr") {
         gBrowser.updateBrowserSharing(browser, { xr: false });
+      } else if (idNoSuffix === "serial") {
+        SerialDeviceSharingHelper.resetBrowserCount(browser);
+        gBrowser.updateBrowserSharing(browser, { serial: false });
+        Services.obs.notifyObservers(
+          browser.browsingContext,
+          "serial-permission-revoked"
+        );
       }
 
       clearCallback();
@@ -1024,7 +1107,7 @@ var gPermissionPanel = {
       permission,
       idNoSuffix: id,
       clearCallback: () => {
-        webrtcUI.clearPermissionsAndStopSharing([id], gBrowser.selectedTab);
+        webrtcUI.clearPermissionsAndStopSharing([id], this.browser);
       },
     });
   },

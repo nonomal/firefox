@@ -6,8 +6,6 @@
 import sys
 from pathlib import PurePath
 
-from gecko_taskgraph.target_tasks import filter_by_uncommon_try_tasks
-
 from ..cli import BaseTryParser
 from ..push import check_working_directory, generate_try_task_config, push_to_try
 from ..tasks import filter_tasks_by_paths, filter_tasks_by_worker_type, generate_tasks
@@ -102,14 +100,17 @@ class FuzzyParser(BaseTryParser):
         "browsertime",
         "chemspill-prio",
         "disable-pgo",
+        "do-not-optimize",
         "env",
         "existing-tasks",
+        "extensions",
         "gecko-profile",
         "new-test-config",
         "path",
         "target-tasks-method",
         "test-tag",
         "pernosco",
+        "pushdate",
         "rebuild",
         "routes",
         "worker-overrides",
@@ -117,6 +118,7 @@ class FuzzyParser(BaseTryParser):
 
 
 def run(
+    metrics,
     update=False,
     query=None,
     intersect_query=None,
@@ -126,6 +128,7 @@ def run(
     save_query=False,
     stage_changes=False,
     dry_run=False,
+    write_task_config=False,
     message="{msg}",
     test_paths=None,
     test_tag=None,
@@ -137,19 +140,24 @@ def run(
     new_test_config=False,
     **kwargs,
 ):
+    metrics.mach_try.fzf_bootstrap_duration.start()
+    from gecko_taskgraph.target_tasks import filter_by_uncommon_try_tasks
+
     fzf = fzf_bootstrap(update)
+    metrics.mach_try.fzf_bootstrap_duration.stop()
 
     if not fzf:
         print(FZF_NOT_FOUND)
         return 1
 
-    push = not stage_changes and not dry_run
+    push = not stage_changes and not dry_run and not write_task_config
     check_working_directory(push)
 
     target_tasks_method = None
     if try_config_params and "target_tasks_method" in try_config_params:
         target_tasks_method = try_config_params.pop("target_tasks_method")
 
+    metrics.mach_try.taskgraph_generation_duration.start()
     tg = generate_tasks(
         parameters,
         full=full,
@@ -157,6 +165,9 @@ def run(
         target_tasks_method=target_tasks_method,
     )
     all_tasks = tg.tasks
+    metrics.mach_try.taskgraph_generation_duration.stop()
+
+    metrics.mach_try.task_filtering_duration.start()
 
     if not full and not disable_target_task_filter:
         all_tasks = {
@@ -168,12 +179,16 @@ def run(
     if try_config_params.get("try_task_config", {}).get("worker-types", []):
         all_tasks = filter_tasks_by_worker_type(all_tasks, try_config_params)
         if not all_tasks:
+            metrics.mach_try.task_filtering_duration.stop()
             return 1
 
     if test_paths or test_tag:
         all_tasks = filter_tasks_by_paths(all_tasks, test_paths, tag=test_tag)
         if not all_tasks:
+            metrics.mach_try.task_filtering_duration.stop()
             return 1
+
+    metrics.mach_try.task_filtering_duration.stop()
 
     key_shortcuts = [k + ":" + v for k, v in fzf_shortcuts.items()]
     base_cmd = [
@@ -205,7 +220,10 @@ def run(
         else:
             fzf_tasks = set(candidate_tasks.keys())
 
+        metrics.mach_try.interactive_duration.start()
         query_str, tasks = run_fzf(cmd, sorted(fzf_tasks))
+        metrics.mach_try.interactive_duration.stop()
+
         queries.append(query_str)
         return set(tasks)
 
@@ -245,14 +263,21 @@ def run(
         args.append("paths={}".format(":".join(test_paths)))
     if args:
         msg = "{} {}".format(msg, "&".join(args))
+
+    metrics.mach_try.task_config_generation_duration.start()
+    try_task_config = generate_try_task_config(
+        "fuzzy", selected, params=try_config_params
+    )
+    metrics.mach_try.task_config_generation_duration.stop()
+
     return push_to_try(
         "fuzzy",
         message.format(msg=msg),
-        try_task_config=generate_try_task_config(
-            "fuzzy", selected, params=try_config_params
-        ),
+        metrics,
+        try_task_config=try_task_config,
         stage_changes=stage_changes,
         dry_run=dry_run,
+        write_task_config=write_task_config,
         closed_tree=closed_tree,
         push_to_vcs=push_to_vcs,
     )

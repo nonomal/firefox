@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +6,7 @@
 
 #include "H264.h"
 #include "PDMFactory.h"
+#include "gfxPlatform.h"
 #include "gtest/gtest.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/gtest/WaitFor.h"
@@ -19,6 +19,9 @@ using ParamType = std::underlying_type<MDD::PropertyName>::type;
 class PropertyTest : public ::testing::TestWithParam<ParamType> {
  public:
   static void SetUpTestSuite() {
+    // This ensures static media data is initialized.
+    gfxPlatform::GetPlatform();
+
     sFactory = MakeRefPtr<PDMFactory>();
     sAVCInfo = MakeUnique<VideoInfo>(sDummyVideoSize);
     sAVCInfo->mMimeType = "video/avc"_ns;
@@ -43,10 +46,11 @@ class PropertyTest : public ::testing::TestWithParam<ParamType> {
   static UniquePtr<VideoInfo> sAVCInfo;
   static UniquePtr<VideoInfo> sVP9Info;
 };
-MOZ_CONSTINIT RefPtr<PDMFactory> PropertyTest::sFactory;
-MOZ_CONSTINIT RefPtr<TaskQueue> PropertyTest::sTaskQueue;
-MOZ_CONSTINIT UniquePtr<VideoInfo> PropertyTest::sAVCInfo;
-MOZ_CONSTINIT UniquePtr<VideoInfo> PropertyTest::sVP9Info;
+
+constinit RefPtr<PDMFactory> PropertyTest::sFactory;
+constinit RefPtr<TaskQueue> PropertyTest::sTaskQueue;
+constinit UniquePtr<VideoInfo> PropertyTest::sAVCInfo;
+constinit UniquePtr<VideoInfo> PropertyTest::sVP9Info;
 
 void CheckEquals(VideoInfo& aVideoInfo, MDD::PropertyName aPropertyName,
                  const Maybe<MDD::PropertyValue>&& aExpectedValue,

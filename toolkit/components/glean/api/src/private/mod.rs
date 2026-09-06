@@ -238,6 +238,18 @@ pub(crate) mod profiler_utils {
                     },
                 }
             }
+            // A contended map lock is expected and routine (a concurrent writer
+            // registering a submetric), not a lookup failure, so emit a neutral
+            // id rather than a diagnostic "Error looking up ..." string.
+            Err(
+                crate::private::LookupError::FOGSubmetricMapLockWouldBlock
+                | crate::private::LookupError::JOGMetricMapLockWouldBlock,
+            ) => {
+                json_writer.unique_string_property(
+                    "id",
+                    &format!("metric {} (metadata unavailable)", **id),
+                );
+            }
             Err(e) => {
                 let error_string = format!("Error looking up {:?}: {:?}", id, e);
                 json_writer.unique_string_property("id", &error_string);
@@ -286,24 +298,9 @@ pub(crate) mod profiler_utils {
                 "{marker.data.cat}.{marker.data.id} {marker.data.label} {marker.data.val}",
             );
             schema.set_table_label("{marker.name} - {marker.data.cat}.{marker.data.id} {marker.data.label}: {marker.data.val}");
-            schema.add_key_label_format_with_flags(
-                "cat",
-                "Category",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "id",
-                "Metric",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "label",
-                "Label",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
+            schema.add_key_label_format("cat", "Category", Format::UniqueString);
+            schema.add_key_label_format("id", "Metric", Format::UniqueString);
+            schema.add_key_label_format("label", "Label", Format::UniqueString);
             schema.add_key_label_format("val", "Value", Format::String);
             schema
         }
@@ -366,24 +363,9 @@ pub(crate) mod profiler_utils {
             schema.set_table_label(
                 "{marker.name} - {marker.data.cat}.{marker.data.id} {marker.data.label}: {marker.data.val}",
             );
-            schema.add_key_label_format_with_flags(
-                "cat",
-                "Category",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "id",
-                "Metric",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "label",
-                "Label",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
+            schema.add_key_label_format("cat", "Category", Format::UniqueString);
+            schema.add_key_label_format("id", "Metric", Format::UniqueString);
+            schema.add_key_label_format("label", "Label", Format::UniqueString);
             schema.add_key_label_format("val", "Value", Format::Integer);
 
             schema
@@ -454,24 +436,9 @@ pub(crate) mod profiler_utils {
                 "{marker.name} - {marker.data.cat}.{marker.data.id} {marker.data.label}: {marker.data.sample}{marker.data.samples}",
             );
             schema.set_chart_label("{marker.data.cat}.{marker.data.id}");
-            schema.add_key_label_format_with_flags(
-                "cat",
-                "Category",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "id",
-                "Metric",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "label",
-                "Label",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
+            schema.add_key_label_format("cat", "Category", Format::UniqueString);
+            schema.add_key_label_format("id", "Metric", Format::UniqueString);
+            schema.add_key_label_format("label", "Label", Format::UniqueString);
             schema.add_key_label_format("sample", "Sample", Format::String);
             schema.add_key_label_format("samples", "Samples", Format::String);
             schema
@@ -539,24 +506,9 @@ pub(crate) mod profiler_utils {
             schema.set_table_label(
                 "{marker.name} - {marker.data.cat}.{marker.data.id}: {marker.data.val}",
             );
-            schema.add_key_label_format_with_flags(
-                "cat",
-                "Category",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "id",
-                "Metric",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "label",
-                "Label",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
+            schema.add_key_label_format("cat", "Category", Format::UniqueString);
+            schema.add_key_label_format("id", "Metric", Format::UniqueString);
+            schema.add_key_label_format("label", "Label", Format::UniqueString);
             schema.add_key_label_format("val", "Value", Format::String);
             schema
         }
@@ -592,18 +544,8 @@ pub(crate) mod profiler_utils {
             let mut schema = MarkerSchema::new(&[Location::MarkerChart, Location::MarkerTable]);
             schema.set_tooltip_label("{marker.data.id} {marker.data.reason}");
             schema.set_table_label("{marker.data.id} {marker.data.reason}");
-            schema.add_key_label_format_with_flags(
-                "id",
-                "Ping name",
-                Format::UniqueString,
-                PayloadFlags::Searchable,
-            );
-            schema.add_key_label_format_with_flags(
-                "reason",
-                "Submission reason",
-                Format::String,
-                PayloadFlags::Searchable,
-            );
+            schema.add_key_label_format("id", "Ping name", Format::UniqueString);
+            schema.add_key_label_format("reason", "Submission reason", Format::String);
             schema
         }
 
@@ -806,7 +748,6 @@ impl_malloc_size_of_metric!(
     DenominatorMetric,
     MemoryDistributionMetric,
     NumeratorMetric,
-    QuantityMetric,
     RateMetric,
     StringMetric,
     StringListMetric,
@@ -822,6 +763,15 @@ impl malloc_size_of::MallocSizeOf for BooleanMetric {
         match self {
             BooleanMetric::Child(_) | BooleanMetric::UnorderedChild(_) => 0,
             BooleanMetric::Parent { inner, .. } => inner.size_of(ops),
+        }
+    }
+}
+
+impl malloc_size_of::MallocSizeOf for QuantityMetric {
+    fn size_of(&self, ops: &mut malloc_size_of::MallocSizeOfOps) -> usize {
+        match self {
+            QuantityMetric::Child(_) | QuantityMetric::UnorderedChild(_) => 0,
+            QuantityMetric::Parent { inner, .. } => inner.size_of(ops),
         }
     }
 }

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-*/
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -36,10 +35,30 @@ class AudioStreamTrack : public MediaStreamTrack {
   void RemoveAudioOutput(void* aKey);
   void SetAudioOutputVolume(void* aKey, float aVolume);
 
+  // Use AddConsumerPort instead of ForwardTrackContentsTo when possible, since
+  // it handles CrossGraphPort creation automatically. Must be balanced with a
+  // corresponding RemoveConsumerPort call.
+  already_AddRefed<MediaInputPort> AddConsumerPort(ProcessedMediaTrack* aTrack);
+  void RemoveConsumerPort(MediaInputPort* aPort);
+
   // WebIDL
   void GetKind(nsAString& aKind) override { aKind.AssignLiteral("audio"); }
 
   void GetLabel(nsAString& aLabel, CallerType aCallerType) override;
+
+ protected:
+  void SetReadyState(MediaStreamTrackState aState) override;
+
+ private:
+  // Main thread only
+  struct CrossGraphConnection {
+    UniquePtr<CrossGraphPort> mPort;
+    size_t mRefCount;
+
+    explicit CrossGraphConnection(UniquePtr<CrossGraphPort> aPort)
+        : mPort(std::move(aPort)), mRefCount(1) {}
+  };
+  nsTArray<CrossGraphConnection> mCrossGraphs;
 };
 
 }  // namespace mozilla::dom

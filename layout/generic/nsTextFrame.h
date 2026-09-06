@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsTextFrame_h__
-#define nsTextFrame_h__
+#ifndef nsTextFrame_h_
+#define nsTextFrame_h_
 
 #include "JustificationUtils.h"
 #include "gfxSkipChars.h"
@@ -26,6 +24,7 @@
 struct SelectionDetails;
 class nsBlockFrame;
 class nsTextPaintStyle;
+class nsLineLayout;
 
 namespace mozilla {
 class SVGContextPaint;
@@ -104,6 +103,7 @@ class nsTextFrame : public nsIFrame {
   using SelectionTypeMask = mozilla::SelectionTypeMask;
   using Size = mozilla::gfx::Size;
   using TextRangeStyle = mozilla::TextRangeStyle;
+  using imgDrawingParams = mozilla::image::imgDrawingParams;
 
  public:
   enum TextRunType : uint8_t;
@@ -225,6 +225,12 @@ class nsTextFrame : public nsIFrame {
     void SetStartOfLine(const gfxSkipCharsIterator& aPosition) {
       mStartOfLineOffset = aPosition.GetSkippedOffset();
     }
+
+    bool HasSpacing() const {
+      return mLetterSpacing || mWordSpacing || mTextAutospace;
+    }
+
+    nscoord LetterSpacing() const { return mLetterSpacing; }
 
    protected:
     void SetupJustificationSpacing(bool aPostReflow);
@@ -483,7 +489,7 @@ class nsTextFrame : public nsIFrame {
   void AddInlinePrefISize(const mozilla::IntrinsicSizeInput& aInput,
                           InlinePrefISizeData* aData) override;
   SizeComputationResult ComputeSize(
-      gfxContext* aRenderingContext, mozilla::WritingMode aWM,
+      const SizeComputationInput& aSizingInput, mozilla::WritingMode aWM,
       const mozilla::LogicalSize& aCBSize, nscoord aAvailableISize,
       const mozilla::LogicalSize& aMargin,
       const mozilla::LogicalSize& aBorderPadding,
@@ -680,29 +686,32 @@ class nsTextFrame : public nsIFrame {
   // context.
   void PaintText(const PaintTextParams& aParams, const nscoord aVisIStartEdge,
                  const nscoord aVisIEndEdge, const nsPoint& aToReferenceFrame,
-                 const bool aIsSelected, float aOpacity = 1.0f);
+                 const bool aIsSelected, imgDrawingParams& aImgParams,
+                 float aOpacity = 1.0f);
   // helper: paint text frame when we're impacted by at least one selection.
   // Return false if the text was not painted and we should continue with
   // the fast path.
   bool PaintTextWithSelection(const PaintTextSelectionParams& aParams,
-                              const ClipEdges& aClipEdges);
+                              const ClipEdges& aClipEdges,
+                              const SelectionDetails& aDetails,
+                              imgDrawingParams& aImgParams);
   // helper: paint text with foreground and background colors determined
   // by selection(s). Also computes a mask of all selection types applying to
   // our text, returned in aAllSelectionTypeMask.
   // Return false if the text was not painted and we should continue with
   // the fast path.
-  bool PaintTextWithSelectionColors(
-      const PaintTextSelectionParams& aParams,
-      const mozilla::UniquePtr<SelectionDetails>& aDetails,
-      SelectionTypeMask* aAllSelectionTypeMask, const ClipEdges& aClipEdges);
+  bool PaintTextWithSelectionColors(const PaintTextSelectionParams& aParams,
+                                    const SelectionDetails& aDetails,
+                                    SelectionTypeMask* aAllSelectionTypeMask,
+                                    const ClipEdges& aClipEdges,
+                                    imgDrawingParams& aImgParams);
   // helper: paint text decorations for text selected by aSelectionType
-  void PaintTextSelectionDecorations(
-      const PaintTextSelectionParams& aParams,
-      const mozilla::UniquePtr<SelectionDetails>& aDetails,
-      SelectionType aSelectionType);
+  void PaintTextSelectionDecorations(const PaintTextSelectionParams& aParams,
+                                     const SelectionDetails& aDetails,
+                                     SelectionType aSelectionType);
 
   SelectionTypeMask ResolveSelections(
-      const PaintTextSelectionParams& aParams, const SelectionDetails* aDetails,
+      const PaintTextSelectionParams& aParams, const SelectionDetails& aDetails,
       nsTArray<PriorityOrderedSelectionsForRange>& aResult,
       SelectionType aSelectionType, bool* aAnyBackgrounds = nullptr) const;
 
@@ -710,7 +719,8 @@ class nsTextFrame : public nsIFrame {
                          const mozilla::gfx::Point& aTextBaselinePt,
                          const mozilla::gfx::Point& aFramePt, Range aRange,
                          const nscolor* aDecorationOverrideColor,
-                         PropertyProvider* aProvider);
+                         PropertyProvider* aProvider,
+                         imgDrawingParams& aImgParams);
 
   nscolor GetCaretColorAt(int32_t aOffset) final;
 
@@ -937,10 +947,12 @@ class nsTextFrame : public nsIFrame {
 
   void PaintOneShadow(const PaintShadowParams& aParams,
                       const mozilla::StyleSimpleShadow& aShadowDetails,
-                      gfxRect& aBoundingBox, uint32_t aBlurFlags);
+                      gfxRect& aBoundingBox, uint32_t aBlurFlags,
+                      imgDrawingParams& aImgParams);
 
   void PaintShadows(mozilla::Span<const mozilla::StyleSimpleShadow>,
-                    const PaintShadowParams& aParams);
+                    const PaintShadowParams& aParams,
+                    imgDrawingParams& aImgParams);
 
   struct LineDecoration {
     nsIFrame* const mFrame;
@@ -982,19 +994,7 @@ class nsTextFrame : public nsIFrame {
 
     LineDecoration(const LineDecoration& aOther) = default;
 
-    bool operator==(const LineDecoration& aOther) const {
-      return mFrame == aOther.mFrame && mStyle == aOther.mStyle &&
-             mColor == aOther.mColor &&
-             mBaselineOffset == aOther.mBaselineOffset &&
-             mTextUnderlinePosition == aOther.mTextUnderlinePosition &&
-             mTextUnderlineOffset == aOther.mTextUnderlineOffset &&
-             mTextDecorationThickness == aOther.mTextDecorationThickness &&
-             mAllowInkSkipping == aOther.mAllowInkSkipping;
-    }
-
-    bool operator!=(const LineDecoration& aOther) const {
-      return !(*this == aOther);
-    }
+    bool operator==(const LineDecoration& aOther) const = default;
   };
   struct TextDecorations {
     AutoTArray<LineDecoration, 1> mOverlines, mUnderlines, mStrikes;
@@ -1007,13 +1007,7 @@ class nsTextFrame : public nsIFrame {
     bool HasUnderline() const { return !mUnderlines.IsEmpty(); }
     bool HasOverline() const { return !mOverlines.IsEmpty(); }
     bool HasStrikeout() const { return !mStrikes.IsEmpty(); }
-    bool operator==(const TextDecorations& aOther) const {
-      return mOverlines == aOther.mOverlines &&
-             mUnderlines == aOther.mUnderlines && mStrikes == aOther.mStrikes;
-    }
-    bool operator!=(const TextDecorations& aOther) const {
-      return !(*this == aOther);
-    }
+    bool operator==(const TextDecorations& aOther) const = default;
   };
   enum TextDecorationColorResolution { eResolvedColors, eUnresolvedColors };
   void GetTextDecorations(nsPresContext* aPresContext,
@@ -1021,29 +1015,31 @@ class nsTextFrame : public nsIFrame {
                           TextDecorations& aDecorations);
 
   void DrawTextRun(Range aRange, const mozilla::gfx::Point& aTextBaselinePt,
-                   const DrawTextRunParams& aParams);
+                   const DrawTextRunParams& aParams,
+                   imgDrawingParams& aImgParams);
 
   void DrawTextRunAndDecorations(Range aRange,
                                  const mozilla::gfx::Point& aTextBaselinePt,
                                  const DrawTextParams& aParams,
-                                 const TextDecorations& aDecorations);
+                                 const TextDecorations& aDecorations,
+                                 imgDrawingParams& aImgParams);
 
   void DrawText(Range aRange, const mozilla::gfx::Point& aTextBaselinePt,
-                const DrawTextParams& aParams);
+                const DrawTextParams& aParams, imgDrawingParams& aImgParams);
 
   // Set non empty rect to aRect, it should be overflow rect or frame rect.
   // If the result rect is larger than the given rect, this returns true.
   bool CombineSelectionUnderlineRect(nsPresContext* aPresContext,
                                      nsRect& aRect);
 
-  // This sets *aShadows to the appropriate shadows, if any, for the given
+  // Returns the appropriate shadows, if any, for the given
   // type of selection.
-  // If text-shadow was not specified, *aShadows is left untouched.
+  // Returns an empty span if text-shadow was not specified..
   // Note that the returned shadow(s) will only be valid as long as the
   // textPaintStyle remains in scope.
-  void GetSelectionTextShadow(
+  mozilla::Span<const mozilla::StyleSimpleShadow> GetSelectionTextShadow(
       SelectionType aSelectionType, nsTextPaintStyle& aTextPaintStyle,
-      mozilla::Span<const mozilla::StyleSimpleShadow>* aShadows);
+      nsAtom* aHighlightName = nullptr);
 
   /**
    * Utility methods to paint selection.
@@ -1068,20 +1064,31 @@ class nsTextFrame : public nsIFrame {
    */
   gfxFloat ComputeDescentLimitForSelectionUnderline(
       nsPresContext* aPresContext, const gfxFont::Metrics& aFontMetrics);
+
+  struct SelectionColors {
+    nscolor mForeground = NS_RGBA(0, 0, 0, 0);
+    nscolor mBackground = NS_RGBA(0, 0, 0, 0);
+    // True if there is a visible background.
+    bool mHasBackground = false;
+    // True if this selection overrides the text foreground color.
+    // For highlights and ::target-text, this is true only if the color is
+    // explicitly specified by the author.
+    bool mOverridesForeground = false;
+    // True if this selection has any visual effect to paint.
+    bool mHasPaintImpact = false;
+    bool HasAnyColorImpact() const {
+      return mHasBackground || mOverridesForeground;
+    }
+    bool HasAnyPaintImpact() const { return mHasPaintImpact; }
+  };
+
   /**
    * This function encapsulates all knowledge of how selections affect
    * foreground and background colors.
-   * @param aForeground the foreground color to use
-   * @param aBackground the background color to use, or RGBA(0,0,0,0) if no
-   *                    background should be painted
-   * @return            true if the selection affects colors, false otherwise
    */
-  static bool GetSelectionTextColors(SelectionType aSelectionType,
-                                     nsAtom* aHighlightName,
-                                     nsTextPaintStyle& aTextPaintStyle,
-                                     const TextRangeStyle& aRangeStyle,
-                                     nscolor* aForeground,
-                                     nscolor* aBackground);
+  static SelectionColors GetSelectionTextColors(
+      SelectionType aSelectionType, nsAtom* aHighlightName,
+      nsTextPaintStyle& aTextPaintStyle, const TextRangeStyle& aRangeStyle);
   /**
    * ComputeSelectionUnderlineHeight() computes selection underline height of
    * the specified selection type from the font metrics.
@@ -1106,7 +1113,7 @@ class nsTextFrame : public nsIFrame {
    * ranges.
    */
   static SelectionTypeMask CreateSelectionRangeList(
-      const SelectionDetails* aDetails, SelectionType aSelectionType,
+      const SelectionDetails& aDetails, SelectionType aSelectionType,
       const PaintTextSelectionParams& aParams,
       nsTArray<SelectionRange>& aSelectionRanges, bool* aAnyBackgrounds);
 

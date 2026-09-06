@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +5,7 @@
 #ifndef mozilla_RestyleManager_h
 #define mozilla_RestyleManager_h
 
+#include "mozilla/Atomics.h"
 #include "mozilla/AutoRestore.h"
 #include "mozilla/OverflowChangedTracker.h"
 #include "mozilla/ServoElementSnapshot.h"
@@ -270,27 +269,7 @@ class RestyleManager {
     // This method takes the content node for the generated content for
     // animation/transition on ::before and ::after, rather than the
     // content node for the real element.
-    void Put(nsIContent* aContent, ComputedStyle* aComputedStyle) {
-      MOZ_ASSERT(aContent);
-      PseudoStyleType pseudoType = aComputedStyle->GetPseudoType();
-      if (pseudoType == PseudoStyleType::NotPseudo ||
-          PseudoStyle::IsViewTransitionPseudoElement(pseudoType)) {
-        mContents.AppendElement(aContent->AsElement());
-      } else if (pseudoType == PseudoStyleType::before) {
-        MOZ_ASSERT(aContent->NodeInfo()->NameAtom() ==
-                   nsGkAtoms::mozgeneratedcontentbefore);
-        mBeforeContents.AppendElement(aContent->GetParent()->AsElement());
-      } else if (pseudoType == PseudoStyleType::after) {
-        MOZ_ASSERT(aContent->NodeInfo()->NameAtom() ==
-                   nsGkAtoms::mozgeneratedcontentafter);
-        mAfterContents.AppendElement(aContent->GetParent()->AsElement());
-      } else if (pseudoType == PseudoStyleType::marker) {
-        MOZ_ASSERT(aContent->NodeInfo()->NameAtom() ==
-                   nsGkAtoms::mozgeneratedcontentmarker);
-        mMarkerContents.AppendElement(aContent->GetParent()->AsElement());
-      }
-    }
-
+    void Put(nsIContent* aContent, ComputedStyle* aComputedStyle);
     void StopAnimationsForElementsWithoutFrames();
 
    private:
@@ -303,13 +282,10 @@ class RestyleManager {
     // Below four arrays might include elements that have already had their
     // animations or transitions stopped.
     //
-    // mBeforeContents, mAfterContents and mMarkerContents hold the real element
-    // rather than the content node for the generated content (which might
+    // mContents holds either the real element and NotPseudo, or the parent
+    // element rather than the content node for generated content (which might
     // change during a reframe).
-    nsTArray<RefPtr<Element>> mContents;
-    nsTArray<RefPtr<Element>> mBeforeContents;
-    nsTArray<RefPtr<Element>> mAfterContents;
-    nsTArray<RefPtr<Element>> mMarkerContents;
+    nsTArray<std::pair<RefPtr<Element>, PseudoStyleType>> mContents;
   };
 
   /**
@@ -379,6 +355,12 @@ class RestyleManager {
                         const nsAttrValue* aOldValue);
 
   /**
+   * Recascade aElement and its pseudo-elements if they depend on
+   * aAttribute through attr().
+   */
+  void MaybeRecascadeForAttrFunction(Element* aElement, nsAtom* aAttribute);
+
+  /**
    * Restyle an element's previous and/or next siblings.
    */
   void RestyleSiblingsForNthOf(dom::Element* aChild,
@@ -436,6 +418,13 @@ class RestyleManager {
   // such as changes made through the Web Animations API or cascading result
   // changes by modifying classes, etc.
   void IncrementAnimationGeneration() { ++mAnimationGeneration; }
+
+  // Called when a highlight pseudo-element (::selection, ::highlight,
+  // ::target-text) style is invalidated. These pseudos need explicit repaint
+  // triggering since their styles are resolved lazily during painting.
+  void NoteHighlightPseudoStyleInvalidated() {
+    mNeedsPseudoElementSelectionsRepaint = true;
+  }
 
   // Apply change hints for animations on the compositor.
   //
@@ -509,7 +498,7 @@ class RestyleManager {
   void RestyleWholeContainer(nsINode* aContainer, NodeSelectorFlags);
   void RestylePreviousSiblings(nsIContent* aStartingSibling);
   void RestyleSiblingsStartingWith(nsIContent* aStartingSibling);
-
+  void RecascadeForTreeCountingFunctions(nsINode* aContainer);
   void RestyleForEmptyChange(Element* aContainer);
   void MaybeRestyleForEdgeChildChange(nsINode* aContainer,
                                       nsIContent* aChangedChild);
@@ -604,6 +593,16 @@ class RestyleManager {
   // CSS animations.  We propagate TraversalRestyleBehavior::ForCSSRuleChanges
   // to traversal function if this flag is set.
   bool mRestyleForCSSRuleChanges = false;
+
+  // Set to true when a highlight pseudo-element (::selection, ::highlight,
+  // ::target-text) style is invalidated during the restyle. These pseudos have
+  // their styles resolved lazily during painting rather than during the restyle
+  // traversal, so we need to explicitly trigger a repaint at the end of the
+  // restyle.
+  // Uses Atomic because style invalidation can happen on worker threads during
+  // parallel style computation.
+  Atomic<bool, MemoryOrdering::Relaxed> mNeedsPseudoElementSelectionsRepaint{
+      false};
 
   // A hashtable with the elements that have changed state or attributes, in
   // order to calculate restyle hints during the traversal.

@@ -1,12 +1,6 @@
 // This test simulates opening the newtab page and moving it to a new window.
 // Links in the page should still work.
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
-
 add_task(async function test_newtab_to_window() {
   await setTestTopSites();
 
@@ -27,6 +21,18 @@ add_task(async function test_newtab_to_window() {
     newWindow.gBrowser.selectedBrowser.currentURI.spec,
     "about:newtab",
     "about:newtab moved to window"
+  );
+
+  // Wait for top sites to render in the new window before clicking.
+  await SpecialPowers.spawn(
+    newWindow.gBrowser.selectedBrowser,
+    [],
+    async () => {
+      await ContentTaskUtils.waitForCondition(
+        () => content.document.querySelector(".top-sites a"),
+        "Top site link should appear"
+      );
+    }
   );
 
   let tabPromise = BrowserTestUtils.waitForNewTab(

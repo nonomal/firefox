@@ -160,39 +160,42 @@ Function getUninstallKey
   Exch $3
 FunctionEnd
 
-; Looks at installation_telemetry.json to determine whether the installation
-; was installed by the stub installer or not.
+; Determines whether the postupdate should run for the installation or the
+; current user.
 ;
-; Expects the JSON file on the stack as a parameter; will return the
-; installation type from the JSON file, generally either "stub" or "full".
-; On failure, pushes "unknown".
-Function GetInstallationType
-  Exch $1 ; directory
-  Push $0 ; temporary variable
+; Usually, this is determined by the /PostUpdateTarget:[...] command-line
+; argument. However, if that isn't available, it'll attempt to guess based on
+; whether it can access a file in the installation directory.
+Function GetPostUpdateTarget
+  Push $0
 
-  nsJSON::Set /file /unicode "$1"
-  nsJSON::Get /type `installer_type` /end
-
-  Pop $0
-  ${If} $0 == ""
-    ; It's only ever written as UTF-16, but decode it as ANSI for redundancy.
-    nsJSON::Set /file "$1"
-    nsJSON::Get /type `installer_type` /end
-    Pop $0 ; type
+  ${GetParameters} $0
+  ${GetOptions} $0 "/PostUpdateTarget:" $0
+  ${IfNot} ${Errors}
+    Exch $0
+    Return
   ${EndIf}
 
-  ClearErrors
-  StrCpy $1 "unknown"
-  ${If} $0 == "string"
-    nsJSON::Get `installer_type` /end
-    ${IfNot} ${Errors}
-      ; get the actual installer type from the file
-      Pop $1
-    ${EndIf}
-  ${EndIf}
+  ; The updater doesn't know about /PostUpdateTarget, so guess. (This should
+  ; only happen once, when the first update with this code arrives, but it
+  ; could also happen for people who run `.\uninstall\helper /postupdate`
+  ; manually for testing.)
+  ;
+  ; If we have access to the install directory, run Installation, otherwise
+  ; run CurrentUser.
+  Push $1
 
-  Exch
-  Pop $0
-  Exch $1
   ClearErrors
+  GetTempFileName $1 "$INSTDIR"
+  FileOpen $0 "$1" a
+  FileClose $0
+  Delete $1
+
+  Pop $1
+  ${If} ${Errors}
+    StrCpy $0 "CurrentUser"
+  ${Else}
+    StrCpy $0 "Installation"
+  ${EndIf}
+  Exch $0
 FunctionEnd

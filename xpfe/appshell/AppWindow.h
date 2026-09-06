@@ -1,11 +1,10 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef mozilla_AppWindow_h__
-#define mozilla_AppWindow_h__
+#ifndef mozilla_AppWindow_h_
+#define mozilla_AppWindow_h_
 
 // Local Includes
 #include "nsChromeTreeOwner.h"
@@ -89,11 +88,10 @@ class AppWindow final : public nsIBaseWindow,
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
     mozilla::PresShell* GetPresShell() override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
-    bool WindowMoved(nsIWidget* aWidget, int32_t x, int32_t y,
+    void WindowMoved(nsIWidget*, const LayoutDeviceIntPoint&,
                      ByMoveToRect) override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
-    bool WindowResized(nsIWidget* aWidget, int32_t aWidth,
-                       int32_t aHeight) override;
+    void WindowResized(nsIWidget*, const LayoutDeviceIntSize&) override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
     bool RequestWindowClose(nsIWidget* aWidget) override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
@@ -103,8 +101,6 @@ class AppWindow final : public nsIBaseWindow,
         mozilla::DesktopCoord aOverlapAmount) override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
     void OcclusionStateChanged(bool aIsFullyOccluded) override;
-    MOZ_CAN_RUN_SCRIPT_BOUNDARY
-    void OSToolbarButtonPressed() override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
     void WindowActivated() override;
     MOZ_CAN_RUN_SCRIPT_BOUNDARY
@@ -149,9 +145,9 @@ class AppWindow final : public nsIBaseWindow,
   nsIAppWindow* GetAppWindow() { return this; }
   mozilla::PresShell* GetPresShell();
   MOZ_CAN_RUN_SCRIPT
-  bool WindowMoved(nsIWidget* aWidget, int32_t aX, int32_t aY);
+  void WindowMoved(nsIWidget*, const mozilla::LayoutDeviceIntPoint&);
   MOZ_CAN_RUN_SCRIPT
-  bool WindowResized(nsIWidget* aWidget, int32_t aWidth, int32_t aHeight);
+  void WindowResized(nsIWidget*, const mozilla::LayoutDeviceIntSize&);
   MOZ_CAN_RUN_SCRIPT bool RequestWindowClose(nsIWidget* aWidget);
   MOZ_CAN_RUN_SCRIPT void SizeModeChanged(nsSizeMode aSizeMode);
   MOZ_CAN_RUN_SCRIPT void FullscreenWillChange(bool aInFullscreen);
@@ -160,7 +156,6 @@ class AppWindow final : public nsIBaseWindow,
       mozilla::DesktopCoord aOverlapAmount);
   MOZ_CAN_RUN_SCRIPT void OcclusionStateChanged(bool aIsFullyOccluded);
   void RecomputeBrowsingContextVisibility();
-  MOZ_CAN_RUN_SCRIPT void OSToolbarButtonPressed();
   MOZ_CAN_RUN_SCRIPT void WindowActivated();
   MOZ_CAN_RUN_SCRIPT void WindowDeactivated();
 
@@ -197,7 +192,7 @@ class AppWindow final : public nsIBaseWindow,
   NS_IMETHOD ForceRoundedDimensions();
   NS_IMETHOD GetAvailScreenSize(int32_t* aAvailWidth, int32_t* aAvailHeight);
 
-  void FinishFullscreenChange(bool aInFullscreen);
+  MOZ_CAN_RUN_SCRIPT void FinishFullscreenChange(bool aInFullscreen);
 
   void ApplyChromeFlags();
   MOZ_CAN_RUN_SCRIPT_BOUNDARY void SizeShell();
@@ -207,7 +202,7 @@ class AppWindow final : public nsIBaseWindow,
   bool LoadPositionFromXUL(int32_t aSpecWidth, int32_t aSpecHeight);
   bool LoadSizeFromXUL(int32_t& aSpecWidth, int32_t& aSpecHeight);
   void SetSpecifiedSize(int32_t aSpecWidth, int32_t aSpecHeight);
-  bool UpdateWindowStateFromMiscXULAttributes();
+  MOZ_CAN_RUN_SCRIPT bool UpdateWindowStateFromMiscXULAttributes();
   void SyncAttributesToWidget();
   void SavePersistentAttributes(PersistentAttributes);
   void MaybeSavePersistentPositionAndSize(PersistentAttributes,
@@ -250,7 +245,6 @@ class AppWindow final : public nsIBaseWindow,
   void EnableParent(bool aEnable);
   void PlaceWindowLayersBehind(uint32_t aLowLevel, uint32_t aHighLevel,
                                nsIAppWindow* aBehind);
-  void SetContentScrollbarVisibility(bool aVisible);
 
   enum PersistentAttributeUpdate { Sync, Async };
   void PersistentAttributesDirty(PersistentAttributes,
@@ -335,7 +329,6 @@ class AppWindow final : public nsIBaseWindow,
   bool mLockedUntilChromeLoad;
   bool mIgnoreXULSize;
   bool mIgnoreXULPosition;
-  bool mChromeFlagsFrozen;
   bool mIgnoreXULSizeMode;
   // mDestroying is used to prevent reentry into into Destroy(), which can
   // otherwise happen due to script running as we tear down various things.
@@ -376,10 +369,13 @@ class AppWindow final : public nsIBaseWindow,
                       const Maybe<LayoutDeviceIntSize>& aSize, bool aRepaint);
   nsresult MoveResize(const Maybe<DesktopPoint>& aPosition,
                       const Maybe<DesktopSize>& aSize, bool aRepaint);
+  nsresult CenterImpl(nsIAppWindow* aRelative, bool aScreen, bool aAlert,
+                      bool aAllowCenteringForSizeChange);
+
   nsCOMPtr<nsIXULStore> mLocalStore;
   bool mIsWidgetInFullscreen = false;
 };
 
 }  // namespace mozilla
 
-#endif /* mozilla_AppWindow_h__ */
+#endif /* mozilla_AppWindow_h_ */

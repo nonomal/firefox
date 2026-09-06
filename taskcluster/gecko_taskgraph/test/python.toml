@@ -3,9 +3,13 @@ subsuite = "taskgraph"
 
 ["test_actions.py"]
 
+["test_actions_backfill.py"]
+
 ["test_actions_util.py"]
 
 ["test_decision.py"]
+
+["test_files_changed.py"]
 
 ["test_main.py"]
 
@@ -17,9 +21,17 @@ subsuite = "taskgraph"
 
 ["test_taskcluster_yml.py"]
 
+["test_transforms_build.py"]
+
 ["test_transforms_build_schedules.py"]
 
 ["test_transforms_job.py"]
+
+["test_transforms_job_common.py"]
+
+["test_transforms_perftest.py"]
+
+["test_transforms_task.py"]
 
 ["test_transforms_test.py"]
 

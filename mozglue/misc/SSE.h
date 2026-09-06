@@ -1,4 +1,3 @@
-/* vim: set shiftwidth=2 tabstop=8 autoindent cindent expandtab: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,6 +9,8 @@
 
 // for definition of MFBT_DATA
 #include "mozilla/Types.h"
+
+#include <cstdint>
 
 /**
  * The public interface of this header consists of a set of macros and

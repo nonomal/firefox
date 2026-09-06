@@ -7,6 +7,7 @@ package mozilla.components.feature.awesomebar
 import android.content.res.Resources
 import android.view.View
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlin.test.assertNotNull
 import mozilla.components.browser.state.search.SearchEngine
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.awesomebar.AwesomeBar
@@ -21,7 +22,6 @@ import mozilla.components.support.test.argumentCaptor
 import mozilla.components.support.test.mock
 import mozilla.components.support.test.robolectric.testContext
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -47,14 +47,13 @@ class AwesomeBarFeatureTest {
 
         `when`(toolbar.setOnEditListener(any())).thenAnswer { invocation ->
             listener = invocation.getArgument<Toolbar.OnEditListener>(0)
-            Unit
         }
 
         AwesomeBarFeature(awesomeBar, toolbar)
 
         assertNotNull(listener)
 
-        listener!!.onStartEditing()
+        listener.onStartEditing()
 
         verify(awesomeBar).onInputStarted()
 
@@ -76,14 +75,13 @@ class AwesomeBarFeatureTest {
 
         `when`(awesomeBar.setOnStopListener(any())).thenAnswer { invocation ->
             stopListener = invocation.getArgument<() -> Unit>(0)
-            Unit
         }
 
         AwesomeBarFeature(awesomeBar, toolbar)
 
         assertNotNull(stopListener)
 
-        stopListener!!.invoke()
+        stopListener.invoke()
 
         verify(toolbar).displayMode()
     }
@@ -98,7 +96,7 @@ class AwesomeBarFeatureTest {
 
         verify(awesomeBar, never()).addProviders(any())
 
-        feature.addSessionProvider(resources, mock(), mock())
+        feature.addSessionProvider(resources, BrowserStore(), mock())
 
         verify(awesomeBar).addProviders(any())
     }
@@ -127,7 +125,7 @@ class AwesomeBarFeatureTest {
 
         verify(awesomeBar, never()).addProviders(any())
 
-        val store: BrowserStore = mock()
+        val store = BrowserStore()
         feature.addSearchProvider(store = store, searchUseCase = mock(), fetchClient = mock())
 
         val provider = argumentCaptor<SearchSuggestionProvider>()
@@ -261,7 +259,7 @@ class AwesomeBarFeatureTest {
 
         verify(awesomeBar, never()).addProviders(any())
 
-        feature.addSearchActionProvider(mock(), mock())
+        feature.addSearchActionProvider(BrowserStore(), mock())
 
         verify(awesomeBar).addProviders(any())
     }
@@ -278,7 +276,6 @@ class AwesomeBarFeatureTest {
 
         `when`(toolbar.setOnEditListener(any())).thenAnswer { invocation ->
             listener = invocation.getArgument<Toolbar.OnEditListener>(0)
-            Unit
         }
 
         AwesomeBarFeature(
@@ -313,7 +310,6 @@ class AwesomeBarFeatureTest {
 
         `when`(toolbar.setOnEditListener(any())).thenAnswer { invocation ->
             listener = invocation.getArgument<Toolbar.OnEditListener>(0)
-            Unit
         }
 
         AwesomeBarFeature(

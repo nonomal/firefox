@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -97,6 +95,9 @@ struct GetDoublyLinkedListElement {
   static_assert(std::is_base_of<DoublyLinkedListElement<T>, T>::value,
                 "You need your own specialization of GetDoublyLinkedListElement"
                 " or use a separate Trait.");
+  static const DoublyLinkedListElement<T>& Get(const T* aThis) {
+    return *aThis;
+  }
   static DoublyLinkedListElement<T>& Get(T* aThis) { return *aThis; }
 };
 
@@ -117,7 +118,7 @@ class DoublyLinkedList final {
    */
   bool isStateValid() const { return (mHead != nullptr) == (mTail != nullptr); }
 
-  bool ElementNotInList(T* aElm) {
+  bool ElementNotInList(const T* aElm) const {
     if (!ElementAccess::Get(aElm).mNext && !ElementAccess::Get(aElm).mPrev) {
       // Both mNext and mPrev being NULL can mean two things:
       // - the element is not in the list.
@@ -169,13 +170,7 @@ class DoublyLinkedList final {
       return result;
     }
 
-    bool operator!=(const Iterator& aOther) const {
-      return mCurrent != aOther.mCurrent;
-    }
-
-    bool operator==(const Iterator& aOther) const {
-      return mCurrent == aOther.mCurrent;
-    }
+    bool operator==(const Iterator& aOther) const = default;
 
     explicit operator bool() const { return mCurrent; }
   };
@@ -194,6 +189,11 @@ class DoublyLinkedList final {
   bool isEmpty() const {
     MOZ_ASSERT(isStateValid());
     return mHead == nullptr;
+  }
+
+  bool isSingle() const {
+    MOZ_ASSERT(isStateValid());
+    return !isEmpty() && mHead == mTail;
   }
 
   /**
@@ -347,13 +347,28 @@ class DoublyLinkedList final {
    * Returns an iterator referencing the first found element whose value matches
    * the given element according to operator==.
    */
-  Iterator find(const T& aElm) { return std::find(begin(), end(), aElm); }
+  Iterator find(const T& aElm) const { return std::find(begin(), end(), aElm); }
+
+  /**
+   * Returns an iterator referencing the element with the same address as the
+   * given element. Useful for membership tests.
+   */
+  Iterator find(const T* aNeedle) const {
+    return std::find_if(begin(), end(),
+                        [aNeedle](const T& elm) { return &elm == aNeedle; });
+  }
 
   /**
    * Returns whether the given element is in the list. Note that this uses
    * T::operator==, not pointer comparison.
    */
-  bool contains(const T& aElm) { return find(aElm) != Iterator(); }
+  bool contains(const T& aElm) const { return find(aElm) != Iterator(); }
+
+  /**
+   * Returns whether the given element is in the list. Note that this uses
+   * pointer comparison.
+   */
+  bool contains(const T* aElm) const { return find(aElm) != Iterator(); }
 
   /**
    * Returns whether the given element might be in the list. Note that this
@@ -361,7 +376,7 @@ class DoublyLinkedList final {
    * the case where the element might be in another list in order to make the
    * check fast.
    */
-  bool ElementProbablyInList(T* aElm) {
+  bool ElementProbablyInList(const T* aElm) const {
     if (isEmpty()) {
       return false;
     }
@@ -372,7 +387,7 @@ class DoublyLinkedList final {
    * Returns whether an element is linked correctly to its predecessor and/or
    * successor, if any. Used for internal sanity checks.
    */
-  bool ElementIsLinkedWell(T* aElm) {
+  bool ElementIsLinkedWell(const T* aElm) const {
     MOZ_ASSERT(aElm);
     if (!ElementProbablyInList(aElm)) {
       return false;
@@ -397,6 +412,23 @@ class DoublyLinkedList final {
         return false;
       }
     }
+    return true;
+  }
+
+  /**
+   * Returns true if the entire list is well formed.
+   */
+  bool ListIsWellFormed() const {
+    // If either mHead or mTail is null then both must be null.
+    if ((mHead == nullptr) && (mTail == mHead)) {
+      return true;
+    } else if (mTail == nullptr) {
+      return false;
+    }
+
+    std::all_of(begin(), end(),
+                [this](const T& elem) { return ElementIsLinkedWell(&elem); });
+
     return true;
   }
 };

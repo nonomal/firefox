@@ -1,14 +1,12 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "vm/Shape-inl.h"
-
+#include "gc/GC.h"
 #include "gc/HashUtil.h"
 #include "js/friend/WindowProxy.h"  // js::IsWindow
 #include "js/HashTable.h"
+#include "js/Prefs.h"
 #include "js/Printer.h"  // js::GenericPrinter, js::Fprinter
 #include "js/UniquePtr.h"
 #include "vm/JSObject.h"
@@ -20,6 +18,7 @@
 #include "vm/JSContext-inl.h"
 #include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
+#include "vm/Shape-inl.h"
 
 using namespace js;
 
@@ -128,10 +127,16 @@ bool js::NativeObject::toDictionaryMode(JSContext* cx,
     return false;
   }
 
-  obj->setShape(shape);
-
-  MOZ_ASSERT(obj->inDictionaryMode());
   obj->setDictionaryModeSlotSpan(span);
+
+  // Ensure concurrent marking can't see the new shape without the dictionary
+  // mode slot span.
+  gc::MemoryReleaseFence(obj->zone());
+
+  gc::MaybeSleepForConcurrentMarkingDelays(cx);
+
+  obj->setShape(shape);
+  MOZ_ASSERT(obj->inDictionaryMode());
 
   return true;
 }
@@ -798,7 +803,13 @@ void NativeObject::maybeFreeDictionaryPropSlots(JSContext* cx,
 
   // Trigger write barriers on the old slots before reallocating.
   prepareSlotRangeForOverwrite(newSpan, oldSpan);
+
+#ifdef JS_GC_CONCURRENT_MARKING
+  // Clear previously used slots on shrink, including fixed slots.
+  initializeSlotRange(newSpan, oldSpan);
+#else
   invalidateSlotRange(newSpan, oldSpan);
+#endif
 
   uint32_t oldCapacity = numDynamicSlots();
   uint32_t newCapacity =
@@ -1066,16 +1077,35 @@ bool NativeObject::generateNewDictionaryShape(JSContext* cx,
   return true;
 }
 
-/* static */
-bool JSObject::setFlag(JSContext* cx, HandleObject obj, ObjectFlag flag) {
-  MOZ_ASSERT(cx->compartment() == obj->compartment());
+static bool ShouldUseObjectFuseForPrototype(JSObject* obj) {
+  if (!obj->is<NativeObject>()) {
+    return false;
+  }
+  return ShouldUseObjectFuses() && JS::Prefs::objectfuse_for_all_protos();
+}
 
-  if (obj->hasFlag(flag)) {
+// static
+bool JSObject::setIsUsedAsPrototype(JSContext* cx, JS::HandleObject obj) {
+  js::ObjectFlags flags = {js::ObjectFlag::IsUsedAsPrototype};
+  if (ShouldUseObjectFuseForPrototype(obj)) {
+    flags.setFlag(js::ObjectFlag::HasObjectFuse);
+  }
+  return setFlags(cx, obj, flags);
+}
+
+/* static */
+bool JSObject::setFlags(JSContext* cx, HandleObject obj, ObjectFlags flags) {
+  MOZ_ASSERT(cx->compartment() == obj->compartment());
+  MOZ_ASSERT_IF(flags.hasFlag(ObjectFlag::IsUsedAsPrototype) &&
+                    ShouldUseObjectFuseForPrototype(obj),
+                flags.hasFlag(ObjectFlag::HasObjectFuse));
+
+  if (obj->hasAllFlags(flags)) {
     return true;
   }
 
   ObjectFlags objectFlags = obj->shape()->objectFlags();
-  objectFlags.setFlag(flag);
+  objectFlags.setFlags(flags);
 
   uint32_t numFixed =
       obj->is<NativeObject>() ? obj->as<NativeObject>().numFixedSlots() : 0;
@@ -1121,16 +1151,6 @@ bool JSObject::setProtoUnchecked(JSContext* cx, HandleObject obj,
       obj->is<NativeObject>() ? obj->as<NativeObject>().numFixedSlots() : 0;
   return Shape::replaceShape(cx, obj, obj->shape()->objectFlags(), proto,
                              numFixed);
-}
-
-/* static */
-bool NativeObject::changeNumFixedSlotsAfterSwap(JSContext* cx,
-                                                Handle<NativeObject*> obj,
-                                                uint32_t nfixed) {
-  MOZ_ASSERT(nfixed != obj->shape()->numFixedSlots());
-
-  return Shape::replaceShape(cx, obj, obj->shape()->objectFlags(),
-                             obj->shape()->proto(), nfixed);
 }
 
 BaseShape::BaseShape(JSContext* cx, const JSClass* clasp, JS::Realm* realm,
@@ -1293,8 +1313,8 @@ void Shape::dump(js::JSONPrinter& json) const {
 
 template <typename KnownF, typename UnknownF>
 void ForEachObjectFlag(ObjectFlags flags, KnownF known, UnknownF unknown) {
-  uint16_t raw = flags.toRaw();
-  for (uint16_t i = 1; i; i = i << 1) {
+  uint32_t raw = flags.toRaw();
+  for (uint32_t i = 1; i; i = i << 1) {
     if (!(raw & i)) {
       continue;
     }
@@ -1344,11 +1364,17 @@ void ForEachObjectFlag(ObjectFlags flags, KnownF known, UnknownF unknown) {
       case ObjectFlag::HasRealmFuseProperty:
         known("HasRealmFuseProperty");
         break;
+      case ObjectFlag::HasObjectFuse:
+        known("HasObjectFuse");
+        break;
       case ObjectFlag::HasPreservedWrapper:
         known("HasPreservedWrapper");
         break;
       case ObjectFlag::HasNonFunctionAccessor:
         known("HasNonFunctionAccessor");
+        break;
+      case ObjectFlag::LegacyFeaturesDisabled:
+        known("LegacyFeaturesDisabled");
         break;
       default:
         unknown(i);

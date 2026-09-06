@@ -7,7 +7,7 @@ package org.mozilla.fenix.settings.account
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import io.mockk.MockKAnnotations
 import io.mockk.every
-import io.mockk.impl.annotations.MockK
+import io.mockk.impl.annotations.RelaxedMockK
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
@@ -19,8 +19,7 @@ class DefaultSyncControllerTest {
 
     private lateinit var syncController: DefaultSyncController
 
-    @MockK(relaxed = true)
-    private lateinit var activity: HomeActivity
+    @RelaxedMockK private lateinit var activity: HomeActivity
 
     @Before
     fun setUp() {

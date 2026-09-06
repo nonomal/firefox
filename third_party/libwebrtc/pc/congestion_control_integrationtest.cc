@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -24,12 +25,14 @@
 #include "api/test/rtc_error_matchers.h"
 #include "pc/session_description.h"
 #include "pc/test/integration_test_helpers.h"
+#include "system_wrappers/include/metrics.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
 #include "test/wait_until.h"
 
 namespace webrtc {
 
+using ::testing::ContainsRegex;
 using ::testing::Eq;
 using ::testing::Field;
 using ::testing::Gt;
@@ -44,24 +47,40 @@ class PeerConnectionCongestionControlTest
       : PeerConnectionIntegrationBaseTest(SdpSemantics::kUnifiedPlan) {}
 };
 
-TEST_F(PeerConnectionCongestionControlTest, OfferContainsCcfbIfEnabled) {
+// This regexp matches both wildcard and non-wildcard ccfb lines.
+constexpr std::string_view ccfb_regex = "a=rtcp-fb:[0-9*]* ack ccfb\r\n";
+
+TEST_F(PeerConnectionCongestionControlTest,
+       OfferDoesNotContainCcfbEvenIfEnabled) {
   SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   caller()->AddAudioVideoTracks();
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller()->CreateOfferAndWait();
   std::string offer_str = absl::StrCat(*offer);
-  EXPECT_THAT(offer_str, HasSubstr("a=rtcp-fb:* ack ccfb\r\n"));
+  EXPECT_THAT(offer_str, Not(ContainsRegex(ccfb_regex)));
+}
+
+TEST_F(PeerConnectionCongestionControlTest, OfferContainsCcfbIfFieldTrial) {
+  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  caller()->AddAudioVideoTracks();
+  std::unique_ptr<SessionDescriptionInterface> offer =
+      caller()->CreateOfferAndWait();
+  std::string offer_str = absl::StrCat(*offer);
+  EXPECT_THAT(offer_str, ContainsRegex(ccfb_regex));
 }
 
 TEST_F(PeerConnectionCongestionControlTest, ReceiveOfferSetsCcfbFlag) {
-  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+  SetFieldTrials(kCallerName,
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
+  SetFieldTrials(kCalleeName,
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   {
     // Check that the callee parsed it.
     auto parsed_contents =
@@ -89,15 +108,14 @@ TEST_F(PeerConnectionCongestionControlTest, ReceiveOfferSetsCcfbFlag) {
 TEST_F(PeerConnectionCongestionControlTest, SendOnlySupportDoesNotEnableCcFb) {
   // Enable CCFB for sender, do not enable it for receiver
   SetFieldTrials(kCallerName,
-                 "WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
   SetFieldTrials(kCalleeName,
                  "WebRTC-RFC8888CongestionControlFeedback/Disabled/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   {
     // Check that the callee parsed the CCFB
     auto parsed_contents =
@@ -126,15 +144,14 @@ TEST_F(PeerConnectionCongestionControlTest,
        ReNegotiationCalleeDoesNotSupportCcfb) {
   // Enable CCFB for sender, do not enable it for receiver
   SetFieldTrials(kCallerName,
-                 "WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
   SetFieldTrials(kCalleeName,
                  "WebRTC-RFC8888CongestionControlFeedback/Disabled/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
 
   // Check that the callee answer does contain transport-cc
   std::string answer_str = absl::StrCat(*caller()->pc()->remote_description());
@@ -143,8 +160,7 @@ TEST_F(PeerConnectionCongestionControlTest,
   // Callee re-negotiates
   callee()->AddVideoTrack();
   callee()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   // Check that the caller's answer does contain CCFB.
   answer_str = absl::StrCat(*caller()->pc()->local_description());
   EXPECT_THAT(answer_str, Not(HasSubstr("ccfb")));
@@ -152,17 +168,16 @@ TEST_F(PeerConnectionCongestionControlTest,
 
 TEST_F(PeerConnectionCongestionControlTest, ReNegotiationBothSupportCcfb) {
   SetFieldTrials(kCallerName,
-                 "WebRTC-RFC8888CongestionControlFeedback/Enabled/"
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/"
                  "WebRTC-HeaderExtensionNegotiateMemory/Enabled/");
   SetFieldTrials(kCalleeName,
-                 "WebRTC-RFC8888CongestionControlFeedback/Enabled/"
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/"
                  "WebRTC-HeaderExtensionNegotiateMemory/Enabled/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
 
   // Check that the callee's answer does  not contain transport-cc
   std::string answer_str = absl::StrCat(*caller()->pc()->remote_description());
@@ -171,8 +186,7 @@ TEST_F(PeerConnectionCongestionControlTest, ReNegotiationBothSupportCcfb) {
   // Callee re-negotiates
   callee()->AddVideoTrack();
   callee()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   std::string offer_str = absl::StrCat(*callee()->pc()->local_description());
   EXPECT_THAT(offer_str, Not(HasSubstr("transport-cc")));
   EXPECT_THAT(
@@ -191,15 +205,14 @@ TEST_F(PeerConnectionCongestionControlTest, ReNegotiationBothSupportCcfb) {
 #ifdef WEBRTC_HAVE_SCTP
 TEST_F(PeerConnectionCongestionControlTest,
        ReceiveOfferWithDataChannelsSetsCcfbFlag) {
-  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   caller()->AddAudioVideoTracks();
   caller()->CreateDataChannel();
   callee()->CreateDataChannel();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   {
     // Check that the callee parsed it.
     auto parsed_contents =
@@ -240,7 +253,7 @@ TEST_F(PeerConnectionCongestionControlTest,
 #endif
 
 TEST_F(PeerConnectionCongestionControlTest, NegotiatingCcfbRemovesTsn) {
-  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignalingForSdpOnly();
   callee()->AddVideoTrack();
@@ -250,8 +263,7 @@ TEST_F(PeerConnectionCongestionControlTest, NegotiatingCcfbRemovesTsn) {
   caller()->pc()->AddTransceiver(MediaType::AUDIO);
 
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
 
   ASSERT_THAT(caller()->pc()->GetTransceivers().size(), Eq(2));
   EXPECT_THAT(
@@ -320,13 +332,12 @@ TEST_F(PeerConnectionCongestionControlTest, NegotiatingCcfbRemovesTsn) {
 }
 
 TEST_F(PeerConnectionCongestionControlTest, CcfbGetsUsed) {
-  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled/");
+  SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignaling();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   MediaExpectations media_expectations;
   media_expectations.CalleeExpectsSomeAudio();
   media_expectations.CalleeExpectsSomeVideo();
@@ -344,14 +355,103 @@ TEST_F(PeerConnectionCongestionControlTest, CcfbGetsUsed) {
               Eq(0));
 }
 
+TEST_F(PeerConnectionCongestionControlTest, CcfbGetsUsedWithPrAnswer) {
+  // CCFB negotiation is asymmetric: the generator sets the flag but doesn't
+  // add it to codecs' feedback_params, while the parser adds it to codecs'
+  // feedback_params. This causes false positive munging detection (71, 86)
+  // when the prAnswer is re-parsed.
+  SetFieldTrials(
+      "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/"
+      "WebRTC-NoSdpMangleAllowForTesting/Enabled,71,86/");
+  metrics::Reset();
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  caller()->AddAudioVideoTracks();
+  callee()->SetGeneratedSdpMunger(
+      [](std::unique_ptr<SessionDescriptionInterface>& sdp) {
+        SetSdpType(sdp, SdpType::kPrAnswer);
+      });
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] {
+    return caller()->pc()->signaling_state() ==
+           PeerConnectionInterface::kHaveRemotePrAnswer;
+  }));
+  MediaExpectations media_expectations;
+  media_expectations.CalleeExpectsSomeAudio();
+  media_expectations.CalleeExpectsSomeVideo();
+  ASSERT_TRUE(ExpectNewFrames(media_expectations));
+  auto pc_internal = caller()->pc_internal();
+  EXPECT_THAT(
+      WaitUntil(
+          [&] {
+            return pc_internal->FeedbackAccordingToRfc8888CountForTesting();
+          },
+          Gt(0)),
+      IsRtcOk());
+  // There should be no transport-cc generated.
+  EXPECT_THAT(pc_internal->FeedbackAccordingToTransportCcCountForTesting(),
+              Eq(0));
+  // Note that metrics are picked up from both PCs, so the number
+  // of metric counts is 2.
+  EXPECT_METRIC_EQ(
+      metrics::NumSamples("WebRTC.PeerConnection.NegotiatedFeedbackType"), 2);
+  EXPECT_METRIC_EQ(
+      metrics::NumEvents("WebRTC.PeerConnection.NegotiatedFeedbackType",
+                         static_cast<int>(RtcpFeedbackType::CCFB)),
+      2);
+  EXPECT_METRIC_EQ(
+      metrics::NumEvents("WebRTC.PeerConnection.NegotiatedFeedbackType",
+                         static_cast<int>(RtcpFeedbackType::TRANSPORT_CC)),
+      0);
+}
+
 TEST_F(PeerConnectionCongestionControlTest, TransportCcGetsUsed) {
   SetFieldTrials("WebRTC-RFC8888CongestionControlFeedback/Disabled/");
+  metrics::Reset();
   ASSERT_TRUE(CreatePeerConnectionWrappers());
   ConnectFakeSignaling();
   caller()->AddAudioVideoTracks();
   caller()->CreateAndSetAndSignalOffer();
-  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
-              IsRtcOk());
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
+  MediaExpectations media_expectations;
+  media_expectations.CalleeExpectsSomeAudio();
+  media_expectations.CalleeExpectsSomeVideo();
+  ASSERT_TRUE(ExpectNewFrames(media_expectations));
+  auto pc_internal = caller()->pc_internal();
+  EXPECT_THAT(
+      WaitUntil(
+          [&] {
+            return pc_internal->FeedbackAccordingToTransportCcCountForTesting();
+          },
+          Gt(0)),
+      IsRtcOk());
+  // Test that RFC 8888 feedback is NOT generated when field trial disabled.
+  EXPECT_THAT(pc_internal->FeedbackAccordingToRfc8888CountForTesting(), Eq(0));
+  // Note that metrics are picked up from both PCs, so the number
+  // of metric counts is 2.
+  EXPECT_METRIC_EQ(
+      metrics::NumSamples("WebRTC.PeerConnection.NegotiatedFeedbackType"), 2);
+  EXPECT_METRIC_EQ(
+      metrics::NumEvents("WebRTC.PeerConnection.NegotiatedFeedbackType",
+                         static_cast<int>(RtcpFeedbackType::CCFB)),
+      0);
+  EXPECT_METRIC_EQ(
+      metrics::NumEvents("WebRTC.PeerConnection.NegotiatedFeedbackType",
+                         static_cast<int>(RtcpFeedbackType::TRANSPORT_CC)),
+      2);
+}
+
+TEST_F(PeerConnectionCongestionControlTest,
+       TransportCcGetsUsedIfCalleeNotEnabledRfc8888) {
+  SetFieldTrials(kCallerName,
+                 "WebRTC-RFC8888CongestionControlFeedback/Enabled,offer:true/");
+  SetFieldTrials(kCalleeName,
+                 "WebRTC-RFC8888CongestionControlFeedback/Disabled/");
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  caller()->AddAudioVideoTracks();
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
   MediaExpectations media_expectations;
   media_expectations.CalleeExpectsSomeAudio();
   media_expectations.CalleeExpectsSomeVideo();

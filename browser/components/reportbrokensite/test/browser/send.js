@@ -208,7 +208,7 @@ async function getExpectedWebCompatInfo(tab, snapshot, fullAppData = false) {
     browserInfo.security.firewall = securityStringToArray(registeredFirewall);
   }
 
-  const tabInfo = await tab.linkedBrowser.ownerGlobal.SpecialPowers.spawn(
+  const tabInfo = await tab.linkedBrowser.documentGlobal.SpecialPowers.spawn(
     tab.linkedBrowser,
     [],
     async function () {
@@ -222,6 +222,7 @@ async function getExpectedWebCompatInfo(tab, snapshot, fullAppData = false) {
           hasMixedActiveContentBlocked: false,
           hasMixedDisplayContentBlocked: false,
           btpHasPurgedSite: false,
+          btpPurgeHistory: [],
           etpCategory: "standard",
         },
         frameworks: {
@@ -255,6 +256,11 @@ function extractBrokenSiteReportFromGleanPing(Glean) {
   ping.tabInfo.antitracking = extractPingData(
     Glean.brokenSiteReportTabInfoAntitracking
   );
+  const btpPurgeHistory =
+    Glean.brokenSiteReportTabInfoAntitracking.btpPurgeHistory.testGetValue();
+  ping.tabInfo.antitracking.btpPurgeHistory = btpPurgeHistory
+    ? Array.from(btpPurgeHistory)
+    : null;
   ping.tabInfo.frameworks = extractPingData(
     Glean.brokenSiteReportTabInfoFrameworks
   );
@@ -280,12 +286,42 @@ function extractBrokenSiteReportFromGleanPing(Glean) {
   return ping;
 }
 
+function removeTabSpecificInfo(tabInfo, setToNull = false) {
+  const { antitracking } = tabInfo;
+  for (const name of [
+    "blockedOrigins",
+    "btpHasPurgedSite",
+    "btpPurgeHistory",
+    "hasMixedActiveContentBlocked",
+    "hasMixedDisplayContentBlocked",
+    "hasTrackingContentBlocked",
+    "isPrivateBrowsing",
+  ]) {
+    if (setToNull) {
+      antitracking[name] = null;
+    } else {
+      delete antitracking[name];
+    }
+  }
+  for (const name of ["frameworks", "languages", "useragentString"]) {
+    if (setToNull) {
+      tabInfo[name] = null;
+    } else {
+      delete tabInfo[name];
+    }
+  }
+}
+
 async function testSend(tab, menu, expectedOverrides = {}) {
   const url = expectedOverrides.url ?? menu.win.gBrowser.currentURI.spec;
   const description = expectedOverrides.description ?? "";
-  const breakageCategory = expectedOverrides.breakageCategory ?? null;
+  const breakageCategory = expectedOverrides.breakageCategory ?? "load";
 
-  let rbs = await menu.openAndPrefillReportBrokenSite(url, description);
+  let rbs = await menu.openReportBrokenSiteToDetailsPanel({
+    url,
+    reason: breakageCategory,
+    description,
+  });
 
   const snapshot = await Troubleshoot.snapshot();
   const expected = await getExpectedWebCompatInfo(tab, snapshot);
@@ -305,17 +341,48 @@ async function testSend(tab, menu, expectedOverrides = {}) {
   if (expectedOverrides.antitracking) {
     expected.tabInfo.antitracking = expectedOverrides.antitracking;
 
-    if (expectedOverrides.antitracking.blockedOrigins) {
-      rbs.blockedTrackersCheckbox = true;
+    if (
+      expectedOverrides.antitracking.blockedOrigins &&
+      rbs.hasBlockedOrigins
+    ) {
+      const { blockedTrackersToggle } = rbs;
+      await isVisible(
+        blockedTrackersToggle,
+        "blocked trackers toggle should be visible"
+      );
+      await isNotPressed(
+        blockedTrackersToggle,
+        "blocked trackers toggle should start off"
+      );
+      EventUtils.synthesizeMouseAtCenter(blockedTrackersToggle, {}, rbs.win);
+      await isPressed(
+        blockedTrackersToggle,
+        "blocked trackers toggle should toggle"
+      );
     }
+  }
+
+  if (expectedOverrides.toggleOffScreenshot && rbs.hasScreenshot) {
+    const { screenshotToggle } = rbs;
+    const { top, left } = screenshotToggle.getBoundingClientRect();
+    await isVisible(screenshotToggle, "screenshot toggle should be visible");
+    await isPressed(screenshotToggle, "screenshot toggle should start off");
+    EventUtils.synthesizeMouseAtPoint(left + 10, top + 10, {}, rbs.win);
+    await isNotPressed(screenshotToggle, "screenshot toggle should toggle");
   }
 
   if (expectedOverrides.frameworks) {
     expected.tabInfo.frameworks = expectedOverrides.frameworks;
   }
 
-  if (breakageCategory) {
-    rbs.chooseReason(breakageCategory);
+  if (expectedOverrides.expectNoTabDetails) {
+    removeTabSpecificInfo(expected.tabInfo, true);
+  }
+
+  // filterReportData drops btpPurgeHistory unless the user opts into sending
+  // blocked tracker data, so the metric is never set in that case.
+  if (!rbs.blockedTrackersToggle.pressed) {
+    expected.tabInfo.antitracking.btpPurgeHistory = null;
   }
 
   Services.fog.testResetFOG();
@@ -330,7 +397,7 @@ async function testSend(tab, menu, expectedOverrides = {}) {
         ["basic", "strict"].includes(tabInfo.antitracking.blockList),
         "Got a blockList"
       );
-      if (rbs.blockedTrackersCheckbox.checked) {
+      if (rbs.blockedTrackersToggle.pressed) {
         ok(
           Array.isArray(tabInfo.antitracking.blockedOrigins),
           "Got an array for blockedOrigins"
@@ -338,14 +405,16 @@ async function testSend(tab, menu, expectedOverrides = {}) {
       } else {
         ok(!tabInfo.antitracking.blockedOrigins, "No blockedOrigins included");
       }
-      ok(tabInfo.useragentString?.length, "Got a final UA string");
+      if (!expectedOverrides.expectNoTabDetails) {
+        ok(tabInfo.useragentString?.length, "Got a final UA string");
+      }
       ok(
         browserInfo.app.defaultUseragentString?.length,
         "Got a default UA string"
       );
-
-      filterFrameworkDetectorFails(ping.tabInfo, expected.tabInfo);
-
+      if (expected?.tabInfo) {
+        filterFrameworkDetectorFails(ping.tabInfo, expected.tabInfo);
+      }
       ok(areObjectsEqual(ping, expected), "ping matches expectations");
     },
     () => rbs.clickSend()
@@ -363,10 +432,6 @@ async function testSend(tab, menu, expectedOverrides = {}) {
 
   // re-opening the panel, the url and description should be reset
   rbs = await menu.openReportBrokenSite();
-  rbs.isMainViewResetToCurrentTab();
-  ok(
-    !rbs.blockedTrackersCheckbox.checked,
-    "blocked trackers checkbox is reset"
-  );
+  rbs.isProperlyReset();
   rbs.close();
 }

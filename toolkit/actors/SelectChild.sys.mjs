@@ -1,4 +1,3 @@
-/* vim: set ts=2 sw=2 sts=2 et tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,7 +8,6 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
-  LayoutUtils: "resource://gre/modules/LayoutUtils.sys.mjs",
 });
 
 const kStateActive = 0x00000001; // ElementState::ACTIVE
@@ -62,14 +60,13 @@ Object.defineProperty(SelectContentHelper, "open", {
 
 SelectContentHelper.prototype = {
   init() {
-    let win = this.element.ownerGlobal;
+    let win = this.element.documentGlobal;
     win.addEventListener("pagehide", this, { mozSystemGroup: true });
     this.element.addEventListener("blur", this, { mozSystemGroup: true });
     this.element.addEventListener("transitionend", this, {
       mozSystemGroup: true,
     });
-    let MutationObserver = this.element.ownerGlobal.MutationObserver;
-    this.mut = new MutationObserver(() => {
+    this.mut = new win.MutationObserver(() => {
       // Something changed the <select> while it was open, so
       // we'll poke a DeferredTask to update the parent sometime
       // in the very near future.
@@ -91,7 +88,7 @@ SelectContentHelper.prototype = {
 
   uninit() {
     this.element.openInParentProcess = false;
-    let win = this.element.ownerGlobal;
+    let win = this.element.documentGlobal;
     win.removeEventListener("pagehide", this, { mozSystemGroup: true });
     this.element.removeEventListener("blur", this, { mozSystemGroup: true });
     this.element.removeEventListener("transitionend", this, {
@@ -111,14 +108,14 @@ SelectContentHelper.prototype = {
     let rect = this._getBoundingContentRect();
     let computedStyles = getComputedStyles(this.element);
     let options = this._buildOptionList();
-    let defaultStyles = this.element.ownerGlobal.getDefaultComputedStyle(
+    let defaultStyles = this.element.documentGlobal.getDefaultComputedStyle(
       this.element
     );
     this.actor.sendAsyncMessage("Forms:ShowDropDown", {
       isOpenedViaTouch: this.isOpenedViaTouch,
       options,
       rect,
-      custom: !this.element.nodePrincipal.isSystemPrincipal,
+      custom: this._allowCustomStyling(computedStyles),
       selectedIndex: this.element.selectedIndex,
       isDarkBackground: ChromeUtils.isDarkBackground(this.element),
       style: supportedStyles(computedStyles, SUPPORTED_SELECT_PROPERTIES),
@@ -149,7 +146,8 @@ SelectContentHelper.prototype = {
   },
 
   _getBoundingContentRect() {
-    return lazy.LayoutUtils.getElementBoundingScreenRect(this.element);
+    let win = this.element.documentGlobal;
+    return win.windowUtils.getElementBoundingScreenRect(this.element);
   },
 
   _buildOptionList() {
@@ -161,6 +159,29 @@ SelectContentHelper.prototype = {
     return { options, uniqueStyles };
   },
 
+  _allowCustomStyling(styles) {
+    if (this.element.nodePrincipal.isSystemPrincipal) {
+      // We assume that our UI integrates reasonably with the OS, so we don't
+      // need custom styling.
+      return false;
+    }
+    if (styles.backgroundImage !== "none") {
+      // Disable custom styling if the select uses background-image. We can't
+      // reasonably support arbitrary background-images (because it'd require
+      // doing image loads on the parent for images specified by content, which
+      // is a no-go). Plus, isDarkBackground() and such don't deal particularly
+      // well with it.
+      return false;
+    }
+    if (styles.color === "rgba(0, 0, 0, 0)") {
+      // If the select text color is transparent, we also can't reasonably
+      // support custom styling. Some pages use this combined with overlaying
+      // text in other ways to customize the button, see bug 2067761.
+      return false;
+    }
+    return true;
+  },
+
   _update() {
     // The <select> was updated while the dropdown was open.
     // Let's send up a new list of options.
@@ -169,12 +190,12 @@ SelectContentHelper.prototype = {
     // have :focus, though it is here for belt-and-suspenders.
     this._setupPseudoClassStyles();
     let computedStyles = getComputedStyles(this.element);
-    let defaultStyles = this.element.ownerGlobal.getDefaultComputedStyle(
+    let defaultStyles = this.element.documentGlobal.getDefaultComputedStyle(
       this.element
     );
     this.actor.sendAsyncMessage("Forms:UpdateDropDown", {
       options: this._buildOptionList(),
-      custom: !this.element.nodePrincipal.isSystemPrincipal,
+      custom: this._allowCustomStyling(computedStyles),
       selectedIndex: this.element.selectedIndex,
       isDarkBackground: ChromeUtils.isDarkBackground(this.element),
       style: supportedStyles(computedStyles, SUPPORTED_SELECT_PROPERTIES),
@@ -209,12 +230,10 @@ SelectContentHelper.prototype = {
           return;
         }
 
-        let win = this.element.ownerGlobal;
-
         // Running arbitrary script below (dispatching events for example) can
         // close us, but we should still send events consistently.
         let element = this.element;
-
+        let win = element.documentGlobal;
         let selectedOption = element.item(element.selectedIndex);
 
         // For ordering of events, we're using non-e10s as our guide here,
@@ -266,7 +285,7 @@ SelectContentHelper.prototype = {
         break;
 
       case "Forms:MouseUp": {
-        let win = this.element.ownerGlobal;
+        let win = this.element.documentGlobal;
         if (message.data.onAnchor) {
           this.dispatchMouseEvent(win, this.element, "mouseup");
         }
@@ -329,7 +348,7 @@ SelectContentHelper.prototype = {
 };
 
 function getComputedStyles(element) {
-  return element.ownerGlobal.getComputedStyle(element);
+  return element.documentGlobal.getComputedStyle(element);
 }
 
 function supportedStyles(cs, supportedProps) {
@@ -367,18 +386,35 @@ function uniqueStylesIndex(cs, uniqueStyles) {
   return uniqueStyles.length - 1;
 }
 
+// Yields the <option>, <optgroup> and <hr> children of `node` in tree order.
+// Any other element is a wrapper, which is transparent for the option list, so
+// it is descended into. See
+// https://html.spec.whatwg.org/#concept-select-option-list
+function* optionListChildren(node) {
+  for (let child of node.children) {
+    let className = ChromeUtils.getClassName(child);
+    switch (className) {
+      case "HTMLOptionElement":
+      case "HTMLOptGroupElement":
+      case "HTMLHRElement":
+        yield [child, className];
+        break;
+      case "HTMLSelectElement":
+      case "HTMLDataListElement":
+        break;
+      default:
+        yield* optionListChildren(child);
+    }
+  }
+}
+
 function buildOptionListForChildren(node, uniqueStyles) {
   let result = [];
 
   let lastWasHR = false;
-  for (let child of node.children) {
-    let className = ChromeUtils.getClassName(child);
-    let isOption = className == "HTMLOptionElement";
+  for (let [child, className] of optionListChildren(node)) {
     let isOptGroup = className == "HTMLOptGroupElement";
     let isHR = className == "HTMLHRElement";
-    if (!isOption && !isOptGroup && !isHR) {
-      continue;
-    }
     if (child.hidden) {
       continue;
     }
@@ -398,7 +434,7 @@ function buildOptionListForChildren(node, uniqueStyles) {
         isHR,
       };
 
-      const defaultHRStyle = node.ownerGlobal.getDefaultComputedStyle(child);
+      const defaultHRStyle = node.documentGlobal.getDefaultComputedStyle(child);
       if (cs.color != defaultHRStyle.color) {
         info.color = cs.color;
       }

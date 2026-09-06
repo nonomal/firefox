@@ -1,21 +1,20 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set sw=2 ts=8 et tw=80 : */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsHttpConnectionInfo_h__
-#define nsHttpConnectionInfo_h__
+#ifndef nsHttpConnectionInfo_h_
+#define nsHttpConnectionInfo_h_
 
-#include "nsHttp.h"
-#include "nsProxyInfo.h"
-#include "nsCOMPtr.h"
-#include "nsStringFwd.h"
-#include "mozilla/Logging.h"
-#include "mozilla/BasePrincipal.h"
-#include "mozilla/AlreadyAddRefed.h"
 #include "ARefBase.h"
+#include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/BasePrincipal.h"
+#include "mozilla/Logging.h"
+#include "mozilla/net/happy_eyeballs_glue.h"
+#include "nsCOMPtr.h"
+#include "nsHttp.h"
 #include "nsIRequest.h"
+#include "nsProxyInfo.h"
+#include "nsStringFwd.h"
 
 //-----------------------------------------------------------------------------
 // nsHttpConnectionInfo - holds the properties of a connection
@@ -38,6 +37,31 @@ namespace net {
 extern LazyLogModule gHttpLog;
 class HttpConnectionInfoCloneArgs;
 class nsHttpTransaction;
+
+struct CoalescingKey {
+  HashNumber mHash = 0;
+  nsCString mString;
+};
+
+// Where a connection info stands on HTTP/3. The three states are mutually
+// exclusive, so they live in one field rather than a flag each. Anything other
+// than Allowed also isolates the connection info into its own connection entry
+// via the hash key.
+enum class Http3Policy : uint8_t {
+  // HTTP/3 may be used, subject to the usual prefs and discovery.
+  Allowed = 0,
+  // HTTP/3 must not be used. Used for transactions that can't speak it (e.g.
+  // WebSocket upgrades) so they are never blocked by, or coalesced onto, an
+  // HTTP/3 connection opened for regular requests to the same host.
+  Disabled,
+  // Only HTTP/3 may be used; Happy Eyeballs must not race h1/h2. Used by eager
+  // Alt-Svc h3 validation so the connection it warms is guaranteed to be h3
+  // (bug 2051272). The separate entry matters: sharing the origin's entry let
+  // the speculative, TCP-less attempt be claimed by a normal transaction and
+  // let it hold the entry's single-H3 slot, wedging every other transaction to
+  // that origin (bug 2063452).
+  Only,
+};
 
 class nsHttpConnectionInfo final : public ARefBase {
  public:
@@ -64,9 +88,9 @@ class nsHttpConnectionInfo final : public ARefBase {
   DeserializeHttpConnectionInfoCloneArgs(
       const HttpConnectionInfoCloneArgs& aInfoArgs);
 
-  static void BuildOriginFrameHashKey(nsACString& newKey,
-                                      nsHttpConnectionInfo* ci,
-                                      const nsACString& host, int32_t port);
+  static CoalescingKey BuildOriginFrameHashKey(nsHttpConnectionInfo* ci,
+                                               const nsACString& host,
+                                               int32_t port);
 
  private:
   virtual ~nsHttpConnectionInfo() {
@@ -90,6 +114,7 @@ class nsHttpConnectionInfo final : public ARefBase {
     AnonymousAllowClientCert,
     FallbackConnection,
     WebTransport,
+    HappyEyeballs,
     End,
   };
   constexpr inline auto UnderlyingIndex(HashKeyIndex aIndex) const {
@@ -115,12 +140,16 @@ class nsHttpConnectionInfo final : public ARefBase {
   // mRoutedPort and mNPNToken will be replaced as well.
   already_AddRefed<nsHttpConnectionInfo> CloneAndAdoptHTTPSSVCRecord(
       nsISVCBRecord* aRecord) const;
+  already_AddRefed<nsHttpConnectionInfo> CloneAndAdoptPortAndAlpn(
+      uint16_t aPort,
+      happy_eyeballs::ConnectionAttemptHttpVersions aProtocol) const;
   void CloneAsDirectRoute(nsHttpConnectionInfo** outCI,
                           nsProxyInfo* aProxyInfo = nullptr);
 
   already_AddRefed<nsHttpConnectionInfo> CreateConnectUDPFallbackConnInfo();
 
   [[nodiscard]] nsresult CreateWildCard(nsHttpConnectionInfo** outParam);
+  bool IsWildCard() const { return mIsWildCard; }
 
   const char* ProxyHost() const {
     return mProxyInfo ? mProxyInfo->Host().get() : nullptr;
@@ -172,6 +201,11 @@ class nsHttpConnectionInfo final : public ARefBase {
   bool GetAnonymous() const {
     return GetHashCharAt(HashKeyIndex::Anonymous) == 'A';
   }
+  void AnonymousInvertedHashKey(nsACString& aResult) const {
+    aResult = mHashKey;
+    aResult.BeginWriting()[UnderlyingIndex(HashKeyIndex::Anonymous)] =
+        GetAnonymous() ? '.' : 'A';
+  }
   void SetPrivate(bool priv) {
     SetHashCharAt(priv ? 'P' : '.', HashKeyIndex::Private);
   }
@@ -215,6 +249,17 @@ class nsHttpConnectionInfo final : public ARefBase {
     return GetHashCharAt(HashKeyIndex::FallbackConnection) == 'F';
   }
 
+  void SetHappyEyeballsEnabled(bool aEnabled) {
+    SetHashCharAt(aEnabled ? 'H' : '.', HashKeyIndex::HappyEyeballs);
+    if (aEnabled && !mHappyEyeballsEnabled) {
+      mHappyEyeballsEnabled = aEnabled;
+      RebuildHashKey();
+    }
+  }
+  bool GetHappyEyeballsEnabled() const {
+    return GetHashCharAt(HashKeyIndex::HappyEyeballs) == 'H';
+  }
+
   void SetTlsFlags(uint32_t aTlsFlags);
   uint32_t GetTlsFlags() const { return mTlsFlags; }
 
@@ -234,6 +279,13 @@ class nsHttpConnectionInfo final : public ARefBase {
   void SetIPv6Disabled(bool aNoIPv6);
   bool GetIPv6Disabled() const { return mIPv6Disabled; }
 
+  void SetHttp3Policy(Http3Policy aPolicy);
+  Http3Policy GetHttp3Policy() const { return mHttp3Policy; }
+  bool GetHttp3Disabled() const {
+    return mHttp3Policy == Http3Policy::Disabled;
+  }
+  bool GetHttp3Only() const { return mHttp3Policy == Http3Policy::Only; }
+
   void SetWebTransport(bool aWebTransport);
   bool GetWebTransport() const { return mWebTransport; }
 
@@ -244,7 +296,9 @@ class nsHttpConnectionInfo final : public ARefBase {
   const nsCString& GetProxyNPNToken() const { return mProxyNPNToken; }
   const nsCString& GetUsername() { return mUsername; }
 
-  const OriginAttributes& GetOriginAttributes() { return mOriginAttributes; }
+  const OriginAttributes& GetOriginAttributes() const {
+    return mOriginAttributes;
+  }
 
   // Returns true for any kind of proxy (http, socks, https, etc..)
   bool UsingProxy();
@@ -324,6 +378,8 @@ class nsHttpConnectionInfo final : public ARefBase {
   uint16_t mIPv4Disabled : 1;
   uint16_t mIPv6Disabled : 1;
 
+  Http3Policy mHttp3Policy = Http3Policy::Allowed;
+
   bool mLessThanTls13;  // This will be set to true if we negotiate less than
                         // tls1.3. If the tls version is till not know or it
                         // is 1.3 or greater the value will be false.
@@ -336,6 +392,9 @@ class nsHttpConnectionInfo final : public ARefBase {
 
   uint64_t mWebTransportId = 0;  // current dedicated Id only used for
                                  // Webtransport, zero means not dedicated
+  bool mIsWildCard = false;
+
+  bool mHappyEyeballsEnabled = false;
 
   // for RefPtr
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(nsHttpConnectionInfo, override)
@@ -344,4 +403,4 @@ class nsHttpConnectionInfo final : public ARefBase {
 }  // namespace net
 }  // namespace mozilla
 
-#endif  // nsHttpConnectionInfo_h__
+#endif  // nsHttpConnectionInfo_h_

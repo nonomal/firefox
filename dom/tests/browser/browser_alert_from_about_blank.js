@@ -3,12 +3,6 @@
 
 "use strict";
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
-
 add_task(async function test_check_alert_from_blank() {
   await BrowserTestUtils.withNewTab(
     "https://example.com/blank",
@@ -25,7 +19,7 @@ add_task(async function test_check_alert_from_blank() {
           // Start an async navigation that will close the alert
           // Previously this wasn't needed as the initial about:blank
           // was followed by an async about:blank load. See Bug 543435
-          newWin.location = "/blank";
+          newWin.location = "about:blank?0";
           newWin.alert("Alert from the popup.");
           info("Button onclick: finished");
         });

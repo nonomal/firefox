@@ -4,12 +4,15 @@
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const DEFAULT_FORM_HISTORY_PARAM = "searchbar-history";
+export const DEFAULT_FORM_HISTORY_PARAM = "searchbar-history";
 const HTTP_OK = 200;
 const REMOTE_TIMEOUT_DEFAULT = 500;
 
 const lazy = XPCOMUtils.declareLazy({
+  ConfigSearchEngine:
+    "moz-src:///toolkit/components/search/ConfigSearchEngine.sys.mjs",
   FormHistory: "resource://gre/modules/FormHistory.sys.mjs",
+  SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
   SearchUtils: "moz-src:///toolkit/components/search/SearchUtils.sys.mjs",
   logConsole: () =>
     console.createInstance({
@@ -36,6 +39,10 @@ const lazy = XPCOMUtils.declareLazy({
 });
 
 /**
+ * @import {SearchEngine} from "./SearchEngine.sys.mjs"
+ */
+
+/**
  * @typedef {Awaited<ReturnType<typeof lazy.FormHistory.getAutoCompleteResults>>} FormHistoryResultType
  */
 
@@ -51,8 +58,15 @@ const lazy = XPCOMUtils.declareLazy({
  *   The term to provide suggestions for.
  * @property {boolean} inPrivateBrowsing
  *   Whether the request is being made in the context of private browsing.
- * @property {nsISearchEngine} engine
+ * @property {SearchEngine} engine
  *   The search engine to use for suggestions.
+ * @property {number} [maxLocalResults]
+ *   The maximum number of local form history results to return. This limit is
+ *   only enforced if remote results are also returned.
+ * @property {number} [maxRemoteResults]
+ *    The maximum number of remote search engine results to return.
+ *    We'll actually only display at most ``maxRemoteResults -
+ *    <displayed local results count>`` remote results.
  * @property {number} [userContextId]
  *   The userContextId of the selected tab.
  * @property {boolean} [restrictToEngine]
@@ -201,16 +215,6 @@ class SearchSuggestionEntry {
  */
 export class SearchSuggestionController {
   /**
-   * Constructor
-   *
-   * @param {string} [formHistoryParam]
-   *   The form history type to use with this controller.
-   */
-  constructor(formHistoryParam = DEFAULT_FORM_HISTORY_PARAM) {
-    this.formHistoryParam = formHistoryParam;
-  }
-
-  /**
    * The maximum length of a value to be stored in search history.
    *
    *  @type {number}
@@ -227,7 +231,7 @@ export class SearchSuggestionController {
   /**
    * Determines whether the given engine offers search suggestions.
    *
-   * @param {nsISearchEngine} engine - The search engine
+   * @param {SearchEngine} engine - The search engine
    * @param {boolean} fetchTrending - Whether we should fetch trending suggestions.
    * @returns {boolean} True if the engine offers suggestions and false otherwise.
    */
@@ -238,30 +242,6 @@ export class SearchSuggestionController {
         : lazy.SearchUtils.URL_TYPE.SUGGEST_JSON
     );
   }
-
-  /**
-   * The maximum number of local form history results to return. This limit is
-   * only enforced if remote results are also returned.
-   *
-   * @type {number}
-   */
-  maxLocalResults = 5;
-
-  /**
-   * The maximum number of remote search engine results to return.
-   * We'll actually only display at most
-   * maxRemoteResults - <displayed local results count> remote results.
-   *
-   * @type {number}
-   */
-  maxRemoteResults = 10;
-
-  /**
-   * The additional parameter used when searching form history.
-   *
-   * @type {string}
-   */
-  formHistoryParam = DEFAULT_FORM_HISTORY_PARAM;
 
   /**
    * The last form history result used to improve the performance of
@@ -295,6 +275,8 @@ export class SearchSuggestionController {
     searchString,
     inPrivateBrowsing,
     engine,
+    maxLocalResults = 5,
+    maxRemoteResults = 10,
     userContextId = 0,
     restrictToEngine = false,
     dedupeRemoteAndLocal = true,
@@ -311,7 +293,7 @@ export class SearchSuggestionController {
 
     this.stop();
 
-    if (!Services.search.isInitialized) {
+    if (!lazy.SearchService.isInitialized) {
       throw new Error("Search not initialized yet (how did you get here?)");
     }
     if (typeof inPrivateBrowsing === "undefined") {
@@ -322,10 +304,10 @@ export class SearchSuggestionController {
     if (!engine.getSubmission) {
       throw new Error("Invalid search engine");
     }
-    if (!this.maxLocalResults && !this.maxRemoteResults) {
+    if (!maxLocalResults && !maxRemoteResults) {
       throw new Error("Zero results expected, what are you trying to do?");
     }
-    if (this.maxLocalResults < 0 || this.maxRemoteResults < 0) {
+    if (maxLocalResults < 0 || maxRemoteResults < 0) {
       throw new Error("Number of requested results must be positive");
     }
 
@@ -335,6 +317,8 @@ export class SearchSuggestionController {
       awaitingLocalResults: false,
       dedupeRemoteAndLocal,
       engine,
+      maxLocalResults,
+      maxRemoteResults,
       fetchTrending,
       inPrivateBrowsing,
       restrictToEngine,
@@ -345,7 +329,7 @@ export class SearchSuggestionController {
     };
 
     // Fetch local results from Form History, if requested.
-    if (this.maxLocalResults && !fetchTrending) {
+    if (maxLocalResults && !fetchTrending) {
       this.#context.awaitingLocalResults = true;
       promises.push(this.#fetchFormHistory(this.#context));
     }
@@ -354,7 +338,7 @@ export class SearchSuggestionController {
       (searchString || fetchTrending) &&
       lazy.suggestionsEnabled &&
       (!inPrivateBrowsing || lazy.suggestionsInPrivateBrowsingEnabled) &&
-      this.maxRemoteResults &&
+      maxRemoteResults &&
       SearchSuggestionController.engineOffersSuggestions(engine, fetchTrending)
     ) {
       promises.push(this.#fetchRemote(this.#context));
@@ -416,7 +400,7 @@ export class SearchSuggestionController {
     // We don't cache these results as we assume that the in-memory SQL cache is
     // good enough in performance.
     let params = {
-      fieldname: this.formHistoryParam,
+      fieldname: DEFAULT_FORM_HISTORY_PARAM,
     };
 
     if (context.restrictToEngine) {
@@ -442,18 +426,20 @@ export class SearchSuggestionController {
   #reportTelemetryForEngine(context) {
     // If the timer id has been reset, then we have already handled telemetry.
     // This might occur in the context of an abort or or cancel.
-    if (context.gleanTimerId) {
-      let engineId = context.engine.isConfigEngine
-        ? context.engine.id
-        : "other";
-      // Stop the latency stopwatch.
+    if (
+      context.engine instanceof lazy.ConfigSearchEngine &&
+      context.gleanTimerId
+    ) {
       if (context.aborted) {
-        Glean.searchSuggestions.latency[engineId].cancel(context.gleanTimerId);
+        Glean.searchSuggestions.latency[context.engine.id].cancel(
+          context.gleanTimerId
+        );
       } else {
-        Glean.searchSuggestions.latency[engineId].stopAndAccumulate(
+        Glean.searchSuggestions.latency[context.engine.id].stopAndAccumulate(
           context.gleanTimerId
         );
       }
+
       context.gleanTimerId = 0;
     }
   }
@@ -486,7 +472,7 @@ export class SearchSuggestionController {
     let method = submission.postData ? "POST" : "GET";
     request.open(method, submission.uri.spec, true);
     // Don't set or store cookies or on-disk cache.
-    request.channel.loadFlags =
+    request.channel.loadFlags |=
       Ci.nsIChannel.LOAD_ANONYMOUS | Ci.nsIChannel.INHIBIT_PERSISTENT_CACHING;
 
     lazy.logConsole.debug(
@@ -570,10 +556,10 @@ export class SearchSuggestionController {
       request.send();
     }
 
-    context.gleanTimerId =
-      Glean.searchSuggestions.latency[
-        context.engine.isConfigEngine ? context.engine.id : "other"
-      ].start();
+    if (context.engine instanceof lazy.ConfigSearchEngine) {
+      context.gleanTimerId =
+        Glean.searchSuggestions.latency[context.engine.id].start();
+    }
 
     return deferredResponse.promise;
   }
@@ -681,7 +667,7 @@ export class SearchSuggestionController {
 
     // If we have remote results, cap the number of local results
     if (results.remote.length) {
-      results.local = results.local.slice(0, this.maxLocalResults);
+      results.local = results.local.slice(0, context.maxLocalResults);
     }
 
     // We don't want things to appear in both history and suggestions so remove
@@ -702,7 +688,7 @@ export class SearchSuggestionController {
     }
 
     // Trim the number of results to the maximum requested (now that we've pruned dupes).
-    let maxRemoteCount = this.maxRemoteResults;
+    let maxRemoteCount = context.maxRemoteResults;
     if (context.dedupeRemoteAndLocal) {
       maxRemoteCount -= results.local.length;
     }

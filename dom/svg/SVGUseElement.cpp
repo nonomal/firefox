@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,10 +12,10 @@
 #include "mozilla/StaticPrefs_svg.h"
 #include "mozilla/URLExtraData.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/ElementBinding.h"
 #include "mozilla/dom/ReferrerInfo.h"
 #include "mozilla/dom/SVGGraphicsElement.h"
 #include "mozilla/dom/SVGLengthBinding.h"
-#include "mozilla/dom/SVGSVGElement.h"
 #include "mozilla/dom/SVGSwitchElement.h"
 #include "mozilla/dom/SVGSymbolElement.h"
 #include "mozilla/dom/SVGUseElementBinding.h"
@@ -41,13 +39,13 @@ JSObject* SVGUseElement::WrapNode(JSContext* aCx,
 
 SVGElement::LengthInfo SVGUseElement::sLengthInfo[4] = {
     {nsGkAtoms::x, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::X},
+     SVGLength::Axis::X},
     {nsGkAtoms::y, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::Y},
+     SVGLength::Axis::Y},
     {nsGkAtoms::width, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::X},
+     SVGLength::Axis::X},
     {nsGkAtoms::height, 0, SVGLength_Binding::SVG_LENGTHTYPE_NUMBER,
-     SVGContentUtils::Y},
+     SVGLength::Axis::Y},
 };
 
 SVGElement::StringInfo SVGUseElement::sStringInfo[2] = {
@@ -76,8 +74,7 @@ NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED(SVGUseElement, SVGUseElementBase,
 //----------------------------------------------------------------------
 // Implementation
 
-SVGUseElement::SVGUseElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+SVGUseElement::SVGUseElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : SVGUseElementBase(std::move(aNodeInfo)), mReferencedElementTracker(this) {
   SetEnabledCallbacks(kCharacterDataChanged | kAttributeChanged |
                       kContentAppended | kContentInserted |
@@ -177,7 +174,8 @@ void SVGUseElement::UnbindFromTree(UnbindContext& aContext) {
 }
 
 already_AddRefed<DOMSVGAnimatedString> SVGUseElement::Href() {
-  return mStringAttributes[HREF].IsExplicitlySet()
+  return mStringAttributes[HREF].IsExplicitlySet() ||
+                 !mStringAttributes[XLINK_HREF].IsExplicitlySet()
              ? mStringAttributes[HREF].ToDOMAnimatedString(this)
              : mStringAttributes[XLINK_HREF].ToDOMAnimatedString(this);
 }
@@ -418,7 +416,9 @@ void SVGUseElement::UpdateShadowTree() {
 
   RefPtr<ShadowRoot> shadow = GetShadowRoot();
   if (!shadow) {
-    shadow = AttachShadowWithoutNameChecks(ShadowRootMode::Closed);
+    ShadowRootInit init;
+    init.mMode = ShadowRootMode::Closed;
+    shadow = AttachShadowWithoutNameChecks(init, Nothing());
   }
   MOZ_ASSERT(shadow);
 
@@ -455,7 +455,7 @@ void SVGUseElement::UpdateShadowTree() {
     const bool isCrossDocument = targetElement->OwnerDoc() != OwnerDoc();
 
     nsNodeInfoManager* nodeInfoManager =
-        isCrossDocument ? OwnerDoc()->NodeInfoManager() : nullptr;
+        isCrossDocument ? NodeInfoManager() : nullptr;
 
     nsCOMPtr<nsINode> newNode =
         targetElement->Clone(true, nodeInfoManager, IgnoreErrors());
@@ -546,7 +546,7 @@ void SVGUseElement::SyncWidthOrHeight(nsAtom* aName) {
   // Our width/height attribute is now no longer explicitly set, so we
   // need to set the value to 100%
   SVGAnimatedLength length;
-  length.Init(SVGContentUtils::XY, 0xff, 100,
+  length.Init(SVGLength::Axis::XY, 0xff, 100,
               SVGLength_Binding::SVG_LENGTHTYPE_PERCENTAGE);
   target->SetLength(aName, length);
 }
@@ -563,7 +563,7 @@ void SVGUseElement::LookupHref() {
     return;
   }
 
-  Element* treeToWatch = mOriginal ? mOriginal.get() : this;
+  const RefPtr<Element> treeToWatch = mOriginal ? mOriginal.get() : this;
   if (nsContentUtils::IsLocalRefURL(href)) {
     mReferencedElementTracker.ResetToLocalFragmentID(*treeToWatch, href);
     return;
@@ -583,7 +583,7 @@ void SVGUseElement::LookupHref() {
     return;
   }
 
-  nsIReferrerInfo* referrer =
+  const nsCOMPtr<nsIReferrerInfo> referrer =
       OwnerDoc()->ReferrerInfoForInternalCSSAndSVGResources();
   mReferencedElementTracker.ResetToURIWithFragmentID(*treeToWatch, targetURI,
                                                      referrer);
@@ -650,10 +650,9 @@ SVGUseFrame* SVGUseElement::GetFrame() const {
 //----------------------------------------------------------------------
 // nsIContent methods
 
-NS_IMETHODIMP_(bool)
-SVGUseElement::IsAttributeMapped(const nsAtom* name) const {
+bool SVGUseElement::IsNoNamespaceAttrMapped(const nsAtom* name) const {
   return name == nsGkAtoms::x || name == nsGkAtoms::y ||
-         SVGUseElementBase::IsAttributeMapped(name);
+         SVGUseElementBase::IsNoNamespaceAttrMapped(name);
 }
 
 NonCustomCSSPropertyId SVGUseElement::GetCSSPropertyIdForAttrEnum(

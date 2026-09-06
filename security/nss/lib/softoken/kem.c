@@ -14,14 +14,29 @@
 /* change to the largest KEM Secret Bytes value supported */
 #define MAX_SHARED_SECRET_BYTES KYBER_SHARED_SECRET_BYTES
 
+CK_ML_KEM_PARAMETER_SET_TYPE
+sftk_kyber_InternalToPK11Param(KyberParams params)
+{
+    switch (params) {
+        case params_ml_kem512:
+        case params_ml_kem512_test_mode:
+            return CKP_ML_KEM_512;
+        case params_ml_kem768:
+        case params_ml_kem768_test_mode:
+            return CKP_ML_KEM_768;
+        case params_ml_kem1024:
+        case params_ml_kem1024_test_mode:
+            return CKP_ML_KEM_1024;
+        default:
+            return CKP_INVALID_ID;
+    }
+}
 KyberParams
 sftk_kyber_PK11ParamToInternal(CK_ML_KEM_PARAMETER_SET_TYPE pk11ParamSet)
 {
     switch (pk11ParamSet) {
-#ifndef NSS_DISABLE_KYBER
-        case CKP_NSS_KYBER_768_ROUND3:
-            return params_kyber768_round3;
-#endif
+        case CKP_ML_KEM_512:
+            return params_ml_kem512;
         case CKP_NSS_ML_KEM_768:
         case CKP_ML_KEM_768:
             return params_ml_kem768;
@@ -32,58 +47,47 @@ sftk_kyber_PK11ParamToInternal(CK_ML_KEM_PARAMETER_SET_TYPE pk11ParamSet)
     }
 }
 
+size_t
+sftk_kyber_pubKeyLen(KyberParams params)
+{
+    switch (params) {
+        case params_ml_kem512:
+        case params_ml_kem512_test_mode:
+            return MLKEM512_PUBLIC_KEY_BYTES;
+        case params_ml_kem768:
+        case params_ml_kem768_test_mode:
+            return KYBER768_PUBLIC_KEY_BYTES;
+        case params_ml_kem1024:
+        case params_ml_kem1024_test_mode:
+            return MLKEM1024_PUBLIC_KEY_BYTES;
+        default:
+            return 0;
+    }
+}
+
 SECItem *
 sftk_kyber_AllocPubKeyItem(KyberParams params, SECItem *pubkey)
 {
-    switch (params) {
-#ifndef NSS_DISABLE_KYBER
-        case params_kyber768_round3:
-        case params_kyber768_round3_test_mode:
-#endif
-        case params_ml_kem768:
-        case params_ml_kem768_test_mode:
-            return SECITEM_AllocItem(NULL, pubkey, KYBER768_PUBLIC_KEY_BYTES);
-        case params_ml_kem1024:
-        case params_ml_kem1024_test_mode:
-            return SECITEM_AllocItem(NULL, pubkey, MLKEM1024_PUBLIC_KEY_BYTES);
-        default:
-            return NULL;
+    size_t pubKeyLen = sftk_kyber_pubKeyLen(params);
+    if (pubKeyLen == 0) {
+        return NULL;
     }
+    return SECITEM_AllocItem(NULL, pubkey, (int)pubKeyLen);
 }
 
 SECItem *
 sftk_kyber_AllocPrivKeyItem(KyberParams params, SECItem *privkey)
 {
     switch (params) {
-#ifndef NSS_DISABLE_KYBER
-        case params_kyber768_round3:
-        case params_kyber768_round3_test_mode:
-#endif
+        case params_ml_kem512:
+        case params_ml_kem512_test_mode:
+            return SECITEM_AllocItem(NULL, privkey, MLKEM512_PRIVATE_KEY_BYTES);
         case params_ml_kem768:
         case params_ml_kem768_test_mode:
             return SECITEM_AllocItem(NULL, privkey, KYBER768_PRIVATE_KEY_BYTES);
         case params_ml_kem1024:
         case params_ml_kem1024_test_mode:
             return SECITEM_AllocItem(NULL, privkey, MLKEM1024_PRIVATE_KEY_BYTES);
-        default:
-            return NULL;
-    }
-}
-
-SECItem *
-sftk_kyber_AllocCiphertextItem(KyberParams params, SECItem *ciphertext)
-{
-    switch (params) {
-#ifndef NSS_DISABLE_KYBER
-        case params_kyber768_round3:
-        case params_kyber768_round3_test_mode:
-#endif
-        case params_ml_kem768:
-        case params_ml_kem768_test_mode:
-            return SECITEM_AllocItem(NULL, ciphertext, KYBER768_CIPHERTEXT_BYTES);
-        case params_ml_kem1024:
-        case params_ml_kem1024_test_mode:
-            return SECITEM_AllocItem(NULL, ciphertext, MLKEM1024_CIPHERTEXT_BYTES);
         default:
             return NULL;
     }
@@ -96,9 +100,6 @@ sftk_kem_ValidateMechanism(CK_MECHANISM_PTR pMechanism)
         return PR_FALSE;
     }
     switch (pMechanism->mechanism) {
-#ifndef NSS_DISABLE_KYBER
-        case CKM_NSS_KYBER:
-#endif
         case CKM_NSS_ML_KEM:
         case CKM_ML_KEM:
             return PR_TRUE;
@@ -118,13 +119,9 @@ sftk_kem_getParamSet(CK_MECHANISM_PTR pMechanism, SFTKObject *key,
     CK_RV crv = CKR_MECHANISM_INVALID;
 
     switch (pMechanism->mechanism) {
-#ifndef NSS_DISABLE_KYBER
-        case CKM_NSS_KYBER:
-#endif
         case CKM_NSS_ML_KEM:
-            /* CKM_NSS_KYBER and CKM_NSS_ML_KEM has cases were we were
-             * given parameters form the application. Retain that symantic for
-             * compatibility */
+            /* CKM_NSS_ML_KEM has cases were we were given parameters from the
+             * application. Retain that semantic for compatibility */
             if ((pMechanism->pParameter) &&
                 pMechanism->ulParameterLen == sizeof(CK_ML_KEM_PARAMETER_SET_TYPE)) {
                 PR_STATIC_ASSERT(sizeof(CK_ML_KEM_PARAMETER_SET_TYPE) == sizeof(CK_LONG));
@@ -160,15 +157,11 @@ sftk_kem_CiphertextLen(CK_MECHANISM_PTR pMechanism, CK_ULONG paramSet)
      * is not overlap between the Vendor specific mechanisms here
      * and the stand ones, we'll just accept them all here. */
     switch (pMechanism->mechanism) {
-#ifndef NSS_DISABLE_KYBER
-        case CKM_NSS_KYBER:
-#endif
         case CKM_NSS_ML_KEM:
         case CKM_ML_KEM:
             switch (paramSet) {
-#ifndef NSS_DISABLE_KYBER
-                case CKP_NSS_KYBER_768_ROUND3:
-#endif
+                case CKP_ML_KEM_512:
+                    return MLKEM512_CIPHERTEXT_BYTES;
                 case CKP_NSS_ML_KEM_768:
                 case CKP_ML_KEM_768:
                     return KYBER768_CIPHERTEXT_BYTES;
@@ -200,6 +193,8 @@ NSC_EncapsulateKey(CK_SESSION_HANDLE hSession,
     SFTKSlot *slot = NULL;
 
     SFTKObject *key = NULL;
+    CK_OBJECT_CLASS ckclass = CKO_SECRET_KEY;
+    CK_KEY_TYPE ckkeyType = CKK_GENERIC_SECRET;
 
     SFTKObject *encapsulationKeyObject = NULL;
     SFTKAttribute *encapsulationKey = NULL;
@@ -244,9 +239,22 @@ NSC_EncapsulateKey(CK_SESSION_HANDLE hSession,
         }
     }
 
+    crv = sftk_defaultAttribute(key, CKA_CLASS, &ckclass, sizeof(ckclass));
+    if (crv != CKR_OK) {
+        goto cleanup;
+    }
+    crv = sftk_defaultAttribute(key, CKA_KEY_TYPE, &ckkeyType, sizeof(ckkeyType));
+    if (crv != CKR_OK) {
+        goto cleanup;
+    }
+
     encapsulationKeyObject = sftk_ObjectFromHandle(hPublicKey, session);
     if (encapsulationKeyObject == NULL) {
         crv = CKR_KEY_HANDLE_INVALID;
+        goto cleanup;
+    }
+    if (encapsulationKeyObject->objclass != CKO_PUBLIC_KEY) {
+        crv = CKR_KEY_TYPE_INCONSISTENT;
         goto cleanup;
     }
     encapsulationKey = sftk_FindAttribute(encapsulationKeyObject, CKA_VALUE);
@@ -275,10 +283,10 @@ NSC_EncapsulateKey(CK_SESSION_HANDLE hSession,
     uint8_t secretBuf[MAX_SHARED_SECRET_BYTES] = { 0 };
     SECItem secret = { siBuffer, secretBuf, sizeof secretBuf };
 
+    sftk_setFIPS(key, sftk_operationIsFIPS(slot, pMechanism, CKA_ENCAPSULATE,
+                                           encapsulationKeyObject, 0));
+    key->source = SFTK_SOURCE_KEA;
     switch (pMechanism->mechanism) {
-#ifndef NSS_DISABLE_KYBER
-        case CKM_NSS_KYBER:
-#endif
         case CKM_NSS_ML_KEM:
         case CKM_ML_KEM:
             PORT_Assert(secret.len >= KYBER_SHARED_SECRET_BYTES);
@@ -310,6 +318,7 @@ NSC_EncapsulateKey(CK_SESSION_HANDLE hSession,
     }
 
 cleanup:
+    PORT_SafeZero(secretBuf, sizeof(secretBuf));
     if (session) {
         sftk_FreeSession(session);
     }
@@ -319,14 +328,14 @@ cleanup:
             return CKR_DEVICE_ERROR;
         }
     }
+    if (encapsulationKey) {
+        sftk_FreeAttribute(encapsulationKey);
+    }
     if (encapsulationKeyObject) {
         status = sftk_FreeObject(encapsulationKeyObject);
         if (status == SFTK_DestroyFailure) {
             return CKR_DEVICE_ERROR;
         }
-    }
-    if (encapsulationKey) {
-        sftk_FreeAttribute(encapsulationKey);
     }
     return crv;
 }
@@ -345,6 +354,8 @@ NSC_DecapsulateKey(CK_SESSION_HANDLE hSession,
     SFTKSlot *slot = NULL;
 
     SFTKObject *key = NULL;
+    CK_OBJECT_CLASS ckclass = CKO_SECRET_KEY;
+    CK_KEY_TYPE ckkeyType = CKK_GENERIC_SECRET;
 
     SFTKObject *decapsulationKeyObject = NULL;
     SFTKAttribute *decapsulationKey = NULL;
@@ -389,9 +400,22 @@ NSC_DecapsulateKey(CK_SESSION_HANDLE hSession,
         }
     }
 
+    crv = sftk_defaultAttribute(key, CKA_CLASS, &ckclass, sizeof(ckclass));
+    if (crv != CKR_OK) {
+        goto cleanup;
+    }
+    crv = sftk_defaultAttribute(key, CKA_KEY_TYPE, &ckkeyType, sizeof(ckkeyType));
+    if (crv != CKR_OK) {
+        goto cleanup;
+    }
+
     decapsulationKeyObject = sftk_ObjectFromHandle(hPrivateKey, session);
     if (decapsulationKeyObject == NULL) {
         crv = CKR_KEY_HANDLE_INVALID;
+        goto cleanup;
+    }
+    if (decapsulationKeyObject->objclass != CKO_PRIVATE_KEY) {
+        crv = CKR_KEY_TYPE_INCONSISTENT;
         goto cleanup;
     }
     decapsulationKey = sftk_FindAttribute(decapsulationKeyObject, CKA_VALUE);
@@ -419,11 +443,10 @@ NSC_DecapsulateKey(CK_SESSION_HANDLE hSession,
      * by changing the define at the top of this file */
     uint8_t secretBuf[MAX_SHARED_SECRET_BYTES] = { 0 };
     SECItem secret = { siBuffer, secretBuf, sizeof secretBuf };
-
+    sftk_setFIPS(key, sftk_operationIsFIPS(slot, pMechanism, CKA_DECAPSULATE,
+                                           decapsulationKeyObject, 0));
+    key->source = SFTK_SOURCE_KEA;
     switch (pMechanism->mechanism) {
-#ifndef NSS_DISABLE_KYBER
-        case CKM_NSS_KYBER:
-#endif
         case CKM_NSS_ML_KEM:
         case CKM_ML_KEM:
             kyberParams = sftk_kyber_PK11ParamToInternal(paramSet);
@@ -452,6 +475,7 @@ NSC_DecapsulateKey(CK_SESSION_HANDLE hSession,
     }
 
 cleanup:
+    PORT_SafeZero(secretBuf, sizeof(secretBuf));
     if (session) {
         sftk_FreeSession(session);
     }
@@ -461,14 +485,14 @@ cleanup:
             return CKR_DEVICE_ERROR;
         }
     }
+    if (decapsulationKey) {
+        sftk_FreeAttribute(decapsulationKey);
+    }
     if (decapsulationKeyObject) {
         status = sftk_FreeObject(decapsulationKeyObject);
         if (status == SFTK_DestroyFailure) {
             return CKR_DEVICE_ERROR;
         }
-    }
-    if (decapsulationKey) {
-        sftk_FreeAttribute(decapsulationKey);
     }
     return crv;
 }

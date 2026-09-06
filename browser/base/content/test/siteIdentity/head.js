@@ -18,40 +18,6 @@ function getIdentityMode(aWindow = window) {
   return aWindow.document.getElementById("identity-box").className;
 }
 
-/**
- * Waits for a load (or custom) event to finish in a given tab. If provided
- * load an uri into the tab.
- *
- * @param tab
- *        The tab to load into.
- * @param [optional] url
- *        The url to load, or the current url.
- * @return {Promise} resolved when the event is handled.
- * @resolves to the received event
- * @rejects if a valid load event is not received within a meaningful interval
- */
-function promiseTabLoadEvent(tab, url) {
-  info("Wait tab event: load");
-
-  function handle(loadedUrl) {
-    if (loadedUrl === "about:blank" || (url && loadedUrl !== url)) {
-      info(`Skipping spurious load event for ${loadedUrl}`);
-      return false;
-    }
-
-    info("Tab event received: load");
-    return true;
-  }
-
-  let loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser, false, handle);
-
-  if (url) {
-    BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, url);
-  }
-
-  return loaded;
-}
-
 // Compares the security state of the page with what is expected
 function isSecurityState(browser, expectedState) {
   let ui = browser.securityUI;
@@ -93,9 +59,9 @@ function isSecurityState(browser, expectedState) {
  * Test the state of the identity box and control center to make
  * sure they are correctly showing the expected mixed content states.
  *
- * @note The checks are done synchronously, but new code should wait on the
- *       returned Promise object to ensure the identity panel has closed.
- *       Bug 1221114 is filed to fix the existing code.
+ * Note: The checks are done synchronously, but new code should wait on the
+ * returned Promise object to ensure the identity panel has closed.
+ * Bug 1221114 is filed to fix the existing code.
  *
  * @param tabbrowser
  * @param Object states
@@ -106,8 +72,8 @@ function isSecurityState(browser, expectedState) {
  *           passiveLoaded: true|false,
  *        }
  *
- * @return {Promise}
- * @resolves When the operation has finished and the identity panel has closed.
+ * @returns {Promise<void>}
+ *   Resolves when the operation has finished and the identity panel has closed.
  */
 async function assertMixedContentBlockingState(tabbrowser, states = {}) {
   if (
@@ -122,12 +88,12 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
   }
 
   let { passiveLoaded, activeLoaded, activeBlocked } = states;
-  let { gIdentityHandler } = tabbrowser.ownerGlobal;
+  let { gIdentityHandler } = tabbrowser.documentGlobal;
   let doc = tabbrowser.ownerDocument;
   let identityBox = gIdentityHandler._identityBox;
   let classList = identityBox.classList;
   let identityIcon = doc.getElementById("identity-icon");
-  let identityIconImage = tabbrowser.ownerGlobal
+  let identityIconImage = tabbrowser.documentGlobal
     .getComputedStyle(identityIcon)
     .getPropertyValue("list-style-image");
 
@@ -237,7 +203,7 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
 
   // Make sure the identity popup has the correct mixedcontent states
   let promisePanelOpen = BrowserTestUtils.waitForEvent(
-    tabbrowser.ownerGlobal,
+    tabbrowser.documentGlobal,
     "popupshown",
     true,
     event => event.target == gIdentityHandler._identityPopup
@@ -286,14 +252,14 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
 
   // Make sure the correct icon is visible in the Control Center.
   // This logic is controlled with CSS, so this helps prevent regressions there.
-  let securityViewBG = tabbrowser.ownerGlobal
+  let securityViewBG = tabbrowser.documentGlobal
     .getComputedStyle(
       document
         .getElementById("identity-popup-securityView")
         .getElementsByClassName("identity-popup-security-connection")[0]
     )
     .getPropertyValue("list-style-image");
-  let securityContentBG = tabbrowser.ownerGlobal
+  let securityContentBG = tabbrowser.documentGlobal
     .getComputedStyle(
       document
         .getElementById("identity-popup-mainView")
@@ -317,12 +283,12 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
   if (stateSecure) {
     is(
       securityViewBG,
-      'url("chrome://global/skin/icons/security.svg")',
+      'url("chrome://global/skin/icons/security-custom-root.svg")',
       "CC using secure icon"
     );
     is(
       securityContentBG,
-      'url("chrome://global/skin/icons/security.svg")',
+      'url("chrome://global/skin/icons/security-custom-root.svg")',
       "CC using secure icon"
     );
   }
@@ -354,12 +320,12 @@ async function assertMixedContentBlockingState(tabbrowser, states = {}) {
       // There is a case here with weak ciphers, but no bc tests are handling this yet.
       is(
         securityViewBG,
-        'url("chrome://global/skin/icons/security.svg")',
+        'url("chrome://global/skin/icons/security-custom-root.svg")',
         "CC using degraded icon"
       );
       is(
         securityContentBG,
-        'url("chrome://global/skin/icons/security.svg")',
+        'url("chrome://global/skin/icons/security-custom-root.svg")',
         "CC using degraded icon"
       );
     }
@@ -453,11 +419,11 @@ async function loadBadCertPage(url, feltPrivacyV1) {
 // nsITLSServerSocket needs a certificate with a corresponding private key
 // available. In mochitests, the certificate with the common name "Mochitest
 // client" has such a key.
-function getTestServerCertificate() {
+async function getTestServerCertificate() {
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
-  for (const cert of certDB.getCerts()) {
+  for (const cert of await certDB.getCerts()) {
     if (cert.commonName == "Mochitest client") {
       return cert;
     }

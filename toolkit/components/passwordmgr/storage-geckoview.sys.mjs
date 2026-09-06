@@ -19,12 +19,10 @@ ChromeUtils.defineESModuleGetters(lazy, {
 export class LoginManagerStorage extends LoginManagerStorage_json {
   static #storage = null;
 
-  static create(callback) {
+  static create() {
     if (!LoginManagerStorage.#storage) {
       LoginManagerStorage.#storage = new LoginManagerStorage();
-      LoginManagerStorage.#storage.initialize().then(callback);
-    } else if (callback) {
-      callback();
+      LoginManagerStorage.#storage.initialize();
     }
 
     return LoginManagerStorage.#storage;
@@ -57,7 +55,15 @@ export class LoginManagerStorage extends LoginManagerStorage_json {
     throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
   }
 
+  async removeLoginAsync(_login) {
+    throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
+  }
+
   modifyLogin(_oldLogin, _newLoginData) {
+    throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
+  }
+
+  async modifyLoginAsync(_oldLogin, _newLoginData) {
     throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
   }
 
@@ -67,10 +73,16 @@ export class LoginManagerStorage extends LoginManagerStorage_json {
     );
   }
 
+  async recordPasswordUseAsync(login) {
+    let result = this.recordPasswordUse(login);
+    // Emulate being async:
+    return Promise.resolve(result);
+  }
+
   /**
    * Returns a promise resolving to an array of all saved logins that can be decrypted.
    *
-   * @resolve {nsILoginInfo[]}
+   * @returns {Promise<nsILoginInfo[]>}
    */
   getAllLogins(includeDeleted) {
     return this._getLoginsAsync({}, includeDeleted);
@@ -185,13 +197,24 @@ export class LoginManagerStorage extends LoginManagerStorage_json {
   }
 
   /**
-   * Removes all logins from storage.
+   * Use `removeAllLoginsAsync` instead.
    */
   removeAllLogins() {
     throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
   }
 
+  /**
+   * Removes all logins from storage.
+   */
+  removeAllLoginsAsync() {
+    throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
+  }
+
   countLogins(_origin, _formActionOrigin, _httpRealm) {
+    throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
+  }
+
+  async countLoginsAsync(_origin, _formActionOrigin, _httpRealm) {
     throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
   }
 

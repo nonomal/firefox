@@ -17,14 +17,13 @@ import mozilla.components.concept.engine.translate.TranslationSupport
 import mozilla.components.concept.engine.translate.findLanguage
 import mozilla.components.lib.state.ext.observeAsComposableState
 import org.mozilla.fenix.R
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
 import org.mozilla.fenix.ext.requireComponents
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.theme.FirefoxTheme
 
-/**
- * A fragment displaying the Firefox Automatic Translation list screen.
- */
-class AutomaticTranslationPreferenceFragment : Fragment() {
+/** A fragment displaying the Firefox Automatic Translation list screen. */
+class AutomaticTranslationPreferenceFragment : Fragment(), SystemInsetsPaddedFragment {
     private val browserStore: BrowserStore by lazy { requireComponents.core.store }
 
     override fun onResume() {
@@ -38,36 +37,46 @@ class AutomaticTranslationPreferenceFragment : Fragment() {
         savedInstanceState: Bundle?,
     ) = content {
         FirefoxTheme {
-            val languageSettings = browserStore.observeAsComposableState { state ->
-                state.translationEngine.languageSettings
-            }.value
-            val translationSupport = browserStore.observeAsComposableState { state ->
-                state.translationEngine.supportedLanguages
-            }.value
-            val engineError = browserStore.observeAsComposableState { state ->
-                state.translationEngine.engineError
-            }.value
-            val couldNotLoadLanguagesError =
-                engineError as? TranslationError.CouldNotLoadLanguagesError
-            val couldNotLoadLanguageSettingsError =
-                engineError as? TranslationError.CouldNotLoadLanguageSettingsError
+            val languageSettings =
+                browserStore
+                    .observeAsComposableState { state ->
+                        state.translationEngine.languageSettings
+                    }
+                    .value
+            val translationSupport =
+                browserStore
+                    .observeAsComposableState { state ->
+                        state.translationEngine.supportedLanguages
+                    }
+                    .value
+            val engineError =
+                browserStore
+                    .observeAsComposableState { state ->
+                        state.translationEngine.engineError
+                    }
+                    .value
+            val couldNotLoadLanguagesError = engineError as? TranslationError.CouldNotLoadLanguagesError
+            val couldNotLoadLanguageSettingsError = engineError as? TranslationError.CouldNotLoadLanguageSettingsError
 
             AutomaticTranslationPreference(
-                automaticTranslationListPreferences = getAutomaticTranslationListPreferences(
-                    languageSettings = languageSettings,
-                    translationSupport = translationSupport,
-                ),
-                hasLanguageError = couldNotLoadLanguagesError != null ||
-                    couldNotLoadLanguageSettingsError != null ||
-                    languageSettings == null,
+                automaticTranslationListPreferences =
+                    getAutomaticTranslationListPreferences(
+                        languageSettings = languageSettings,
+                        translationSupport = translationSupport,
+                    ),
+                hasLanguageError =
+                    couldNotLoadLanguagesError != null ||
+                        couldNotLoadLanguageSettingsError != null ||
+                        languageSettings == null,
                 onItemClick = {
-                    findNavController().navigate(
-                        AutomaticTranslationPreferenceFragmentDirections
-                            .actionAutomaticTranslationPreferenceToAutomaticTranslationOptionsPreference(
-                                it.language.code,
-                                it.language.localizedDisplayName,
-                            ),
-                    )
+                    findNavController()
+                        .navigate(
+                            AutomaticTranslationPreferenceFragmentDirections
+                                .actionAutomaticTranslationPreferenceToAutomaticTranslationOptionsPreference(
+                                    it.language.code,
+                                    it.language.localizedDisplayName,
+                                )
+                        )
                 },
             )
         }
@@ -77,8 +86,7 @@ class AutomaticTranslationPreferenceFragment : Fragment() {
         languageSettings: Map<String, LanguageSetting>? = null,
         translationSupport: TranslationSupport? = null,
     ): List<AutomaticTranslationItemPreference> {
-        val automaticTranslationListPreferences =
-            mutableListOf<AutomaticTranslationItemPreference>()
+        val automaticTranslationListPreferences = mutableListOf<AutomaticTranslationItemPreference>()
 
         if (translationSupport != null && languageSettings != null) {
             languageSettings.forEach { entry ->
@@ -86,14 +94,14 @@ class AutomaticTranslationPreferenceFragment : Fragment() {
                     automaticTranslationListPreferences.add(
                         AutomaticTranslationItemPreference(
                             language = it,
-                            automaticTranslationOptionPreference = getAutomaticTranslationOptionPreference(
-                                entry.value,
-                            ),
-                        ),
+                            automaticTranslationOptionPreference = getAutomaticTranslationOptionPreference(entry.value),
+                        )
                     )
                 }
             }
         }
+
+        automaticTranslationListPreferences.sortBy { it.language.localizedDisplayName }
         return automaticTranslationListPreferences
     }
 }

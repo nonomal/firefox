@@ -8,6 +8,14 @@
 
 import("../../webrtc.gni")
 
+rtc_library("force_test_environment") {
+  visibility = webrtc_default_visibility
+  sources = [
+    "force_test_environment.cc",
+    "force_test_environment.h",
+  ]
+}
+
 rtc_source_set("environment") {
   visibility = [ "*" ]
   sources = [ "environment.h" ]
@@ -24,15 +32,20 @@ rtc_source_set("environment") {
 }
 
 rtc_library("deprecated_global_field_trials") {
-  visibility = [ ":environment_factory" ]
+  visibility = [
+    ":environment_factory",
+    "../../sdk:peerconnectionfactory_base_objc",
+    "../../sdk/android:peerconnection_jni",
+  ]
   allow_poison = [ "environment_construction" ]
   sources = [
     "deprecated_global_field_trials.cc",
     "deprecated_global_field_trials.h",
   ]
   deps = [
-    "../:field_trials_registry",
-    "../../system_wrappers:field_trial",
+    "..:field_trials_registry",
+    "../../rtc_base:checks",
+    "../../rtc_base:logging",
     "//third_party/abseil-cpp/absl/strings:string_view",
   ]
 }
@@ -47,6 +60,7 @@ rtc_library("environment_factory") {
   deps = [
     ":deprecated_global_field_trials",
     ":environment",
+    ":force_test_environment",
     "..:field_trials_view",
     "..:make_ref_counted",
     "..:refcountedbase",
@@ -68,8 +82,10 @@ if (rtc_include_tests) {
     deps = [
       ":environment",
       ":environment_factory",
+      ":force_test_environment",
       "..:field_trials_view",
       "../../system_wrappers",
+      "../../test:create_test_environment",
       "../../test:test_support",
       "../rtc_event_log",
       "../task_queue",

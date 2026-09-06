@@ -169,7 +169,7 @@ async function getExtensions({ manifest_version = 2, expectGranted } = {}) {
         manifest_version,
         name: "Test add-on 8",
         browser_specific_settings: { gecko: { id: "addon8@mochi.test" } },
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         optional_permissions: ["https://*/*", "http://*/*", "file://*/*"],
       },
       background,
@@ -402,7 +402,7 @@ async function runTest(options) {
       );
     }
 
-    await BrowserTestUtils.waitForCondition(async () => {
+    await TestUtils.waitForCondition(async () => {
       return button.pressed == !enabled;
     }, "button changed state");
   }
@@ -444,7 +444,7 @@ async function runTest(options) {
       "permission was toggled"
     );
 
-    await BrowserTestUtils.waitForCondition(async () => {
+    await TestUtils.waitForCondition(async () => {
       return button.pressed == !enabled;
     }, "button changed state");
   }
@@ -523,15 +523,7 @@ async function runTest(options) {
   }
 }
 
-async function testPermissionsView({
-  manifestV3enabled,
-  manifest_version,
-  expectGranted,
-}) {
-  await SpecialPowers.pushPrefEnv({
-    set: [["extensions.manifestV3.enabled", manifestV3enabled]],
-  });
-
+async function testPermissionsView({ manifest_version, expectGranted }) {
   // pre-set a permission prior to starting extensions.
   await ExtensionPermissions.add("addon4@mochi.test", {
     permissions: ["tabs"],
@@ -569,7 +561,7 @@ async function testPermissionsView({
   info("Check add-on with only one optional origin.");
   await runTest({
     extension: extensions["addon2@mochi.test"],
-    optional_permissions: manifestV3enabled ? ["http://mochi.test/*"] : [],
+    optional_permissions: ["http://mochi.test/*"],
     optional_strings: {
       "http://mochi.test/*": "Access your data for http://mochi.test",
     },
@@ -596,7 +588,7 @@ async function testPermissionsView({
     optional_permissions: [
       "webNavigation",
       "<all_urls>",
-      ...(manifestV3enabled ? ["https://example.com/*"] : []),
+      "https://example.com/*",
     ],
     optional_enabled: ["https://example.com/*"],
     optional_strings: {
@@ -620,10 +612,7 @@ async function testPermissionsView({
   info("Check privileged add-on with non-web origin permissions");
   await runTest({
     extension: extensions["priv6@mochi.test"],
-    optional_permissions: [
-      "<all_urls>",
-      ...(manifestV3enabled ? ["*://*.mozilla.com/*"] : []),
-    ],
+    optional_permissions: ["<all_urls>", "*://*.mozilla.com/*"],
     optional_overlapping: ["<all_urls>", "*://*/*"],
     optional_strings: {
       "*://*.mozilla.com/*":
@@ -642,23 +631,28 @@ async function testPermissionsView({
   await runTest({
     extension: extensions["addon8@mochi.test"],
     optional_permissions: ["https://*/*"],
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     optional_overlapping: ["https://*/*", "http://*/*"],
   });
 
   for (let ext of Object.values(extensions)) {
     await ext.unload();
   }
-
-  await SpecialPowers.popPrefEnv();
 }
 
-add_task(async function testPermissionsView_MV2_manifestV3disabled() {
-  await testPermissionsView({ manifestV3enabled: false, manifest_version: 2 });
+add_setup(async () => {
+  // With the opt-in, <all_urls> and file://*/* permissions result in the
+  // addition of an extra "Allow access to file URLs" entry to the Optional
+  // permission section. The test expectations were written before this
+  // feature existed, so disable it. Test coverage for these file permissions
+  // is at browser_html_detail_permissions_file_access.js.
+  await SpecialPowers.pushPrefEnv({
+    set: [["extensions.webextensions.fileSchemeAccess.requireOptIn", false]],
+  });
 });
 
-add_task(async function testPermissionsView_MV2_manifestV3enabled() {
-  await testPermissionsView({ manifestV3enabled: true, manifest_version: 2 });
+add_task(async function testPermissionsView_MV2() {
+  await testPermissionsView({ manifest_version: 2 });
 });
 
 add_task(async function testPermissionsView_MV3_noInstallPrompt() {
@@ -666,7 +660,6 @@ add_task(async function testPermissionsView_MV3_noInstallPrompt() {
     set: [["extensions.originControls.grantByDefault", false]],
   });
   await testPermissionsView({
-    manifestV3enabled: true,
     manifest_version: 3,
     expectGranted: false,
   });
@@ -678,7 +671,6 @@ add_task(async function testPermissionsView_MV3() {
     set: [["extensions.originControls.grantByDefault", true]],
   });
   await testPermissionsView({
-    manifestV3enabled: true,
     manifest_version: 3,
     expectGranted: true,
   });
@@ -867,7 +859,7 @@ add_task(async function testAllUrlsNotGrantedUnconditionally_MV3() {
 
 add_task(async function test_OneOfMany_AllSites_toggle() {
   // ESLint autofix will silently convert http://*/* match patterns into https.
-  /* eslint-disable @microsoft/sdl/no-insecure-url */
+  /* eslint-disable sdl/no-insecure-url */
   let id = "addon9@mochi.test";
 
   let extension = ExtensionTestUtils.loadExtension({
@@ -947,7 +939,7 @@ add_task(async function test_OneOfMany_AllSites_toggle() {
 
   await closeView(view);
   await extension.unload();
-  /* eslint-enable @microsoft/sdl/no-insecure-url */
+  /* eslint-enable sdl/no-insecure-url */
 });
 
 add_task(async function testOverrideLocalization() {

@@ -148,7 +148,6 @@ ifndef NSS_DISABLE_AVX2
     ifneq ($(CPU_ARCH),x86_64)
         # Disable AVX2 entirely on non-Intel platforms
         NSS_DISABLE_AVX2 = 1
-        $(warning CPU_ARCH is not x86_64, disabling -mavx2)
     else
         # Clang reports its version as an older gcc, but it's OK
         ifndef CC_IS_CLANG
@@ -240,10 +239,6 @@ endif
 # Avoid building with Neon acceleration on Arm32
 ifdef NSS_DISABLE_ARM32_NEON
 DEFINES += -DNSS_DISABLE_ARM32_NEON
-endif
-
-ifdef NSS_DISABLE_KYBER
-DEFINES += -DNSS_DISABLE_KYBER
 endif
 
 # Avoid building with PowerPC's Altivec acceleration

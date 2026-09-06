@@ -3,8 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::context::QuirksMode;
+use crate::derives::*;
+use crate::device::Device;
 use crate::error_reporting::{ContextualParseError, ParseErrorReporter};
-use crate::media_queries::{Device, MediaList};
+use crate::media_queries::MediaList;
 use crate::parser::ParserContext;
 use crate::shared_lock::{DeepCloneWithLock, Locked};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard};
@@ -16,27 +18,17 @@ use crate::stylesheets::{
     CssRule, CssRules, CustomMediaEvaluator, CustomMediaMap, Origin, UrlExtraData,
 };
 use crate::use_counters::UseCounters;
+use crate::FxHashMap;
 use crate::{Namespace, Prefix};
-use cssparser::{Parser, ParserInput, StyleSheetParser};
+use cssparser::{Parser, StyleSheetParser};
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
-use rustc_hash::FxHashMap;
 use servo_arc::Arc;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use style_traits::ParsingMode;
 
 use super::scope_rule::ImplicitScopeRoot;
-
-/// This structure holds the user-agent and user stylesheets.
-pub struct UserAgentStylesheets {
-    /// The lock used for user-agent stylesheets.
-    pub shared_lock: SharedRwLock,
-    /// The user or user agent stylesheets.
-    pub user_or_user_agent_stylesheets: Vec<DocumentStyleSheet>,
-    /// The quirks mode stylesheet.
-    pub quirks_mode_stylesheet: DocumentStyleSheet,
-}
 
 /// A set of namespaces applying to a given stylesheet.
 ///
@@ -94,7 +86,7 @@ impl StylesheetContents {
             css,
             &url_data,
             origin,
-            &shared_lock,
+            shared_lock,
             stylesheet_loader,
             error_reporter,
             quirks_mode,
@@ -104,7 +96,7 @@ impl StylesheetContents {
         );
 
         Arc::new(Self {
-            rules: CssRules::new(rules, &shared_lock),
+            rules: CssRules::new(rules, shared_lock),
             origin,
             url_data,
             namespaces,
@@ -293,11 +285,8 @@ impl StylesheetInDocument for Stylesheet {
 
 /// A simple wrapper over an `Arc<Stylesheet>`, with pointer comparison, and
 /// suitable for its use in a `StylesheetSet`.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
-pub struct DocumentStyleSheet(
-    #[cfg_attr(feature = "servo", ignore_malloc_size_of = "Arc")] pub Arc<Stylesheet>,
-);
+#[derive(Clone, Debug, MallocSizeOf)]
+pub struct DocumentStyleSheet(#[ignore_malloc_size_of = "Arc"] pub Arc<Stylesheet>);
 
 impl PartialEq for DocumentStyleSheet {
     fn eq(&self, other: &Self) -> bool {
@@ -347,7 +336,19 @@ pub enum AllowImportRules {
 }
 
 impl SanitizationKind {
-    fn allows(self, rule: &CssRule) -> bool {
+    fn allows(self, rule: &CssRule, guard: &SharedRwLockReadGuard) -> bool {
+        if !self.allows_self(rule) {
+            return false;
+        }
+        for child in rule.children(guard) {
+            if !self.allows(child, guard) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn allows_self(self, rule: &CssRule) -> bool {
         debug_assert_ne!(self, SanitizationKind::None);
         // NOTE(emilio): If this becomes more complex (not filtering just by
         // top-level rules), we should thread all the data through nested rules
@@ -367,7 +368,8 @@ impl SanitizationKind {
             // TODO(dshin): Same comment as Layer applies - shouldn't give away
             // something like display size - erring on the side of "safe" for now.
             CssRule::Scope(..) |
-            CssRule::StartingStyle(..) => false,
+            CssRule::StartingStyle(..) |
+            CssRule::AppearanceBase(..) => false,
 
             CssRule::FontFace(..) |
             CssRule::Namespace(..) |
@@ -381,7 +383,8 @@ impl SanitizationKind {
             CssRule::Property(..) |
             CssRule::FontFeatureValues(..) |
             CssRule::FontPaletteValues(..) |
-            CssRule::CounterStyle(..) => !is_standard,
+            CssRule::CounterStyle(..) |
+            CssRule::ViewTransition(..) => !is_standard,
         }
     }
 }
@@ -426,8 +429,7 @@ impl Stylesheet {
         allow_import_rules: AllowImportRules,
         mut sanitization_data: Option<&mut SanitizationData>,
     ) -> (Namespaces, Vec<CssRule>, Option<String>, Option<String>) {
-        let mut input = ParserInput::new(css);
-        let mut input = Parser::new(&mut input);
+        let mut input = Parser::new(css);
 
         let context = ParserContext::new(
             origin,
@@ -438,6 +440,7 @@ impl Stylesheet {
             /* namespaces = */ Default::default(),
             error_reporter,
             use_counters,
+            /* attr_taint */ Default::default(),
         );
 
         let mut rule_parser = TopLevelRuleParser {
@@ -462,8 +465,8 @@ impl Stylesheet {
                     Ok(rule_start) => {
                         // TODO(emilio, nesting): sanitize nested CSS rules, probably?
                         if let Some(ref mut data) = sanitization_data {
-                            if let Some(ref rule) = iter.parser.rules.last() {
-                                if !data.kind.allows(rule) {
+                            if let Some(rule) = iter.parser.rules.last() {
+                                if !data.kind.allows(rule, &shared_lock.read()) {
                                     iter.parser.rules.pop();
                                     continue;
                                 }
@@ -472,8 +475,7 @@ impl Stylesheet {
                             data.output.push_str(&css[rule_start.byte_index()..end]);
                         }
                     },
-                    Err((error, slice)) => {
-                        let location = error.location;
+                    Err((error, slice, location)) => {
                         let error = ContextualParseError::InvalidRule(slice, error);
                         iter.parser.context.log_css_error(location, error);
                     },
@@ -552,11 +554,11 @@ impl Clone for Stylesheet {
         // Make a deep clone of the media, using the new lock.
         let media = self.media.read_with(&guard).clone();
         let media = Arc::new(lock.wrap(media));
-        let contents = lock.wrap(Arc::new(
+        let contents = lock.wrap(
             self.contents
                 .read_with(&guard)
-                .deep_clone_with_lock(&lock, &guard),
-        ));
+                .deep_clone(&lock, None, &guard),
+        );
 
         Stylesheet {
             contents,

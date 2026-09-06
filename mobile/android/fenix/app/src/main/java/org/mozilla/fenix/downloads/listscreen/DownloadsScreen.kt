@@ -24,15 +24,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,23 +48,31 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.PreviewParameter
-import androidx.compose.ui.tooling.preview.PreviewParameterProvider
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
 import mozilla.components.compose.base.button.FloatingActionButton
+import mozilla.components.compose.base.button.IconButton
+import mozilla.components.compose.base.button.RadioButton
+import mozilla.components.compose.base.button.TextButton
 import mozilla.components.compose.base.menu.DropdownMenu
 import mozilla.components.compose.base.menu.MenuItem
 import mozilla.components.compose.base.modifier.thenConditional
 import mozilla.components.compose.base.snackbar.Snackbar
 import mozilla.components.compose.base.snackbar.displaySnackbar
 import mozilla.components.compose.base.text.Text
-import mozilla.components.lib.state.ext.observeAsState
+import mozilla.components.compose.base.theme.ThemedValue
+import mozilla.components.compose.base.theme.ThemedValueProvider
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.compose.list.ExpandableListHeader
+import org.mozilla.fenix.downloads.DownloadsScreenTestTag
 import org.mozilla.fenix.downloads.listscreen.store.DownloadListItem
 import org.mozilla.fenix.downloads.listscreen.store.DownloadUIAction
 import org.mozilla.fenix.downloads.listscreen.store.DownloadUIState
@@ -75,24 +86,20 @@ import org.mozilla.fenix.downloads.listscreen.ui.FileListItem
 import org.mozilla.fenix.downloads.listscreen.ui.Filters
 import org.mozilla.fenix.downloads.listscreen.ui.ToolbarConfig
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
-import mozilla.components.ui.icons.R as iconsR
 
 /**
  * Downloads screen that displays the list of downloads.
  *
  * @param downloadsStore The [DownloadUIStore] used to manage and access the state of download items.
  * @param onItemClick Callback invoked when a download item is clicked.
- * @param onNavigationIconClick Callback for the back button click in the toolbar.
  */
 @Suppress("LongMethod", "CognitiveComplexMethod")
 @Composable
 fun DownloadsScreen(
     downloadsStore: DownloadUIStore,
     onItemClick: (FileItem) -> Unit,
-    onNavigationIconClick: () -> Unit,
 ) {
-    val uiState by downloadsStore.observeAsState(initialValue = downloadsStore.state) { it }
+    val uiState by downloadsStore.stateFlow.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -106,31 +113,44 @@ fun DownloadsScreen(
             downloadsStore.dispatch(DownloadUIAction.SearchBarDismissRequest)
         }
     }
+    val snackbarState = uiState.deletionSnackbarState
 
-    if (uiState.isDeleteDialogVisible) {
+    if (snackbarState is DownloadUIState.SnackbarState.UndoDeletion) {
+        val items = snackbarState.items
+
+        LaunchedEffect(items) {
+            showDeleteSnackbar(
+                selectedItems = items,
+                coroutineScope = coroutineScope,
+                snackbarHostState = snackbarHostState,
+                context = context,
+                undoAction = {
+                    downloadsStore.dispatch(DownloadUIAction.UndoPendingDeletion)
+                },
+            )
+        }
+    }
+
+    val dialogState = uiState.dialogState
+
+    if (dialogState is DownloadUIState.DialogState.DeleteConfirmation) {
+        val items = dialogState.items
+        DeleteConfirmationDialog(
+            itemCount = items.size,
+            onConfirm = { removeFromDevice ->
+                downloadsStore.dispatch(DownloadUIAction.AddPendingDeletionSet(items, removeFromDevice))
+            },
+            onDismiss = {
+                downloadsStore.dispatch(DownloadUIAction.DismissDeleteDialog)
+            },
+        )
+    } else if (dialogState is DownloadUIState.DialogState.MultiSelectDeleteConfirmation) {
         DeleteDownloadFileDialog(
             onConfirmDelete = {
-                downloadsStore.dispatch(DownloadUIAction.UpdateDeleteDialogVisibility(false))
-                downloadsStore.dispatch(
-                    DownloadUIAction.AddPendingDeletionSet(
-                        downloadsStore.state.mode.selectedItems.map { it.id }.toSet(),
-                    ),
-                )
-                showDeleteSnackbar(
-                    selectedItems = (downloadsStore.state.mode.selectedItems.toSet()),
-                    coroutineScope = coroutineScope,
-                    snackbarHostState = snackbarHostState,
-                    context = context,
-                    undoAction = {
-                        downloadsStore.dispatch(
-                            DownloadUIAction.UndoPendingDeletion,
-                        )
-                    },
-                )
-                downloadsStore.dispatch(DownloadUIAction.ExitEditMode)
+                downloadsStore.dispatch(DownloadUIAction.ConfirmMultiSelectDelete(dialogState.items))
             },
             onCancel = {
-                downloadsStore.dispatch(DownloadUIAction.UpdateDeleteDialogVisibility(false))
+                downloadsStore.dispatch(DownloadUIAction.DismissDeleteDialog)
             },
         )
     }
@@ -161,36 +181,42 @@ fun DownloadsScreen(
                 },
                 navigationIcon = {
                     if (!uiState.isSearchFieldVisible) {
-                        IconButton(onClick = onNavigationIconClick) {
+                        IconButton(
+                            onClick = {
+                                downloadsStore.dispatch(DownloadUIAction.NavigationIconClicked)
+                            },
+                            contentDescription = stringResource(R.string.download_navigate_back_description),
+                        ) {
                             Icon(
                                 painter = painterResource(iconsR.drawable.mozac_ic_back_24),
-                                contentDescription = stringResource(R.string.download_navigate_back_description),
+                                contentDescription = null,
                                 tint = toolbarConfig.iconColor,
                             )
                         }
                     }
                 },
                 actions = {
+                    if (uiState.isSettingsIconVisible) {
+                        IconButton(
+                            onClick = {
+                                downloadsStore.dispatch(DownloadUIAction.SettingsIconClicked)
+                            },
+                            contentDescription = stringResource(R.string.download_navigate_settings_description),
+                        ) {
+                            Icon(
+                                painter = painterResource(iconsR.drawable.mozac_ic_settings_24),
+                                contentDescription = null,
+                                tint = toolbarConfig.iconColor,
+                            )
+                        }
+                    }
                     if (uiState.mode is Mode.Editing) {
                         ToolbarEditActions(
                             downloadsStore = downloadsStore,
                             toolbarConfig = toolbarConfig,
-                            onItemDeleteClick = { item ->
+                            onItemDeleteClick = {
                                 downloadsStore.dispatch(
-                                    DownloadUIAction.AddPendingDeletionSet(
-                                        setOf(item.id),
-                                    ),
-                                )
-                                showDeleteSnackbar(
-                                    selectedItems = setOf(item),
-                                    coroutineScope = coroutineScope,
-                                    snackbarHostState = snackbarHostState,
-                                    context = context,
-                                    undoAction = {
-                                        downloadsStore.dispatch(
-                                            DownloadUIAction.UndoPendingDeletion,
-                                        )
-                                    },
+                                    DownloadUIAction.RequestDeleteMultiple(uiState.mode.selectedItems)
                                 )
                             },
                         )
@@ -235,48 +261,38 @@ fun DownloadsScreen(
                 }
             },
             onPauseClick = {
-                downloadsStore.dispatch(
-                    DownloadUIAction.PauseDownload(downloadId = it),
-                )
+                downloadsStore.dispatch(DownloadUIAction.PauseDownload(downloadId = it))
             },
             onResumeClick = {
-                downloadsStore.dispatch(
-                    DownloadUIAction.ResumeDownload(downloadId = it),
-                )
+                downloadsStore.dispatch(DownloadUIAction.ResumeDownload(downloadId = it))
             },
             onRetryClick = {
                 downloadsStore.dispatch(DownloadUIAction.RetryDownload(downloadId = it))
             },
             onDeleteClick = { item ->
-                if (item.status is FileItem.Status.Completed) {
-                    downloadsStore.dispatch(
-                        DownloadUIAction.AddPendingDeletionSet(
-                            setOf(item.id),
-                        ),
-                    )
-                    showDeleteSnackbar(
-                        selectedItems = setOf(item),
-                        coroutineScope = coroutineScope,
-                        snackbarHostState = snackbarHostState,
-                        context = context,
-                        undoAction = {
-                            downloadsStore.dispatch(
-                                DownloadUIAction.UndoPendingDeletion,
-                            )
-                        },
-                    )
-                } else {
-                    downloadsStore.dispatch(DownloadUIAction.CancelDownload(downloadId = item.id))
-                }
+                downloadsStore.dispatch(DownloadUIAction.RequestDelete(item))
             },
             onShareUrlClick = { downloadsStore.dispatch(DownloadUIAction.ShareUrlClicked(it.url)) },
             onShareFileClick = {
                 downloadsStore.dispatch(
                     DownloadUIAction.ShareFileClicked(
-                        it.filePath,
-                        it.contentType,
-                    ),
+                        directoryPath = it.directoryPath,
+                        fileName = it.fileName,
+                        contentType = it.contentType,
+                    )
                 )
+            },
+            onRenameFileClick = { downloadsStore.dispatch(DownloadUIAction.RenameFileClicked(it)) },
+            onRenameFileConfirmed = { item: FileItem, newName: String ->
+                downloadsStore.dispatch(DownloadUIAction.RenameFileConfirmed(item = item, newName = newName))
+            },
+            onRenameFileDismissed = { downloadsStore.dispatch(DownloadUIAction.RenameFileDismissed) },
+            onRenameFileFailureDismissed = { downloadsStore.dispatch(DownloadUIAction.RenameFileFailureDismissed) },
+            onFileExtensionChangedByUser = { item: FileItem, newName: String ->
+                downloadsStore.dispatch(DownloadUIAction.FileExtensionChangedByUser(item = item, newName = newName))
+            },
+            onCloseChangeFileExtensionDialog = {
+                downloadsStore.dispatch(DownloadUIAction.CloseChangeFileExtensionDialog)
             },
         )
     }
@@ -286,47 +302,38 @@ fun DownloadsScreen(
 private fun ToolbarEditActions(
     downloadsStore: DownloadUIStore,
     toolbarConfig: ToolbarConfig,
-    onItemDeleteClick: (FileItem) -> Unit,
+    onItemDeleteClick: () -> Unit,
 ) {
     // IconButton and DropdownMenu in a common parent so the menu position is calculated correctly.
     Row {
         var showMenu by remember { mutableStateOf(false) }
 
-        IconButton(onClick = { showMenu = true }) {
+        IconButton(
+            onClick = { showMenu = true },
+            contentDescription = stringResource(R.string.content_description_menu),
+        ) {
             Icon(
                 painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
-                contentDescription = stringResource(
-                    R.string.content_description_menu,
-                ),
+                contentDescription = null,
                 tint = toolbarConfig.iconColor,
             )
         }
 
         DropdownMenu(
             expanded = showMenu,
-            menuItems = listOf(
-                MenuItem.TextItem(
-                    text = Text.Resource(R.string.download_select_all_items),
-                    level = MenuItem.FixedItem.Level.Default,
-                    onClick = { downloadsStore.dispatch(DownloadUIAction.AddAllItemsForRemoval) },
+            menuItems =
+                listOf(
+                    MenuItem.TextItem(
+                        text = Text.Resource(R.string.download_select_all_items),
+                        level = MenuItem.FixedItem.Level.Default,
+                        onClick = { downloadsStore.dispatch(DownloadUIAction.AddAllItemsForRemoval) },
+                    ),
+                    MenuItem.TextItem(
+                        text = Text.Resource(R.string.download_delete_item),
+                        level = MenuItem.FixedItem.Level.Critical,
+                        onClick = onItemDeleteClick,
+                    ),
                 ),
-                MenuItem.TextItem(
-                    text = Text.Resource(R.string.download_delete_item),
-                    level = MenuItem.FixedItem.Level.Critical,
-                    onClick = {
-                        when (downloadsStore.state.mode.selectedItems.size) {
-                            1 -> {
-                                onItemDeleteClick(downloadsStore.state.mode.selectedItems.first())
-                                downloadsStore.dispatch(DownloadUIAction.ExitEditMode)
-                            }
-
-                            else -> downloadsStore.dispatch(
-                                DownloadUIAction.UpdateDeleteDialogVisibility(true),
-                            )
-                        }
-                    },
-                ),
-            ),
             onDismissRequest = { showMenu = false },
         )
     }
@@ -334,6 +341,7 @@ private fun ToolbarEditActions(
 
 /**
  * Content of the screen below the toolbar.
+ *
  * @param uiState The UI state of the screen.
  * @param paddingValues The padding values of the screen.
  * @param listState The state controlling and observing the scroll position of the downloads list.
@@ -346,6 +354,12 @@ private fun ToolbarEditActions(
  * @param onDeleteClick Invoked when delete icon button is clicked.
  * @param onShareUrlClick Invoked when share url button is clicked.
  * @param onShareFileClick Invoked when share file button is clicked.
+ * @param onRenameFileClick Invoked when rename file button is clicked.
+ * @param onRenameFileConfirmed Invoked when rename file dialog is confirmed.
+ * @param onRenameFileDismissed Invoked when rename file dialog is dismissed.
+ * @param onRenameFileFailureDismissed Invoked when rename file failure dialog is dismissed.
+ * @param onFileExtensionChangedByUser Callback invoked when the user changes the file extension during renaming.
+ * @param onCloseChangeFileExtensionDialog Callback invoked when the file extension change dialog is closed.
  */
 @SuppressWarnings("LongParameterList")
 @Composable
@@ -362,44 +376,59 @@ private fun DownloadsScreenContent(
     onDeleteClick: (FileItem) -> Unit,
     onShareUrlClick: (FileItem) -> Unit,
     onShareFileClick: (FileItem) -> Unit,
+    onRenameFileClick: (FileItem) -> Unit,
+    onRenameFileConfirmed: (FileItem, String) -> Unit,
+    onRenameFileDismissed: () -> Unit,
+    onRenameFileFailureDismissed: () -> Unit,
+    onFileExtensionChangedByUser: (FileItem, String) -> Unit,
+    onCloseChangeFileExtensionDialog: () -> Unit,
 ) {
     Column(
-        modifier = Modifier
-            .padding(paddingValues)
-            .imePadding(),
+        modifier = Modifier.padding(paddingValues).imePadding(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         if (uiState.filtersToDisplay.isNotEmpty()) {
             Filters(
                 selectedContentTypeFilter = uiState.selectedContentTypeFilter,
                 contentTypeFilters = uiState.filtersToDisplay,
-                modifier = Modifier
-                    .width(FirefoxTheme.layout.size.containerMaxWidth)
-                    .padding(vertical = FirefoxTheme.layout.space.static200),
+                modifier =
+                    Modifier.width(FirefoxTheme.layout.size.containerMaxWidth)
+                        .padding(vertical = FirefoxTheme.layout.space.static200),
                 onContentTypeSelected = onContentTypeSelected,
             )
         }
 
+        DownloadRenameFlow(
+            fileToRename = uiState.fileToRename,
+            renameFileError = uiState.renameFileError,
+            isChangeFileExtensionDialogVisible = uiState.isChangeFileExtensionDialogVisible,
+            onRenameFileConfirmed = onRenameFileConfirmed,
+            onRenameFileDismissed = onRenameFileDismissed,
+            onRenameFileFailureDismissed = onRenameFileFailureDismissed,
+            onFileExtensionChangedByUser = onFileExtensionChangedByUser,
+            onCloseChangeFileExtensionDialog = onCloseChangeFileExtensionDialog,
+        )
+
         when (uiState.itemsState) {
             is DownloadUIState.ItemsState.NoItems -> EmptyState(modifier = Modifier.fillMaxSize())
-            is DownloadUIState.ItemsState.NoSearchResults -> NoSearchResults(
-                modifier = Modifier.fillMaxSize(),
-            )
+            is DownloadUIState.ItemsState.NoSearchResults -> NoSearchResults(modifier = Modifier.fillMaxSize())
 
-            is DownloadUIState.ItemsState.Items -> DownloadsContent(
-                items = uiState.itemsState.items,
-                mode = uiState.mode,
-                listState = listState,
-                onClick = onItemClick,
-                onSelectionChange = onSelectionChange,
-                onPauseClick = onPauseClick,
-                onResumeClick = onResumeClick,
-                onRetryClick = onRetryClick,
-                onDeleteClick = onDeleteClick,
-                onShareUrlClick = onShareUrlClick,
-                onShareFileClick = onShareFileClick,
-                modifier = Modifier.fillMaxSize(),
-            )
+            is DownloadUIState.ItemsState.Items ->
+                DownloadsContent(
+                    items = uiState.itemsState.items,
+                    mode = uiState.mode,
+                    listState = listState,
+                    onClick = onItemClick,
+                    onSelectionChange = onSelectionChange,
+                    onPauseClick = onPauseClick,
+                    onResumeClick = onResumeClick,
+                    onRetryClick = onRetryClick,
+                    onDeleteClick = onDeleteClick,
+                    onShareUrlClick = onShareUrlClick,
+                    onShareFileClick = onShareFileClick,
+                    onRenameFileClick = onRenameFileClick,
+                    modifier = Modifier.fillMaxSize(),
+                )
         }
     }
 }
@@ -419,6 +448,7 @@ private fun DownloadsContent(
     onDeleteClick: (FileItem) -> Unit,
     onShareUrlClick: (FileItem) -> Unit,
     onShareFileClick: (FileItem) -> Unit,
+    onRenameFileClick: (FileItem) -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
 
@@ -441,9 +471,7 @@ private fun DownloadsContent(
                 is HeaderItem -> {
                     HeaderListItem(
                         headerItem = listItem,
-                        modifier = Modifier
-                            .animateItem()
-                            .width(FirefoxTheme.layout.size.containerMaxWidth),
+                        modifier = Modifier.animateItem().width(FirefoxTheme.layout.size.containerMaxWidth),
                     )
                 }
 
@@ -451,39 +479,42 @@ private fun DownloadsContent(
                     FileListItem(
                         fileItem = listItem,
                         isSelected = mode.selectedItems.contains(listItem),
-                        areAfterListItemIconsVisible = mode is Mode.Normal ||
-                            listItem.status !is FileItem.Status.Completed,
+                        areAfterListItemIconsVisible =
+                            mode is Mode.Normal || listItem.status !is FileItem.Status.Completed,
                         onPauseClick = onPauseClick,
                         onDeleteClick = onDeleteClick,
                         onResumeClick = onResumeClick,
                         onRetryClick = onRetryClick,
                         onShareUrlClick = onShareUrlClick,
                         onShareFileClick = onShareFileClick,
-                        modifier = Modifier
-                            .animateItem()
-                            .width(FirefoxTheme.layout.size.containerMaxWidth)
-                            .thenConditional(
-                                modifier = Modifier
-                                    .combinedClickable(
-                                        onClick = {
-                                            if (mode is Mode.Normal) {
-                                                onClick(listItem)
-                                            } else {
-                                                onSelectionChange(
-                                                    listItem,
-                                                    !mode.selectedItems.contains(listItem),
-                                                )
-                                            }
-                                        },
-                                        onLongClick = {
-                                            if (mode is Mode.Normal) {
-                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                onSelectionChange(listItem, true)
-                                            }
-                                        },
-                                    ),
-                            ) { listItem.status is FileItem.Status.Completed }
-                            .testTag("${DownloadsListTestTag.DOWNLOADS_LIST_ITEM}.${listItem.fileName}"),
+                        onRenameFileClick = onRenameFileClick,
+                        modifier =
+                            Modifier.animateItem()
+                                .width(FirefoxTheme.layout.size.containerMaxWidth)
+                                .thenConditional(
+                                    modifier =
+                                        Modifier.combinedClickable(
+                                            onClick = {
+                                                if (mode is Mode.Normal) {
+                                                    onClick(listItem)
+                                                } else {
+                                                    onSelectionChange(
+                                                        listItem,
+                                                        !mode.selectedItems.contains(listItem),
+                                                    )
+                                                }
+                                            },
+                                            onLongClick = {
+                                                if (mode is Mode.Normal) {
+                                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    onSelectionChange(listItem, true)
+                                                }
+                                            },
+                                        )
+                                ) {
+                                    listItem.status is FileItem.Status.Completed
+                                }
+                                .testTag("${DownloadsListTestTag.DOWNLOADS_LIST_ITEM}.${listItem.fileName}"),
                     )
 
                     if (index == items.lastIndex || items[index + 1] is HeaderItem) {
@@ -501,9 +532,7 @@ private fun HeaderListItem(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
-        ExpandableListHeader(
-            headerText = stringResource(id = headerItem.timeCategory.stringRes),
-        )
+        ExpandableListHeader(headerText = stringResource(id = headerItem.timeCategory.stringRes))
     }
 }
 
@@ -555,22 +584,113 @@ private fun EmptyState(modifier: Modifier = Modifier) {
 @ReadOnlyComposable
 private fun getToolbarConfig(mode: Mode): ToolbarConfig {
     return when (mode) {
-        is Mode.Editing -> ToolbarConfig(
-            title = stringResource(
-                R.string.download_multi_select_title,
-                mode.selectedItems.size,
-            ),
-            backgroundColor = MaterialTheme.colorScheme.primary,
-            textColor = MaterialTheme.colorScheme.inverseOnSurface,
-            iconColor = MaterialTheme.colorScheme.inverseOnSurface,
-        )
+        is Mode.Editing ->
+            ToolbarConfig(
+                title =
+                    stringResource(
+                        R.string.download_multi_select_title,
+                        mode.selectedItems.size,
+                    ),
+                backgroundColor = MaterialTheme.colorScheme.primary,
+                textColor = MaterialTheme.colorScheme.onPrimary,
+                iconColor = MaterialTheme.colorScheme.onPrimary,
+            )
 
-        is Mode.Normal -> ToolbarConfig(
-            title = stringResource(R.string.library_downloads),
-            backgroundColor = MaterialTheme.colorScheme.surface,
-            textColor = MaterialTheme.colorScheme.onSurface,
-            iconColor = MaterialTheme.colorScheme.onSurface,
+        is Mode.Normal ->
+            ToolbarConfig(
+                title = stringResource(R.string.library_downloads),
+                backgroundColor = MaterialTheme.colorScheme.surface,
+                textColor = MaterialTheme.colorScheme.onSurface,
+                iconColor = MaterialTheme.colorScheme.onSurface,
+            )
+    }
+}
+
+@Composable
+private fun DeleteConfirmationDialog(
+    itemCount: Int,
+    onConfirm: (removeFromDevice: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var deleteFromDevice by remember { mutableStateOf(true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                painter = painterResource(iconsR.drawable.mozac_ic_delete_24),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        },
+        title = {
+            Text(
+                text = pluralStringResource(R.plurals.downloads_delete_dialog_title, itemCount, itemCount),
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+        },
+        text = {
+            Column {
+                DeleteOptionRow(
+                    selected = deleteFromDevice,
+                    onClick = { deleteFromDevice = true },
+                    title = stringResource(R.string.download_delete_dialog_from_device),
+                )
+
+                DeleteOptionRow(
+                    selected = !deleteFromDevice,
+                    onClick = { deleteFromDevice = false },
+                    title = stringResource(R.string.download_delete_dialog_from_history),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                text = stringResource(R.string.download_delete_dialog_confirm),
+                onClick = { onConfirm(deleteFromDevice) },
+                modifier = Modifier.testTag(DownloadsScreenTestTag.DELETE_DIALOG_CONFIRM_BUTTON),
+            )
+        },
+        dismissButton = {
+            TextButton(
+                text = stringResource(R.string.download_delete_dialog_cancel),
+                onClick = onDismiss,
+                modifier = Modifier.testTag(DownloadsScreenTestTag.DELETE_DIALOG_CANCEL_BUTTON),
+            )
+        },
+    )
+}
+
+@Composable
+private fun DeleteOptionRow(
+    selected: Boolean,
+    onClick: () -> Unit,
+    title: String,
+) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth()
+                .selectable(
+                    selected = selected,
+                    onClick = onClick,
+                    role = Role.RadioButton,
+                )
+                .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
         )
+        Spacer(modifier = Modifier.width(16.dp))
+        Column {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
     }
 }
 
@@ -602,192 +722,157 @@ private fun getDeleteSnackBarMessage(fileItems: Set<FileItem>, context: Context)
 }
 
 private class DownloadsScreenPreviewModelParameterProvider :
-    PreviewParameterProvider<DownloadUIState> {
-    override val values: Sequence<DownloadUIState>
-        get() = sequenceOf(
+    ThemedValueProvider<DownloadUIState>(
+        sequenceOf(
             DownloadUIState.INITIAL,
             DownloadUIState(
-                items = listOf(
-                    FileItem(
-                        id = "1",
-                        fileName = "File 1",
-                        url = "https://example.com/file1",
-                        description = "1.2 MB • example.com",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/pdf",
-                        status = FileItem.Status.Completed,
-                        filePath = "/path/to/file1",
-                        timeCategory = TimeCategory.TODAY,
+                items =
+                    listOf(
+                        FileItem(
+                            id = "1",
+                            fileName = "File 1",
+                            url = "https://example.com/file1",
+                            description = "1.2 MB • example.com",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/pdf",
+                            status = FileItem.Status.Completed,
+                            filePath = "/path/to/file1",
+                            timeCategory = TimeCategory.TODAY,
+                        ),
+                        FileItem(
+                            id = "2",
+                            fileName = "File 2",
+                            url = "https://example.com/file2",
+                            description = "2.3 MB • example.com",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "image/png",
+                            status = FileItem.Status.Completed,
+                            filePath = "/path/to/file2",
+                            timeCategory = TimeCategory.TODAY,
+                        ),
+                        FileItem(
+                            id = "3",
+                            fileName = "File 3",
+                            url = "https://example.com/file3",
+                            description = "3.4 MB • example.com",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Completed,
+                            filePath = "/path/to/file3",
+                            timeCategory = TimeCategory.OLDER,
+                        ),
+                        FileItem(
+                            id = "4",
+                            fileName = "File 4",
+                            url = "https://example.com/file4",
+                            description = "5 MB / 10 MB • in 5s",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Downloading(progress = 0.5f),
+                            filePath = "/path/to/file4",
+                            timeCategory = TimeCategory.IN_PROGRESS,
+                        ),
+                        FileItem(
+                            id = "5",
+                            fileName = "File 5",
+                            url = "https://example.com/file5",
+                            description = "5 MB / 10 MB • pending",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Downloading(progress = 0.5f),
+                            filePath = "/path/to/file5",
+                            timeCategory = TimeCategory.IN_PROGRESS,
+                        ),
+                        FileItem(
+                            id = "6",
+                            fileName = "File 6",
+                            url = "https://example.com/file6",
+                            description = "5 MB / 10 MB • paused",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Paused(progress = 0.5f),
+                            filePath = "/path/to/file6",
+                            timeCategory = TimeCategory.IN_PROGRESS,
+                        ),
+                        FileItem(
+                            id = "7",
+                            fileName = "File 7",
+                            url = "https://example.com/file7",
+                            description = "Preparing download…",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Initiated,
+                            filePath = "/path/to/file7",
+                            timeCategory = TimeCategory.IN_PROGRESS,
+                        ),
+                        FileItem(
+                            id = "8",
+                            fileName = "File 8",
+                            url = "https://example.com/file8",
+                            description = "Download Failed",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Failed,
+                            filePath = "/path/to/file8",
+                            timeCategory = TimeCategory.IN_PROGRESS,
+                        ),
                     ),
-                    FileItem(
-                        id = "2",
-                        fileName = "File 2",
-                        url = "https://example.com/file2",
-                        description = "2.3 MB • example.com",
-                        displayedShortUrl = "example.com",
-                        contentType = "image/png",
-                        status = FileItem.Status.Completed,
-                        filePath = "/path/to/file2",
-                        timeCategory = TimeCategory.TODAY,
-                    ),
-                    FileItem(
-                        id = "3",
-                        fileName = "File 3",
-                        url = "https://example.com/file3",
-                        description = "3.4 MB • example.com",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Completed,
-                        filePath = "/path/to/file3",
-                        timeCategory = TimeCategory.OLDER,
-                    ),
-                    FileItem(
-                        id = "4",
-                        fileName = "File 4",
-                        url = "https://example.com/file4",
-                        description = "5 MB / 10 MB • in 5s",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Downloading(progress = 0.5f),
-                        filePath = "/path/to/file4",
-                        timeCategory = TimeCategory.IN_PROGRESS,
-                    ),
-                    FileItem(
-                        id = "5",
-                        fileName = "File 5",
-                        url = "https://example.com/file5",
-                        description = "5 MB / 10 MB • pending",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Downloading(progress = 0.5f),
-                        filePath = "/path/to/file5",
-                        timeCategory = TimeCategory.IN_PROGRESS,
-                    ),
-                    FileItem(
-                        id = "6",
-                        fileName = "File 6",
-                        url = "https://example.com/file6",
-                        description = "5 MB / 10 MB • paused",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Paused(progress = 0.5f),
-                        filePath = "/path/to/file6",
-                        timeCategory = TimeCategory.IN_PROGRESS,
-                    ),
-                    FileItem(
-                        id = "7",
-                        fileName = "File 7",
-                        url = "https://example.com/file7",
-                        description = "Preparing download…",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Initiated,
-                        filePath = "/path/to/file7",
-                        timeCategory = TimeCategory.IN_PROGRESS,
-                    ),
-                    FileItem(
-                        id = "8",
-                        fileName = "File 8",
-                        url = "https://example.com/file8",
-                        description = "Download Failed",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Failed,
-                        filePath = "/path/to/file8",
-                        timeCategory = TimeCategory.IN_PROGRESS,
-                    ),
-                ),
                 mode = Mode.Normal,
                 pendingDeletionIds = emptySet(),
                 userSelectedContentTypeFilter = FileItem.ContentTypeFilter.All,
             ),
             DownloadUIState(
-                items = List(size = 20) { index ->
-                    FileItem(
-                        id = "$index",
-                        fileName = "File $index",
-                        url = "https://example.com/file$index",
-                        description = "1.2 MB • example.com",
-                        displayedShortUrl = "example.com",
-                        contentType = "application/zip",
-                        status = FileItem.Status.Completed,
-                        filePath = "/path/to/file1",
-                        timeCategory = TimeCategory.TODAY,
-                    )
-                },
+                items =
+                    List(size = 20) { index ->
+                        FileItem(
+                            id = "$index",
+                            fileName = "File $index",
+                            url = "https://example.com/file$index",
+                            description = "1.2 MB • example.com",
+                            directoryPath = "/storage/emulated/0/Download",
+                            displayedShortUrl = "example.com",
+                            contentType = "application/zip",
+                            status = FileItem.Status.Completed,
+                            filePath = "/path/to/file1",
+                            timeCategory = TimeCategory.TODAY,
+                        )
+                    },
                 mode = Mode.Normal,
                 pendingDeletionIds = emptySet(),
                 userSelectedContentTypeFilter = FileItem.ContentTypeFilter.All,
             ),
         )
-}
+    )
 
 @Composable
 @FlexibleWindowLightDarkPreview
 private fun DownloadsScreenPreviews(
-    @PreviewParameter(DownloadsScreenPreviewModelParameterProvider::class) state: DownloadUIState,
+    @PreviewParameter(DownloadsScreenPreviewModelParameterProvider::class) state: ThemedValue<DownloadUIState>
 ) {
-    val downloadsStore = remember { DownloadUIStore(initialState = state) }
+    val downloadsStore = remember { DownloadUIStore(initialState = state.value) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    FirefoxTheme {
+    FirefoxTheme(state.theme) {
         Box {
             DownloadsScreen(
                 downloadsStore = downloadsStore,
                 onItemClick = {
                     scope.launch {
-                        snackbarHostState.displaySnackbar(
-                            message = "Item ${it.fileName} clicked",
-                        )
-                    }
-                },
-                onNavigationIconClick = {
-                    scope.launch {
-                        snackbarHostState.displaySnackbar(
-                            message = "Navigation Icon clicked",
-                        )
+                        snackbarHostState.displaySnackbar(message = "Item ${it.fileName} clicked")
                     }
                 },
             )
-            SnackbarHost(
-                hostState = snackbarHostState,
-            ) {
+            SnackbarHost(hostState = snackbarHostState) {
                 Snackbar(snackbarData = it)
             }
-        }
-    }
-}
-
-@Composable
-@Preview
-private fun DownloadsScreenPrivatePreviews(
-    @PreviewParameter(DownloadsScreenPreviewModelParameterProvider::class) state: DownloadUIState,
-) {
-    val downloadsStore = remember { DownloadUIStore(initialState = state) }
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
-    FirefoxTheme(theme = Theme.Private) {
-        Box {
-            DownloadsScreen(
-                downloadsStore = downloadsStore,
-                onItemClick = {
-                    scope.launch {
-                        snackbarHostState.displaySnackbar(
-                            message = "Item ${it.fileName} clicked",
-                        )
-                    }
-                },
-                onNavigationIconClick = {
-                    scope.launch {
-                        snackbarHostState.displaySnackbar(
-                            message = "Navigation Icon clicked",
-                        )
-                    }
-                },
-            )
-            SnackbarHost(
-                hostState = snackbarHostState,
-            )
         }
     }
 }

@@ -20,7 +20,7 @@ class Sinf : public Atom {
 
         mDefaultCryptByteBlock(0),
         mDefaultSkipByteBlock(0) {}
-  explicit Sinf(Box& aBox);
+  explicit Sinf(const Box& aBox);
 
   bool IsValid() const override {
     return !!mDefaultEncryptionType &&  // Should have an encryption scheme
@@ -30,7 +30,7 @@ class Sinf : public Atom {
 
   uint8_t mDefaultIVSize;
   AtomType mDefaultEncryptionType;
-  uint8_t mDefaultKeyID[16];
+  uint8_t mDefaultKeyID[16] = {};
   uint8_t mDefaultCryptByteBlock;
   uint8_t mDefaultSkipByteBlock;
   CopyableTArray<uint8_t> mDefaultConstantIV;
@@ -38,14 +38,14 @@ class Sinf : public Atom {
 
 class SinfParser {
  public:
-  explicit SinfParser(Box& aBox);
+  explicit SinfParser(const Box& aBox);
 
   Sinf& GetSinf() { return mSinf; }
 
  private:
-  Result<Ok, nsresult> ParseSchm(Box& aBox);
-  Result<Ok, nsresult> ParseSchi(Box& aBox);
-  Result<Ok, nsresult> ParseTenc(Box& aBox);
+  Result<Ok, nsresult> ParseSchm(const Box& aBox);
+  Result<Ok, nsresult> ParseSchi(const Box& aBox);
+  Result<Ok, nsresult> ParseTenc(const Box& aBox);
 
   Sinf mSinf;
 };

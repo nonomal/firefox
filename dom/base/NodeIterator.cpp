@@ -1,5 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -94,7 +93,7 @@ void NodeIterator::NodePointer::AdjustForRemoval(nsINode* aRoot,
 }
 
 bool NodeIterator::NodePointer::MoveForward(nsINode* aRoot, nsINode* aNode) {
-  while (1) {
+  while (true) {
     if (aNode == aRoot) break;
 
     nsINode* sibling = aNode->GetNextSibling();
@@ -142,6 +141,8 @@ NS_IMPL_CYCLE_COLLECTION_CLASS(NodeIterator)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(NodeIterator)
   if (tmp->mRoot) tmp->mRoot->RemoveMutationObserver(tmp);
+  tmp->mPointer.Clear();
+  tmp->mWorkingPointer.Clear();
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mRoot)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mFilter)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
@@ -191,9 +192,7 @@ already_AddRefed<nsINode> NodeIterator::NextOrPrevNode(
 }
 
 void NodeIterator::Detach() {
-  if (mRoot) {
-    mRoot->OwnerDoc()->WarnOnceAbout(DeprecatedOperations::eNodeIteratorDetach);
-  }
+  // Intentionally a no-op, as this API is deprecated.
 }
 
 /*

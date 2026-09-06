@@ -1,15 +1,12 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "gtest/gtest.h"
-
-#include <minwindef.h>
 #include <handleapi.h>
+#include <minwindef.h>
 #include <synchapi.h>
 
+#include "gtest/gtest.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/ErrorNames.h"
 #include "mozilla/Result.h"
@@ -29,7 +26,6 @@
 #include "nsITimer.h"
 #include "nsTHashMap.h"
 #include "nsThreadUtils.h"
-// #include "nscore.h"
 
 namespace details {
 static nsCString MakeTargetName(const char* name) {
@@ -94,7 +90,7 @@ class TestHandleWatcher : public testing::Test {
   static already_AddRefed<mozilla::SharedThreadPool> GetPool() {
     AssertIsLive();
     if (!sPool) {
-      sPool = mozilla::SharedThreadPool::Get("Test Pool"_ns);
+      sPool = mozilla::SharedThreadPool::Get("Test Pool");
     }
     return do_AddRef(sPool);
   }
@@ -113,7 +109,7 @@ class TestHandleWatcher : public testing::Test {
 /* static */
 bool TestHandleWatcher::sIsLive = false;
 /* static */
-MOZ_CONSTINIT RefPtr<mozilla::SharedThreadPool> TestHandleWatcher::sPool;
+constinit RefPtr<mozilla::SharedThreadPool> TestHandleWatcher::sPool;
 
 ///////////////////////////////////////////////////////////////////////
 // WindowsEventObject
@@ -448,6 +444,8 @@ class MockEventTarget final : public nsIEventTarget {
   NS_IMETHOD UnregisterShutdownTask(nsITargetShutdownTask* task) override {
     return mShutdownTasks.RemoveTask(task);
   }
+  NS_IMETHOD_(FeatureFlags) GetFeatures() override { return SUPPORTS_BASE; }
+
   void RegisterDeathAction(std::function<void(void)>&& f) {
     mDeathAction = std::move(f);
   }

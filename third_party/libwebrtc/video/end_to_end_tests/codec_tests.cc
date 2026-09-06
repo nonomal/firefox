@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "api/environment/environment.h"
+#include "api/rtp_header_extension_id.h"
 #include "api/rtp_parameters.h"
 #include "api/test/video/function_video_decoder_factory.h"
 #include "api/test/video/function_video_encoder_factory.h"
@@ -39,11 +40,8 @@
 
 namespace webrtc {
 namespace {
-enum : int {  // The first valid value is 1.
-  kColorSpaceExtensionId = 1,
-  kVideoRotationExtensionId,
-};
-}  // namespace
+constexpr RtpHeaderExtensionId kColorSpaceExtensionId(1);
+constexpr RtpHeaderExtensionId kVideoRotationExtensionId(2);
 
 class CodecEndToEndTest : public test::CallTest {
  public:
@@ -215,7 +213,8 @@ TEST_F(CodecEndToEndTest,
 class EndToEndTestH264 : public test::CallTest,
                          public ::testing::WithParamInterface<std::string> {
  public:
-  EndToEndTestH264() : CallTest(/*field_trials=*/GetParam()) {
+  EndToEndTestH264() {
+    field_trials().Set("WebRTC-SpsPpsIdrIsH264Keyframe", GetParam());
     RegisterRtpExtension(RtpExtension(RtpExtension::kVideoRotationUri,
                                       kVideoRotationExtensionId));
   }
@@ -224,8 +223,8 @@ class EndToEndTestH264 : public test::CallTest,
 INSTANTIATE_TEST_SUITE_P(
     SpsPpsIdrIsKeyframe,
     EndToEndTestH264,
-    ::testing::Values("WebRTC-SpsPpsIdrIsH264Keyframe/Disabled/",
-                      "WebRTC-SpsPpsIdrIsH264Keyframe/Enabled/"));
+    ::testing::Values(/*WebRTC-SpsPpsIdrIsH264Keyframe*/ "Disabled",
+                      /*WebRTC-SpsPpsIdrIsH264Keyframe*/ "Enabled"));
 
 TEST_P(EndToEndTestH264, SendsAndReceivesH264) {
   test::FunctionVideoEncoderFactory encoder_factory(
@@ -280,4 +279,5 @@ TEST_P(EndToEndTestH264, SendsAndReceivesH264PacketizationMode1) {
 }
 #endif  // defined(WEBRTC_USE_H264)
 
+}  // namespace
 }  // namespace webrtc

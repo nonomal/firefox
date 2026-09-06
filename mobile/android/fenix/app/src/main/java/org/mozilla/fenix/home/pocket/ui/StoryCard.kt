@@ -13,9 +13,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -26,6 +26,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
+import mozilla.components.compose.base.modifier.skeletonLoader
 import mozilla.components.service.pocket.PocketStory
 import mozilla.components.service.pocket.PocketStory.ContentRecommendation
 import mozilla.components.service.pocket.PocketStory.PocketRecommendedStory
@@ -33,12 +35,10 @@ import mozilla.components.service.pocket.PocketStory.PocketSponsoredStory
 import mozilla.components.service.pocket.PocketStory.SponsoredContent
 import org.mozilla.fenix.compose.Favicon
 import org.mozilla.fenix.compose.Image
-import org.mozilla.fenix.compose.skeletonLoader
 import org.mozilla.fenix.home.fake.FakeHomepagePreview
 import org.mozilla.fenix.theme.FirefoxTheme
-import kotlin.math.roundToInt
+import org.mozilla.fenix.wallpapers.WallpaperTheme
 
-private val cardShape = RoundedCornerShape(8.dp)
 private val defaultCardContentPadding = 8.dp
 private val imageWidth = 345.dp
 private val imageHeight = 180.dp
@@ -49,33 +49,30 @@ internal fun StoryCard(
     onClick: (story: PocketStory, position: Triple<Int, Int, Int>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val imageUrl = story.imageUrl.replace(
-        "{wh}",
-        with(LocalDensity.current) {
-            "${imageWidth.toPx().roundToInt()}x${
+    val imageUrl =
+        story.imageUrl.replace(
+            "{wh}",
+            with(LocalDensity.current) {
+                "${imageWidth.toPx().roundToInt()}x${
                 imageWidth.toPx().roundToInt()
             }"
-        },
-    )
+            },
+        )
 
     Card(
         onClick = {
             onClick(story, Triple(0, 0, 0))
         },
         modifier = modifier,
-        shape = cardShape,
+        shape = MaterialTheme.shapes.small,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        colors = CardDefaults.cardColors(containerColor = FirefoxTheme.colors.layer2),
+        colors = CardDefaults.cardColors(containerColor = WallpaperTheme.cardBackgroundColor),
     ) {
-        Column(
-            modifier = Modifier.padding(all = defaultCardContentPadding),
-        ) {
+        Column(modifier = Modifier.padding(all = defaultCardContentPadding)) {
             Image(
                 url = imageUrl,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(imageWidth / imageHeight)
-                    .clip(cardShape),
+                modifier =
+                    Modifier.fillMaxWidth().aspectRatio(imageWidth / imageHeight).clip(MaterialTheme.shapes.small),
                 private = false,
                 targetSize = imageWidth,
                 contentScale = ContentScale.Crop,
@@ -90,7 +87,6 @@ internal fun StoryCard(
             ) {
                 Text(
                     text = story.title,
-                    color = FirefoxTheme.colors.textPrimary,
                     overflow = TextOverflow.Ellipsis,
                     maxLines = 2,
                     style = FirefoxTheme.typography.headline7,
@@ -107,8 +103,7 @@ internal fun StoryCard(
                     }
 
                     is PocketRecommendedStory,
-                    is PocketSponsoredStory,
-                        -> {
+                    is PocketSponsoredStory -> {
                         // no-op, don't handle these [PocketStory] types as they are no longer
                         // supported after the Merino recommendation migration.
                     }
@@ -122,7 +117,7 @@ internal fun StoryCard(
 
                         Text(
                             text = subtitle,
-                            color = FirefoxTheme.colors.textSecondary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             overflow = TextOverflow.Ellipsis,
                             style = FirefoxTheme.typography.subtitle1,
                         )
@@ -135,11 +130,7 @@ internal fun StoryCard(
 
 @Composable
 private fun Placeholder() {
-    Box(
-        modifier = Modifier
-            .aspectRatio(imageWidth / imageHeight)
-            .skeletonLoader(),
-    )
+    Box(modifier = Modifier.aspectRatio(imageWidth / imageHeight).skeletonLoader())
 }
 
 @PreviewLightDark
@@ -148,7 +139,7 @@ private fun StoryCardPreview() {
     FirefoxTheme {
         Column(modifier = Modifier.padding(16.dp)) {
             StoryCard(
-                story = FakeHomepagePreview.pocketStories(limit = 1).first(),
+                story = FakeHomepagePreview.stories(limit = 1).first(),
                 onClick = { _, _ -> },
             )
         }

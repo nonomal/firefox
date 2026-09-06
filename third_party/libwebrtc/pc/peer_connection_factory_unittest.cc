@@ -14,19 +14,22 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "api/audio/audio_device.h"
+#include "api/audio/audio_processing.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
+#include "api/audio_options.h"
 #include "api/create_modular_peer_connection_factory.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/data_channel_interface.h"
 #include "api/enable_media.h"
 #include "api/enable_media_with_defaults.h"
+#include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
-#include "api/field_trials.h"
 #include "api/field_trials_view.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
@@ -37,6 +40,7 @@
 #include "api/scoped_refptr.h"
 #include "api/test/mock_packet_socket_factory.h"
 #include "api/units/time_delta.h"
+#include "api/units/timestamp.h"
 #include "api/video_codecs/scalability_mode.h"
 #include "api/video_codecs/video_decoder_factory_template.h"
 #include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
@@ -53,20 +57,23 @@
 #include "modules/audio_processing/include/mock_audio_processing.h"
 #include "p2p/base/port.h"
 #include "p2p/base/port_allocator.h"
-#include "p2p/base/port_interface.h"
 #include "p2p/test/fake_port_allocator.h"
 #include "pc/connection_context.h"
 #include "pc/test/fake_audio_capture_module.h"
 #include "pc/test/fake_video_track_source.h"
 #include "rtc_base/event.h"
 #include "rtc_base/internal/default_socket_server.h"
+#include "rtc_base/net_helper.h"
 #include "rtc_base/network.h"
 #include "rtc_base/socket_address.h"
 #include "rtc_base/socket_server.h"
 #include "rtc_base/thread.h"
-#include "rtc_base/time_utils.h"
+#include "test/create_test_environment.h"
+#include "test/create_test_field_trials.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
+#include "test/run_loop.h"
+#include "test/testsupport/file_utils.h"
 
 #ifdef WEBRTC_ANDROID
 #include "pc/test/android_test_initializer.h"
@@ -82,7 +89,6 @@ using test::MockAudioProcessingBuilder;
 using ::testing::_;
 using ::testing::A;
 using ::testing::AtLeast;
-using ::testing::InvokeWithoutArgs;
 using ::testing::NiceMock;
 using ::testing::NotNull;
 using ::testing::Return;
@@ -161,11 +167,12 @@ class PeerConnectionFactoryTest : public ::testing::Test {
         std::make_unique<VideoDecoderFactoryTemplate<
             LibvpxVp8DecoderTemplateAdapter, LibvpxVp9DecoderTemplateAdapter,
             OpenH264DecoderTemplateAdapter, Dav1dDecoderTemplateAdapter>>(),
-        nullptr /* audio_mixer */, nullptr /* audio_processing */);
+        nullptr /* audio_mixer */, nullptr /* audio_processing */,
+        nullptr /* audio_frame_processor */, CreateTestFieldTrialsPtr());
 
     ASSERT_TRUE(factory_.get() != nullptr);
-    port_allocator_ = std::make_unique<FakePortAllocator>(CreateEnvironment(),
-                                                          socket_server_.get());
+    port_allocator_ = std::make_unique<FakePortAllocator>(
+        CreateTestEnvironment(), socket_server_.get());
     raw_port_allocator_ = port_allocator_.get();
   }
 
@@ -261,7 +268,7 @@ class PeerConnectionFactoryTest : public ::testing::Test {
   }
 
   std::unique_ptr<SocketServer> socket_server_;
-  AutoSocketServerThread main_thread_;
+  test::RunLoop main_thread_;
   scoped_refptr<PeerConnectionFactoryInterface> factory_;
   NullPeerConnectionObserver observer_;
   std::unique_ptr<FakePortAllocator> port_allocator_;
@@ -292,10 +299,12 @@ CreatePeerConnectionFactoryWithRtxDisabled() {
           OpenH264DecoderTemplateAdapter, Dav1dDecoderTemplateAdapter>>(),
   EnableMedia(pcf_dependencies);
 
+  Environment env = CreateTestEnvironment();
   scoped_refptr<ConnectionContext> context =
-      ConnectionContext::Create(CreateEnvironment(), &pcf_dependencies);
+      ConnectionContext::Create(env, &pcf_dependencies);
   context->set_use_rtx(false);
-  return make_ref_counted<PeerConnectionFactory>(context, &pcf_dependencies);
+  return make_ref_counted<PeerConnectionFactory>(env, context,
+                                                 &pcf_dependencies);
 }
 
 // Verify creation of PeerConnection using internal ADM, video factory and
@@ -317,7 +326,8 @@ TEST(PeerConnectionFactoryTestInternal, DISABLED_CreatePCUsingInternalModules) {
           CreateBuiltinAudioDecoderFactory(),
           nullptr /* video_encoder_factory */,
           nullptr /* video_decoder_factory */, nullptr /* audio_mixer */,
-          nullptr /* audio_processing */));
+          nullptr /* audio_processing */, nullptr /* audio_frame_processor */,
+          CreateTestFieldTrialsPtr()));
 
   NullPeerConnectionObserver observer;
   PeerConnectionInterface::RTCConfiguration config;
@@ -640,7 +650,8 @@ TEST_F(PeerConnectionFactoryTest, LocalRendering) {
   scoped_refptr<FakeVideoTrackSource> source =
       FakeVideoTrackSource::Create(/*is_screencast=*/false);
 
-  FakeFrameSource frame_source(1280, 720, kNumMicrosecsPerSec / 30);
+  FakeFrameSource frame_source(1280, 720, TimeDelta::Seconds(1) / 30,
+                               Timestamp::Zero());
 
   ASSERT_TRUE(source.get() != nullptr);
   scoped_refptr<VideoTrackInterface> track(
@@ -666,7 +677,7 @@ TEST_F(PeerConnectionFactoryTest, LocalRendering) {
 
 TEST(PeerConnectionFactoryDependenciesTest,
      CanInjectFieldTrialsWithEnvironment) {
-  std::unique_ptr<FieldTrialsView> field_trials = FieldTrials::Create("");
+  std::unique_ptr<FieldTrialsView> field_trials = CreateTestFieldTrialsPtr("");
   ASSERT_THAT(field_trials, NotNull());
   FieldTrialsView* raw_field_trials = field_trials.get();
 
@@ -687,10 +698,11 @@ TEST(PeerConnectionFactoryDependenciesTest, UsesNetworkManager) {
   Event called;
   EXPECT_CALL(*mock_network_manager, StartUpdating())
       .Times(AtLeast(1))
-      .WillRepeatedly(InvokeWithoutArgs([&] { called.Set(); }));
+      .WillRepeatedly([&] { called.Set(); });
 
   PeerConnectionFactoryDependencies pcf_dependencies;
   pcf_dependencies.network_manager = std::move(mock_network_manager);
+  pcf_dependencies.env = CreateTestEnvironment();
 
   scoped_refptr<PeerConnectionFactoryInterface> pcf =
       CreateModularPeerConnectionFactory(std::move(pcf_dependencies));
@@ -711,15 +723,16 @@ TEST(PeerConnectionFactoryDependenciesTest, UsesPacketSocketFactory) {
       std::make_unique<NiceMock<MockPacketSocketFactory>>();
 
   Event called;
-  EXPECT_CALL(*mock_socket_factory, CreateUdpSocket(_, _, _))
-      .WillOnce(InvokeWithoutArgs([&] {
+  EXPECT_CALL(*mock_socket_factory, CreateUdpSocket)
+      .WillOnce([&] {
         called.Set();
         return nullptr;
-      }))
-      .WillRepeatedly(Return(nullptr));
+      })
+      .WillRepeatedly([] { return nullptr; });
 
   PeerConnectionFactoryDependencies pcf_dependencies;
   pcf_dependencies.packet_socket_factory = std::move(mock_socket_factory);
+  pcf_dependencies.env = CreateTestEnvironment();
 
   scoped_refptr<PeerConnectionFactoryInterface> pcf =
       CreateModularPeerConnectionFactory(std::move(pcf_dependencies));
@@ -753,12 +766,99 @@ TEST(PeerConnectionFactoryDependenciesTest,
   PeerConnectionFactoryDependencies pcf_dependencies;
   pcf_dependencies.adm = FakeAudioCaptureModule::Create();
   pcf_dependencies.audio_processing_builder = std::move(ap_factory);
+  pcf_dependencies.env = CreateTestEnvironment();
   EnableMediaWithDefaults(pcf_dependencies);
 
   scoped_refptr<PeerConnectionFactoryInterface> pcf =
       CreateModularPeerConnectionFactory(std::move(pcf_dependencies));
-  pcf->StartAecDump(nullptr, 24'242);
+  // Provide a valid file to avoid triggering the null pointer guard.
+  // The AEC dump machinery takes ownership of the file and closes it.
+  std::string temp_filename =
+      test::TempFilename(test::OutputPath(), "aec_dump");
+  pcf->StartAecDump(fopen(temp_filename.c_str(), "wb"), 24'242);
+  // Destroy the PCF to ensure the file is closed before attempting removal.
+  pcf = nullptr;
+  test::RemoveFile(temp_filename);
 }
+
+TEST(PeerConnectionFactoryDependenciesTest, RepeatMediaEngineInitialization) {
+  scoped_refptr<AudioDeviceModule> adm = FakeAudioCaptureModule::Create();
+  PeerConnectionFactoryDependencies pcf_dependencies;
+  pcf_dependencies.adm = adm;
+  pcf_dependencies.signaling_thread = Thread::Current();
+  pcf_dependencies.worker_thread = Thread::Current();
+  pcf_dependencies.network_thread = Thread::Current();
+  pcf_dependencies.env = CreateTestEnvironment();
+  EnableMediaWithDefaults(pcf_dependencies);
+
+  scoped_refptr<PeerConnectionFactoryInterface> pcf =
+      CreateModularPeerConnectionFactory(std::move(pcf_dependencies));
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FALSE(adm->Initialized());
+    PeerConnectionInterface::RTCConfiguration config;
+    NullPeerConnectionObserver observer;
+    auto pc = pcf->CreatePeerConnectionOrError(
+        config, PeerConnectionDependencies(&observer));
+    ASSERT_TRUE(pc.ok());
+    EXPECT_TRUE(adm->Initialized());
+  }
+  EXPECT_FALSE(adm->Initialized());
+}
+
+#if !defined(WEBRTC_CHROMIUM_BUILD) && !defined(WEBRTC_WEBKIT_BUILD)
+TEST(PeerConnectionFactoryDependenciesTest,
+     CreateAudioSourceAppliesOptionsToAudioProcessing) {
+  auto ap_factory = std::make_unique<MockAudioProcessingBuilder>();
+  auto audio_processing = make_ref_counted<NiceMock<MockAudioProcessing>>();
+
+  // Capture the sequence of applied configurations to verify value-toggling
+  // and options persistence.
+  std::vector<bool> aec_enabled_sequence;
+  EXPECT_CALL(*audio_processing, ApplyConfig(_))
+      .WillRepeatedly([&](const AudioProcessing::Config& config) {
+        aec_enabled_sequence.push_back(config.echo_canceller.enabled);
+      });
+  EXPECT_CALL(*ap_factory, Build).WillOnce(Return(audio_processing));
+
+  PeerConnectionFactoryDependencies pcf_dependencies;
+  pcf_dependencies.adm = FakeAudioCaptureModule::Create();
+  pcf_dependencies.audio_processing_builder = std::move(ap_factory);
+  pcf_dependencies.signaling_thread = Thread::Current();
+  pcf_dependencies.worker_thread = Thread::Current();
+  pcf_dependencies.network_thread = Thread::Current();
+  pcf_dependencies.env = CreateTestEnvironment();
+  EnableMediaWithDefaults(pcf_dependencies);
+
+  scoped_refptr<PeerConnectionFactoryInterface> pcf =
+      CreateModularPeerConnectionFactory(std::move(pcf_dependencies));
+
+  // 1. Create AudioSource with custom options (AEC disabled).
+  AudioOptions options;
+  options.echo_cancellation = false;
+  auto source = pcf->CreateAudioSource(options);
+
+  // Verify no Init/ApplyConfig has been called yet (lazy initialization).
+  EXPECT_TRUE(aec_enabled_sequence.empty());
+
+  // 2. Create PeerConnection to trigger media engine initialization.
+  PeerConnectionInterface::RTCConfiguration config;
+  NullPeerConnectionObserver observer;
+  auto pc_or_error = pcf->CreatePeerConnectionOrError(
+      config, PeerConnectionDependencies(&observer));
+  ASSERT_TRUE(pc_or_error.ok());
+
+  // Verify the exact sequence of applied configurations:
+  // - 1st Init (defaults): true (default option is applied)
+  // - 2nd Applied Custom: false (custom options from CreateAudioSource are
+  // applied)
+  ASSERT_EQ(aec_enabled_sequence.size(), 2u);
+  EXPECT_EQ(aec_enabled_sequence[0], true);
+  EXPECT_EQ(aec_enabled_sequence[1], false);
+
+  pcf = nullptr;
+}
+#endif
 
 }  // namespace
 }  // namespace webrtc

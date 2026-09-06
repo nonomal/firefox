@@ -1,31 +1,30 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "WaylandBuffer.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+
 #include "WaylandSurface.h"
 #include "WaylandSurfaceLock.h"
-
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <errno.h>
-
 #include "gfx2DGlue.h"
 #include "gfxPlatform.h"
 #include "mozilla/WidgetUtilsGtk.h"
-#include "mozilla/gfx/Tools.h"
 #include "mozilla/gfx/Logging.h"
+#include "mozilla/gfx/Tools.h"
 #include "mozilla/ipc/SharedMemoryHandle.h"
 #include "nsGtkUtils.h"
 #include "nsPrintfCString.h"
 #include "prenv.h"  // For PR_GetEnv
 
 #ifdef MOZ_LOGGING
+#  include "Units.h"
 #  include "mozilla/Logging.h"
 #  include "mozilla/ScopeExit.h"
-#  include "Units.h"
 extern mozilla::LazyLogModule gWidgetWaylandLog;
 #  define LOGWAYLAND(...) \
     MOZ_LOG(gWidgetWaylandLog, mozilla::LogLevel::Debug, (__VA_ARGS__))
@@ -90,7 +89,7 @@ WaylandShmPool::~WaylandShmPool() {
 
 WaylandBuffer::WaylandBuffer(const LayoutDeviceIntSize& aSize) : mSize(aSize) {}
 
-bool WaylandBuffer::IsAttached() const {
+bool WaylandBuffer::IsAttached(const WaylandSurfaceLock& aSurfaceLock) const {
   for (const auto& transaction : mBufferTransactions) {
     if (transaction->IsAttached()) {
       return true;
@@ -130,7 +129,8 @@ BufferTransaction* WaylandBuffer::GetTransaction(
   return transaction;
 }
 
-void WaylandBuffer::RemoveTransaction(RefPtr<BufferTransaction> aTransaction) {
+void WaylandBuffer::RemoveTransaction(const WaylandSurfaceLock& aSurfaceLock,
+                                      RefPtr<BufferTransaction> aTransaction) {
   LOGWAYLAND("WaylandBuffer::RemoveTransaction() [%p]", (void*)aTransaction);
   [[maybe_unused]] bool removed =
       mBufferTransactions.RemoveElement(aTransaction);
@@ -187,7 +187,7 @@ WaylandBufferSHM::WaylandBufferSHM(const LayoutDeviceIntSize& aSize)
 
 WaylandBufferSHM::~WaylandBufferSHM() {
   LOGWAYLAND("WaylandBufferSHM::~WaylandBufferSHM() [%p]\n", (void*)this);
-  MOZ_RELEASE_ASSERT(!IsAttached());
+  MOZ_RELEASE_ASSERT(mBufferTransactions.IsEmpty());
 }
 
 already_AddRefed<gfx::DrawTarget> WaylandBufferSHM::Lock() {
@@ -206,6 +206,7 @@ void WaylandBufferSHM::Clear() {
 #ifdef MOZ_LOGGING
 void WaylandBufferSHM::DumpToFile(const char* aHint) {
   if (!mDumpSerial) {
+    NS_WARNING("mDumpSerial is not set!");
     return;
   }
 
@@ -286,12 +287,13 @@ WaylandBufferDMABUF::WaylandBufferDMABUF(const LayoutDeviceIntSize& aSize)
 WaylandBufferDMABUF::~WaylandBufferDMABUF() {
   LOGWAYLAND("WaylandBufferDMABUF::~WaylandBufferDMABUF [%p] UID %d\n",
              (void*)this, mDMABufSurface ? mDMABufSurface->GetUID() : -1);
-  MOZ_RELEASE_ASSERT(!IsAttached());
+  MOZ_RELEASE_ASSERT(mBufferTransactions.IsEmpty());
 }
 
 #ifdef MOZ_LOGGING
 void WaylandBufferDMABUF::DumpToFile(const char* aHint) {
   if (!mDumpSerial) {
+    NS_WARNING("mDumpSerial is not set!");
     return;
   }
   nsCString filename;
@@ -471,7 +473,7 @@ void BufferTransaction::DeleteLocked(const WaylandSurfaceLock& aSurfaceLock) {
 
   // This can destroy us
   RefPtr grip{this};
-  mBuffer->RemoveTransaction(this);
+  mBuffer->RemoveTransaction(aSurfaceLock, this);
   mBuffer = nullptr;
 }
 

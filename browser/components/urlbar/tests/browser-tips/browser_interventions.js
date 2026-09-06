@@ -3,14 +3,9 @@
 
 "use strict";
 
-ChromeUtils.defineESModuleGetters(this, {
-  UrlbarProviderInterventions:
-    "moz-src:///browser/components/urlbar/UrlbarProviderInterventions.sys.mjs",
-});
-
 add_setup(async function () {
   Services.telemetry.clearEvents();
-  makeProfileResettable();
+  await makeProfileResettable();
 
   await SpecialPowers.pushPrefEnv({
     set: [["browser.urlbar.scotchBonnet.enableOverride", false]],
@@ -23,7 +18,7 @@ add_task(async function refresh() {
   // button.
   await checkIntervention({
     searchString: SEARCH_STRINGS.REFRESH,
-    tip: UrlbarProviderInterventions.TIP_TYPE.REFRESH,
+    tip: UrlbarShared.INTERVENTION_TIP_TYPE.REFRESH,
     title:
       "Restore default settings and remove old add-ons for optimal performance.",
     button: /^Refresh .+…$/,
@@ -41,21 +36,19 @@ add_task(async function refresh() {
 add_task(async function clear() {
   // Pick the tip, which should open the refresh dialog.  Click its cancel
   // button.
-  let useOldClearHistoryDialog = Services.prefs.getBoolPref(
-    "privacy.sanitize.useOldClearHistoryDialog"
-  );
-  let dialogURL = useOldClearHistoryDialog
-    ? "chrome://browser/content/sanitize.xhtml"
-    : "chrome://browser/content/sanitize_v2.xhtml";
   await checkIntervention({
     searchString: SEARCH_STRINGS.CLEAR,
-    tip: UrlbarProviderInterventions.TIP_TYPE.CLEAR,
+    tip: UrlbarShared.INTERVENTION_TIP_TYPE.CLEAR,
     title: "Clear your cache, cookies, history and more.",
     button: "Choose What to Clear…",
     awaitCallback() {
-      return BrowserTestUtils.promiseAlertDialog("cancel", dialogURL, {
-        isSubDialog: true,
-      });
+      return BrowserTestUtils.promiseAlertDialog(
+        "cancel",
+        "chrome://browser/content/sanitize_v2.xhtml",
+        {
+          isSubDialog: true,
+        }
+      );
     },
   });
 });
@@ -69,7 +62,7 @@ add_task(async function clear_private() {
   let result = (await awaitTip(SEARCH_STRINGS.REFRESH, win))[0];
   Assert.strictEqual(
     result.payload.type,
-    UrlbarProviderInterventions.TIP_TYPE.REFRESH
+    UrlbarShared.INTERVENTION_TIP_TYPE.REFRESH
   );
 
   // Blur the urlbar so that the engagement is ended.
@@ -127,12 +120,13 @@ add_task(async function testIsActive() {
     },
   ];
 
-  let interventionsProviderInstance = UrlbarProvidersManager.getProvider(
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
+  let interventionsProviderInstance = providersManager.getProvider(
     "UrlbarProviderInterventions"
   );
   // Mock the relevent method of Query so we don't have to start a real one.
   interventionsProviderInstance.queryInstance = {
-    getProvider: name => UrlbarProvidersManager.getProvider(name),
+    getProvider: name => providersManager.getProvider(name),
   };
   for (const {
     description,
@@ -165,7 +159,7 @@ add_task(async function tipsAreEnglishOnly() {
   let result = (await awaitTip(SEARCH_STRINGS.REFRESH, window))[0];
   Assert.strictEqual(
     result.payload.type,
-    UrlbarProviderInterventions.TIP_TYPE.REFRESH
+    UrlbarShared.INTERVENTION_TIP_TYPE.REFRESH
   );
   await UrlbarTestUtils.promisePopupClose(window, () => gURLBar.blur());
 
@@ -208,7 +202,7 @@ add_task(async function pickHelp() {
     let [result] = await awaitTip(SEARCH_STRINGS.CLEAR);
     Assert.strictEqual(
       result.payload.type,
-      UrlbarProviderInterventions.TIP_TYPE.CLEAR
+      UrlbarShared.INTERVENTION_TIP_TYPE.CLEAR
     );
 
     // Click the help command and wait for the help page to load.

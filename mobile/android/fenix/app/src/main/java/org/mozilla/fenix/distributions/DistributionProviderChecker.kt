@@ -16,14 +16,10 @@ private const val ADJUST_CONTENT_PROVIDER_INTENT_ACTION = "com.attribution.REFER
 
 private const val ENCRYPTED_DATA_COLUMN = "encrypted_data"
 
-/**
- * A tool for trying to get a provider from a content resolver meant for adjust.
- */
+/** A tool for trying to get a provider from a content resolver meant for adjust. */
 interface DistributionProviderChecker {
-    /**
-     * Looks for the provider value
-     */
-    fun queryProvider(): String?
+    /** Looks for the provider value */
+    suspend fun queryProvider(): String?
 }
 
 private val logger = Logger(DistributionProviderChecker::class.simpleName)
@@ -36,10 +32,14 @@ private val logger = Logger(DistributionProviderChecker::class.simpleName)
 class DefaultDistributionProviderChecker(private val context: Context) : DistributionProviderChecker {
     private val classVersion = "Default"
 
-    override fun queryProvider(): String? {
+    override suspend fun queryProvider(): String? {
         logger.info("$classVersion - Starting check...")
         val adjustProviderIntent = Intent(ADJUST_CONTENT_PROVIDER_INTENT_ACTION)
-        val contentProviders = context.packageManager.queryIntentContentProviders(adjustProviderIntent, 0)
+        val contentProviders =
+            context.packageManager.queryIntentContentProviders(
+                adjustProviderIntent,
+                0,
+            )
         val contentResolver = context.contentResolver
 
         for (resolveInfo in contentProviders) {
@@ -48,16 +48,27 @@ class DefaultDistributionProviderChecker(private val context: Context) : Distrib
 
             val projection = arrayOf(ENCRYPTED_DATA_COLUMN)
 
-            val contentResolverCursor = contentResolver.query(
-                uri,
-                projection,
-                "package_name=?",
-                arrayOf(context.packageName),
-                null,
-            )
+            @Suppress("TooGenericExceptionCaught")
+            val contentResolverCursor =
+                try {
+                    contentResolver.query(
+                        uri,
+                        projection,
+                        "package_name=?",
+                        arrayOf(context.packageName),
+                        null,
+                    )
+                } catch (e: Exception) {
+                    // Third-party referral providers can throw arbitrary exceptions across the Binder.
+                    // Skip the misbehaving provider instead of crashing at startup.
+                    logger.error("$classVersion - Failed to query provider $authority", e)
+                    continue
+                }
 
             contentResolverCursor?.use { cursor ->
-                cursor.getProvider()?.let { return it }
+                cursor.getProvider()?.let {
+                    return it
+                }
             }
         }
 

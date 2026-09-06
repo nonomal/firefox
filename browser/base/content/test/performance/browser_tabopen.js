@@ -32,6 +32,7 @@ add_task(async function () {
 
   await ensureNoPreloadedBrowser();
   await disableFxaBadge();
+  await ensureSearchIconVisible();
 
   // The test starts on about:blank and opens an about:blank
   // tab which triggers opening the toolbar since
@@ -58,7 +59,7 @@ add_task(async function () {
     .getElementById("tabs-newtab-button")
     .getBoundingClientRect();
   let textBoxRect = gURLBar
-    .querySelector("moz-input-box")
+    .querySelector(".urlbar-input-box")
     .getBoundingClientRect();
 
   let inRange = (val, min, max) => min <= val && val <= max;
@@ -80,6 +81,15 @@ add_task(async function () {
   };
 
   const kTabCloseIconWidth = 13;
+
+  // The '+' button uses a different glyph under nova which paints 1px
+  // shorter than the proton one.
+  const kNewTabIconHeight = Services.prefs.getBoolPref(
+    "browser.nova.enabled",
+    false
+  )
+    ? 12
+    : 13;
 
   let isExpectedChange = function (r) {
     // We expect all changes to be within the tab strip.
@@ -119,8 +129,8 @@ add_task(async function () {
     // the former and new positions can touch each other causing the rect
     // to have twice the icon's width.
     if (
-      r.h == kTabCloseIconWidth &&
-      r.w <= 2 * kTabCloseIconWidth + kMaxEmptyPixels
+      r.h == kNewTabIconHeight &&
+      r.w <= 2 * kNewTabIconHeight + kMaxEmptyPixels
     ) {
       return true;
     }

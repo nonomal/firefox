@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,6 +7,7 @@
 #include "CertVerifier.h"
 #include "ExtendedValidation.h"
 #include "NSSCertDBTrustDomain.h"
+#include "PKCS11Token.h"
 #include "X509CertValidity.h"
 #include "certdb.h"
 #include "ipc/IPCMessageUtils.h"
@@ -29,7 +29,6 @@
 #include "nsIX509Cert.h"
 #include "nsNSSCertHelper.h"
 #include "nsNSSCertTrust.h"
-#include "nsPK11TokenDB.h"
 #include "nsPKCS12Blob.h"
 #include "nsProxyRelease.h"
 #include "nsReadableUtils.h"
@@ -53,8 +52,6 @@ using namespace mozilla::psm;
 extern LazyLogModule gPIPNSSLog;
 
 NS_IMPL_ISUPPORTS(nsNSSCertificate, nsIX509Cert, nsISerializable, nsIClassInfo)
-
-nsNSSCertificate::nsNSSCertificate() : mCert("nsNSSCertificate::mCert") {}
 
 nsNSSCertificate::nsNSSCertificate(CERTCertificate* cert)
     : mCert("nsNSSCertificate::mCert") {
@@ -473,14 +470,35 @@ nsNSSCertificate::GetTokenName(nsAString& aTokenName) {
   if (!internalSlot) {
     return NS_ERROR_FAILURE;
   }
-  nsCOMPtr<nsIPK11Token> token(
-      new nsPK11Token(cert->slot ? cert->slot : internalSlot.get()));
+  nsCOMPtr<nsIPKCS11Token> token(
+      new PKCS11Token(cert->slot ? cert->slot : internalSlot.get()));
   nsAutoCString tmp;
   nsresult rv = token->GetTokenName(tmp);
   if (NS_FAILED(rv)) {
     return rv;
   }
   aTokenName.Assign(NS_ConvertUTF8toUTF16(tmp));
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsNSSCertificate::GetSubjectPublicKeyInfo(nsTArray<uint8_t>& aSPKI) {
+  aSPKI.Clear();
+
+  pkix::Input certInput;
+  pkix::Result result = certInput.Init(mDER.Elements(), mDER.Length());
+  if (result != pkix::Result::Success) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  // NB: since we're not building a trust path, the endEntityOrCA parameter is
+  // irrelevant.
+  pkix::BackCert cert(certInput, pkix::EndEntityOrCA::MustBeEndEntity, nullptr);
+  result = cert.Init();
+  if (result != pkix::Result::Success) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  pkix::Input spki = cert.GetSubjectPublicKeyInfo();
+  aSPKI.AppendElements(spki.UnsafeGetData(), spki.GetLength());
   return NS_OK;
 }
 

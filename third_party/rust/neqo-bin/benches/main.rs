@@ -10,23 +10,30 @@
     reason = "Inherent in codspeed criterion_group! macro."
 )]
 
-use std::{env, hint::black_box, net::SocketAddr, path::PathBuf, str::FromStr as _};
+use std::{env, net::SocketAddr, time::Duration};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use neqo_bin::{client, server};
+use neqo_common::to_u64;
 use tokio::runtime::Builder;
 
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15))
+}
+
 struct Benchmark {
-    name: String,
+    name: &'static str,
     num_requests: usize,
     upload_size: usize,
     download_size: usize,
 }
 
 fn transfer(c: &mut Criterion) {
-    neqo_crypto::init_db(PathBuf::from_str("../test-fixture/db").unwrap()).unwrap();
+    test_fixture::fixture_init();
 
-    let mtu = env::var("MTU").map_or_else(|_| String::new(), |mtu| format!("/mtu-{mtu}"));
+    let mtu_suffix = env::var("MTU").ok().map(|mtu| format!("/mtu-{mtu}"));
     for Benchmark {
         name,
         num_requests,
@@ -34,37 +41,41 @@ fn transfer(c: &mut Criterion) {
         download_size,
     } in [
         Benchmark {
-            name: format!("1-conn/1-100mb-resp{mtu} (aka. Download)"),
+            name: "1-conn/1-100mb-resp (aka. Download)",
             num_requests: 1,
             upload_size: 0,
             download_size: 100 * 1024 * 1024,
         },
         Benchmark {
-            name: format!("1-conn/10_000-parallel-1b-resp{mtu} (aka. RPS)"),
+            name: "1-conn/10_000-parallel-1b-resp (aka. RPS)",
             num_requests: 10_000,
             upload_size: 0,
             download_size: 1,
         },
         Benchmark {
-            name: format!("1-conn/1-1b-resp{mtu} (aka. HPS)"),
+            name: "1-conn/1-1b-resp (aka. HPS)",
             num_requests: 1,
             upload_size: 0,
             download_size: 1,
         },
         Benchmark {
-            name: format!("1-conn/1-100mb-req{mtu} (aka. Upload)"),
+            name: "1-conn/1-100mb-req (aka. Upload)",
             num_requests: 1,
             upload_size: 100 * 1024 * 1024,
             download_size: 0,
         },
     ] {
-        let mut group = c.benchmark_group(name);
+        let bench_name = mtu_suffix
+            .as_ref()
+            .map_or_else(|| name.to_string(), |suffix| format!("{name}{suffix}"));
+        let mut group = c.benchmark_group("transfer");
+        group.noise_threshold(0.03);
         group.throughput(if num_requests == 1 {
-            Throughput::Bytes((upload_size + download_size) as u64)
+            Throughput::Bytes(to_u64(upload_size + download_size))
         } else {
-            Throughput::Elements(num_requests as u64)
+            Throughput::Elements(to_u64(num_requests))
         });
-        group.bench_function("client", |b| {
+        group.bench_function(&bench_name, |b| {
             b.to_async(Builder::new_current_thread().enable_all().build().unwrap())
                 .iter_batched(
                     || {
@@ -77,12 +88,10 @@ fn transfer(c: &mut Criterion) {
                         ));
                         (server_handle, client)
                     },
-                    |(server_handle, client)| {
-                        black_box(async move {
-                            client.await.unwrap();
-                            // Tell server to shut down.
-                            server_handle.send(()).unwrap();
-                        })
+                    |(server_handle, client)| async move {
+                        client.await.unwrap();
+                        // Tell server to shut down.
+                        server_handle.send(()).unwrap();
                     },
                     BatchSize::PerIteration,
                 );
@@ -119,5 +128,9 @@ fn spawn_server() -> (tokio::sync::oneshot::Sender<()>, SocketAddr) {
     (done_sender, addr_receiver.recv().unwrap())
 }
 
-criterion_group!(benches, transfer);
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = transfer
+}
 criterion_main!(benches);

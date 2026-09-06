@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -15,9 +13,12 @@
 #include "jit/InlineScriptTree.h"
 #include "jit/JitRuntime.h"
 #include "jit/JitSpewer.h"
+#include "js/Prefs.h"  // JS::Prefs
+#include "js/ProfilingFrameIterator.h"
 #include "js/Vector.h"
 #include "vm/BytecodeLocation.h"  // for BytecodeLocation
 #include "vm/GeckoProfiler.h"
+#include "vm/Realm.h"  // Realm::creationOptions
 
 #include "vm/GeckoProfiler-inl.h"
 #include "vm/JSScript-inl.h"
@@ -26,6 +27,55 @@ using mozilla::Maybe;
 
 namespace js {
 namespace jit {
+
+bool IsRealmIndependentBaselineCode(JSScript* script) {
+  return JS::Prefs::experimental_self_hosted_cache() && script->selfHosted();
+}
+
+bool AddBaselineJitcodeGlobalEntry(JSContext* cx, JSScript* script,
+                                   JitCode* code,
+                                   JitCodeSourceInfoVector&& sourceInfo) {
+  UniqueChars str = GeckoProfilerRuntime::allocProfileString(cx, script);
+  if (!str) {
+    return false;
+  }
+
+  UniqueJitcodeGlobalEntry entry;
+  if (IsRealmIndependentBaselineCode(script)) {
+    entry = MakeJitcodeGlobalEntry<RealmIndependentSharedEntry>(
+        cx, code, code->raw(), code->rawEnd(), std::move(str));
+  } else {
+    uint64_t realmId = script->realm()->creationOptions().profilerRealmID();
+    entry = MakeJitcodeGlobalEntry<BaselineEntry>(
+        cx, code, code->raw(), code->rawEnd(), script, std::move(str), realmId,
+        std::move(sourceInfo));
+  }
+  if (!entry) {
+    return false;
+  }
+
+  JitcodeGlobalTable* table =
+      cx->runtime()->jitRuntime()->getJitcodeGlobalTable();
+  if (!table->addEntry(std::move(entry))) {
+    ReportOutOfMemory(cx);
+    return false;
+  }
+
+  code->setHasBytecodeMap();
+  return true;
+}
+
+JitcodeGlobalEntry::JitcodeGlobalEntry(Kind kind, JitCode* code,
+                                       void* nativeStartAddr,
+                                       void* nativeEndAddr)
+    : JitCodeRange(nativeStartAddr, nativeEndAddr),
+      jitcode_(code),
+      zone_(code->zone()),
+      kind_(kind) {
+  MOZ_ASSERT(code);
+  MOZ_ASSERT(nativeStartAddr);
+  MOZ_ASSERT(nativeEndAddr);
+}
 
 static inline JitcodeRegionEntry RegionAtAddr(const IonEntry& entry, void* ptr,
                                               uint32_t* ptrOffset) {
@@ -45,8 +95,7 @@ void* IonEntry::canonicalNativeAddrFor(void* ptr) const {
   return (void*)(((uint8_t*)nativeStartAddr()) + region.nativeOffset());
 }
 
-uint32_t IonEntry::callStackAtAddr(void* ptr, const char** labelResults,
-                                   uint32_t* sourceIdResults,
+uint32_t IonEntry::callStackAtAddr(void* ptr, CallStackFrameInfo* results,
                                    uint32_t maxResults) const {
   MOZ_ASSERT(maxResults >= 1);
 
@@ -62,8 +111,31 @@ uint32_t IonEntry::callStackAtAddr(void* ptr, const char** labelResults,
     locationIter.readNext(&scriptIdx, &pcOffset);
     MOZ_ASSERT(getStr(scriptIdx));
 
-    labelResults[count] = getStr(scriptIdx);
-    sourceIdResults[count] = getScriptSource(scriptIdx).scriptSource->id();
+    results[count].label = getStr(scriptIdx);
+    results[count].sourceId = getScriptKey(scriptIdx).scriptSource->id();
+
+    // Calculate line numbers during sampling
+    // For the first entry (innermost frame), use precise PC offset from
+    // delta-run
+    if (count == 0) {
+      pcOffset = region.findPcOffset(ptrOffset, pcOffset);
+    }
+
+    const IonScriptData& scriptData = getScriptData(scriptIdx);
+    ImmutableScriptData* isd = scriptData.scriptKey.sharedData->get();
+    jsbytecode* code = isd->code();
+    jsbytecode* pc = code + pcOffset;
+    MOZ_ASSERT(pcOffset < isd->codeLength());
+
+    SrcNote* notes = isd->notes();
+    SrcNote* notesEnd = notes + isd->noteLength();
+
+    JS::LimitedColumnNumberOneOrigin col;
+    uint32_t line = PCToLineNumber(scriptData.lineno, scriptData.column, notes,
+                                   notesEnd, code, pc, &col);
+    results[count].line = line;
+    results[count].column = col.oneOriginValue();
+
     count++;
     if (count >= maxResults) {
       break;
@@ -84,30 +156,14 @@ IonEntry::~IonEntry() {
   regionTable_ = nullptr;
 }
 
-static IonEntry& IonEntryForIonIC(JSRuntime* rt, const IonICEntry* icEntry) {
-  // The table must have an IonEntry for the IC's rejoin address.
-  auto* table = rt->jitRuntime()->getJitcodeGlobalTable();
-  auto* entry = table->lookup(icEntry->rejoinAddr());
-  MOZ_ASSERT(entry);
-  MOZ_RELEASE_ASSERT(entry->isIon());
-  return entry->asIon();
-}
-
 void* IonICEntry::canonicalNativeAddrFor(void* ptr) const { return ptr; }
 
-uint32_t IonICEntry::callStackAtAddr(JSRuntime* rt, void* ptr,
-                                     const char** labelResults,
-                                     uint32_t* sourceIdResults,
+uint32_t IonICEntry::callStackAtAddr(void* ptr, CallStackFrameInfo* results,
                                      uint32_t maxResults) const {
-  const IonEntry& entry = IonEntryForIonIC(rt, this);
-  return entry.callStackAtAddr(rejoinAddr(), labelResults, sourceIdResults,
-                               maxResults);
+  return ionEntry().callStackAtAddr(rejoinAddr(), results, maxResults);
 }
 
-uint64_t IonICEntry::realmID(JSRuntime* rt) const {
-  const IonEntry& entry = IonEntryForIonIC(rt, this);
-  return entry.realmID();
-}
+uint64_t IonICEntry::realmID() const { return ionEntry().realmID(); }
 
 void* BaselineEntry::canonicalNativeAddrFor(void* ptr) const {
   // TODO: We can't yet normalize Baseline addresses until we unify
@@ -115,14 +171,29 @@ void* BaselineEntry::canonicalNativeAddrFor(void* ptr) const {
   return ptr;
 }
 
-uint32_t BaselineEntry::callStackAtAddr(void* ptr, const char** labelResults,
-                                        uint32_t* sourceIdResults,
+uint32_t BaselineEntry::callStackAtAddr(void* ptr, CallStackFrameInfo* results,
                                         uint32_t maxResults) const {
   MOZ_ASSERT(containsPointer(ptr));
   MOZ_ASSERT(maxResults >= 1);
 
-  labelResults[0] = str();
-  sourceIdResults[0] = scriptSource().scriptSource->id();
+  results[0].label = str();
+  results[0].sourceId = scriptKey().scriptSource->id();
+  results[0].line = 0;
+  results[0].column = 0;
+
+  uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t startAddr = reinterpret_cast<uintptr_t>(nativeStartAddr());
+  MOZ_ASSERT(addr >= startAddr);
+  uint32_t nativeOffset = uint32_t(addr - startAddr);
+
+  // The per-entry table is empty when the profiler was off at compile time.
+  // In that case leave line/column at 0.
+  if (const JitCodeSourceInfo* info =
+          LookupSourceInfo(sourceInfo_, nativeOffset)) {
+    results[0].line = info->line;
+    results[0].column = info->column.oneOriginValue();
+  }
+
   return 1;
 }
 
@@ -131,8 +202,7 @@ void* BaselineInterpreterEntry::canonicalNativeAddrFor(void* ptr) const {
 }
 
 uint32_t BaselineInterpreterEntry::callStackAtAddr(void* ptr,
-                                                   const char** labelResults,
-                                                   uint32_t* sourceIdResults,
+                                                   CallStackFrameInfo* results,
                                                    uint32_t maxResults) const {
   MOZ_CRASH("shouldn't be called for BaselineInterpreter entries");
 }
@@ -155,20 +225,21 @@ bool RealmIndependentSharedEntry::callStackAtAddr(
 }
 
 uint32_t RealmIndependentSharedEntry::callStackAtAddr(
-    void* ptr, const char** labelResults, uint32_t* sourceIdResults,
-    uint32_t maxResults) const {
+    void* ptr, CallStackFrameInfo* results, uint32_t maxResults) const {
   MOZ_ASSERT(containsPointer(ptr));
   MOZ_ASSERT(maxResults >= 1);
 
-  labelResults[0] = str();
-  sourceIdResults[0] = 0;
+  results[0].label = str();
+  results[0].sourceId = 0;
+  results[0].line = 0;
+  results[0].column = 0;
   return 1;
 }
 
 uint64_t RealmIndependentSharedEntry::realmID() const { return 0; }
 
 const JitcodeGlobalEntry* JitcodeGlobalTable::lookupForSampler(
-    void* ptr, JSRuntime* rt, uint64_t samplePosInBuffer) {
+    void* ptr, uint64_t samplePosInBuffer) {
   JitcodeGlobalEntry* entry = lookupInternal(ptr);
   if (!entry) {
     return nullptr;
@@ -178,15 +249,13 @@ const JitcodeGlobalEntry* JitcodeGlobalTable::lookupForSampler(
 
   // IonIC entries must keep their corresponding Ion entries alive.
   if (entry->isIonIC()) {
-    IonEntry& ionEntry = IonEntryForIonIC(rt, &entry->asIonIC());
-    ionEntry.setSamplePositionInBuffer(samplePosInBuffer);
+    entry->asIonIC().ionEntry().setSamplePositionInBuffer(samplePosInBuffer);
   }
 
-  // JitcodeGlobalEntries are marked at the end of the mark phase. A read
-  // barrier is not needed. Any JS frames sampled during the sweep phase of
-  // the GC must be on stack, and on-stack frames must already be marked at
-  // the beginning of the sweep phase. It's not possible to assert this here
-  // as we may be off main thread when called from the gecko profiler.
+  // The jitcode_ edge is weak, but no read barrier is needed here because the
+  // profiler never lets GC thing pointers escape: it only uses the entry to
+  // resolve addresses to call-stack info that has already been baked in at
+  // entry-creation time (see callStackAtAddr and realmID).
 
   return entry;
 }
@@ -208,13 +277,21 @@ bool JitcodeGlobalTable::addEntry(UniqueJitcodeGlobalEntry entry) {
              entry->isBaselineInterpreter() || entry->isDummy() ||
              entry->isRealmIndependentShared());
 
-  // Assert the new entry does not have a code range that's equal to (or
-  // contained in) one of the existing entries, because that would confuse the
-  // AVL tree.
-  MOZ_ASSERT(!tree_.maybeLookup(entry.get()));
-
   // Suppress profiler sampling while data structures are being mutated.
   AutoSuppressProfilerSampling suppressSampling(TlsContext.get());
+
+  // Old entries whose JitCode was collected but were kept alive for profiler
+  // buffer processing may still occupy overlapping address ranges. Remove them
+  // from the AVL tree so the new entry can take their place. They are left in
+  // entries_ and will be swept from the vector by traceWeak at the next GC.
+  // There may be multiple (e.g. several small IonIC stubs whose memory was
+  // reused by a larger JitCode).
+  while (JitCodeRange** existing = tree_.maybeLookup(entry.get())) {
+    auto* oldEntry = static_cast<JitcodeGlobalEntry*>(*existing);
+    MOZ_ASSERT(!oldEntry->hasJitcode());
+    tree_.remove(oldEntry);
+    oldEntry->setInTree(false);
+  }
 
   if (!entries_.append(std::move(entry))) {
     return false;
@@ -223,6 +300,7 @@ bool JitcodeGlobalTable::addEntry(UniqueJitcodeGlobalEntry entry) {
     entries_.popBack();
     return false;
   }
+  entries_.back()->setInTree(true);
 
   return true;
 }
@@ -235,72 +313,34 @@ void JitcodeGlobalTable::setAllEntriesAsExpired() {
   }
 }
 
-bool JitcodeGlobalTable::markIteratively(GCMarker* marker) {
-  // JitcodeGlobalTable must keep entries that are in the sampler buffer
-  // alive. This conditionality is akin to holding the entries weakly.
-  //
-  // If this table were marked at the beginning of the mark phase, then
-  // sampling would require a read barrier for sampling in between
-  // incremental GC slices. However, invoking read barriers from the sampler
-  // is wildly unsafe. The sampler may run at any time, including during GC
-  // itself.
-  //
-  // Instead, JitcodeGlobalTable is marked at the beginning of the sweep
-  // phase, along with weak references. The key assumption is the
-  // following. At the beginning of the sweep phase, any JS frames that the
-  // sampler may put in its buffer that are not already there at the
-  // beginning of the mark phase must have already been marked, as either 1)
-  // the frame was on-stack at the beginning of the sweep phase, or 2) the
-  // frame was pushed between incremental sweep slices. Frames of case 1)
-  // are already marked. Frames of case 2) must have been reachable to have
-  // been newly pushed, and thus are already marked.
-  //
-  // The approach above obviates the need for read barriers. The assumption
-  // above is checked in JitcodeGlobalTable::lookupForSampler.
-
-  MOZ_ASSERT(!JS::RuntimeHeapIsMinorCollecting());
-
-  AutoSuppressProfilerSampling suppressSampling(TlsContext.get());
-
-  // If the profiler is off, rangeStart will be Nothing() and all entries are
-  // considered to be expired.
-  Maybe<uint64_t> rangeStart =
-      marker->runtime()->profilerSampleBufferRangeStart();
-
-  bool markedAny = false;
-  for (EntryVector::Range r(entries_.all()); !r.empty(); r.popFront()) {
-    auto& entry = r.front();
-
-    // If an entry is not sampled, reset its buffer position to the invalid
-    // position, and conditionally mark the rest of the entry if its
-    // JitCode is not already marked. This conditional marking ensures
-    // that so long as the JitCode *may* be sampled, we keep any
-    // information that may be handed out to the sampler, like tracked
-    // types used by optimizations and scripts used for pc to line number
-    // mapping, alive as well.
-    if (!rangeStart || !entry->isSampled(*rangeStart)) {
-      entry->setAsExpired();
-      if (!entry->isJitcodeMarkedFromAnyThread(marker->runtime())) {
-        continue;
-      }
-    }
-
-    // The table is runtime-wide. Not all zones may be participating in
-    // the GC.
-    if (!entry->zone()->isCollecting() || entry->zone()->isGCFinished()) {
-      continue;
-    }
-
-    markedAny |= entry->trace(marker->tracer());
-  }
-
-  return markedAny;
-}
-
 void JitcodeGlobalTable::traceWeak(JSRuntime* rt, JSTracer* trc) {
   AutoSuppressProfilerSampling suppressSampling(rt->mainContextFromOwnThread());
 
+  // If the profiler is off, rangeStart will be Nothing() and all entries are
+  // considered to be expired.
+  Maybe<uint64_t> rangeStart = rt->profilerSampleBufferRangeStart();
+
   entries_.eraseIf([&](auto& entry) {
+    // Expire entries no longer referenced from the profiler buffer.
+    if (!entry->isReferencedByProfiler(rangeStart)) {
+      entry->setAsExpired();
+    }
+
+    // Entries whose JitCode was collected in a previous cycle are kept alive
+    // only while still referenced from the profiler buffer. We skip the zone
+    // check here because the zone may have been destroyed after the JitCode
+    // was collected. The entry may have already been removed from the tree by
+    // addEntry if a new JitCode was compiled at the same address.
+    if (!entry->hasJitcode()) {
+      if (entry->isReferencedByProfiler(rangeStart)) {
+        return false;
+      }
+      if (entry->isInTree()) {
+        tree_.remove(entry.get());
+      }
+      return true;
+    }
+
     if (!entry->zone()->isCollecting() || entry->zone()->isGCFinished()) {
       return false;
     }
@@ -311,54 +351,41 @@ void JitcodeGlobalTable::traceWeak(JSRuntime* rt, JSTracer* trc) {
       return false;
     }
 
-    // We have to remove the entry.
-#ifdef DEBUG
-    Maybe<uint64_t> rangeStart = rt->profilerSampleBufferRangeStart();
-    MOZ_ASSERT_IF(rangeStart, !entry->isSampled(*rangeStart));
-#endif
+    // JitCode is being collected. If there are still unprocessed samples
+    // in the profiler buffer referencing this entry, keep the entry alive
+    // (including in the AVL tree) so that the profiler can still resolve
+    // those addresses via callStackAtAddr during streaming. The entry no
+    // longer needs the JitCode pointer since all the information it
+    // provides (call stack strings, realmId) is already baked in.
+    if (entry->isReferencedByProfiler(rangeStart)) {
+      *entry->jitcodePtr() = nullptr;
+      return false;
+    }
+
     tree_.remove(entry.get());
     return true;
   });
 
-  MOZ_ASSERT(tree_.empty() == entries_.empty());
-}
-
-bool JitcodeGlobalEntry::traceJitcode(JSTracer* trc) {
-  if (!IsMarkedUnbarriered(trc->runtime(), jitcode_)) {
-    TraceManuallyBarrieredEdge(trc, &jitcode_,
-                               "jitcodglobaltable-baseentry-jitcode");
-    return true;
-  }
-  return false;
-}
-
-bool JitcodeGlobalEntry::isJitcodeMarkedFromAnyThread(JSRuntime* rt) {
-  return IsMarkedUnbarriered(rt, jitcode_);
+  MOZ_ASSERT_IF(entries_.empty(), tree_.empty());
 }
 
 uint32_t JitcodeGlobalEntry::callStackAtAddr(JSRuntime* rt, void* ptr,
-                                             const char** labelResults,
-                                             uint32_t* sourceIdResults,
+                                             CallStackFrameInfo* results,
                                              uint32_t maxResults) const {
   switch (kind()) {
     case Kind::Ion:
-      return asIon().callStackAtAddr(ptr, labelResults, sourceIdResults,
-                                     maxResults);
+      return asIon().callStackAtAddr(ptr, results, maxResults);
     case Kind::IonIC:
-      return asIonIC().callStackAtAddr(rt, ptr, labelResults, sourceIdResults,
-                                       maxResults);
+      return asIonIC().callStackAtAddr(ptr, results, maxResults);
     case Kind::Baseline:
-      return asBaseline().callStackAtAddr(ptr, labelResults, sourceIdResults,
-                                          maxResults);
+      return asBaseline().callStackAtAddr(ptr, results, maxResults);
     case Kind::BaselineInterpreter:
-      return asBaselineInterpreter().callStackAtAddr(
-          ptr, labelResults, sourceIdResults, maxResults);
+      return asBaselineInterpreter().callStackAtAddr(ptr, results, maxResults);
     case Kind::Dummy:
-      return asDummy().callStackAtAddr(rt, ptr, labelResults, sourceIdResults,
-                                       maxResults);
+      return asDummy().callStackAtAddr(rt, ptr, results, maxResults);
     case Kind::RealmIndependentShared:
-      return asRealmIndependentShared().callStackAtAddr(
-          ptr, labelResults, sourceIdResults, maxResults);
+      return asRealmIndependentShared().callStackAtAddr(ptr, results,
+                                                        maxResults);
   }
   MOZ_CRASH("Invalid kind");
 }
@@ -368,7 +395,7 @@ uint64_t JitcodeGlobalEntry::realmID(JSRuntime* rt) const {
     case Kind::Ion:
       return asIon().realmID();
     case Kind::IonIC:
-      return asIonIC().realmID(rt);
+      return asIonIC().realmID();
     case Kind::Baseline:
       return asBaseline().realmID();
     case Kind::Dummy:
@@ -380,8 +407,6 @@ uint64_t JitcodeGlobalEntry::realmID(JSRuntime* rt) const {
   }
   MOZ_CRASH("Invalid kind");
 }
-
-bool JitcodeGlobalEntry::trace(JSTracer* trc) { return traceJitcode(trc); }
 
 void* JitcodeGlobalEntry::canonicalNativeAddrFor(JSRuntime* rt,
                                                  void* ptr) const {
@@ -702,7 +727,8 @@ bool JitcodeRegionEntry::WriteRun(CompactBufferWriter& writer,
       // NB: scriptList is guaranteed to contain curTree->script()
       uint32_t scriptIdx = 0;
       for (; scriptIdx < scriptList.length(); scriptIdx++) {
-        if (scriptList[scriptIdx].sourceAndExtent.matches(curTree->script())) {
+        if (scriptList[scriptIdx].scriptData.scriptKey.matches(
+                curTree->script())) {
           break;
         }
       }
@@ -753,17 +779,16 @@ bool JitcodeRegionEntry::WriteRun(CompactBufferWriter& writer,
 
     // Spew the bytecode in these ranges.
     if (curBytecodeOffset < nextBytecodeOffset) {
-      JitSpewStart(JitSpew_Profiling, "      OPS: ");
+      AutoJitSpewMessage msg(JitSpew_Profiling, "      OPS: ");
       uint32_t curBc = curBytecodeOffset;
       while (curBc < nextBytecodeOffset) {
         jsbytecode* pc = entry[i].tree->script()->offsetToPC(curBc);
 #ifdef JS_JITSPEW
         JSOp op = JSOp(*pc);
-        JitSpewCont(JitSpew_Profiling, "%s ", CodeName(op));
+        msg.append("%s ", CodeName(op));
 #endif
         curBc += GetBytecodeLength(pc);
       }
-      JitSpewFin(JitSpew_Profiling);
     }
     spewer.spewAndAdvance("      ");
 
@@ -882,18 +907,18 @@ bool JitcodeIonTable::WriteIonTable(CompactBufferWriter& writer,
 
   JitSpew(JitSpew_Profiling,
           "Writing native to bytecode map for %s (offset %u-%u) (%zu entries)",
-          scriptList[0].sourceAndExtent.scriptSource->filename(),
-          scriptList[0].sourceAndExtent.toStringStart,
-          scriptList[0].sourceAndExtent.toStringEnd,
+          scriptList[0].scriptData.scriptKey.scriptSource->filename(),
+          scriptList[0].scriptData.scriptKey.toStringStart,
+          scriptList[0].scriptData.scriptKey.toStringEnd,
           mozilla::PointerRangeSize(start, end));
 
   JitSpew(JitSpew_Profiling, "  ScriptList of size %u",
           unsigned(scriptList.length()));
   for (uint32_t i = 0; i < scriptList.length(); i++) {
     JitSpew(JitSpew_Profiling, "  Script %u - %s (offset %u-%u)", i,
-            scriptList[i].sourceAndExtent.scriptSource->filename(),
-            scriptList[i].sourceAndExtent.toStringStart,
-            scriptList[i].sourceAndExtent.toStringEnd);
+            scriptList[i].scriptData.scriptKey.scriptSource->filename(),
+            scriptList[i].scriptData.scriptKey.toStringStart,
+            scriptList[i].scriptData.scriptKey.toStringEnd);
   }
 
   // Write out runs first.  Keep a vector tracking the positive offsets from
@@ -968,16 +993,14 @@ bool JitcodeIonTable::WriteIonTable(CompactBufferWriter& writer,
 }  // namespace jit
 }  // namespace js
 
-JS::ProfiledFrameHandle::ProfiledFrameHandle(JSRuntime* rt,
-                                             js::jit::JitcodeGlobalEntry& entry,
-                                             void* addr, const char* label,
-                                             uint32_t sourceId, uint32_t depth)
+JS::ProfiledFrameHandle::ProfiledFrameHandle(
+    JSRuntime* rt, js::jit::JitcodeGlobalEntry& entry, void* addr,
+    const js::jit::CallStackFrameInfo& frameInfo, uint32_t depth)
     : rt_(rt),
       entry_(entry),
       addr_(addr),
       canonicalAddr_(nullptr),
-      label_(label),
-      sourceId_(sourceId),
+      frameInfo_(frameInfo),
       depth_(depth) {
   if (!canonicalAddr_) {
     canonicalAddr_ = entry_.canonicalNativeAddrFor(rt_, addr_);
@@ -1002,12 +1025,15 @@ JS_PUBLIC_API uint64_t JS::ProfiledFrameHandle::realmID() const {
   return entry_.realmID(rt_);
 }
 
-JS_PUBLIC_API uint32_t JS::ProfiledFrameHandle::sourceId() const {
-  return sourceId_;
-}
-
 JS_PUBLIC_API JS::ProfiledFrameRange JS::GetProfiledFrames(JSContext* cx,
                                                            void* addr) {
+  // Ensure ProfiledFrameRange::MaxInliningDepth matches
+  // InlineScriptTree::MaxDepth. Please keep them in sync.
+  static_assert(ProfiledFrameRange::MaxInliningDepth ==
+                    js::jit::InlineScriptTree::MaxDepth,
+                "ProfiledFrameRange::MaxInliningDepth must match "
+                "InlineScriptTree::MaxDepth");
+
   JSRuntime* rt = cx->runtime();
   js::jit::JitcodeGlobalTable* table =
       rt->jitRuntime()->getJitcodeGlobalTable();
@@ -1016,8 +1042,8 @@ JS_PUBLIC_API JS::ProfiledFrameRange JS::GetProfiledFrames(JSContext* cx,
   ProfiledFrameRange result(rt, addr, entry);
 
   if (entry) {
-    result.depth_ = entry->callStackAtAddr(
-        rt, addr, result.labels_, result.sourceIds_, std::size(result.labels_));
+    result.depth_ = entry->callStackAtAddr(rt, addr, result.frames_,
+                                           std::size(result.frames_));
   }
   return result;
 }
@@ -1027,6 +1053,5 @@ JS::ProfiledFrameHandle JS::ProfiledFrameRange::Iter::operator*() const {
   // and the depth we need to pass to ProfiledFrameHandle goes down.
   uint32_t depth = range_.depth_ - 1 - index_;
   return ProfiledFrameHandle(range_.rt_, *range_.entry_, range_.addr_,
-                             range_.labels_[depth], range_.sourceIds_[depth],
-                             depth);
+                             range_.frames_[depth], depth);
 }

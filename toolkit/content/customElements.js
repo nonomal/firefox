@@ -694,15 +694,11 @@
   MozElements.BaseControlMixin = Base => {
     class BaseControl extends Base {
       get disabled() {
-        return this.getAttribute("disabled") == "true";
+        return this.hasAttribute("disabled");
       }
 
       set disabled(val) {
-        if (val) {
-          this.setAttribute("disabled", "true");
-        } else {
-          this.removeAttribute("disabled");
-        }
+        this.toggleAttribute("disabled", !!val);
       }
 
       get tabIndex() {
@@ -793,7 +789,6 @@
       ["menulist", "chrome://global/content/elements/menulist.js"],
       ["named-deck", "chrome://global/content/elements/named-deck.js"],
       ["named-deck-button", "chrome://global/content/elements/named-deck.js"],
-      ["panel-list", "chrome://global/content/elements/panel-list.js"],
       ["stringbundle", "chrome://global/content/elements/stringbundle.js"],
       [
         "printpreview-pagination",
@@ -834,8 +829,16 @@
         "chrome://global/content/elements/moz-input-color.mjs",
       ],
       [
+        "moz-input-email",
+        "chrome://global/content/elements/moz-input-email.mjs",
+      ],
+      [
         "moz-input-folder",
         "chrome://global/content/elements/moz-input-folder.mjs",
+      ],
+      [
+        "moz-input-number",
+        "chrome://global/content/elements/moz-input-number.mjs",
       ],
       [
         "moz-input-password",
@@ -845,7 +848,9 @@
         "moz-input-search",
         "chrome://global/content/elements/moz-input-search.mjs",
       ],
+      ["moz-input-tel", "chrome://global/content/elements/moz-input-tel.mjs"],
       ["moz-input-text", "chrome://global/content/elements/moz-input-text.mjs"],
+      ["moz-input-url", "chrome://global/content/elements/moz-input-url.mjs"],
       ["moz-label", "chrome://global/content/elements/moz-label.mjs"],
       [
         "moz-message-bar",
@@ -872,6 +877,7 @@
         "moz-support-link",
         "chrome://global/content/elements/moz-support-link.mjs",
       ],
+      ["moz-textarea", "chrome://global/content/elements/moz-textarea.mjs"],
       ["moz-toggle", "chrome://global/content/elements/moz-toggle.mjs"],
       [
         "moz-visual-picker",
@@ -881,6 +887,12 @@
         "moz-visual-picker-item",
         "chrome://global/content/elements/moz-visual-picker.mjs",
       ],
+      [
+        "moz-segmented-control",
+        "chrome://global/content/elements/moz-segmented-control.mjs",
+      ],
+      ["panel-list", "chrome://global/content/elements/panel-list.mjs"],
+      ["theme-picker", "chrome://global/content/elements/theme-picker.mjs"],
     ];
     document.addEventListener(
       "DOMContentLoaded",
@@ -893,7 +905,23 @@
             customElements.setElementCreationCallback(
               tag,
               function customElementCreationCallback() {
-                ChromeUtils.importESModule(script, { global: "current" });
+                try {
+                  ChromeUtils.importESModule(script, { global: "current" });
+                } catch (e) {
+                  // If the module is imported also by the regular module
+                  // loader as part of <script> tags or the dynamic import
+                  // before this point, and if the import failed due to, e.g.
+                  // the channel get cancelled, the module record keeps the
+                  // import error for the script URI, and
+                  // ChromeUtils.importESModule fails to import the module.
+                  //
+                  // Given that the CustomElementRegistry expects the callback
+                  // not to throw, and also it to define a custom element,
+                  // report the error here and define an empty implementation,
+                  // assuming the page is getting discarded anyway.
+                  console.error("Failed to import custom element module", e);
+                  customElements.define(tag, class extends MozHTMLElement {});
+                }
               }
             );
           }

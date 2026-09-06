@@ -3,11 +3,11 @@
 
 "use strict";
 
-// eslint-disable-next-line @microsoft/sdl/no-insecure-url
+// eslint-disable-next-line sdl/no-insecure-url
 const PAGE_1 = "http://example.com";
-// eslint-disable-next-line @microsoft/sdl/no-insecure-url
+// eslint-disable-next-line sdl/no-insecure-url
 const PAGE_2 = "http://example.org";
-// eslint-disable-next-line @microsoft/sdl/no-insecure-url
+// eslint-disable-next-line sdl/no-insecure-url
 const PAGE_3 = "http://example.net";
 
 /**
@@ -18,9 +18,8 @@ const PAGE_3 = "http://example.net";
  *   The browser to check.
  * @param expected (Boolean)
  *   True if we expect the "multiple" state to be set.
- * @returns Promise
- * @resolves undefined
- *   When the check has completed.
+ * @returns {Promise<void>}
+ *   Resolves when the check has completed.
  */
 async function assertShowingMultipleUI(browser, expected) {
   let showingMultiple = await SpecialPowers.spawn(browser, [], async () => {
@@ -49,9 +48,8 @@ function snapshotCount(snapshot) {
  *
  * @param tab (<xul:tab>)
  *   The tab to switch to and crash.
- * @returns Promise
- * @resolves undefined
- *   When about:tabcrashed is loaded.
+ * @returns {Promise<void>}
+ *   Resolves when about:tabcrashed is loaded.
  */
 async function switchToAndCrashTab(tab) {
   let browser = tab.linkedBrowser;
@@ -128,7 +126,7 @@ add_task(async function test_multiple_tabcrashed_pages() {
   // was a single about:tabcrashed page at unload time, so we expect
   // only a single entry for the probe for when we removed the last
   // crashed tab.
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return snapshotCount(histogram.snapshot()) == 1;
   }, `Collected value should become 1.`);
 

@@ -18,6 +18,7 @@
 #include "absl/strings/string_view.h"
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
+#include "api/environment/force_test_environment.h"
 #include "api/field_trials.h"
 #include "api/field_trials_view.h"
 #include "api/test/time_controller.h"
@@ -33,9 +34,12 @@ struct SetFieldTrials {
     factory.Set(CreateTestFieldTrialsPtr(field_trials));
   }
 
-  void operator()(FieldTrialsView* absl_nonnull field_trials) {
-    RTC_CHECK(field_trials != nullptr);
-    factory.Set(field_trials);
+  void operator()(const FieldTrialsView* absl_nullable field_trials) {
+    if (field_trials != nullptr) {
+      factory.Set(field_trials);
+    } else {
+      factory.Set(CreateTestFieldTrialsPtr());
+    }
   }
 
   void operator()(absl_nonnull std::unique_ptr<FieldTrialsView> field_trials) {
@@ -63,6 +67,7 @@ struct SetTime {
 }  // namespace
 
 Environment CreateTestEnvironment(CreateTestEnvironmentOptions o) {
+  AutoBypassTestEnvironmentCheck bypass;
   EnvironmentFactory factory;
 
   std::visit(SetFieldTrials{.factory = factory}, std::move(o.field_trials));

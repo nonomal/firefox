@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +5,7 @@
 #include "NSSCertDBTrustDomain.h"
 
 #include <stdint.h>
+
 #include <utility>
 
 #include "CRLiteTimestamp.h"
@@ -676,10 +675,38 @@ CRLiteTimestamp::GetTimestamp(uint64_t* aTimestamp) {
   return NS_OK;
 }
 
+static void RecordCRLiteNotCoveredCertAge(
+    const nsTArray<RefPtr<nsICRLiteTimestamp>>& timestamps, Time time) {
+  if (timestamps.IsEmpty()) {
+    return;
+  }
+  uint64_t mostRecentMs = 0;
+  for (const auto& ts : timestamps) {
+    uint64_t timestampMs = 0;
+    if (NS_SUCCEEDED(ts->GetTimestamp(&timestampMs))) {
+      mostRecentMs = std::max(mostRecentMs, timestampMs);
+    }
+  }
+  if (mostRecentMs == 0) {
+    return;
+  }
+  uint64_t timeSeconds = 0;
+  if (SecondsSinceEpochFromTime(time, &timeSeconds) != Success) {
+    return;
+  }
+  uint64_t timeMs = timeSeconds * 1000;
+  if (timeMs < mostRecentMs) {
+    return;
+  }
+  mozilla::glean::cert_verifier::crlite_not_covered_cert_age
+      .AccumulateRawDuration(TimeDuration::FromMilliseconds(
+          static_cast<double>(timeMs - mostRecentMs)));
+}
+
 Result NSSCertDBTrustDomain::CheckCRLite(
     const nsTArray<uint8_t>& issuerSubjectPublicKeyInfoBytes,
     const nsTArray<uint8_t>& serialNumberBytes,
-    const nsTArray<RefPtr<nsICRLiteTimestamp>>& timestamps,
+    const nsTArray<RefPtr<nsICRLiteTimestamp>>& timestamps, Time time,
     /*out*/ bool& filterCoversCertificate) {
   filterCoversCertificate = false;
   int16_t crliteRevocationState;
@@ -714,6 +741,7 @@ Result NSSCertDBTrustDomain::CheckCRLite(
     case nsICertStorage::STATE_NOT_COVERED:
       filterCoversCertificate = false;
       mozilla::glean::cert_verifier::crlite_status.Get("not_covered"_ns).Add(1);
+      RecordCRLiteNotCoveredCertAge(timestamps, time);
       return Success;
     case nsICertStorage::STATE_NO_FILTER:
       filterCoversCertificate = false;
@@ -779,9 +807,8 @@ Result NSSCertDBTrustDomain::CheckRevocation(
     }
   }
 
-  Result ocspResult = CheckRevocationByOCSP(
-      certID, time, validityDuration, aiaLocation, crliteCoversCertificate,
-      crliteResult, stapledOCSPResponse);
+  Result ocspResult = CheckRevocationByOCSP(certID, time, validityDuration,
+                                            aiaLocation, stapledOCSPResponse);
 
   MOZ_LOG(gCertVerifierLog, LogLevel::Debug,
           ("NSSCertDBTrustDomain: end of CheckRevocation"));
@@ -821,7 +848,7 @@ Result NSSCertDBTrustDomain::CheckRevocationByCRLite(
     }
 
     return CheckCRLite(issuerSubjectPublicKeyInfoBytes, serialNumberBytes,
-                       timestamps, crliteCoversCertificate);
+                       timestamps, time, crliteCoversCertificate);
   }
 
   // When CT is enabled, we verify the signatures on all available SCTs and
@@ -863,13 +890,12 @@ Result NSSCertDBTrustDomain::CheckRevocationByCRLite(
   }
 
   return CheckCRLite(issuerSubjectPublicKeyInfoBytes, serialNumberBytes,
-                     timestamps, crliteCoversCertificate);
+                     timestamps, time, crliteCoversCertificate);
 }
 
 Result NSSCertDBTrustDomain::CheckRevocationByOCSP(
     const CertID& certID, Time time, Duration validityDuration,
-    const nsCString& aiaLocation, const bool crliteCoversCertificate,
-    const Result crliteResult,
+    const nsCString& aiaLocation,
     /*optional*/ const Input* stapledOCSPResponse) {
   const uint16_t maxOCSPLifetimeInDays = 10;
   // If we have a stapled OCSP response then the verification of that response
@@ -1047,7 +1073,7 @@ Result NSSCertDBTrustDomain::CheckRevocationByOCSP(
     // responses from a failing server.
     return SynchronousCheckRevocationWithServer(
         certID, aiaLocation, time, maxOCSPLifetimeInDays, cachedResponseResult,
-        stapledOCSPResponseResult, crliteCoversCertificate, crliteResult);
+        stapledOCSPResponseResult);
   }
 
   return HandleOCSPFailure(cachedResponseResult, stapledOCSPResponseResult,
@@ -1057,8 +1083,7 @@ Result NSSCertDBTrustDomain::CheckRevocationByOCSP(
 Result NSSCertDBTrustDomain::SynchronousCheckRevocationWithServer(
     const CertID& certID, const nsCString& aiaLocation, Time time,
     uint16_t maxOCSPLifetimeInDays, const Result cachedResponseResult,
-    const Result stapledOCSPResponseResult, const bool crliteCoversCertificate,
-    const Result crliteResult) {
+    const Result stapledOCSPResponseResult) {
   if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
     return Result::FATAL_ERROR_LIBRARY_FAILURE;
   }
@@ -1095,14 +1120,6 @@ Result NSSCertDBTrustDomain::SynchronousCheckRevocationWithServer(
       return cacheRV;
     }
 
-    if (crliteCoversCertificate &&
-        crliteResult == Result::ERROR_REVOKED_CERTIFICATE) {
-      // CRLite says the certificate is revoked, but OCSP fetching failed.
-      mozilla::glean::cert_verifier::crlite_vs_ocsp_result
-          .Get("CRLiteRevOCSPFail"_ns)
-          .Add(1);
-    }
-
     return HandleOCSPFailure(cachedResponseResult, stapledOCSPResponseResult,
                              rv);
   }
@@ -1114,34 +1131,6 @@ Result NSSCertDBTrustDomain::SynchronousCheckRevocationWithServer(
   rv = VerifyAndMaybeCacheEncodedOCSPResponse(certID, time,
                                               maxOCSPLifetimeInDays, response,
                                               ResponseIsFromNetwork, expired);
-
-  // If CRLite said that this certificate is revoked, report the OCSP
-  // status. OCSP may have succeeded, said the certificate is revoked, said the
-  // certificate doesn't exist, or it may have failed for a reason that results
-  // in a "soft fail" (i.e. there is no indication that the certificate is
-  // either definitely revoked or definitely not revoked, so for usability,
-  // revocation checking says the certificate is valid by default).
-  if (crliteCoversCertificate &&
-      crliteResult == Result::ERROR_REVOKED_CERTIFICATE) {
-    if (rv == Success) {
-      mozilla::glean::cert_verifier::crlite_vs_ocsp_result
-          .Get("CRLiteRevOCSPOk"_ns)
-          .Add(1);
-    } else if (rv == Result::ERROR_REVOKED_CERTIFICATE) {
-      mozilla::glean::cert_verifier::crlite_vs_ocsp_result
-          .Get("CRLiteRevOCSPRev"_ns)
-          .Add(1);
-    } else if (rv == Result::ERROR_OCSP_UNKNOWN_CERT) {
-      mozilla::glean::cert_verifier::crlite_vs_ocsp_result
-          .Get("CRLiteRevOCSPUnk"_ns)
-          .Add(1);
-    } else {
-      mozilla::glean::cert_verifier::crlite_vs_ocsp_result
-          .Get("CRLiteRevOCSPSoft"_ns)
-          .Add(1);
-    }
-  }
-
   if (rv == Success || mOCSPFetching == RevocationCheckRequired) {
     MOZ_LOG(gCertVerifierLog, LogLevel::Debug,
             ("NSSCertDBTrustDomain: returning after "
@@ -1554,7 +1543,14 @@ void NSSCertDBTrustDomain::NoteAuxiliaryExtension(AuxiliaryExtension extension,
 
 SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
                         PKCS11DBConfig pkcs11DbConfig) {
-  MOZ_ASSERT(NS_IsMainThread());
+  // In the parent process, this must be called on the main thread. In the
+  // utility process, this will be called on a background thread.
+  MOZ_ASSERT(NS_IsMainThread() || XRE_IsUtilityProcess());
+  // If this is the utility process, the pref to enable the utility process
+  // better be true (or this is a gtest).
+  MOZ_ASSERT(!XRE_IsUtilityProcess() ||
+             StaticPrefs::security_utility_pkcs11_module_process_enabled() ||
+             PR_GetEnv("MOZ_RUN_GTEST"));
 
   // The NSS_INIT_NOROOTINIT flag turns off the loading of the root certs
   // module by NSS_Initialize because we will load it in LoadLoadableRoots
@@ -1565,8 +1561,20 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
   if (nssDbConfig == NSSDBConfig::ReadOnly) {
     flags |= NSS_INIT_READONLY;
   }
-  if (pkcs11DbConfig == PKCS11DBConfig::DoNotLoadModules) {
+  // If we've been configured to not load any modules or if this is the parent
+  // process and the PKCS#11 utility process is enabled, don't load the NSS
+  // PKCS#11 module DB.
+  bool isParentProcessButLoadingModulesInUtilityProcess =
+      XRE_IsParentProcess() &&
+      StaticPrefs::security_utility_pkcs11_module_process_enabled();
+  if (pkcs11DbConfig == PKCS11DBConfig::DoNotLoadModules ||
+      isParentProcessButLoadingModulesInUtilityProcess) {
     flags |= NSS_INIT_NOMODDB;
+  }
+  // If this is the utility process, only load the NSS PKCS#11 module DB, not
+  // the key/certificate DB.
+  if (XRE_IsUtilityProcess()) {
+    flags |= NSS_INIT_NOCERTDB;
   }
   nsAutoCString dbTypeAndDirectory("sql:");
   dbTypeAndDirectory.Append(dir);
@@ -1579,22 +1587,30 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
     return srv;
   }
 
-  if (nssDbConfig == NSSDBConfig::ReadWrite) {
+  // If the key DB doesn't have a password set, PK11_NeedUserInit will return
+  // true. For the SQL DB, we need to set a password or we won't be able to
+  // import any certificates or change trust settings. This only applies to the
+  // parent process and when we're in read/write mode.
+  if (nssDbConfig == NSSDBConfig::ReadWrite && XRE_IsParentProcess()) {
     UniquePK11SlotInfo slot(PK11_GetInternalKeySlot());
     if (!slot) {
       return SECFailure;
     }
-    // If the key DB doesn't have a password set, PK11_NeedUserInit will return
-    // true. For the SQL DB, we need to set a password or we won't be able to
-    // import any certificates or change trust settings.
     if (PK11_NeedUserInit(slot.get())) {
       srv = PK11_InitPin(slot.get(), nullptr, nullptr);
-      MOZ_ASSERT(srv == SECSuccess);
-      (void)srv;
+      MOZ_ALWAYS_TRUE(srv == SECSuccess);
     }
   }
 
-  CollectThirdPartyPKCS11ModuleTelemetry(/*aIsInitialization=*/true);
+  // Collect third party PKCS#11 module telemetry if this is the parent process
+  // and the utility process is not enabled or if this is the utility process.
+  bool isParentProcessAndNotLoadingModulesInUtilityProcess =
+      XRE_IsParentProcess() &&
+      !StaticPrefs::security_utility_pkcs11_module_process_enabled();
+  if (isParentProcessAndNotLoadingModulesInUtilityProcess ||
+      XRE_IsUtilityProcess()) {
+    CollectThirdPartyPKCS11ModuleTelemetry(/*aIsInitialization=*/true);
+  }
 
   return SECSuccess;
 }

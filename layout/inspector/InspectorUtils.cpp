@@ -1,11 +1,10 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/dom/InspectorUtils.h"
 
+#include "AnchorPositioningUtils.h"
 #include "ChildIterator.h"
 #include "Units.h"
 #include "gfxTextRun.h"
@@ -30,6 +29,7 @@
 #include "mozilla/dom/CSSStyleRule.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
 #include "mozilla/dom/CharacterData.h"
+#include "mozilla/dom/ContentList.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/Element.h"
@@ -49,11 +49,11 @@
 #include "nsCSSValue.h"
 #include "nsColor.h"
 #include "nsComputedDOMStyle.h"
-#include "nsContentList.h"
 #include "nsFieldSetFrame.h"
 #include "nsGlobalWindowInner.h"
 #include "nsGridContainerFrame.h"
 #include "nsIContentInlines.h"
+#include "nsIFrameInlines.h"
 #include "nsLayoutUtils.h"
 #include "nsNameSpaceManager.h"
 #include "nsPresContext.h"
@@ -83,42 +83,6 @@ static nsPresContext* EnsureSafeToHandOutRules(Element& aElement) {
   }
   presContext->EnsureSafeToHandOutCSSRules();
   return presContext;
-}
-
-static already_AddRefed<const ComputedStyle> GetStartingStyle(
-    Element& aElement, const PseudoStyleRequest& aPseudo) {
-  Element* elementOrPseudoElement = aElement.GetPseudoElement(aPseudo);
-  if (!elementOrPseudoElement) {
-    // For the pseudo elements which doesn't support animations or transitions,
-    // this returns nullptr. This is probably fine because @starting-style
-    // doesn't work on these pseudo elements neither.
-    //
-    // FIXME: If we still want to retrieve the @starting-style rules for those
-    // pseudo-elements which don't support animations, we may have to rework
-    // Servo_ResolveStartingStyle() because now @starting-style doesn't work on
-    // eagerly-cascaded pseudo-elements, and the above function,
-    // GetPseudoElement(), only works on the pseudo-elements which support
-    // animations.
-    return nullptr;
-  }
-  // If this element is unstyled, or it doesn't have matched rules in
-  // @starting-style, we return.
-  if (!Servo_Element_MayHaveStartingStyle(elementOrPseudoElement)) {
-    return nullptr;
-  }
-  if (!EnsureSafeToHandOutRules(aElement)) {
-    return nullptr;
-  }
-  RefPtr<Document> doc = aElement.GetComposedDoc();
-  if (!doc) {
-    return nullptr;
-  }
-  doc->FlushPendingNotifications(FlushType::Style);
-  RefPtr<PresShell> ps = doc->GetPresShell();
-  if (!ps) {
-    return nullptr;
-  }
-  return ps->StyleSet()->ResolveStartingStyle(*elementOrPseudoElement);
 }
 
 static already_AddRefed<const ComputedStyle> GetCleanComputedStyleForElement(
@@ -245,7 +209,13 @@ void InspectorUtils::GetChildrenForNode(nsINode& aNode,
     }
   }
   nsIContent* parent = aNode.AsContent();
+  if (auto* node = nsLayoutUtils::GetBackdropPseudo(parent)) {
+    aResult.AppendElement(node);
+  }
   if (auto* node = nsLayoutUtils::GetMarkerPseudo(parent)) {
+    aResult.AppendElement(node);
+  }
+  if (auto* node = nsLayoutUtils::GetCheckmarkPseudo(parent)) {
     aResult.AppendElement(node);
   }
   if (auto* node = nsLayoutUtils::GetBeforePseudo(parent)) {
@@ -271,6 +241,10 @@ void InspectorUtils::GetChildrenForNode(nsINode& aNode,
   if (auto* node = nsLayoutUtils::GetAfterPseudo(parent)) {
     aResult.AppendElement(node);
   }
+
+  if (auto* node = nsLayoutUtils::GetPickerIconPseudo(parent)) {
+    aResult.AppendElement(node);
+  }
 }
 
 class ReadOnlyInspectorDeclaration final : public nsDOMCSSDeclaration {
@@ -289,9 +263,15 @@ class ReadOnlyInspectorDeclaration final : public nsDOMCSSDeclaration {
   void GetPropertyValue(NonCustomCSSPropertyId aId, nsACString& aValue) final {
     Servo_DeclarationBlock_GetPropertyValueByNonCustomId(mRaw, aId, &aValue);
   }
+  bool HasLonghandProperty(const nsACString& aPropName) final {
+    return Servo_DeclarationBlock_HasLonghandProperty(mRaw, &aPropName);
+  }
   void IndexedGetter(uint32_t aIndex, bool& aFound,
                      nsACString& aPropName) final {
-    aFound = Servo_DeclarationBlock_GetNthProperty(mRaw, aIndex, &aPropName);
+    CSSPropertyId id{eCSSProperty_UNKNOWN};
+    if ((aFound = Servo_DeclarationBlock_GetAt(mRaw, aIndex, &id))) {
+      id.ToString(aPropName);
+    }
   }
   void RemoveProperty(const nsACString& aPropertyName, nsACString& aValue,
                       ErrorResult& aRv) final {
@@ -327,12 +307,10 @@ class ReadOnlyInspectorDeclaration final : public nsDOMCSSDeclaration {
     return CSSStyleProperties_Binding::Wrap(aCx, this, aGivenProto);
   }
   // These ones are a bit sad, but matches e.g. nsComputedDOMStyle.
-  nsresult SetCSSDeclaration(DeclarationBlock* aDecl,
-                             MutationClosureData*) final {
+  nsresult SetCSSDeclaration(Block* aDecl, MutationClosureData*) final {
     MOZ_CRASH("called ReadOnlyInspectorDeclaration::SetCSSDeclaration");
   }
-  DeclarationBlock* GetOrCreateCSSDeclaration(Operation,
-                                              DeclarationBlock**) override {
+  Block* GetOrCreateCSSDeclaration(Operation, Block**) override {
     MOZ_CRASH("called ReadOnlyInspectorDeclaration::GetOrCreateCSSDeclaration");
   }
   ParsingEnvironment GetParsingEnvironment(nsIPrincipal*) const final {
@@ -357,6 +335,7 @@ NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_0(ReadOnlyInspectorDeclaration)
 
 static void GetCSSRulesFromComputedValues(
     Element& aElement, const ComputedStyle* aComputedStyle,
+    bool aWithStartingStyle,
     nsTArray<OwningCSSRuleOrInspectorDeclaration>& aResult) {
   const PresShell* presShell = aElement.OwnerDoc()->GetPresShell();
   if (!presShell) {
@@ -364,7 +343,8 @@ static void GetCSSRulesFromComputedValues(
   }
 
   AutoTArray<StyleMatchingDeclarationBlock, 8> rawDecls;
-  Servo_ComputedValues_GetMatchingDeclarations(aComputedStyle, &rawDecls);
+  Servo_ComputedValues_GetMatchingDeclarations(aComputedStyle,
+                                               aWithStartingStyle, &rawDecls);
 
   AutoTArray<ServoStyleRuleMap*, 8> maps;
   {
@@ -446,25 +426,14 @@ void InspectorUtils::GetMatchingCSSRules(
     GlobalObject& aGlobalObject, Element& aElement, const nsAString& aPseudo,
     bool aIncludeVisitedStyle, bool aWithStartingStyle,
     nsTArray<OwningCSSRuleOrInspectorDeclaration>& aResult) {
-  auto pseudo = nsCSSPseudoElements::ParsePseudoElement(
-      aPseudo, CSSEnabledState::ForAllContent);
+  auto pseudo = PseudoStyleRequest::Parse(
+      aPseudo, aElement.OwnerDoc()->DefaultStyleAttrURLData());
   if (!pseudo) {
     return;
   }
 
-  RefPtr<const ComputedStyle> computedStyle;
-  if (aWithStartingStyle) {
-    computedStyle = GetStartingStyle(aElement, *pseudo);
-  }
-
-  // Note: GetStartingStyle() return nullptr if this element doesn't have rules
-  // inside @starting-style, or the pseudo-element doesn't support animations or
-  // transitions. For this case, we would like to return the primay rules of
-  // this element.
-  if (!computedStyle) {
-    computedStyle = GetCleanComputedStyleForElement(&aElement, *pseudo);
-  }
-
+  RefPtr<const ComputedStyle> computedStyle =
+      GetCleanComputedStyleForElement(&aElement, *pseudo);
   if (!computedStyle) {
     // This can fail for elements that are not in the document or
     // if the document they're in doesn't have a presshell.  Bail out.
@@ -477,7 +446,8 @@ void InspectorUtils::GetMatchingCSSRules(
     }
   }
 
-  GetCSSRulesFromComputedValues(aElement, computedStyle, aResult);
+  GetCSSRulesFromComputedValues(aElement, computedStyle, aWithStartingStyle,
+                                aResult);
 }
 
 /* static */
@@ -565,15 +535,16 @@ static uint32_t CollectAtRules(ServoCSSRuleList& aRuleList,
     // so the DevTools team gets notified and can decide if it should be
     // displayed.
     switch (rule->Type()) {
+      case StyleCssRuleType::CustomMedia:
       case StyleCssRuleType::Media:
       case StyleCssRuleType::Supports:
       case StyleCssRuleType::LayerBlock:
+      case StyleCssRuleType::PositionTry:
       case StyleCssRuleType::Property:
       case StyleCssRuleType::Container: {
         (void)aResult.AppendElement(OwningNonNull(*rule), fallible);
         break;
       }
-      case StyleCssRuleType::CustomMedia:
       case StyleCssRuleType::Style:
       case StyleCssRuleType::Import:
       case StyleCssRuleType::Document:
@@ -589,8 +560,9 @@ static uint32_t CollectAtRules(ServoCSSRuleList& aRuleList,
       case StyleCssRuleType::FontPaletteValues:
       case StyleCssRuleType::Scope:
       case StyleCssRuleType::StartingStyle:
-      case StyleCssRuleType::PositionTry:
       case StyleCssRuleType::NestedDeclarations:
+      case StyleCssRuleType::AppearanceBase:
+      case StyleCssRuleType::ViewTransition:
         break;
     }
 
@@ -730,8 +702,17 @@ static uint8_t ToServoCssType(InspectorPropertyType aType) {
 
 bool InspectorUtils::Supports(GlobalObject&, const nsACString& aDeclaration,
                               const SupportsOptions& aOptions) {
-  return Servo_CSSSupports(&aDeclaration, aOptions.mUserAgent, aOptions.mChrome,
-                           aOptions.mQuirks);
+  StyleCssSupportsParams params{
+      .origin =
+          aOptions.mUserAgent ? StyleOrigin::UserAgent : StyleOrigin::Author,
+      .url_context = aOptions.mChrome ? StyleCssSupportsUrlContext::Chrome
+                                      : StyleCssSupportsUrlContext::Default,
+      .quirks = aOptions.mQuirks
+                    ? nsCompatibility::eCompatibility_NavQuirks
+                    : nsCompatibility::eCompatibility_FullStandards,
+  };
+  return Servo_CSSSupports(&aDeclaration, &params,
+                           /* aUrlData = */ nullptr);
 }
 
 bool InspectorUtils::CssPropertySupportsType(GlobalObject& aGlobalObject,
@@ -758,6 +739,12 @@ void InspectorUtils::GetCSSValuesForProperty(GlobalObject& aGlobalObject,
   if (!found) {
     aRv.Throw(NS_ERROR_FAILURE);
   }
+}
+
+/* static */
+void InspectorUtils::GetCSSWideKeywords(GlobalObject& aGlobalObject,
+                                        nsTArray<nsString>& aResult) {
+  Servo_Property_GetCSSWideKeywords(&aResult);
 }
 
 /* static */
@@ -839,8 +826,7 @@ void InspectorUtils::ColorToRGBA(GlobalObject& aGlobal,
   }();
 
   nscolor color = NS_RGB(0, 0, 0);
-  if (!ServoCSSParser::ComputeColor(styleData, NS_RGB(0, 0, 0), aColorString,
-                                    &color)) {
+  if (!ServoCSSParser::ComputeColor(styleData, aColorString, &color)) {
     aResult.SetNull();
     return;
   }
@@ -876,6 +862,12 @@ void InspectorUtils::ColorTo(GlobalObject&, const nsACString& aFromColor,
 bool InspectorUtils::IsValidCSSColor(GlobalObject& aGlobalObject,
                                      const nsACString& aColorString) {
   return ServoCSSParser::IsValidCSSColor(aColorString);
+}
+
+/* static */
+bool InspectorUtils::IsValidCSSImage(GlobalObject& aGlobalObject,
+                                     const nsACString& aImageString) {
+  return ServoCSSParser::IsValidCSSImage(aImageString);
 }
 
 /* static */
@@ -951,17 +943,17 @@ static ElementState GetStatesForPseudoClass(const nsAString& aStatePseudo) {
 /* static */
 void InspectorUtils::GetCSSPseudoElementNames(GlobalObject& aGlobalObject,
                                               nsTArray<nsString>& aResult) {
-  const auto kPseudoCount =
-      static_cast<size_t>(PseudoStyleType::CSSPseudoElementsEnd);
+  const auto kPseudoCount = static_cast<size_t>(PseudoStyleType::MAX);
   for (size_t i = 0; i < kPseudoCount; ++i) {
     PseudoStyleType type = static_cast<PseudoStyleType>(i);
-    if (!nsCSSPseudoElements::IsEnabled(type, CSSEnabledState::ForAllContent)) {
+    if (type == PseudoStyleType::NotPseudo ||
+        !Servo_PseudoStyleType_EnabledForAllContent(type)) {
       continue;
     }
     auto& string = *aResult.AppendElement();
     // Use two semi-colons (though internally we use one).
     string.Append(u':');
-    nsAtom* atom = nsCSSPseudoElements::GetPseudoAtom(type);
+    const nsStaticAtom* atom = PseudoStyle::GetAtom(type);
     string.Append(nsDependentAtomString(atom));
   }
 }
@@ -1064,12 +1056,6 @@ bool InspectorUtils::IsBlockContainer(GlobalObject&, Element& aElement) {
   if (!frame) {
     return false;
   }
-
-  // For fieldset elements, we need to check the inner frame.
-  if (nsFieldSetFrame* fieldsetFrame = do_QueryFrame(frame)) {
-    frame = fieldsetFrame->GetInner();
-  }
-
   if (frame->IsBlockFrameOrSubclass()) {
     return true;
   }
@@ -1086,7 +1072,6 @@ bool InspectorUtils::IsBlockContainer(GlobalObject&, Element& aElement) {
       return true;
     }
   }
-
   return false;
 }
 
@@ -1139,8 +1124,7 @@ static bool IsFrameOutsideOfAncestor(const nsIFrame* aFrame,
                                      const nsIFrame* aAncestorFrame,
                                      const nsRect& aAncestorRect) {
   nsRect frameRectInAncestorSpace = nsLayoutUtils::TransformFrameRectToAncestor(
-      aFrame, aFrame->ScrollableOverflowRect(), RelativeTo{aAncestorFrame},
-      nullptr, nullptr, false, nullptr);
+      aFrame, aFrame->ScrollableOverflowRect(), RelativeTo{aAncestorFrame});
 
   // We use nsRect::SaturatingUnionEdges because it correctly handles the case
   // of a zero-width or zero-height frame, which we still want to consider as
@@ -1158,7 +1142,7 @@ static bool IsFrameOutsideOfAncestor(const nsIFrame* aFrame,
 static void AddOverflowingChildrenOfElement(const nsIFrame* aFrame,
                                             const nsIFrame* aAncestorFrame,
                                             const nsRect& aRect,
-                                            nsSimpleContentList& aList) {
+                                            SimpleContentList& aList) {
   MOZ_ASSERT(aFrame, "we assume the passed-in frame is non-null");
   for (const auto& childList : aFrame->ChildLists()) {
     for (const nsIFrame* child : childList.mList) {
@@ -1194,9 +1178,9 @@ static void AddOverflowingChildrenOfElement(const nsIFrame* aFrame,
   }
 }
 
-already_AddRefed<nsINodeList> InspectorUtils::GetOverflowingChildrenOfElement(
+already_AddRefed<dom::NodeList> InspectorUtils::GetOverflowingChildrenOfElement(
     GlobalObject& aGlobal, Element& aElement) {
-  auto list = MakeRefPtr<nsSimpleContentList>(&aElement);
+  auto list = MakeRefPtr<SimpleContentList>(&aElement);
   const ScrollContainerFrame* scrollContainerFrame =
       aElement.GetScrollContainerFrame();
   // Element must be a ScrollContainerFrame.
@@ -1381,6 +1365,107 @@ uint16_t InspectorUtils::GetGridContainerType(GlobalObject&,
     result |= InspectorUtils_Binding::GRID_SUBGRID_COL;
   }
   return result;
+}
+
+void InspectorUtils::GetAnchorFor(GlobalObject&, Element& aElement,
+                                  const nsAString& aName,
+                                  Nullable<InspectorAnchorElement>& aResult) {
+  auto* frame = aElement.GetPrimaryFrame(FlushType::Frames);
+  if (!frame || !frame->IsAbsolutelyPositioned()) {
+    return;
+  }
+
+  nsIFrame* anchor = nullptr;
+  RefPtr<nsAtom> name;
+  ScopedNameRef scopedName{nullptr, StyleCascadeLevel::Default()};
+  InspectorAnchorType type = InspectorAnchorType::Explicit;
+  if (aName.IsEmpty()) {
+    // Anchor name, otherwise implicit anchor.
+    const auto& positionAnchor = frame->StylePosition()->mPositionAnchor;
+    if (positionAnchor.value.IsIdent()) {
+      scopedName = {positionAnchor.value.AsIdent().AsAtom(),
+                    positionAnchor.scope};
+    } else {
+      auto implicit = AnchorPositioningUtils::GetAnchorPosImplicitAnchor(frame);
+      anchor = implicit.mAnchorFrame;
+      if (!anchor) {
+        return;
+      }
+      switch (implicit.mKind) {
+        case AnchorPositioningUtils::ImplicitAnchorKind::None:
+          break;
+        case AnchorPositioningUtils::ImplicitAnchorKind::Popover:
+          type = InspectorAnchorType::Popover;
+          break;
+        case AnchorPositioningUtils::ImplicitAnchorKind::PseudoElement:
+          type = InspectorAnchorType::Pseudo_element;
+          break;
+      }
+      auto& result = aResult.SetValue();
+      result.mElement = *anchor->GetContent()->AsElement();
+      result.mType = type;
+      return;
+    }
+  } else {
+    // TODO(emilio): Allow looking up names from other trees.
+    name = NS_Atomize(aName);
+    scopedName = {name, StyleCascadeLevel::Default()};
+  }
+  anchor = frame->PresShell()->GetAnchorPosAnchor(scopedName, frame);
+  if (!anchor) {
+    return;
+  }
+  auto& result = aResult.SetValue();
+  result.mElement = *anchor->GetContent()->AsElement();
+  result.mType = type;
+}
+
+/* static */
+void InspectorUtils::GetAnchorNamesFor(GlobalObject& aGlobalObject,
+                                       Element& aElement,
+                                       nsTArray<nsString>& aResult) {
+  auto* frame = aElement.GetPrimaryFrame(FlushType::Frames);
+  if (!frame || !frame->IsAbsolutelyPositioned()) {
+    return;
+  }
+
+  frame->PresShell()->CollectAnchorNames(frame, aResult);
+}
+
+/* static */
+void InspectorUtils::GetComputationStepsSupportedCSSFunctions(
+    GlobalObject& aGlobalObject, nsTArray<nsCString>& aResult) {
+  Servo_GetComputationStepsSupportedCSSFunctions(&aResult);
+}
+
+/* static */
+void InspectorUtils::GetComputationSteps(GlobalObject& aGlobalObject,
+                                         const nsAString& aExpression,
+                                         Element& aElement,
+                                         const nsAString& aPseudo,
+                                         nsTArray<nsString>& aResult) {
+  Document* doc = aElement.GetComposedDoc();
+  if (!doc) {
+    return;
+  }
+
+  auto pseudo = PseudoStyleRequest::Parse(
+      aPseudo, aElement.OwnerDoc()->DefaultStyleAttrURLData());
+  if (!pseudo) {
+    return;
+  }
+
+  RefPtr<const ComputedStyle> computedStyle =
+      GetCleanComputedStyleForElement(&aElement, *pseudo);
+  if (!computedStyle) {
+    // This can fail for elements that are not in the document or
+    // if the document they're in doesn't have a presshell.  Bail out.
+    return;
+  }
+
+  Servo_GetComputationSteps(&aExpression, &aElement, pseudo->mType,
+                            computedStyle, doc->EnsureStyleSet().RawData(),
+                            &aResult);
 }
 
 }  // namespace mozilla::dom

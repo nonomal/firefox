@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,25 +5,38 @@
 #include "VectorImage.h"
 
 #include "AutoRestoreSVGState.h"
+#include "BlobSurfaceProvider.h"
+#include "ISurfaceProvider.h"
+#include "ImageRegion.h"
+#include "LookupResult.h"
+#include "Orientation.h"
+#include "SVGDocumentWrapper.h"
+#include "SVGDrawingCallback.h"
+#include "SVGDrawingParameters.h"
+#include "SurfaceCache.h"
+#include "WindowRenderer.h"
 #include "gfx2DGlue.h"
 #include "gfxContext.h"
 #include "gfxDrawable.h"
 #include "gfxPlatform.h"
 #include "gfxUtils.h"
 #include "imgFrame.h"
-#include "mozilla/MemoryReporting.h"
 #include "mozilla/MediaFeatureChange.h"
-#include "mozilla/dom/Event.h"
-#include "mozilla/dom/SVGSVGElement.h"
-#include "mozilla/dom/SVGDocument.h"
-#include "mozilla/gfx/2D.h"
+#include "mozilla/MemoryReporting.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ProfilerLabels.h"
 #include "mozilla/RefPtr.h"
-#include "mozilla/StaticPrefs_image.h"
 #include "mozilla/SVGObserverUtils.h"  // for SVGRenderingObserver
 #include "mozilla/SVGUtils.h"
-
+#include "mozilla/StaticPrefs_image.h"
+#include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
+#include "mozilla/dom/Event.h"
+#include "mozilla/dom/SVGDocument.h"
+#include "mozilla/dom/SVGSVGElement.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/image/Resolution.h"
+#include "nsIDOMEventListener.h"
 #include "nsIStreamListener.h"
 #include "nsMimeTypes.h"
 #include "nsPresContext.h"
@@ -32,20 +44,6 @@
 #include "nsString.h"
 #include "nsStubDocumentObserver.h"
 #include "nsWindowSizes.h"
-#include "ImageRegion.h"
-#include "ISurfaceProvider.h"
-#include "LookupResult.h"
-#include "Orientation.h"
-#include "SVGDocumentWrapper.h"
-#include "SVGDrawingCallback.h"
-#include "SVGDrawingParameters.h"
-#include "nsIDOMEventListener.h"
-#include "SurfaceCache.h"
-#include "BlobSurfaceProvider.h"
-#include "mozilla/dom/Document.h"
-#include "mozilla/dom/DocumentInlines.h"
-#include "mozilla/image/Resolution.h"
-#include "WindowRenderer.h"
 
 namespace mozilla {
 
@@ -86,8 +84,8 @@ class SVGRootRenderingObserver final : public SVGRenderingObserver {
     StopObserving();
   }
 
-  Element* GetReferencedElementWithoutObserving() final {
-    return mDocWrapper->GetRootSVGElem();
+  Element* GetReferencedElementWithoutObserving() const final {
+    return mDocWrapper->GetSVGRootElement();
   }
 
   virtual void OnRenderingChange() override {
@@ -231,7 +229,7 @@ class SVGLoadEventListener final : public nsIDOMEventListener {
 NS_IMPL_ISUPPORTS(SVGLoadEventListener, nsIDOMEventListener)
 
 SVGDrawingCallback::SVGDrawingCallback(SVGDocumentWrapper* aSVGDocumentWrapper,
-                                       const IntSize& aViewportSize,
+                                       const CSSSize& aViewportSize,
                                        const IntSize& aSize,
                                        uint32_t aImageFlags)
     : mSVGDocumentWrapper(aSVGDocumentWrapper),
@@ -273,11 +271,7 @@ bool SVGDrawingCallback::operator()(gfxContext* aContext,
           double(mSize.width) / mViewportSize.width,
           double(mSize.height) / mViewportSize.height));
 
-  nsPresContext* presContext = presShell->GetPresContext();
-  MOZ_ASSERT(presContext, "pres shell w/out pres context");
-
-  nsRect svgRect(0, 0, presContext->DevPixelsToAppUnits(mViewportSize.width),
-                 presContext->DevPixelsToAppUnits(mViewportSize.height));
+  nsRect svgRect(nsPoint(), CSSPixel::ToAppUnits(mViewportSize));
 
   RenderDocumentFlags renderDocFlags =
       RenderDocumentFlags::IgnoreViewportScrolling;
@@ -458,7 +452,7 @@ VectorImage::GetWidth(int32_t* aWidth) {
     return NS_ERROR_FAILURE;
   }
 
-  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetRootSVGElem();
+  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetSVGRootElement();
   if (MOZ_UNLIKELY(!rootElem)) {
     // Unlikely to reach this code; we should have a root SVG elem, since we
     // finished loading without errors. But we can sometimes get here during
@@ -489,7 +483,7 @@ VectorImage::GetHeight(int32_t* aHeight) {
     return NS_ERROR_FAILURE;
   }
 
-  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetRootSVGElem();
+  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetSVGRootElement();
   if (MOZ_UNLIKELY(!rootElem)) {
     // Unlikely to reach this code; we should have a root SVG elem, since we
     // finished loading without errors. But we can sometimes get here during
@@ -514,7 +508,7 @@ VectorImage::GetIntrinsicSize(ImageIntrinsicSize* aIntrinsicSize) {
   if (mError || !mIsFullyLoaded) {
     return NS_ERROR_FAILURE;
   }
-  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetRootSVGElem();
+  SVGSVGElement* rootElem = mSVGDocumentWrapper->GetSVGRootElement();
   if (MOZ_UNLIKELY(!rootElem)) {
     return NS_ERROR_FAILURE;
   }
@@ -620,7 +614,7 @@ VectorImage::GetFrame(uint32_t aWhichFrame, uint32_t aFlags) {
 
   // Look up height & width
   // ----------------------
-  SVGSVGElement* svgElem = mSVGDocumentWrapper->GetRootSVGElem();
+  SVGSVGElement* svgElem = mSVGDocumentWrapper->GetSVGRootElement();
   MOZ_ASSERT(svgElem,
              "Should have a root SVG elem, since we finished "
              "loading without errors");
@@ -957,8 +951,7 @@ VectorImage::Draw(gfxContext* aContext, const nsIntSize& aSize,
   std::tie(sourceSurface, params.size) =
       LookupCachedSurface(aSize, params.svgContext, aFlags);
   if (sourceSurface) {
-    RefPtr<gfxDrawable> drawable =
-        new gfxSurfaceDrawable(sourceSurface, params.size);
+    auto drawable = MakeRefPtr<gfxSurfaceDrawable>(sourceSurface, params.size);
     Show(drawable, params);
     return ImgDrawResult::SUCCESS;
   }
@@ -981,8 +974,7 @@ VectorImage::Draw(gfxContext* aContext, const nsIntSize& aSize,
     return ImgDrawResult::SUCCESS;
   }
 
-  RefPtr<gfxDrawable> drawable =
-      new gfxSurfaceDrawable(sourceSurface, params.size);
+  auto drawable = MakeRefPtr<gfxSurfaceDrawable>(sourceSurface, params.size);
   Show(drawable, params);
   SendFrameComplete(didCache, params.flags);
   return ImgDrawResult::SUCCESS;
@@ -1242,10 +1234,10 @@ bool VectorImage::MaybeRestrictSVGContext(SVGImageContext& aSVGContext,
 
 already_AddRefed<gfxDrawable> VectorImage::CreateSVGDrawable(
     const SVGDrawingParameters& aParams) {
-  RefPtr<gfxDrawingCallback> cb = new SVGDrawingCallback(
+  auto cb = MakeRefPtr<SVGDrawingCallback>(
       mSVGDocumentWrapper, aParams.viewportSize, aParams.size, aParams.flags);
 
-  RefPtr<gfxDrawable> svgDrawable = new gfxCallbackDrawable(cb, aParams.size);
+  auto svgDrawable = MakeRefPtr<gfxCallbackDrawable>(cb, aParams.size);
   return svgDrawable.forget();
 }
 
@@ -1456,7 +1448,8 @@ VectorImage::OnStartRequest(nsIRequest* aRequest) {
              "Repeated call to OnStartRequest -- can this happen?");
 
   mSVGDocumentWrapper = new SVGDocumentWrapper();
-  nsresult rv = mSVGDocumentWrapper->OnStartRequest(aRequest);
+  RefPtr<SVGDocumentWrapper> wrapper = mSVGDocumentWrapper;
+  nsresult rv = wrapper->OnStartRequest(aRequest);
   if (NS_FAILED(rv)) {
     mSVGDocumentWrapper = nullptr;
     mError = true;
@@ -1488,14 +1481,15 @@ VectorImage::OnStopRequest(nsIRequest* aRequest, nsresult aStatus) {
     return NS_ERROR_FAILURE;
   }
 
-  return mSVGDocumentWrapper->OnStopRequest(aRequest, aStatus);
+  RefPtr<SVGDocumentWrapper> wrapper = mSVGDocumentWrapper;
+  return wrapper->OnStopRequest(aRequest, aStatus);
 }
 
 void VectorImage::OnSVGDocumentParsed() {
   MOZ_ASSERT(mParseCompleteListener, "Should have the parse complete listener");
   MOZ_ASSERT(mLoadEventListener, "Should have the load event listener");
 
-  if (!mSVGDocumentWrapper->GetRootSVGElem()) {
+  if (!mSVGDocumentWrapper->GetSVGRootElement()) {
     // This is an invalid SVG document. It may have failed to parse, or it may
     // be missing the <svg> root element, or the <svg> root element may not
     // declare the correct namespace. In any of these cases, we'll never be
@@ -1548,7 +1542,7 @@ void VectorImage::SendInvalidationNotifications() {
 }
 
 void VectorImage::OnSVGDocumentLoaded() {
-  MOZ_ASSERT(mSVGDocumentWrapper->GetRootSVGElem(),
+  MOZ_ASSERT(mSVGDocumentWrapper->GetSVGRootElement(),
              "Should have parsed successfully");
   MOZ_ASSERT(!mIsFullyLoaded && !mHaveAnimations,
              "These flags shouldn't get set until OnSVGDocumentLoaded. "
@@ -1604,6 +1598,10 @@ void VectorImage::OnSVGDocumentError() {
   // invalid document.
   ReportDocumentUseCounters();
 
+  // ProgressTracker::SyncNotifyProgress may release us, so ensure we
+  // stick around long enough to complete our work.
+  RefPtr<VectorImage> kungFuDeathGrip(this);
+
   if (mProgressTracker) {
     // Notify observers about the error and unblock page load.
     Progress progress = FLAG_HAS_ERROR;
@@ -1629,8 +1627,8 @@ VectorImage::OnDataAvailable(nsIRequest* aRequest, nsIInputStream* aInStr,
     return NS_ERROR_FAILURE;
   }
 
-  return mSVGDocumentWrapper->OnDataAvailable(aRequest, aInStr, aSourceOffset,
-                                              aCount);
+  RefPtr<SVGDocumentWrapper> wrapper = mSVGDocumentWrapper;
+  return wrapper->OnDataAvailable(aRequest, aInStr, aSourceOffset, aCount);
 }
 
 // --------------------------

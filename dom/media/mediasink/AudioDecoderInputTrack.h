@@ -5,6 +5,9 @@
 #ifndef AudioDecoderInputTrack_h
 #define AudioDecoderInputTrack_h
 
+#include <memory>
+#include <thread>
+
 #include "AudioSegment.h"
 #include "MediaEventSource.h"
 #include "MediaSegment.h"
@@ -12,6 +15,7 @@
 #include "MediaTrackGraph.h"
 #include "TimeUnits.h"
 #include "mozilla/SPSCQueue.h"
+#include "mozilla/StateMirroring.h"
 #include "mozilla/TimeStamp.h"
 #include "nsISerialEventTarget.h"
 
@@ -36,7 +40,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
   static AudioDecoderInputTrack* Create(MediaTrackGraph* aGraph,
                                         nsISerialEventTarget* aDecoderThread,
                                         const AudioInfo& aInfo,
-                                        float aPlaybackRate, float aVolume,
+                                        float aPlaybackRate,
                                         bool aPreservesPitch);
 
   // SPSCData suppports filling different supported type variants, and is used
@@ -46,9 +50,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
     struct Empty {};
     struct ClearFutureData {};
     struct DecodedData {
-      DecodedData()
-          : mStartTime(media::TimeUnit::Invalid()),
-            mEndTime(media::TimeUnit::Invalid()) {}
+      DecodedData() = default;
       DecodedData(DecodedData&& aDecodedData)
           : mSegment(std::move(aDecodedData.mSegment)) {
         mStartTime = aDecodedData.mStartTime;
@@ -65,12 +67,12 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
         mEndTime = media::TimeUnit::Invalid();
       }
       AudioSegment mSegment;
-      media::TimeUnit mStartTime;
-      media::TimeUnit mEndTime;
+      media::TimeUnit mStartTime{media::TimeUnit::Invalid()};
+      media::TimeUnit mEndTime{media::TimeUnit::Invalid()};
     };
     struct EOS {};
 
-    SPSCData() : mData(Empty()) {};
+    SPSCData() = default;
     explicit SPSCData(ClearFutureData&& aArg) : mData(std::move(aArg)) {};
     explicit SPSCData(DecodedData&& aArg) : mData(std::move(aArg)) {};
     explicit SPSCData(EOS&& aArg) : mData(std::move(aArg)) {};
@@ -84,7 +86,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
       return IsDecodedData() ? &mData.as<DecodedData>() : nullptr;
     }
 
-    Variant<Empty, ClearFutureData, DecodedData, EOS> mData;
+    Variant<Empty, ClearFutureData, DecodedData, EOS> mData{Empty()};
   };
 
   // Decoder thread API
@@ -93,17 +95,17 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
                   const PrincipalHandle& aPrincipalHandle);
   void NotifyEndOfStream();
   void ClearFutureData();
-  void SetVolume(float aVolume);
   void SetPlaybackRate(float aPlaybackRate);
   void SetPreservesPitch(bool aPreservesPitch);
   // After calling this, the track are not expected to receive any new data.
   void Close();
   bool HasBatchedData() const;
 
-  MediaEventSource<int64_t, TimeStamp, AwakeTimeStamp>& OnOutput() {
-    return mOnOutput;
-  }
+  MediaEventSource<int64_t>& OnOutput() { return mOnOutput; }
   MediaEventSource<void>& OnEnd() { return mOnEnd; }
+  MediaEventSource<void>& OnPlaybackRateFallback() {
+    return mOnPlaybackRateFallback;
+  }
 
   // Graph Thread API
   void DestroyImpl() override;
@@ -115,14 +117,14 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
     AssertOnGraphThread();
     return mWrittenFrames;
   }
-  float Volume() const {
-    AssertOnGraphThread();
-    return mVolume;
-  }
   float PlaybackRate() const {
     AssertOnGraphThread();
     return mPlaybackRate;
   }
+
+#ifdef ENABLE_TESTS
+  uint32_t TimeStretcherSamplesForTesting();
+#endif
 
  protected:
   ~AudioDecoderInputTrack();
@@ -130,8 +132,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
  private:
   AudioDecoderInputTrack(nsISerialEventTarget* aDecoderThread,
                          TrackRate aGraphRate, const AudioInfo& aInfo,
-                         float aPlaybackRate, float aVolume,
-                         bool aPreservesPitch);
+                         float aPlaybackRate, bool aPreservesPitch);
 
   // Return false if the converted segment contains zero duration.
   bool ConvertAudioDataToSegment(AudioData* aAudio, AudioSegment& aSegment,
@@ -177,11 +178,11 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
 
   const RefPtr<nsISerialEventTarget> mDecoderThread;
 
-  // Notify the amount of audio frames which have been sent to the track,
-  // sampled by the awake system time (and non-awake, for now) they were sent.
-  MediaEventProducer<int64_t, TimeStamp, AwakeTimeStamp> mOnOutput;
+  // Notify the amount of audio frames which have been sent to the track.
+  MediaEventProducer<int64_t> mOnOutput;
   // Notify when the track is ended.
   MediaEventProducer<void> mOnEnd;
+  MediaEventProducer<void> mOnPlaybackRateFallback;
 
   // These variables are ONLY used in the decoder thread.
   nsAutoRef<SpeexResamplerState> mResampler;
@@ -195,7 +196,6 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
   bool mReceivedEOS = false;
   TrackTime mWrittenFrames = 0;
   float mPlaybackRate;
-  float mVolume;
   bool mPreservesPitch;
 
   // A thread-safe queue shared by the decoder thread and the graph thread.
@@ -208,6 +208,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
   // not clear all data in SPSC queue when the track's `DestroyImpl()` gets
   // called. We leave to destroy the queue later when the track gets destroyed.
   SPSCQueue<SPSCData> mSPSCQueue{40};
+  std::thread::id mProducerThreadId;
 
   // When the graph requires the less amount of audio frames than the amount of
   // frames an audio data has, then the remaining part of frames would be stored
@@ -226,7 +227,7 @@ class AudioDecoderInputTrack final : public ProcessedMediaTrack {
   bool mSentAllData = false;
 
   // This is used to adjust the playback rate and pitch.
-  RLBoxSoundTouch* mTimeStretcher = nullptr;
+  std::unique_ptr<RLBoxSoundTouch> mTimeStretcher;
 
   // Buffers that would be used for the time stretching.
   AutoTArray<AudioDataValue, 2> mInterleavedBuffer;

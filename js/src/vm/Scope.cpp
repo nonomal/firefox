@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -8,8 +6,7 @@
 
 #include <new>
 
-#include "jsnum.h"
-
+#include "builtin/Number.h"
 #include "frontend/CompilationStencil.h"  // ScopeStencilRef, CompilationStencil, CompilationState, CompilationAtomCache
 #include "frontend/ParserAtom.h"  // frontend::ParserAtomsTable, frontend::ParserAtom
 #include "frontend/ScriptIndex.h"  // ScriptIndex
@@ -21,6 +18,7 @@
 #include "wasm/WasmDebug.h"
 #include "wasm/WasmInstance.h"
 
+#include "gc/Allocator-inl.h"
 #include "gc/BufferAllocator-inl.h"
 #include "gc/GCContext-inl.h"
 #include "gc/ObjectKind-inl.h"
@@ -49,10 +47,8 @@ const char* js::BindingKindString(BindingKind kind) {
       return "synthetic";
     case BindingKind::PrivateMethod:
       return "private method";
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     case BindingKind::Using:
       return "using";
-#endif
   }
   MOZ_CRASH("Bad BindingKind");
 }
@@ -113,6 +109,7 @@ static bool AddToEnvironmentMap(JSContext* cx, const JSClass* clasp,
   PropertyFlags propFlags = {PropertyFlag::Enumerable};
   switch (bindKind) {
     case BindingKind::Const:
+    case BindingKind::Using:
     case BindingKind::NamedLambdaCallee:
       // Non-writable.
       break;
@@ -136,7 +133,7 @@ SharedShape* js::CreateEnvironmentShape(JSContext* cx, BindingIter& bi,
     BindingLocation loc = bi.location();
     if (loc.kind() == BindingLocation::Kind::Environment) {
       JSAtom* name = bi.name();
-      MOZ_ASSERT(AtomIsMarked(cx->zone(), name));
+      MOZ_ASSERT(ZoneHasRef(cx->zone(), name));
       id = NameToId(name->asPropertyName());
       if (!AddToEnvironmentMap(cx, cls, id, bi.kind(), loc.slot(), &map,
                                &mapLength, &objectFlags)) {
@@ -162,11 +159,22 @@ SharedShape* js::CreateEnvironmentShapeForSyntheticModule(
 
   RootedId id(cx);
   uint32_t slotIndex = numSlots;
+
+  auto addProperty = [&](PropertyName* name) {
+    id = NameToId(name);
+    return SharedPropMap::addPropertyWithKnownSlot(
+        cx, cls, &map, &mapLength, id, propFlags, slotIndex, &objectFlags);
+  };
+
+  // Add internal *namespace* property.
+  if (!addProperty(cx->names().star_namespace_star_)) {
+    return nullptr;
+  }
+  slotIndex++;
+
+  // Add synthetic exports.
   for (JSAtom* exportName : module->syntheticExportNames()) {
-    id = NameToId(exportName->asPropertyName());
-    if (!SharedPropMap::addPropertyWithKnownSlot(cx, cls, &map, &mapLength, id,
-                                                 propFlags, slotIndex,
-                                                 &objectFlags)) {
+    if (!addProperty(exportName->asPropertyName())) {
       return nullptr;
     }
     slotIndex++;
@@ -239,7 +247,7 @@ static typename ConcreteScope::RuntimeData* NewEmptyScopeData(
   using Data = typename ConcreteScope::RuntimeData;
 
   size_t dataSize = SizeOfScopeData<Data>(length);
-  Data* data = gc::NewBuffer<Data>(cx->zone(), dataSize, false, length);
+  Data* data = gc::NewSizedBuffer<Data>(cx->zone(), dataSize, false, length);
   if (!data) {
     ReportOutOfMemory(cx);
     return nullptr;
@@ -646,22 +654,6 @@ void EvalScope::prepareForScopeCreation(ScopeKind scopeKind,
   }
 }
 
-/* static */
-Scope* EvalScope::nearestVarScopeForDirectEval(Scope* scope) {
-  for (ScopeIter si(scope); si; si++) {
-    switch (si.kind()) {
-      case ScopeKind::Function:
-      case ScopeKind::FunctionBodyVar:
-      case ScopeKind::Global:
-      case ScopeKind::NonSyntactic:
-        return scope;
-      default:
-        break;
-    }
-  }
-  return nullptr;
-}
-
 ModuleScope::RuntimeData::RuntimeData(size_t length) {
   PoisonNames(this, length);
 }
@@ -956,9 +948,7 @@ void BaseAbstractBindingIter<NameT>::init(
          /* varStart= */ 0,
          /* letStart= */ 0,
          /* constStart= */ 0,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
          /* usingStart= */ data.length,
-#endif
          /* syntheticStart= */ data.length,
          /* privageMethodStart= */ data.length,
          /* flags= */ CanHaveEnvironmentSlots | flags,
@@ -976,8 +966,7 @@ void BaseAbstractBindingIter<NameT>::init(
     //          synthetic - [data.length, data.length)
     //    private methods - [data.length, data.length)
     //
-    // If ENABLE_EXPLICIT_RESOURCE_MANAGEMENT is set, the consts range is split
-    // into the following:
+    // The consts range is further split into the following:
     //             consts - [slotInfo.constStart, slotInfo.usingStart)
     //             usings - [slotInfo.usingStart, data.length)
     init(/* positionalFormalStart= */ 0,
@@ -985,9 +974,7 @@ void BaseAbstractBindingIter<NameT>::init(
          /* varStart= */ 0,
          /* letStart= */ 0,
          /* constStart= */ slotInfo.constStart,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
          /* usingStart= */ slotInfo.usingStart,
-#endif
          /* syntheticStart= */ data.length,
          /* privateMethodStart= */ data.length,
          /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots | flags,
@@ -1022,9 +1009,7 @@ void BaseAbstractBindingIter<NameT>::init(
        /* varStart= */ 0,
        /* letStart= */ 0,
        /* constStart= */ 0,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ 0,
-#endif
        /* syntheticStart= */ 0,
        /* privateMethodStart= */ slotInfo.privateMethodStart,
        /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots,
@@ -1063,9 +1048,7 @@ void BaseAbstractBindingIter<NameT>::init(
        /* varStart= */ slotInfo.varStart,
        /* letStart= */ length,
        /* constStart= */ length,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ length,
-#endif
        /* syntheticStart= */ length,
        /* privateMethodStart= */ length,
        /* flags= */ flags,
@@ -1096,9 +1079,7 @@ void BaseAbstractBindingIter<NameT>::init(VarScope::AbstractData<NameT>& data,
        /* varStart= */ 0,
        /* letStart= */ length,
        /* constStart= */ length,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ length,
-#endif
        /* syntheticStart= */ length,
        /* privateMethodStart= */ length,
        /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots,
@@ -1129,9 +1110,7 @@ void BaseAbstractBindingIter<NameT>::init(
        /* varStart= */ 0,
        /* letStart= */ slotInfo.letStart,
        /* constStart= */ slotInfo.constStart,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ data.length,
-#endif
        /* syntheticStart= */ data.length,
        /* privateMethoodStart= */ data.length,
        /* flags= */ CannotHaveSlots,
@@ -1175,9 +1154,7 @@ void BaseAbstractBindingIter<NameT>::init(EvalScope::AbstractData<NameT>& data,
        /* varStart= */ 0,
        /* letStart= */ length,
        /* constStart= */ length,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ length,
-#endif
        /* syntheticStart= */ length,
        /* privateMethodStart= */ length,
        /* flags= */ flags,
@@ -1204,8 +1181,7 @@ void BaseAbstractBindingIter<NameT>::init(
   //          synthetic - [data.length, data.length)
   //    private methods - [data.length, data.length)
   //
-  // If ENABLE_EXPLICIT_RESOURCE_MANAGEMENT is set, the consts range is split
-  // into the following:
+  // The consts range is further split into the following:
   //             consts - [slotInfo.constStart, slotInfo.usingStart)
   //             usings - [slotInfo.usingStart, data.length)
   init(
@@ -1214,9 +1190,7 @@ void BaseAbstractBindingIter<NameT>::init(
       /* varStart= */ slotInfo.varStart,
       /* letStart= */ slotInfo.letStart,
       /* constStart= */ slotInfo.constStart,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
       /* usingStart= */ slotInfo.usingStart,
-#endif
       /* syntheticStart= */ data.length,
       /* privateMethodStart= */ data.length,
       /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots,
@@ -1247,9 +1221,7 @@ void BaseAbstractBindingIter<NameT>::init(
        /* varStart= */ 0,
        /* letStart= */ length,
        /* constStart= */ length,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ length,
-#endif
        /* syntheticStart= */ length,
        /* privateMethodStart= */ length,
        /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots,
@@ -1280,9 +1252,7 @@ void BaseAbstractBindingIter<NameT>::init(
        /* varStart= */ 0,
        /* letStart= */ length,
        /* constStart= */ length,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
        /* usingStart= */ length,
-#endif
        /* syntheticStart= */ length,
        /* privateMethodStart= */ length,
        /* flags= */ CanHaveFrameSlots | CanHaveEnvironmentSlots,

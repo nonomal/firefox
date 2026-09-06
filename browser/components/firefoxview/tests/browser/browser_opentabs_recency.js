@@ -18,10 +18,6 @@ const tabURL3 = "data:,Tab3";
 const tabURL4 = "data:,Tab4";
 
 add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-
   origBrowserState = SessionStore.getBrowserState();
 });
 
@@ -177,7 +173,7 @@ async function checkRecentTabList(browser, expected) {
   const tabListRows = await getTabRowsForCard(openTabsCard);
   Assert.ok(tabListRows, "Found the tab list element");
   let actual = Array.from(tabListRows).map(row => row.url);
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => ObjectUtils.deepEqual(actual, expected),
     "Waiting for tab list to hvae items with URLs in the expected order"
   );

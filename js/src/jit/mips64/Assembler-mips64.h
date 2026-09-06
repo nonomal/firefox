@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -8,7 +6,6 @@
 #define jit_mips64_Assembler_mips64_h
 
 #include "jit/mips-shared/Assembler-mips-shared.h"
-
 #include "jit/mips64/Architecture-mips64.h"
 
 namespace js {
@@ -32,31 +29,27 @@ class ABIArgGenerator : public ABIArgGeneratorShared {
   ABIArg& current() { return current_; }
 };
 
-// These registers may be volatile or nonvolatile.
+// See "ABI special registers" in Assembler-shared.h for more information.
 static constexpr Register ABINonArgReg0 = t4;
 static constexpr Register ABINonArgReg1 = t5;
 static constexpr Register ABINonArgReg2 = t6;
 static constexpr Register ABINonArgReg3 = t7;
 
-// This register may be volatile or nonvolatile. Avoid f23 which is the
-// ScratchDoubleReg.
+// See "ABI special registers" in Assembler-shared.h for more information.
+// Avoid f23 which is the ScratchDoubleReg.
 static constexpr FloatRegister ABINonArgDoubleReg{FloatRegisters::f21,
                                                   FloatRegisters::Double};
 
-// These registers may be volatile or nonvolatile.
-// Note: these three registers are all guaranteed to be different
+// See "ABI special registers" in Assembler-shared.h for more information.
 static constexpr Register ABINonArgReturnReg0 = t4;
 static constexpr Register ABINonArgReturnReg1 = t5;
 static constexpr Register ABINonVolatileReg = s0;
 
-// This register is guaranteed to be clobberable during the prologue and
-// epilogue of an ABI call which must preserve both ABI argument, return
-// and non-volatile registers.
+// See "ABI special registers" in Assembler-shared.h for more information.
 static constexpr Register ABINonArgReturnVolatileReg = t4;
 
-// TLS pointer argument register for WebAssembly functions. This must not alias
-// any other register used for passing function arguments or return values.
-// Preserved by WebAssembly functions.
+// See "ABI special registers" in Assembler-shared.h, and "The WASM ABIs" in
+// WasmFrame.h for more information.
 static constexpr Register InstanceReg = s5;
 
 // Registers used for wasm table calls. These registers must be disjoint

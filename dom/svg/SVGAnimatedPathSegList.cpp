@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -43,8 +41,19 @@ static StyleCurveControlPoint<float> MakeControlPoint(PositionType type,
   if (type == PositionType::Absolute) {
     return StyleCurveControlPoint<float>::Absolute({x, y});
   } else {
-    return StyleCurveControlPoint<float>::Relative(
-        StyleRelativeControlPoint<float>{{x, y}, StyleControlReference::None});
+    const auto rcp =
+        StyleRelativeControlPoint<float>{{x, y}, StyleControlReference::Start};
+    return StyleCurveControlPoint<float>::Relative(rcp);
+  }
+}
+
+static StyleAxisEndPoint<float> MakeAxisEndPoint(PositionType type,
+                                                 float end_point) {
+  if (type == PositionType::Absolute) {
+    const auto pos = StyleAxisPosition<float>::LengthPercent(end_point);
+    return StyleAxisEndPoint<float>::ToPosition(pos);
+  } else {
+    return StyleAxisEndPoint<float>::ByCoordinate(end_point);
   }
 }
 
@@ -139,13 +148,17 @@ class MOZ_STACK_CLASS SVGPathSegmentInitWrapper final {
             mInit.mValues[3] ? StyleArcSize::Large : StyleArcSize::Small,
             mInit.mValues[2]);
       case 'H':
-        return StylePathCommand::HLine(StyleByTo::To, mInit.mValues[0]);
+        return StylePathCommand::HLine(
+            MakeAxisEndPoint(PositionType::Absolute, mInit.mValues[0]));
       case 'h':
-        return StylePathCommand::HLine(StyleByTo::By, mInit.mValues[0]);
+        return StylePathCommand::HLine(
+            MakeAxisEndPoint(PositionType::Relative, mInit.mValues[0]));
       case 'V':
-        return StylePathCommand::VLine(StyleByTo::To, mInit.mValues[0]);
+        return StylePathCommand::VLine(
+            MakeAxisEndPoint(PositionType::Absolute, mInit.mValues[0]));
       case 'v':
-        return StylePathCommand::VLine(StyleByTo::By, mInit.mValues[0]);
+        return StylePathCommand::VLine(
+            MakeAxisEndPoint(PositionType::Relative, mInit.mValues[0]));
       case 'S':
         return StylePathCommand::SmoothCubic(
             MakeEndPoint(PositionType::Absolute, mInit.mValues[2],
@@ -235,7 +248,7 @@ nsresult SVGAnimatedPathSegList::SetAnimValue(const SVGPathData& aNewAnimValue,
   // that will override an existing animation.
 
   if (!mAnimVal) {
-    mAnimVal = MakeUnique<SVGPathData>();
+    mAnimVal = std::make_unique<SVGPathData>();
   }
   *mAnimVal = aNewAnimValue;
   aElement->DidAnimatePathSegList();
@@ -251,8 +264,9 @@ bool SVGAnimatedPathSegList::IsRendered() const {
   return mAnimVal ? !mAnimVal->IsEmpty() : !mBaseVal.IsEmpty();
 }
 
-UniquePtr<SMILAttr> SVGAnimatedPathSegList::ToSMILAttr(SVGElement* aElement) {
-  return MakeUnique<SMILAnimatedPathSegList>(this, aElement);
+std::unique_ptr<SMILAttr> SVGAnimatedPathSegList::ToSMILAttr(
+    SVGElement* aElement) {
+  return std::make_unique<SMILAnimatedPathSegList>(this, aElement);
 }
 
 nsresult SVGAnimatedPathSegList::SMILAnimatedPathSegList::ValueFromString(

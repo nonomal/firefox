@@ -12,29 +12,16 @@ import org.mozilla.fenix.R
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.appstate.AppAction
 import org.mozilla.fenix.home.HomeFragment
-import org.mozilla.fenix.home.HomeFragmentDirections
 import org.mozilla.fenix.home.recenttabs.RecentTab
 import org.mozilla.fenix.home.recenttabs.interactor.RecentTabInteractor
-import org.mozilla.fenix.utils.Settings
 
-/**
- * An interface that handles the view manipulation of the recent tabs in the Home screen.
- */
+/** An interface that handles the view manipulation of the recent tabs in the Home screen. */
 interface RecentTabController {
 
-    /**
-     * @see [RecentTabInteractor.onRecentTabClicked]
-     */
+    /** @see [RecentTabInteractor.onRecentTabClicked] */
     fun handleRecentTabClicked(tabId: String)
 
-    /**
-     * @see [RecentTabInteractor.onRecentTabShowAllClicked]
-     */
-    fun handleRecentTabShowAllClicked()
-
-    /**
-     * @see [RecentTabInteractor.onRemoveRecentTab]
-     */
+    /** @see [RecentTabInteractor.onRemoveRecentTab] */
     fun handleRecentTabRemoved(tab: RecentTab.Tab)
 }
 
@@ -44,13 +31,11 @@ interface RecentTabController {
  * @param selectTabUseCase [SelectTabUseCase] used selecting a tab.
  * @param navController [NavController] used for navigation.
  * @param appStore The [AppStore] that holds the state of the [HomeFragment].
- * @param settings [Settings] object used to obtain the tab manager feature flag.
  */
 class DefaultRecentTabsController(
     private val selectTabUseCase: SelectTabUseCase,
     private val navController: NavController,
     private val appStore: AppStore,
-    private val settings: Settings,
 ) : RecentTabController {
 
     override fun handleRecentTabClicked(tabId: String) {
@@ -58,15 +43,6 @@ class DefaultRecentTabsController(
 
         selectTabUseCase.invoke(tabId)
         navController.navigate(R.id.browserFragment)
-    }
-
-    override fun handleRecentTabShowAllClicked() {
-        RecentTabs.showAllClicked.record(NoExtras())
-        if (settings.tabManagerEnhancementsEnabled) {
-            navController.navigate(HomeFragmentDirections.actionGlobalTabManagementFragment())
-        } else {
-            navController.navigate(HomeFragmentDirections.actionGlobalTabsTrayFragment())
-        }
     }
 
     override fun handleRecentTabRemoved(tab: RecentTab.Tab) {

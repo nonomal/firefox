@@ -12,7 +12,11 @@ import time
 import jsonschema
 
 from mozperftest.layers import Layer
-from mozperftest.metrics.common import COMMON_ARGS, filtered_metrics
+from mozperftest.metrics.common import (
+    COMMON_ARGS,
+    filtered_metrics,
+    get_available_metrics,
+)
 from mozperftest.metrics.exceptions import PerfherderValidDataError
 from mozperftest.metrics.notebook.constant import Constant
 from mozperftest.metrics.notebook.transformer import get_transformer
@@ -31,23 +35,21 @@ class Perfherder(Layer):
     activated = False
 
     arguments = COMMON_ARGS
-    arguments.update(
-        {
-            "stats": {
-                "action": "store_true",
-                "default": False,
-                "help": "If set, browsertime statistics will be reported.",
-            },
-            "timestamp": {
-                "type": float,
-                "default": None,
-                "help": (
-                    "Timestamp to use for the perfherder data. Can be the "
-                    "current date or a past date if needed."
-                ),
-            },
-        }
-    )
+    arguments.update({
+        "stats": {
+            "action": "store_true",
+            "default": False,
+            "help": "If set, browsertime statistics will be reported.",
+        },
+        "timestamp": {
+            "type": float,
+            "default": None,
+            "help": (
+                "Timestamp to use for the perfherder data. Can be the "
+                "current date or a past date if needed."
+            ),
+        },
+    })
 
     def run(self, metadata):
         """Processes the given results into a perfherder-formatted data blob.
@@ -74,13 +76,21 @@ class Perfherder(Layer):
             exclusions = ["statistics."]
 
         # Get filtered metrics
+        transformer = self.get_arg("transformer")
         metrics = self.get_arg("metrics")
+        if not metrics:
+            metrics = [
+                {"name": name}
+                for name in get_available_metrics(
+                    metadata, output, prefix, transformer=transformer
+                )
+            ]
         results, fullsettings = filtered_metrics(
             metadata,
             output,
             prefix,
             metrics=metrics,
-            transformer=self.get_arg("transformer"),
+            transformer=transformer,
             settings=True,
             exclude=exclusions,
             split_by=self.get_arg("split-by"),
@@ -131,6 +141,7 @@ class Perfherder(Layer):
                 should_alert=strtobool(settings.get("shouldAlert", False)),
                 application=app_info,
                 alert_threshold=float(settings.get("alertThreshold", 2.0)),
+                alert_severity=settings.get("alertSeverity"),
                 lower_is_better=strtobool(settings.get("lowerIsBetter", True)),
                 unit=settings.get("unit", "ms"),
                 summary=settings.get("value"),
@@ -160,10 +171,12 @@ class Perfherder(Layer):
         sequence = int(time.monotonic() * 1000)
         payload = json.dumps(all_perfherder_data, sort_keys=True).encode("utf-8")
         digest = hashlib.sha1(payload).hexdigest()[:8]
-        file = f"perfherder-data-{sequence}-{digest}.json"
+        perfherder_file = f"perfherder-data-{sequence}-{digest}.json"
         if prefix:
-            file = f"{prefix}-{file}"
-        self.info(f"Writing perfherder results to {os.path.join(output, file)}")
+            perfherder_file = f"{prefix}-{perfherder_file}"
+        self.info(
+            f"Writing perfherder results to {os.path.join(output, perfherder_file)}"
+        )
 
         # XXX "suites" key error occurs when using self.info so a print
         # is being done for now.
@@ -175,7 +188,7 @@ class Perfherder(Layer):
         sys.stdout.write("\n")
         sys.stdout.flush()
 
-        metadata.set_output(write_json(all_perfherder_data, output, file))
+        metadata.set_output(write_json(all_perfherder_data, output, perfherder_file))
         return metadata
 
     def _build_blob(
@@ -190,6 +203,7 @@ class Perfherder(Layer):
         framework=None,
         application=None,
         alert_threshold=2.0,
+        alert_severity=None,
         lower_is_better=True,
         unit="ms",
         summary=None,
@@ -235,6 +249,9 @@ class Perfherder(Layer):
             is being tested. Must include name, and optionally a version.
         :param alert_threshold float: The change in percentage this
             metric must undergo to to generate an alert.
+        :param alert_severity str: The severity of the alerts produced by this
+            suite (`critical`, `subcritical`, or `normal`). Left out of the blob
+            when None, which makes Perfherder fall back to `normal`.
         :param lower_is_better bool: If True, then lower values are better
             than higher ones.
         :param unit str: The unit of the data.
@@ -288,6 +305,10 @@ class Perfherder(Layer):
             "subtests": perf_subtests,
         }
 
+        # Only set when given, otherwise Perfherder defaults it to `normal`
+        if alert_severity is not None:
+            suite["alertSeverity"] = alert_severity
+
         perfherder = {
             "suites": [suite],
             "framework": framework,
@@ -307,6 +328,7 @@ class Perfherder(Layer):
 
             # Gather extra settings specified from within a metric specification
             subtest_alert_threshold = alert_threshold
+            subtest_alert_severity = alert_severity
             subtest_lower_is_better = lower_is_better
             subtest_unit = unit
             for met in metrics_info:
@@ -320,6 +342,9 @@ class Perfherder(Layer):
                 subtest_unit = metrics_info[met].get("unit", unit)
                 subtest_lower_is_better = metrics_info[met].get(
                     "lowerIsBetter", lower_is_better
+                )
+                subtest_alert_severity = metrics_info[met].get(
+                    "alertSeverity", alert_severity
                 )
 
                 if metrics_info[met].get("shouldAlert", should_alert):
@@ -354,6 +379,11 @@ class Perfherder(Layer):
                 subtest["lowerIsBetter"] = extra_info["lowerIsBetter"]
             else:
                 subtest["lowerIsBetter"] = subtest_lower_is_better
+
+            if extra_info.get("alertSeverity") is not None:
+                subtest["alertSeverity"] = extra_info["alertSeverity"]
+            elif subtest_alert_severity is not None:
+                subtest["alertSeverity"] = subtest_alert_severity
 
             if has_callable_method(transformer_obj, "subtest_summary"):
                 subtest["value"] = transformer_obj.subtest_summary(subtest)

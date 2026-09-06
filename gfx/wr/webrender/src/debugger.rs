@@ -3,44 +3,50 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use crate::{DebugCommand, RenderApi, ApiMsg};
-use crate::profiler::Profiler;
+use crate::profiler::{Profiler, RenderCommandLog};
 use crate::composite::CompositeState;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use api::crossbeam_channel;
 use api::channel::{Sender, unbounded_channel};
-use api::{DebugFlags, TextureCacheCategory};
+use api::{DebugFlags, RenderBackendId, TextureCacheCategory};
 use api::debugger::{DebuggerMessage, SetDebugFlagsMessage, ProfileCounterDescriptor};
-use api::debugger::{UpdateProfileCountersMessage, InitProfileCountersMessage, ProfileCounterId};
-use api::debugger::{CompositorDebugInfo, CompositorDebugTile};
+use api::debugger::{FrameLogMessage, InitProfileCountersMessage, ProfileCounterId};
+use api::debugger::{CompositorDebugInfo, CompositorDebugTile, RenderDocReply};
 use std::thread;
 use base64::prelude::*;
 use sha1::{Sha1, Digest};
-use hyper::{Request, Response, Body, service::{make_service_fn, service_fn}, Server};
+use hyper::{Request, Response, body::Incoming, service::service_fn};
+use hyper_util::rt::TokioIo;
+use hyper_util::server::conn::auto::Builder as ServerBuilder;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 
 /// A minimal wrapper around RenderApi's channel that can be cloned.
 #[derive(Clone)]
 struct DebugRenderApi {
     api_sender: Sender<ApiMsg>,
+    backend_id: RenderBackendId,
 }
 
 impl DebugRenderApi {
     fn new(api: &RenderApi) -> Self {
         Self {
             api_sender: api.get_api_sender(),
+            backend_id: api.backend_id(),
         }
     }
 
     fn get_debug_flags(&self) -> DebugFlags {
         let (tx, rx) = unbounded_channel();
-        let msg = ApiMsg::DebugCommand(DebugCommand::GetDebugFlags(tx));
+        let msg = ApiMsg::DebugCommand(self.backend_id, DebugCommand::GetDebugFlags(tx));
         self.api_sender.send(msg).unwrap();
         rx.recv().unwrap()
     }
 
     fn send_debug_cmd(&self, cmd: DebugCommand) {
-        let msg = ApiMsg::DebugCommand(cmd);
+        let msg = ApiMsg::DebugCommand(self.backend_id, cmd);
         self.api_sender.send(msg).unwrap();
     }
 }
@@ -142,6 +148,7 @@ impl Debugger {
         &mut self,
         debug_flags: DebugFlags,
         profiler: &Profiler,
+        command_log: &Option<RenderCommandLog>,
     ) {
         let mut clients_to_keep = Vec::new();
 
@@ -149,15 +156,21 @@ impl Debugger {
             let msg = SetDebugFlagsMessage {
                 flags: debug_flags,
             };
-            if client.send_msg(DebuggerMessage::SetDebugFlags(msg)) {
-                let updates = profiler.collect_updates_for_debugger();
+            let profile_counters = if client.send_msg(DebuggerMessage::SetDebugFlags(msg)) {
+                Some(profiler.collect_updates_for_debugger())
+            } else {
+                None
+            };
 
-                let counters = UpdateProfileCountersMessage {
-                    updates,
-                };
-                if client.send_msg(DebuggerMessage::UpdateProfileCounters(counters)) {
-                    clients_to_keep.push(client);
-                }
+            let render_commands = command_log.as_ref().map(|dc| { dc.get().to_vec() });
+
+            let msg = FrameLogMessage {
+                profile_counters,
+                render_commands,
+            };
+
+            if client.send_msg(DebuggerMessage::UpdateFrameLog(msg)) {
+                clients_to_keep.push(client);
             }
         }
 
@@ -183,48 +196,58 @@ pub fn start(api: RenderApi) {
         };
 
         runtime.block_on(async {
-            let make_svc = make_service_fn(move |_conn| {
-                let api = api.clone();
-                async move {
-                    Ok::<_, Infallible>(service_fn(move |req| {
-                        handle_request(req, api.clone())
-                    }))
-                }
-            });
-
-            let addr = address.parse().unwrap();
-            let server = match Server::try_bind(&addr) {
-                Ok(s) => s,
+            let listener = match TcpListener::bind(address).await {
+                Ok(l) => l,
                 Err(e) => {
-                    eprintln!("WebRender debugger could not bind: {addr}: {e:?}");
+                    eprintln!("WebRender debugger could not bind: {address}: {e:?}");
                     return;
                 }
             };
 
-            if let Err(e) = server.serve(make_svc).await {
-                eprintln!("WebRender debugger error: {:?}", e);
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        eprintln!("WebRender debugger accept error: {:?}", e);
+                        continue;
+                    }
+                };
+
+                let api = api.clone();
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(move |req| {
+                        handle_request(req, api.clone())
+                    });
+                    if let Err(e) = ServerBuilder::new(hyper_util::rt::TokioExecutor::new())
+                        .serve_connection_with_upgrades(io, svc)
+                        .await
+                    {
+                        eprintln!("WebRender debugger connection error: {:?}", e);
+                    }
+                });
             }
         });
     });
 }
 
-async fn request_to_string(request: Request<Body>) -> Result<String, hyper::Error> {
-    let body_bytes = hyper::body::to_bytes(request.into_body()).await?;
+async fn request_to_string(request: Request<Incoming>) -> Result<String, hyper::Error> {
+    let body_bytes = request.into_body().collect().await?.to_bytes();
     Ok(String::from_utf8_lossy(&body_bytes).to_string())
 }
 
-fn string_response<S: Into<String>>(string: S) -> Response<Body> {
-    Response::new(Body::from(string.into()))
+fn string_response<S: Into<String>>(string: S) -> Response<Full<Bytes>> {
+    Response::new(Full::new(Bytes::from(string.into())))
 }
 
-fn status_response(status: u16) -> Response<Body> {
-    Response::builder().status(status).body(Body::from("")).unwrap()
+fn status_response(status: u16) -> Response<Full<Bytes>> {
+    Response::builder().status(status).body(Full::new(Bytes::new())).unwrap()
 }
 
 async fn handle_request(
-    request: Request<Body>,
+    request: Request<Incoming>,
     api: DebugRenderApi,
-) -> Result<Response<Body>, Infallible> {
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let path = request.uri().path();
     let query = request.uri().query().unwrap_or("");
     let args: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
@@ -260,6 +283,21 @@ async fn handle_request(
                 }
             }
         }
+        "/render-cmd-log" => {
+            match request.method() {
+                &hyper::Method::POST => {
+                    let content = request_to_string(request).await.unwrap();
+                    let enabled = serde_json::from_str(&content).expect("bug");
+                    api.send_debug_cmd(
+                        DebugCommand::SetRenderCommandLog(enabled)
+                    );
+                    Ok(string_response(format!("{:?}", enabled)))
+                }
+                _ => {
+                    Ok(status_response(403))
+                }
+            }
+        }
         "/generate-frame" => {
             // Force generate a frame-build and composite
             api.send_debug_cmd(
@@ -267,9 +305,32 @@ async fn handle_request(
             );
             Ok(status_response(200))
         }
+        "/renderdoc-capture" => {
+            // Capture the next composited frame with RenderDoc, replying with
+            // the path of the written .rdc (or an error message).
+            let (tx, rx) = unbounded_channel();
+            // CaptureRenderDoc forces a full invalidated rebuild and captures
+            // that rebuilt frame, so all picture-cache tiles are re-rasterized
+            // within the captured frame (a single-frame capture can't replay
+            // cached tile textures rendered in earlier frames).
+            api.send_debug_cmd(
+                DebugCommand::CaptureRenderDoc(tx)
+            );
+            // Reply with a JSON-serialized RenderDocReply so the client can tell
+            // success from failure explicitly, rather than sniffing the string.
+            // TODO: the debugger protocol could instead signal errors via HTTP
+            // status codes (and have the client surface non-2xx as an error),
+            // which would generalize to the other endpoints that already return
+            // 400/403/404 but whose bodies the client currently ignores.
+            let reply = match rx.recv() {
+                Ok(reply) => reply,
+                Err(..) => RenderDocReply::Error("No response received from WR".into()),
+            };
+            Ok(string_response(serde_json::to_string(&reply).unwrap()))
+        }
         "/query" => {
             // Query internal state about WR.
-            let (tx, rx) = crossbeam_channel::unbounded();
+            let (tx, rx) = unbounded_channel();
             let kind = match args.get("type").map(|s| s.as_str()) {
                 Some("spatial-tree") => DebugQueryKind::SpatialTree {},
                 Some("composite-view") => DebugQueryKind::CompositorView {},
@@ -322,7 +383,7 @@ async fn handle_request(
 
                         // Spawn a task to handle writing to the WebSocket stream
                         tokio::spawn(async move {
-                            let mut stream = upgraded;
+                            let mut stream = TokioIo::new(upgraded);
                             while let Some(data) = rx.recv().await {
                                 if stream.write_all(&data).await.is_err() {
                                     break;
@@ -348,7 +409,7 @@ async fn handle_request(
                 .header("upgrade", "websocket")
                 .header("connection", "upgrade")
                 .header("sec-websocket-accept", accept_key)
-                .body(Body::from(""))
+                .body(Full::new(Bytes::new()))
                 .unwrap())
         }
         _ => {

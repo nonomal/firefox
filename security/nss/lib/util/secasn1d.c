@@ -258,12 +258,12 @@ typedef struct sec_asn1d_state_struct {
 } sec_asn1d_state;
 
 #define IS_HIGH_TAG_NUMBER(n) ((n) == SEC_ASN1_HIGH_TAG_NUMBER)
-#define LAST_TAG_NUMBER_BYTE(b) (((b)&0x80) == 0)
+#define LAST_TAG_NUMBER_BYTE(b) (((b) & 0x80) == 0)
 #define TAG_NUMBER_BITS 7
 #define TAG_NUMBER_MASK 0x7f
 
-#define LENGTH_IS_SHORT_FORM(b) (((b)&0x80) == 0)
-#define LONG_FORM_LENGTH(b) ((b)&0x7f)
+#define LENGTH_IS_SHORT_FORM(b) (((b) & 0x80) == 0)
+#define LONG_FORM_LENGTH(b) ((b) & 0x7f)
 
 #define HIGH_BITS(field, cnt) ((field) >> ((sizeof(field) * 8) - (cnt)))
 
@@ -964,7 +964,7 @@ sec_asn1d_check_and_subtract_length(unsigned long *remaining,
 {
     PORT_Assert(remaining);
     PORT_Assert(cx);
-    if (!remaining || !cx) {
+    if (!remaining) {
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         cx->status = decodeError;
         return PR_FALSE;
@@ -1067,6 +1067,8 @@ sec_asn1d_prepare_for_contents(sec_asn1d_state *state)
             state->top->status = decodeError;
             return;
         }
+        PORT_Assert(state->theTemplate->offset == 0 ||
+                    state->theTemplate->offset < state->theTemplate->size);
         state->dest = (char *)dest + state->theTemplate->offset;
 
         /*
@@ -2533,8 +2535,10 @@ sec_asn1d_before_choice(sec_asn1d_state *state)
         state->dest = (char *)dest + state->theTemplate->offset;
     }
 
+    char *dest = state->dest ? (char *)state->dest - state->theTemplate->offset : NULL;
+
     child = sec_asn1d_push_state(state->top, state->theTemplate + 1,
-                                 (char *)state->dest - state->theTemplate->offset,
+                                 dest,
                                  PR_FALSE);
     if ((sec_asn1d_state *)NULL == child) {
         return (sec_asn1d_state *)NULL;
@@ -2585,7 +2589,7 @@ sec_asn1d_during_choice(sec_asn1d_state *state)
             return NULL;
         }
 
-        dest = (char *)child->dest - child->theTemplate->offset;
+        dest = child->dest ? (char *)child->dest - child->theTemplate->offset : NULL;
         child->theTemplate++;
 
         if (0 == child->theTemplate->kind) {
@@ -2594,7 +2598,7 @@ sec_asn1d_during_choice(sec_asn1d_state *state)
             state->top->status = decodeError;
             return (sec_asn1d_state *)NULL;
         }
-        child->dest = (char *)dest + child->theTemplate->offset;
+        child->dest = dest ? (char *)dest + child->theTemplate->offset : NULL;
 
         /* cargo'd from next_in_sequence innards */
         if (state->pending) {
@@ -2757,6 +2761,11 @@ SEC_ASN1DecoderUpdate(SEC_ASN1DecoderContext *cx,
     sec_asn1d_state *state = NULL;
     unsigned long consumed;
     SEC_ASN1EncodingPart what;
+
+    if (!cx) {
+        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+        return SECFailure;
+    }
 
     if (cx->status == needBytes)
         cx->status = keepGoing;

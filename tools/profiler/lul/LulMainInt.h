@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,7 +5,7 @@
 #ifndef LulMainInt_h
 #define LulMainInt_h
 
-#include "PlatformMacros.h"
+#include "mozilla/ProfilerPlatformMacros.h"
 #include "LulMain.h"  // for TaggedUWord
 
 #include <string>
@@ -93,9 +91,7 @@ struct PfxInstr {
   PfxInstr(PfxExprOp opcode, int32_t operand)
       : mOpcode(opcode), mOperand(operand) {}
   explicit PfxInstr(PfxExprOp opcode) : mOpcode(opcode), mOperand(0) {}
-  bool operator==(const PfxInstr& other) const {
-    return mOpcode == other.mOpcode && mOperand == other.mOperand;
-  }
+  bool operator==(const PfxInstr& other) const = default;
   PfxExprOp mOpcode;
   int32_t mOperand;
 };

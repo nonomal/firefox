@@ -139,28 +139,26 @@ impl super::CommandEncoder {
             .as_ref()
             .map(|sc| sc.root_index)
         {
+            let special_constants = super::SpecialConstants::from_indirect_draw_call_params(
+                first_vertex,
+                first_instance,
+            );
             let needs_update = match self.pass.root_elements[root_index as usize] {
-                super::RootElement::SpecialConstantBuffer {
-                    first_vertex: other_vertex,
-                    first_instance: other_instance,
-                    other: _,
-                } => first_vertex != other_vertex || first_instance != other_instance,
+                super::RootElement::SpecialConstants(old_special_constants) => {
+                    old_special_constants != special_constants
+                }
                 _ => true,
             };
             if needs_update {
                 self.pass.dirty_root_elements |= 1 << root_index;
                 self.pass.root_elements[root_index as usize] =
-                    super::RootElement::SpecialConstantBuffer {
-                        first_vertex,
-                        first_instance,
-                        other: 0,
-                    };
+                    super::RootElement::SpecialConstants(special_constants);
             }
         }
         self.update_root_elements();
     }
 
-    fn prepare_dispatch(&mut self, count: [u32; 3]) {
+    fn prepare_dispatch(&mut self, workgroup_count: [u32; 3]) {
         if let Some(root_index) = self
             .pass
             .layout
@@ -168,22 +166,18 @@ impl super::CommandEncoder {
             .as_ref()
             .map(|sc| sc.root_index)
         {
+            let special_constants =
+                super::SpecialConstants::from_compute_dispatch_params(workgroup_count);
             let needs_update = match self.pass.root_elements[root_index as usize] {
-                super::RootElement::SpecialConstantBuffer {
-                    first_vertex,
-                    first_instance,
-                    other,
-                } => [first_vertex as u32, first_instance, other] != count,
+                super::RootElement::SpecialConstants(old_special_constants) => {
+                    old_special_constants != special_constants
+                }
                 _ => true,
             };
             if needs_update {
                 self.pass.dirty_root_elements |= 1 << root_index;
                 self.pass.root_elements[root_index as usize] =
-                    super::RootElement::SpecialConstantBuffer {
-                        first_vertex: count[0] as i32,
-                        first_instance: count[1],
-                        other: count[2],
-                    };
+                    super::RootElement::SpecialConstants(special_constants);
             }
         }
         self.update_root_elements();
@@ -200,12 +194,14 @@ impl super::CommandEncoder {
             self.pass.dirty_root_elements ^= 1 << index;
 
             match self.pass.root_elements[index as usize] {
-                super::RootElement::Empty => log::error!("Root index {index} is not bound"),
-                super::RootElement::Constant => {
-                    let info = self.pass.layout.root_constant_info.as_ref().unwrap();
+                super::RootElement::Empty => unreachable!(
+                    "Empty root element at index {index} should not have been marked as dirty"
+                ),
+                super::RootElement::Immediates => {
+                    let info = self.pass.layout.immediates_info.as_ref().unwrap();
 
-                    for offset in info.range.clone() {
-                        let val = self.pass.constant_data[offset as usize];
+                    for offset in 0..info.size {
+                        let val = self.pass.immediates[offset as usize];
                         match self.pass.kind {
                             Pk::Render => unsafe {
                                 list.SetGraphicsRoot32BitConstant(index, val, offset)
@@ -217,23 +213,27 @@ impl super::CommandEncoder {
                         }
                     }
                 }
-                super::RootElement::SpecialConstantBuffer {
-                    first_vertex,
-                    first_instance,
-                    other,
-                } => match self.pass.kind {
+                super::RootElement::SpecialConstants(super::SpecialConstants {
+                    first_vertex_or_x,
+                    first_instance_or_y,
+                    unused_or_z,
+                }) => match self.pass.kind {
                     Pk::Render => {
-                        unsafe { list.SetGraphicsRoot32BitConstant(index, first_vertex as u32, 0) };
-                        unsafe { list.SetGraphicsRoot32BitConstant(index, first_instance, 1) };
+                        unsafe {
+                            list.SetGraphicsRoot32BitConstant(index, first_vertex_or_x as u32, 0)
+                        };
+                        unsafe { list.SetGraphicsRoot32BitConstant(index, first_instance_or_y, 1) };
                     }
                     Pk::Compute => {
-                        unsafe { list.SetComputeRoot32BitConstant(index, first_vertex as u32, 0) };
-                        unsafe { list.SetComputeRoot32BitConstant(index, first_instance, 1) };
-                        unsafe { list.SetComputeRoot32BitConstant(index, other, 2) };
+                        unsafe {
+                            list.SetComputeRoot32BitConstant(index, first_vertex_or_x as u32, 0)
+                        };
+                        unsafe { list.SetComputeRoot32BitConstant(index, first_instance_or_y, 1) };
+                        unsafe { list.SetComputeRoot32BitConstant(index, unused_or_z, 2) };
                     }
                     Pk::Transfer => (),
                 },
-                super::RootElement::Table(descriptor) => match self.pass.kind {
+                super::RootElement::DescriptorTable(descriptor) => match self.pass.kind {
                     Pk::Render => unsafe { list.SetGraphicsRootDescriptorTable(index, descriptor) },
                     Pk::Compute => unsafe { list.SetComputeRootDescriptorTable(index, descriptor) },
                     Pk::Transfer => (),
@@ -250,7 +250,7 @@ impl super::CommandEncoder {
                         Pk::Transfer => (),
                     }
                 }
-                super::RootElement::DynamicOffsetsBuffer { start, end } => {
+                super::RootElement::DynamicStorageBufferOffsets { start, end } => {
                     let values = &self.pass.dynamic_storage_buffer_offsets[start..end];
 
                     for (offset, &value) in values.iter().enumerate() {
@@ -265,7 +265,7 @@ impl super::CommandEncoder {
                         }
                     }
                 }
-                super::RootElement::SamplerHeap => match self.pass.kind {
+                super::RootElement::SamplerHeapDescriptorTable => match self.pass.kind {
                     Pk::Render => unsafe {
                         list.SetGraphicsRootDescriptorTable(
                             index,
@@ -287,14 +287,11 @@ impl super::CommandEncoder {
     fn reset_signature(&mut self, layout: &super::PipelineLayoutShared) {
         if let Some(root_index) = layout.special_constants.as_ref().map(|sc| sc.root_index) {
             self.pass.root_elements[root_index as usize] =
-                super::RootElement::SpecialConstantBuffer {
-                    first_vertex: 0,
-                    first_instance: 0,
-                    other: 0,
-                };
+                super::RootElement::SpecialConstants(super::SpecialConstants::default());
         }
         if let Some(root_index) = layout.sampler_heap_root_index {
-            self.pass.root_elements[root_index as usize] = super::RootElement::SamplerHeap;
+            self.pass.root_elements[root_index as usize] =
+                super::RootElement::SamplerHeapDescriptorTable;
         }
         self.pass.layout = layout.clone();
         self.pass.dirty_root_elements = (1 << layout.total_root_elements) - 1;
@@ -315,6 +312,57 @@ impl super::CommandEncoder {
         }
     }
 
+    /// Zero the padding of `buffer`, which holds the linear footprint of `region`
+    /// starting at offset zero.
+    unsafe fn clear_buf_tex_padding(
+        &mut self,
+        buffer: &super::Buffer,
+        region: &crate::BufferTextureCopy,
+        tex_fmt: wgt::TextureFormat,
+    ) {
+        let info = region
+            .buffer_layout
+            .get_buffer_texture_copy_info(
+                tex_fmt,
+                region.texture_base.aspect.map(),
+                &region.size.into(),
+            )
+            .unwrap();
+
+        let has_row_padding = info.row_stride_bytes > info.row_bytes_dense;
+        for image in 0..info.depth_or_array_layers {
+            let image_base = info.offset + image * info.image_stride_bytes;
+
+            if has_row_padding {
+                for row in 0..info.image_rows_dense - 1 {
+                    let row_base = image_base + row * info.row_stride_bytes;
+                    let start = row_base + info.row_bytes_dense;
+                    let end = row_base + info.row_stride_bytes;
+                    unsafe { self.clear_buffer(buffer, start..end) };
+                }
+            }
+
+            // Everything between the end of the last row of the image and the start
+            // of the next image is padding.
+            if image < info.depth_or_array_layers - 1 {
+                let start = image_base + info.image_bytes_dense;
+                let end = image_base + info.image_stride_bytes;
+                unsafe { self.clear_buffer(buffer, start..end) };
+            }
+        }
+    }
+
+    /// Allocate a scratch buffer holding the linear footprint of `region` at offset
+    /// zero, and run `copy_op` with it while it is in the [`BufferUses::COPY_DST`]
+    /// state. On return, the buffer has been transitioned to [`BufferUses::COPY_SRC`].
+    ///
+    /// The contents of the buffer are *not* initialized, so `copy_op` must write
+    /// every byte that is subsequently read out of it. In particular, if the whole
+    /// footprint is copied somewhere the application can observe, `copy_op` has to
+    /// call [`Self::clear_buf_tex_padding`].
+    ///
+    /// [`BufferUses::COPY_DST`]: wgt::BufferUses::COPY_DST
+    /// [`BufferUses::COPY_SRC`]: wgt::BufferUses::COPY_SRC
     unsafe fn buf_tex_intermediate<T>(
         &mut self,
         region: crate::BufferTextureCopy,
@@ -422,9 +470,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
             list.set_name(label)?;
         }
 
-        self.list = Some(list);
+        // Ensure clean state even if the last encoding did not complete normally.
         self.temp.clear();
         self.pass.clear();
+        self.end_of_pass_timer_query = None;
+
+        self.list = Some(list);
         Ok(())
     }
     unsafe fn discard_encoding(&mut self) {
@@ -796,6 +847,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
                         r,
                         src.format,
                         |this, buf, size, intermediate_region| {
+                            this.clear_buf_tex_padding(buf, &intermediate_region, src.format);
                             copy_aligned(this, src, buf, intermediate_region);
                             crate::BufferCopy {
                                 src_offset: 0,
@@ -951,7 +1003,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
         });
 
         let list = self.list.as_ref().unwrap();
-        #[allow(trivial_casts)] // No other clean way to write the coercion inside .map() below?
         unsafe {
             list.OMSetRenderTargets(
                 desc.color_attachments.len() as u32,
@@ -964,7 +1015,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.pass.resolves.clear();
         for (rtv, cat) in color_views.iter().zip(desc.color_attachments.iter()) {
             if let Some(cat) = cat.as_ref() {
-                if !cat.ops.contains(crate::AttachmentOps::LOAD) {
+                if cat.ops.contains(crate::AttachmentOps::LOAD_CLEAR) {
                     let value = [
                         cat.clear_value.r as f32,
                         cat.clear_value.g as f32,
@@ -989,12 +1040,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
         if let Some(ref ds) = desc.depth_stencil_attachment {
             let mut flags = Direct3D12::D3D12_CLEAR_FLAGS::default();
             let aspects = ds.target.view.aspects;
-            if !ds.depth_ops.contains(crate::AttachmentOps::LOAD)
+            if ds.depth_ops.contains(crate::AttachmentOps::LOAD_CLEAR)
                 && aspects.contains(crate::FormatAspects::DEPTH)
             {
                 flags |= Direct3D12::D3D12_CLEAR_FLAG_DEPTH;
             }
-            if !ds.stencil_ops.contains(crate::AttachmentOps::LOAD)
+            if ds.stencil_ops.contains(crate::AttachmentOps::LOAD_CLEAR)
                 && aspects.contains(crate::FormatAspects::STENCIL)
             {
                 flags |= Direct3D12::D3D12_CLEAR_FLAG_STENCIL;
@@ -1128,13 +1179,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         group: &super::BindGroup,
         dynamic_offsets: &[wgt::DynamicOffset],
     ) {
-        let info = &layout.bind_group_infos[index as usize];
+        let info = layout.bind_group_infos[index as usize].as_ref().unwrap();
         let mut root_index = info.base_root_index as usize;
 
         // Bind CBV/SRC/UAV descriptor tables
         if info.tables.contains(super::TableTypes::SRV_CBV_UAV) {
             self.pass.root_elements[root_index] =
-                super::RootElement::Table(group.handle_views.unwrap().gpu);
+                super::RootElement::DescriptorTable(group.handle_views.unwrap().gpu);
             root_index += 1;
         }
 
@@ -1152,7 +1203,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             offsets_index += range.start;
 
             self.pass.root_elements[root_index as usize] =
-                super::RootElement::DynamicOffsetsBuffer {
+                super::RootElement::DynamicStorageBufferOffsets {
                     start: range.start,
                     end: range.end,
                 };
@@ -1192,20 +1243,19 @@ impl crate::CommandEncoder for super::CommandEncoder {
             self.reset_signature(&layout.shared);
         };
     }
-    unsafe fn set_push_constants(
+    unsafe fn set_immediates(
         &mut self,
         layout: &super::PipelineLayout,
-        _stages: wgt::ShaderStages,
         offset_bytes: u32,
         data: &[u32],
     ) {
         let offset_words = offset_bytes as usize / 4;
 
-        let info = layout.shared.root_constant_info.as_ref().unwrap();
+        let info = layout.shared.immediates_info.as_ref().unwrap();
 
-        self.pass.root_elements[info.root_index as usize] = super::RootElement::Constant;
+        self.pass.root_elements[info.root_index as usize] = super::RootElement::Immediates;
 
-        self.pass.constant_data[offset_words..(offset_words + data.len())].copy_from_slice(data);
+        self.pass.immediates[offset_words..(offset_words + data.len())].copy_from_slice(data);
 
         if self.pass.layout.signature == layout.shared.signature {
             self.pass.dirty_root_elements |= 1 << info.root_index;
@@ -1459,30 +1509,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
-        if self
-            .pass
-            .layout
-            .special_constants
-            .as_ref()
-            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
-            .is_some()
-        {
-            self.update_root_elements();
-        } else {
-            self.prepare_dispatch([0; 3]);
-        }
-
+        self.prepare_dispatch([0; 3]);
         let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
             self.list.as_ref().unwrap().cast().unwrap();
-        let Some(cmd_signature) = &self
-            .pass
-            .layout
-            .special_constants
-            .as_ref()
-            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
-            .unwrap_or_else(|| &self.shared.cmd_signatures)
-            .draw_mesh
-        else {
+        let Some(cmd_signature) = &self.shared.cmd_signatures.draw_mesh else {
             panic!("Feature `MESH_SHADING` not enabled");
         };
         unsafe {
@@ -1591,12 +1621,16 @@ impl crate::CommandEncoder for super::CommandEncoder {
         unsafe { list.SetPipelineState(&pipeline.raw) }
     }
 
-    unsafe fn dispatch(&mut self, count @ [x, y, z]: [u32; 3]) {
+    unsafe fn dispatch_workgroups(&mut self, count @ [x, y, z]: [u32; 3]) {
         self.prepare_dispatch(count);
         unsafe { self.list.as_ref().unwrap().Dispatch(x, y, z) }
     }
 
-    unsafe fn dispatch_indirect(&mut self, buffer: &super::Buffer, offset: wgt::BufferAddress) {
+    unsafe fn dispatch_workgroups_indirect(
+        &mut self,
+        buffer: &super::Buffer,
+        offset: wgt::BufferAddress,
+    ) {
         if self
             .pass
             .layout
@@ -1851,5 +1885,36 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 conv::map_acceleration_structure_copy_mode(copy),
             )
         }
+    }
+
+    unsafe fn set_acceleration_structure_dependencies(
+        _command_buffers: &[&super::CommandBuffer],
+        _dependencies: &[&super::AccelerationStructure],
+    ) {
+    }
+
+    unsafe fn begin_ray_tracing_pass(&mut self, _desc: &crate::RayTracingPassDescriptor) {
+        unreachable!("Ray tracing pipelines not supported")
+    }
+
+    unsafe fn end_ray_tracing_pass(&mut self) {
+        unreachable!("Ray tracing pipelines not supported")
+    }
+
+    unsafe fn set_ray_tracing_pipeline(
+        &mut self,
+        _pipeline: &<Self::A as crate::Api>::RayTracingPipeline,
+    ) {
+        unreachable!("Ray tracing pipelines not supported")
+    }
+
+    unsafe fn trace_rays(
+        &mut self,
+        _count: [u32; 3],
+        _ray_generation_group_data: crate::PipelineGroupData<super::Buffer>,
+        _miss_group_data: crate::PipelineGroupData<super::Buffer>,
+        _intersection_group_data: crate::PipelineGroupData<super::Buffer>,
+    ) {
+        unreachable!("Ray tracing pipelines not supported")
     }
 }

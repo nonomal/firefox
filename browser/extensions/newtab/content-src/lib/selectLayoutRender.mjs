@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import {
+  isSpaceOverridden,
+  SPACE_IDS,
+} from "resource://newtab/common/PageLayoutVariants.mjs";
+
 export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
   const { layout, feeds, spocs } = state;
   let spocIndexPlacementMap = {};
@@ -81,7 +86,9 @@ export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
 
   // Filter sections is Recommended Stories are turned off
   const pocketEnabled =
-    prefs["feeds.section.topstories"] && prefs["feeds.system.topstories"];
+    (prefs["feeds.section.topstories"] ||
+      isSpaceOverridden(SPACE_IDS.STORIES, prefs)) &&
+    prefs["feeds.system.topstories"];
   if (!pocketEnabled) {
     filterArray.push(
       // Bug 1980459 - Do not remove Widgets if DS is disabled
@@ -93,15 +100,7 @@ export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
   function getMaxTiles(responsiveLayouts) {
     return responsiveLayouts
       .flatMap(responsiveLayout => responsiveLayout)
-      .reduce((acc, t) => {
-        acc[t.columnCount] = t.tiles.length;
-
-        // Update maxTile if current tile count is greater
-        if (!acc.maxTile || t.tiles.length > acc.maxTile) {
-          acc.maxTile = t.tiles.length;
-        }
-        return acc;
-      }, {});
+      .reduce((max, t) => Math.max(max, t.tiles.length), 0);
   }
 
   const placeholderComponent = component => {
@@ -184,7 +183,7 @@ export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
 
     result.forEach(section => {
       const { sectionKey } = section;
-      section.data = sectionsMap[sectionKey];
+      section.data = sectionsMap[sectionKey] || [];
     });
 
     return result;
@@ -252,15 +251,33 @@ export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
             sections: handleSections(data.sections, data.recommendations).map(
               section => {
                 const sectionsSpocsPositions = [];
-                section.layout.responsiveLayouts
-                  // Initial position for spocs is going to be for the smallest breakpoint.
-                  // We can then move it from there via breakpoints.
-                  .find(item => item.columnCount === 1)
-                  .tiles.forEach(tile => {
-                    if (tile.hasAd) {
-                      sectionsSpocsPositions.push({ index: tile.position });
-                    }
-                  });
+                const smallestBreakpointLayout =
+                  section.layout.responsiveLayouts
+                    // Initial position for spocs is going to be for the smallest breakpoint.
+                    // We can then move it from there via breakpoints.
+                    .find(item => item.columnCount === 1);
+
+                // A carousel fills one tile with several recommendations, so each
+                // tile after it reads from an index offset by the number of slides.
+                const carouselTile = smallestBreakpointLayout.tiles.find(
+                  tile => tile.carousel
+                );
+                const carouselSlideCount =
+                  prefs.trainhopConfig?.carousel?.slideCount ??
+                  prefs["discoverystream.carousel.slideCount"];
+                // The carousel's own tile accounts for one of those slides.
+                const carouselExtra = carouselTile ? carouselSlideCount - 1 : 0;
+
+                smallestBreakpointLayout.tiles.forEach(tile => {
+                  if (tile.hasAd && section.allowAds !== false) {
+                    const isAfterCarousel =
+                      carouselTile && tile.position > carouselTile.position;
+                    sectionsSpocsPositions.push({
+                      index:
+                        tile.position + (isAfterCarousel ? carouselExtra : 0),
+                    });
+                  }
+                });
                 return {
                   ...section,
                   data: handleSpocs(
@@ -304,7 +321,7 @@ export const selectLayoutRender = ({ state = {}, prefs = {} }) => {
       let currentPosition = 0;
       data.sections.forEach(section => {
         // We assume the count for the breakpoint with the most tiles.
-        const { maxTile } = getMaxTiles(section?.layout?.responsiveLayouts);
+        const maxTile = getMaxTiles(section?.layout?.responsiveLayouts);
         for (let i = 0; i < maxTile; i++) {
           if (section.data[i]) {
             section.data[i] = {

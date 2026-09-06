@@ -22,19 +22,14 @@ add_task(async function () {
   let alreadyFocused = false;
   let inRange = (val, min, max) => min <= val && val <= max;
   let tabBoundingRect = undefined;
+  let urlbarBoundingRect = undefined;
   for (let i = 1; i < frames.length; ++i) {
     let frame = frames[i],
       previousFrame = frames[i - 1];
     let rects = compareFrames(frame, previousFrame);
-    if (!alreadyFocused && isLikelyFocusChange(rects, frame)) {
-      todo(
-        false,
-        "bug 1445161 - the window should be focused at first paint, " +
-          rects.toSource()
-      );
-      continue;
-    }
-    alreadyFocused = true;
+
+    let expectedRects = [];
+    let focusRects = [];
 
     rects = rects.filter(rect => {
       let width = frame.width;
@@ -46,10 +41,14 @@ add_task(async function () {
         {
           name: "Shadow around active tab should not flicker on macOS (bug 1960967)",
           condition(r) {
+            if (Services.prefs.getBoolPref("browser.nova.enabled", false)) {
+              // The Nova redesign does not have a shadow around the active tab.
+              return false;
+            }
             const tabRect = tabBoundingRect
               ? tabBoundingRect
               : (tabBoundingRect = gBrowser.tabContainer
-                  .querySelector("tab[selected=true] .tab-background")
+                  .querySelector("tab[selected] .tab-background")
                   .getBoundingClientRect());
             return (
               inRange(r.x1, tabRect.x - 2, tabRect.x + 2) &&
@@ -59,32 +58,56 @@ add_task(async function () {
             );
           },
         },
+        {
+          name: "Pixel snapping on urlbar bottom border on MacOS & Windows",
+          condition(r) {
+            if (!urlbarBoundingRect) {
+              urlbarBoundingRect = document
+                .getElementById("urlbar")
+                .getBoundingClientRect();
+            }
+            return rectMatchesBottomBorder(r, urlbarBoundingRect);
+          },
+        },
       ];
 
       let rectText = `${rect.toSource()}, window width: ${width}`;
       for (let e of exceptions) {
         if (e.condition(rect)) {
           todo(false, e.name + ", " + rectText);
+          expectedRects.push(rect);
           return false;
         }
       }
 
-      ok(false, "unexpected changed rect: " + rectText);
+      if (!alreadyFocused) {
+        focusRects.push(rect);
+      }
       return true;
     });
+
+    if (!alreadyFocused && isLikelyFocusChange(focusRects, frame)) {
+      todo(
+        false,
+        "bug 1445161 - the window should be focused at first paint, " +
+          focusRects.toSource()
+      );
+      continue;
+    }
+    alreadyFocused = true;
+
     if (!rects.length) {
       info("ignoring identical frame");
       continue;
     }
 
-    // Before dumping a frame with unexpected differences for the first time,
-    // ensure at least one previous frame has been logged so that it's possible
-    // to see the differences when examining the log.
-    if (!unexpectedRects) {
-      dumpFrame(previousFrame);
+    for (let rect of rects) {
+      let rectText = `${rect.toSource()}, window width: ${frame.width}`;
+      ok(false, "unexpected changed rect: " + rectText);
     }
+
+    await reportFlickerWithAPNG(previousFrame, frame, i, expectedRects);
     unexpectedRects += rects.length;
-    dumpFrame(frame);
   }
   is(unexpectedRects, 0, "should have 0 unknown flickering areas");
 });

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -65,8 +63,8 @@
 
 /* All the XPConnect private declarations - only include locally. */
 
-#ifndef xpcprivate_h___
-#define xpcprivate_h___
+#ifndef xpcprivate_h_
+#define xpcprivate_h_
 
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
@@ -75,78 +73,71 @@
 #include "mozilla/CycleCollectedJSRuntime.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/DefineEnum.h"
+#include "mozilla/dom/ScriptSettings.h"
 #include "mozilla/HashFunctions.h"
 #include "mozilla/LinkedList.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
-#include "mozilla/PodOperations.h"
 #include "mozilla/mozalloc.h"
+#include "mozilla/PodOperations.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Vector.h"
 
-#include "mozilla/dom/ScriptSettings.h"
-
-#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 
+#include "MainThreadUtils.h"
+#include "nsBaseHashtable.h"
+#include "nsCOMArray.h"
+#include "nsCOMPtr.h"
+#include "nscore.h"
+#include "nsCycleCollectionParticipant.h"
+#include "nsDebug.h"
+#include "nsDeque.h"
+#include "nsHashKeys.h"
+#include "nsIClassInfoImpl.h"
+#include "nsIComponentManager.h"
+#include "nsIComponentRegistrar.h"
+#include "nsIConsoleService.h"
+#include "nsIObserver.h"
+#include "nsIPrincipal.h"
+#include "nsIScriptObjectPrincipal.h"
+#include "nsIScriptSecurityManager.h"
+#include "nsIServiceManager.h"
+#include "nsISimpleEnumerator.h"
+#include "nsISupports.h"
+#include "nsISupportsPrimitives.h"
+#include "nsIXPConnect.h"
+#include "nsIXPCScriptable.h"
+#include "nsJSPrincipals.h"
+#include "nsReadableUtils.h"
+#include "nsString.h"
+#include "nsTArray.h"
+#include "nsVariant.h"
+#include "nsWeakReference.h"
+#include "nsWrapperCache.h"
+#include "nsXPCOM.h"
+#include "nsXPTCUtils.h"
+#include "prcvar.h"
+#include "prenv.h"
+#include "SandboxPrivate.h"
+#include "SystemGlobal.h"
+#include "xpccomponents.h"
+#include "XPCForwards.h"
+#include "XPCLog.h"
+#include "xpcObjectHelper.h"
 #include "xpcpublic.h"
-#include "js/HashTable.h"
+#include "xptinfo.h"
+
+#include "js/friend/CycleCollector.h"
 #include "js/GCHashTable.h"
+#include "js/HashTable.h"
 #include "js/Object.h"              // JS::GetClass, JS::GetCompartment
 #include "js/PropertyAndElement.h"  // JS_DefineProperty
 #include "js/TracingAPI.h"
 #include "js/WeakMapPtr.h"
-#include "nscore.h"
-#include "nsXPCOM.h"
-#include "nsCycleCollectionParticipant.h"
-#include "nsDebug.h"
-#include "nsISupports.h"
-#include "nsIServiceManager.h"
-#include "nsIClassInfoImpl.h"
-#include "nsIComponentManager.h"
-#include "nsIComponentRegistrar.h"
-#include "nsISupportsPrimitives.h"
-#include "nsISimpleEnumerator.h"
-#include "nsIXPConnect.h"
-#include "nsIXPCScriptable.h"
-#include "nsIObserver.h"
-#include "nsWeakReference.h"
-#include "nsCOMPtr.h"
-#include "nsXPTCUtils.h"
-#include "xptinfo.h"
-#include "XPCForwards.h"
-#include "XPCLog.h"
-#include "xpccomponents.h"
-#include "prenv.h"
-#include "prcvar.h"
-#include "nsString.h"
-#include "nsReadableUtils.h"
-
-#include "MainThreadUtils.h"
-
-#include "nsIConsoleService.h"
-
-#include "nsVariant.h"
-#include "nsCOMArray.h"
-#include "nsTArray.h"
-#include "nsBaseHashtable.h"
-#include "nsHashKeys.h"
-#include "nsWrapperCache.h"
-#include "nsDeque.h"
-
-#include "nsIScriptSecurityManager.h"
-
-#include "nsIPrincipal.h"
-#include "nsJSPrincipals.h"
-#include "nsIScriptObjectPrincipal.h"
-#include "xpcObjectHelper.h"
-
-#include "SandboxPrivate.h"
-#include "SystemGlobal.h"
 
 #ifdef XP_WIN
 // Nasty MS defines
@@ -164,13 +155,6 @@ class AutoEntryScript;
 class Exception;
 }  // namespace dom
 }  // namespace mozilla
-
-/***************************************************************************/
-// data declarations...
-extern const char XPC_EXCEPTION_CONTRACTID[];
-extern const char XPC_CONSOLE_CONTRACTID[];
-extern const char XPC_SCRIPT_ERROR_CONTRACTID[];
-extern const char XPC_XPCONNECT_CONTRACTID[];
 
 /***************************************************************************/
 // Helper function.
@@ -227,12 +211,10 @@ class nsXPConnect final : public nsIXPConnect {
 
   void RecordTraversal(void* p, nsISupports* s);
 
- protected:
+ private:
+  nsXPConnect() = default;
   virtual ~nsXPConnect();
 
-  nsXPConnect();
-
- private:
   // Singleton instance
   static nsXPConnect* gSelf;
   static bool gOnceAliveNowDead;
@@ -378,10 +360,8 @@ class XPCJSContext final : public mozilla::CycleCollectedJSContext,
     IDX_INDEXEDDB,
     IDX_STRUCTUREDCLONE,
     IDX_LOCKS,
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     IDX_SUPPRESSED,
     IDX_ERROR,
-#endif
     IDX_TOTAL_COUNT  // just a count of the above
   };
 
@@ -479,7 +459,7 @@ class XPCJSRuntime final : public mozilla::CycleCollectedJSRuntime {
   bool InitializeStrings(JSContext* cx);
 
   virtual bool DescribeCustomObjects(JSObject* aObject, const JSClass* aClasp,
-                                     char (&aName)[72]) const override;
+                                     char (&aName)[512]) const override;
   virtual bool NoteCustomGCThingXPCOMChildren(
       const JSClass* aClasp, JSObject* aObj,
       nsCycleCollectionTraversalCallback& aCb) const override;
@@ -516,7 +496,6 @@ class XPCJSRuntime final : public mozilla::CycleCollectedJSRuntime {
   void DispatchDeferredDeletion(bool aContinuation,
                                 bool aPurge = false) override;
 
-  void CustomGCCallback(JSGCStatus status) override;
   void CustomOutOfMemoryCallback() override;
   void OnLargeAllocationFailure();
   static void GCSliceCallback(JSContext* cx, JS::GCProgress progress,
@@ -535,9 +514,6 @@ class XPCJSRuntime final : public mozilla::CycleCollectedJSRuntime {
   bool GCIsRunning() const { return mGCIsRunning; }
 
   ~XPCJSRuntime();
-
-  void AddGCCallback(xpcGCCallback cb);
-  void RemoveGCCallback(xpcGCCallback cb);
 
   JSObject* GetUAWidgetScope(JSContext* cx, nsIPrincipal* principal);
 
@@ -607,7 +583,6 @@ class XPCJSRuntime final : public mozilla::CycleCollectedJSRuntime {
   nsTArray<nsISupports*> mNativesToReleaseArray;
   bool mDoingFinalization;
   mozilla::LinkedList<nsXPCWrappedJS> mSubjectToFinalizationWJS;
-  nsTArray<xpcGCCallback> extraGCCallbacks;
   JS::GCSliceCallback mPrevGCSliceCallback;
   JS::DoCycleCollectionCallback mPrevDoCycleCollectionCallback;
   mozilla::WeakPtr<SandboxPrivate> mUnprivilegedJunkScope;
@@ -799,8 +774,6 @@ class XPCWrappedNativeScope final
   bool GetComponentsJSObject(JSContext* cx, JS::MutableHandleObject obj);
 
   JSObject* GetExpandoChain(JS::HandleObject target);
-
-  JSObject* DetachExpandoChain(JS::HandleObject target);
 
   bool SetExpandoChain(JSContext* cx, JS::HandleObject target,
                        JS::HandleObject chain);
@@ -1172,6 +1145,10 @@ class XPCNativeSet final {
   static void DestroyInstance(XPCNativeSet* inst);
 
  private:
+  // The number of interfaces a set can hold is bounded by the width of
+  // mInterfaceCount.
+  static constexpr size_t kMaxInterfaceCount = UINT16_MAX;
+
   uint16_t mInterfaceCount;
   // Always last - object sized for array.
   // These are strong references.
@@ -2182,6 +2159,7 @@ struct GlobalProperties {
   bool Blob : 1;
   bool ChromeUtils : 1;
   bool CSS : 1;
+  bool CSSPositionTryDescriptors : 1;
   bool CSSRule : 1;
   bool CustomStateSet : 1;
   bool Directory : 1;
@@ -2256,6 +2234,7 @@ class MOZ_STACK_CLASS OptionsBase {
   bool ParseValue(const char* name, JS::MutableHandleValue prop,
                   bool* found = nullptr);
   bool ParseBoolean(const char* name, bool* prop);
+  bool ParseOptionalBoolean(const char* name, mozilla::Maybe<bool>& prop);
   bool ParseObject(const char* name, JS::MutableHandleObject prop);
   bool ParseJSString(const char* name, JS::MutableHandleString prop);
   bool ParseString(const char* name, nsCString& prop);
@@ -2279,6 +2258,7 @@ class MOZ_STACK_CLASS SandboxOptions : public OptionsBase {
         wantExportHelpers(false),
         isWebExtensionContentScript(false),
         proto(cx),
+        associatedWindow(cx),
         sameZoneAs(cx),
         forceSecureContext(false),
         freshCompartment(false),
@@ -2299,10 +2279,12 @@ class MOZ_STACK_CLASS SandboxOptions : public OptionsBase {
   bool wantExportHelpers;
   bool isWebExtensionContentScript;
   JS::RootedObject proto;
+  JS::RootedObject associatedWindow;
   mozilla::Maybe<nsString> sandboxContentSecurityPolicy;
   nsCString sandboxName;
   JS::RootedObject sameZoneAs;
   bool forceSecureContext;
+  mozilla::Maybe<bool> freezeBuiltins;
   bool freshCompartment;
   bool freshZone;
   bool isUAWidgetScope;
@@ -2836,4 +2818,4 @@ void xpc_DelocalizeRuntime(JSRuntime* rt);
 
 /***************************************************************************/
 
-#endif /* xpcprivate_h___ */
+#endif /* xpcprivate_h_ */

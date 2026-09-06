@@ -6,9 +6,9 @@
 /** @import { DeferredTask } from "../../../modules/DeferredTask.sys.mjs" */
 /** @import { OpenedConnection, Sqlite } from "../../../modules/Sqlite.sys.mjs" */
 
-const lazy = {};
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
   ExperimentAPI: "resource://nimbus/ExperimentAPI.sys.mjs",
   NimbusTelemetry: "resource://nimbus/lib/Telemetry.sys.mjs",
@@ -16,13 +16,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///toolkit/profile/ProfilesDatastoreService.sys.mjs",
   RemoteSettingsSyncError:
     "resource://nimbus/lib/RemoteSettingsExperimentLoader.sys.mjs",
-});
 
-ChromeUtils.defineLazyGetter(lazy, "log", () => {
-  const { Logger } = ChromeUtils.importESModule(
-    "resource://messaging-system/lib/Logger.sys.mjs"
-  );
-  return new Logger("NimbusEnrollments");
+  log: () => {
+    const { Logger } = ChromeUtils.importESModule(
+      "resource://messaging-system/lib/Logger.sys.mjs"
+    );
+    return new Logger("NimbusEnrollments");
+  },
 });
 
 /**
@@ -101,7 +101,7 @@ export class PendingWrites {
     //
     // We explicitly check for the presence of the value, not the key, in case
     // this is a re-enrollment following an unenrollment.
-    if (!this.enrollments.get(slug)) {
+    if (!this.enrollments.has(slug) || recipe) {
       this.enrollments.set(slug, recipe);
     }
   }
@@ -283,7 +283,8 @@ export class NimbusEnrollments {
       if (typeof timestamp !== "number" || isNaN(timestamp) || timestamp < 0) {
         throw new lazy.RemoteSettingsSyncError(
           collection,
-          lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason.INVALID_LAST_MODIFIED
+          lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason
+            .INVALID_LAST_MODIFIED
         );
       } else if (
         typeof lastTimestamp === "undefined" ||
@@ -492,7 +493,7 @@ export class NimbusEnrollments {
             unenrollReason = excluded.unenrollReason,
             lastSeen = excluded.lastSeen,
             setPrefs = excluded.setPrefs,
-            prefFlips = excluded.setPrefs,
+            prefFlips = excluded.prefFlips,
             source = excluded.source;
         `,
         {
@@ -628,15 +629,17 @@ export class NimbusEnrollments {
   /**
    * Whether or not reading from the NimbusEnrollments table is enabled.
    *
-   * This is true by default in Nightly, except in xpcshell tests.
+   * This is true by default except in xpcshell tests.
    */
   static get readFromDatabaseEnabled() {
-    // TODO(bug 1972426): Enable this behaviour by default and remove this pref.
+    // TODO(bug 1967779): require the ProfilesDatastoreService to be initialized
+    // and remove this.
     return DATABASE_ENABLED && READ_FROM_DATABASE_ENABLED;
   }
 
   static get syncEnrollmentsEnabled() {
-    // TODO(bug 1956087): Enable this behaviour by default and remove this pref.
+    // TODO(bug 1967779): require the ProfilesDatastoreService to be initialized
+    // and remove this.
     return (
       DATABASE_ENABLED && READ_FROM_DATABASE_ENABLED && SYNC_ENROLLMENTS_ENABLED
     );
@@ -736,6 +739,50 @@ export class NimbusEnrollments {
     lazy.log.debug(`Loaded ${enrollments.length} enrollments`);
 
     return Object.fromEntries(enrollments);
+  }
+
+  /**
+   * Load third-party opt-in recipes from the database.
+   *
+   * Only opt-ins that are not from Remote Settings will be loaded (e.g., this
+   * will load the opt-ins provided by nimbus-devtools).
+   *
+   * @returns {Promise<object[]>} The third-party opt-in recipes.
+   */
+  static async loadThirdPartyOptInRecipes() {
+    // We only load third-party opt-ins (e.g., Nimbus Devtools, force
+    // enrollment) because the RemoteSettingsExperimentLoader will update the
+    // list with its opt-ins at enable time.
+    function processRow(row) {
+      const recipe = JSON.parse(row.getResultByName("recipe"));
+      const source = row.getResultByName("source");
+
+      return { recipe, source };
+    }
+
+    const conn = await lazy.ProfilesDatastoreService.getConnection();
+    const rows = await conn.execute(
+      `
+      SELECT
+        json(recipe) AS recipe,
+        source
+      FROM NimbusEnrollments
+      WHERE
+            profileId = :profileId
+        AND recipe ->> "$.isFirefoxLabsOptIn"
+        AND (
+                 NOT (recipe ->> "$.isEnrollmentPaused")
+              OR active
+        )
+        AND source != :source;
+      `,
+      {
+        profileId: lazy.ExperimentAPI.profileId,
+        source: lazy.NimbusTelemetry.EnrollmentSource.RS_LOADER,
+      }
+    );
+
+    return rows.map(processRow);
   }
 
   /**

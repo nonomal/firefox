@@ -10,9 +10,10 @@ use std::{
     ops::{Deref, Div as _},
 };
 
-use neqo_common::{qtrace, Header};
+use neqo_common::{Header, qtrace};
 
 use crate::{
+    Error, Res,
     prefix::{
         BASE_PREFIX_NEGATIVE, BASE_PREFIX_POSITIVE, HEADER_FIELD_INDEX_DYNAMIC,
         HEADER_FIELD_INDEX_DYNAMIC_POST, HEADER_FIELD_INDEX_STATIC,
@@ -20,15 +21,14 @@ use crate::{
         HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC_POST, HEADER_FIELD_LITERAL_NAME_REF_STATIC,
         NO_PREFIX,
     },
-    qpack_send_buf::Data,
-    reader::{parse_utf8, ReceiverBufferWrapper},
-    table::HeaderTable,
-    Error, Res,
+    qpack_send_buf::Encoder as _,
+    reader::{LiteralReader, ReceiverBufferWrapper, parse_utf8},
+    table::{ADDITIONAL_TABLE_ENTRY_SIZE, DynamicTableEntry, HeaderTable},
 };
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct HeaderEncoder {
-    buf: Data,
+    buf: neqo_common::Encoder,
     base: u64,
     use_huffman: bool,
     max_entries: u64,
@@ -44,7 +44,7 @@ impl Display for HeaderEncoder {
 impl HeaderEncoder {
     pub fn new(base: u64, use_huffman: bool, max_entries: u64) -> Self {
         Self {
-            buf: Data::default(),
+            buf: neqo_common::Encoder::default(),
             base,
             use_huffman,
             max_entries,
@@ -58,7 +58,7 @@ impl HeaderEncoder {
             .encode_prefixed_encoded_int(HEADER_FIELD_INDEX_STATIC, index);
     }
 
-    fn new_ref(&mut self, index: u64) {
+    const fn new_ref(&mut self, index: u64) {
         if let Some(r) = self.max_dynamic_index_ref {
             if r < index {
                 self.max_dynamic_index_ref = Some(index);
@@ -81,7 +81,9 @@ impl HeaderEncoder {
     }
 
     pub fn encode_literal_with_name_ref(&mut self, is_static: bool, index: u64, value: &[u8]) {
-        qtrace!("[{self}] encode literal with name ref - index={index}, static={is_static}, value={value:x?}");
+        qtrace!(
+            "[{self}] encode literal with name ref - index={index}, static={is_static}, value={value:x?}"
+        );
         if is_static {
             self.buf
                 .encode_prefixed_encoded_int(HEADER_FIELD_LITERAL_NAME_REF_STATIC, index);
@@ -139,14 +141,14 @@ impl HeaderEncoder {
             .encode_prefixed_encoded_int(NO_PREFIX, enc_insert_cnt);
         self.buf.encode_prefixed_encoded_int(prefix, delta);
 
-        self.buf.write_bytes(&tmp);
+        self.buf.encode(tmp);
     }
 }
 
 impl Deref for HeaderEncoder {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
-        &self.buf
+        self.buf.as_ref()
     }
 }
 
@@ -208,47 +210,42 @@ impl<'a> HeaderDecoder<'a> {
             return Ok(HeaderDecoderResult::Blocked(self.req_insert_cnt));
         }
         let mut h: Vec<Header> = Vec::new();
+        let mut remaining = LiteralReader::MAX_LEN;
 
         while !self.buf.done() {
             let b = Error::map_error(self.buf.peek(), Error::Decompression)?;
-            if HEADER_FIELD_INDEX_STATIC.cmp_prefix(b) {
-                h.push(Error::map_error(
-                    self.read_indexed_static(),
-                    Error::Decompression,
-                )?);
+            let header = if HEADER_FIELD_INDEX_STATIC.cmp_prefix(b) {
+                Error::map_error(self.read_indexed_static(), Error::Decompression)?
             } else if HEADER_FIELD_INDEX_DYNAMIC.cmp_prefix(b) {
-                h.push(Error::map_error(
-                    self.read_indexed_dynamic(table),
-                    Error::Decompression,
-                )?);
+                Error::map_error(self.read_indexed_dynamic(table), Error::Decompression)?
             } else if HEADER_FIELD_INDEX_DYNAMIC_POST.cmp_prefix(b) {
-                h.push(Error::map_error(
-                    self.read_indexed_dynamic_post(table),
-                    Error::Decompression,
-                )?);
+                Error::map_error(self.read_indexed_dynamic_post(table), Error::Decompression)?
             } else if HEADER_FIELD_LITERAL_NAME_REF_STATIC.cmp_prefix(b) {
-                h.push(Error::map_error(
+                Error::map_error(
                     self.read_literal_with_name_ref_static(),
                     Error::Decompression,
-                )?);
+                )?
             } else if HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC.cmp_prefix(b) {
-                h.push(Error::map_error(
+                Error::map_error(
                     self.read_literal_with_name_ref_dynamic(table),
                     Error::Decompression,
-                )?);
+                )?
             } else if HEADER_FIELD_LITERAL_NAME_LITERAL.cmp_prefix(b) {
-                h.push(Error::map_error(
-                    self.read_literal_with_name_literal(),
-                    Error::Decompression,
-                )?);
+                Error::map_error(self.read_literal_with_name_literal(), Error::Decompression)?
             } else if HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC_POST.cmp_prefix(b) {
-                h.push(Error::map_error(
+                Error::map_error(
                     self.read_literal_with_name_ref_dynamic_post(table),
                     Error::Decompression,
-                )?);
+                )?
             } else {
                 unreachable!("All prefixes are covered");
-            }
+            };
+            remaining = remaining
+                .checked_sub(
+                    header.name().len() + header.value().len() + ADDITIONAL_TABLE_ENTRY_SIZE,
+                )
+                .ok_or(Error::Decompression)?;
+            h.push(header);
         }
 
         qtrace!("[{self}] done decoding header block");
@@ -303,6 +300,9 @@ impl<'a> HeaderDecoder<'a> {
                 }
                 req_insert_cnt -= full_range;
             }
+            if req_insert_cnt == 0 {
+                return Err(Error::Decompression);
+            }
             Ok(req_insert_cnt)
         }
     }
@@ -316,12 +316,30 @@ impl<'a> HeaderDecoder<'a> {
         Ok(Header::new(parse_utf8(entry.name())?, entry.value()))
     }
 
+    /// Resolve a dynamic-table reference from a field line representation. A reference
+    /// whose absolute index is at or above the Required Insert Count is a decoding error
+    /// per RFC 9204, Section 2.2.3, even when the entry is still present in the table
+    /// because later insertions arrived. This also covers Section 2.2.1: such a reference
+    /// means the declared Required Insert Count was smaller than the block actually needs.
+    fn dynamic_entry<'t>(
+        &self,
+        table: &'t HeaderTable,
+        index: u64,
+        post: bool,
+    ) -> Res<&'t DynamicTableEntry> {
+        let entry = table.get_dynamic(index, self.base, post)?;
+        if entry.index() >= self.req_insert_cnt {
+            return Err(Error::Decompression);
+        }
+        Ok(entry)
+    }
+
     fn read_indexed_dynamic(&mut self, table: &HeaderTable) -> Res<Header> {
         let index = self
             .buf
             .read_prefixed_int(HEADER_FIELD_INDEX_DYNAMIC.len())?;
         qtrace!("[{self}] decoder dynamic indexed {index}");
-        let entry = table.get_dynamic(index, self.base, false)?;
+        let entry = self.dynamic_entry(table, index, false)?;
         Ok(Header::new(parse_utf8(entry.name())?, entry.value()))
     }
 
@@ -330,7 +348,7 @@ impl<'a> HeaderDecoder<'a> {
             .buf
             .read_prefixed_int(HEADER_FIELD_INDEX_DYNAMIC_POST.len())?;
         qtrace!("[{self}] decode post-based {index}");
-        let entry = table.get_dynamic(index, self.base, true)?;
+        let entry = self.dynamic_entry(table, index, true)?;
         Ok(Header::new(parse_utf8(entry.name())?, entry.value()))
     }
 
@@ -355,7 +373,7 @@ impl<'a> HeaderDecoder<'a> {
             .read_prefixed_int(HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC.len())?;
 
         Ok(Header::new(
-            parse_utf8(table.get_dynamic(index, self.base, false)?.name())?,
+            parse_utf8(self.dynamic_entry(table, index, false)?.name())?,
             self.buf.read_literal_from_buffer(0)?,
         ))
     }
@@ -368,7 +386,7 @@ impl<'a> HeaderDecoder<'a> {
             .read_prefixed_int(HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC_POST.len())?;
 
         Ok(Header::new(
-            parse_utf8(table.get_dynamic(index, self.base, true)?.name())?,
+            parse_utf8(self.dynamic_entry(table, index, true)?.name())?,
             self.buf.read_literal_from_buffer(0)?,
         ))
     }
@@ -391,7 +409,10 @@ impl<'a> HeaderDecoder<'a> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
 
-    use super::{HeaderDecoder, HeaderDecoderResult, HeaderEncoder, HeaderTable};
+    use super::{
+        ADDITIONAL_TABLE_ENTRY_SIZE, HeaderDecoder, HeaderDecoderResult, HeaderEncoder,
+        HeaderTable, LiteralReader,
+    };
     use crate::Error;
 
     const INDEX_STATIC_TEST: &[(u64, &[u8], &str, &str)] = &[
@@ -924,5 +945,104 @@ mod tests {
             Error::Decompression,
             decoder_h.decode_header_block(&table, 1000, 0).unwrap_err()
         );
+    }
+
+    /// RFC 9204 Section 2.2.3: a field line that references a dynamic table entry
+    /// whose absolute index is at or above the declared Required Insert Count is a
+    /// decoding error, even when a later insertion has left that entry in the table.
+    #[test]
+    fn reference_at_or_above_required_insert_count() {
+        let mut table = HeaderTable::new(false);
+        table.set_capacity(10000).unwrap();
+        table.insert(b"header0", b"0").unwrap(); // absolute index 0
+        table.insert(b"header1", b"1").unwrap(); // absolute index 1
+        assert_eq!(table.base(), 2);
+
+        // Required Insert Count = 1 (only absolute index 0 may be referenced), Base = 2,
+        // then an indexed dynamic reference that resolves to absolute index 1.
+        let mut decoder_h = HeaderDecoder::new(&[0x02, 0x01, 0x80]);
+        assert_eq!(
+            Error::Decompression,
+            decoder_h.decode_header_block(&table, 1000, 2).unwrap_err()
+        );
+
+        // The same reference decodes once the Required Insert Count admits it:
+        // Required Insert Count = 2, Base = 2, indexed dynamic reference to index 1.
+        let mut decoder_h = HeaderDecoder::new(&[0x03, 0x00, 0x80]);
+        if let HeaderDecoderResult::Headers(result) =
+            decoder_h.decode_header_block(&table, 1000, 2).unwrap()
+        {
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name(), "header1");
+        } else {
+            panic!("No headers");
+        }
+    }
+
+    /// RFC 9204 Section 4.5.1.1: a non-zero Encoded Insert Count that
+    /// reconstructs to a Required Insert Count of 0 is a decoding error.
+    /// A value of 1 maps to a value of 0, which is invalid unless the
+    /// value has wrapped, which this test doesn't cover.
+    #[test]
+    fn req_insert_count_reconstructed_to_zero() {
+        let table = HeaderTable::new(false);
+        let mut decoder_h = HeaderDecoder::new(&[0x01, 0x00]);
+        assert_eq!(
+            Error::Decompression,
+            decoder_h.decode_header_block(&table, 1000, 0).unwrap_err()
+        );
+
+        // An Encoded Insert Count of 0 legitimately means no dynamic references
+        // and still decodes to an empty field section.
+        let mut decoder_h = HeaderDecoder::new(&[0x00, 0x00]);
+        assert_eq!(
+            HeaderDecoderResult::Headers(Vec::new()),
+            decoder_h.decode_header_block(&table, 1000, 0).unwrap()
+        );
+    }
+
+    /// A header block that references the same static table entry many times must be
+    /// rejected before exhausting memory.
+    #[test]
+    fn header_list_size_limit() {
+        let table = HeaderTable::new(false);
+        // 0xC0 = HEADER_FIELD_INDEX_STATIC with index 0 (:authority, "").
+        let entry_size = ":authority".len() + ADDITIONAL_TABLE_ENTRY_SIZE;
+        let reps = LiteralReader::MAX_LEN / entry_size + 1;
+        // Prefix: required_insert_cnt=0, base_delta=0 (2 bytes: 0x00, 0x00)
+        let mut buf = vec![0x00u8, 0x00];
+        buf.resize(buf.len() + reps, 0xC0);
+        let mut decoder_h = HeaderDecoder::new(&buf);
+        assert_eq!(
+            Error::Decompression,
+            decoder_h.decode_header_block(&table, 1000, 0).unwrap_err()
+        );
+    }
+
+    /// Truncated input for each header-block prefix type must propagate as
+    /// `Error::Decompression`. Each byte sets the maximum value for its prefix's
+    /// integer field, forcing a continuation byte that is not present.
+    #[test]
+    fn decode_truncated_for_each_prefix() {
+        const TRUNCATED_PREFIXES: &[u8] = &[
+            0xFF, // HEADER_FIELD_INDEX_STATIC
+            0xBF, // HEADER_FIELD_INDEX_DYNAMIC
+            0x1F, // HEADER_FIELD_INDEX_DYNAMIC_POST
+            0x5F, // HEADER_FIELD_LITERAL_NAME_REF_STATIC
+            0x4F, // HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC
+            0x3F, // HEADER_FIELD_LITERAL_NAME_LITERAL
+            0x07, // HEADER_FIELD_LITERAL_NAME_REF_DYNAMIC_POST
+        ];
+        let mut table = HeaderTable::new(false);
+        fill_table(&mut table);
+        for &prefix in TRUNCATED_PREFIXES {
+            let buf = [0x00, 0x00, prefix];
+            let mut decoder_h = HeaderDecoder::new(&buf);
+            assert_eq!(
+                Error::Decompression,
+                decoder_h.decode_header_block(&table, 1000, 0).unwrap_err(),
+                "prefix {prefix:#04x}"
+            );
+        }
     }
 }

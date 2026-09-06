@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -27,8 +25,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "jsnum.h"
-
+#include "builtin/Number.h"
 #include "frontend/FrontendContext.h"
 #include "frontend/Parser.h"
 #include "frontend/ParserAtom.h"
@@ -1614,13 +1611,10 @@ bool TokenStreamCharsBase<Unit>::addLineOfContext(ErrorMetadata* err,
     static_assert(std::is_same_v<Unit, Utf8Unit>, "should only see UTF-8 here");
 
     bool simple = utf16WindowLength == encodedWindowLength;
-#ifdef DEBUG
-    auto isAscii = [](Unit u) { return IsAscii(u); };
     MOZ_ASSERT(std::all_of(encodedWindow, encodedWindow + encodedWindowLength,
-                           isAscii) == simple,
+                           [](Unit u) { return IsAscii(u); }) == simple,
                "equal window lengths in UTF-8 should correspond only to "
                "wholly-ASCII text");
-#endif
     if (simple) {
       err->tokenOffset = encodedTokenOffset;
       err->lineLength = encodedWindowLength;

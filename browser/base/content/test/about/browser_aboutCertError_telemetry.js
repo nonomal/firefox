@@ -3,14 +3,27 @@
 
 "use strict";
 
-requestLongerTimeout(2);
+requestLongerTimeout(4);
 
 const BAD_CERT = "https://expired.example.com/";
 const BAD_STS_CERT =
   "https://badchain.include-subdomains.pinning.example.com:443";
 
-add_task(async function checkTelemetryClickEvents() {
+function gleanClickMetric(object) {
+  return Glean.securityUiCerterror[
+    "click" +
+      object
+        .split("_")
+        .map(word => word[0].toUpperCase() + word.slice(1))
+        .join("")
+  ];
+}
+
+async function checkTelemetryClickEvents(useFelt) {
   info("Loading a bad cert page and verifying telemetry click events arrive.");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", useFelt]],
+  });
 
   let oldCanRecord = Services.telemetry.canRecordExtended;
   Services.telemetry.canRecordExtended = true;
@@ -47,80 +60,101 @@ add_task(async function checkTelemetryClickEvents() {
       "error_code_link",
       "clipboard_button_top",
       "clipboard_button_bot",
-      "return_button_top",
     ];
+
+    const mapRecordObjectsFelt = {
+      advanced_button: "advancedButton",
+      learn_more_link: "learnMoreLink",
+      error_code_link: "errorCode",
+      clipboard_button_top: "copyButtonTop",
+      clipboard_button_bot: "copyButtonBot",
+      return_button_adv: "returnButton",
+      exception_button: "exceptionButton",
+    };
 
     recordedObjects.push("return_button_adv");
     if (!useFrame) {
       recordedObjects.push("exception_button");
     }
+    if (!useFelt) {
+      recordedObjects.push("return_button_top");
+    }
 
     for (let object of recordedObjects) {
+      await Services.fog.testFlushAllChildren();
+      Services.fog.testResetFOG();
+
       let tab = await openErrorPage(BAD_CERT, useFrame);
       let browser = tab.linkedBrowser;
-
-      let loadEvents = await TestUtils.waitForCondition(() => {
-        let events = Services.telemetry.snapshotEvents(
-          Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
-          true
-        ).content;
-        if (events && events.length) {
-          events = events.filter(
-            e => e[1] == "security.ui.certerror" && e[2] == "load"
-          );
-          if (
-            events.length == 1 &&
-            events[0][5].is_frame == useFrame.toString()
-          ) {
-            return events;
-          }
-        }
-        return null;
-      }, "recorded telemetry for the load");
-
-      is(
-        loadEvents.length,
-        1,
-        `recorded telemetry for the load testing ${object}, useFrame: ${useFrame}`
-      );
 
       let bc = browser.browsingContext;
       if (useFrame) {
         bc = bc.children[0];
       }
 
-      await SpecialPowers.spawn(bc, [object], async function (objectId) {
-        let doc = content.document;
+      await SpecialPowers.spawn(
+        bc,
+        [object, useFelt, mapRecordObjectsFelt],
+        async function (objectId, use_felt, mapFelt) {
+          let doc = content.document;
 
-        await ContentTaskUtils.waitForCondition(
-          () => doc.body.classList.contains("certerror"),
-          "Wait for certerror to be loaded"
-        );
+          if (use_felt) {
+            const netErrorCard =
+              doc.querySelector("net-error-card").wrappedJSObject;
+            const advancedButton = netErrorCard.advancedButton;
+            if (
+              !netErrorCard.advancedContainer &&
+              objectId !== "advanced_button"
+            ) {
+              advancedButton.scrollIntoView(true);
+              EventUtils.synthesizeMouseAtCenter(advancedButton, {}, content);
 
-        let domElement = doc.querySelector(`[data-telemetry-id='${objectId}']`);
-        domElement.click();
-      });
-
-      let clickEvents = await TestUtils.waitForCondition(() => {
-        let events = Services.telemetry.snapshotEvents(
-          Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
-          true
-        ).content;
-        if (events && events.length) {
-          events = events.filter(
-            e =>
-              e[1] == "security.ui.certerror" &&
-              e[2] == "click" &&
-              e[3] == object
-          );
-          if (
-            events.length == 1 &&
-            events[0][5].is_frame == useFrame.toString()
-          ) {
-            return events;
+              await ContentTaskUtils.waitForCondition(
+                () => netErrorCard.advancedContainer,
+                "Advanced section should be rendered for revoked certificate"
+              );
+            }
+            if (
+              ["clipboard_button_top", "clipboard_button_bot"].includes(
+                objectId
+              )
+            ) {
+              netErrorCard.errorCode.click();
+              await ContentTaskUtils.waitForCondition(
+                () => netErrorCard[mapFelt[objectId]],
+                "Wait for component to render."
+              );
+            }
+            if (objectId === "exception_button") {
+              await ContentTaskUtils.waitForCondition(
+                () =>
+                  netErrorCard.exceptionButton &&
+                  !netErrorCard.exceptionButton.disabled,
+                "Wait for the exception button to be created."
+              );
+            }
+            const el = netErrorCard[mapFelt[objectId]];
+            el.scrollIntoView(true);
+            EventUtils.synthesizeMouse(el, 2, 2, {}, content);
+          } else {
+            await ContentTaskUtils.waitForCondition(
+              () => doc.body.classList.contains("certerror"),
+              "Wait for certerror to be loaded"
+            );
+            let domElement = doc.querySelector(
+              `[data-telemetry-id='${objectId}']`
+            );
+            domElement.click();
           }
         }
-        return null;
+      );
+
+      let clickEvents = await TestUtils.waitForCondition(async () => {
+        await Services.fog.testFlushAllChildren();
+        let events = gleanClickMetric(object)
+          .testGetValue()
+          ?.filter(e => e.extra.is_frame == useFrame.toString());
+        return events?.length == 1 ? events : null;
       }, "Has captured telemetry events.");
 
       is(
@@ -147,5 +181,11 @@ add_task(async function checkTelemetryClickEvents() {
 
       BrowserTestUtils.removeTab(gBrowser.selectedTab);
     }
+  }
+}
+
+add_task(async function runCheckTelemetryClickEvents() {
+  for (const useFelt of [true, false]) {
+    await checkTelemetryClickEvents(useFelt);
   }
 });

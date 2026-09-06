@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,7 +10,9 @@
 #include "mozilla/ClipboardContentAnalysisChild.h"
 #include "mozilla/ClipboardReadRequestChild.h"
 #include "mozilla/Span.h"
+#include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_dom.h"
+#include "mozilla/dom/AutoSuppressEventHandlingAndSuspend.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/DOMStringList.h"
@@ -48,6 +48,7 @@
 #include "nsISupportsPrimitives.h"
 #include "nsIXPConnect.h"
 #include "nsNetUtil.h"
+#include "nsPIDOMWindowInlines.h"
 #include "nsPresContext.h"
 #include "nsQueryObject.h"
 #include "nsReadableUtils.h"
@@ -55,6 +56,16 @@
 #include "nsVariant.h"
 
 namespace mozilla::dom {
+
+// The order of the types matters. `kFileMime` needs to be one of the first
+// two types. And the order should be the same as the types order defined in
+// MandatoryDataTypesAsCStrings() for Clipboard API.
+static constexpr nsLiteralCString kNonPlainTextExternalFormats[] = {
+    nsLiteralCString(kCustomTypesMime), nsLiteralCString(kFileMime),
+    nsLiteralCString(kHTMLMime),        nsLiteralCString(kRTFMime),
+    nsLiteralCString(kURLMime),         nsLiteralCString(kURLDataMime),
+    nsLiteralCString(kTextMime),        nsLiteralCString(kPNGImageMime),
+    nsLiteralCString(kPDFJSMime)};
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(DataTransfer)
 
@@ -181,6 +192,36 @@ DataTransfer::DataTransfer(nsISupports* aParent, EventMessage aEventMessage,
                        "Failed to set given string to the DataTransfer object");
 }
 
+DataTransfer::DataTransfer(nsISupports* aParent,
+                           nsIClipboard::ClipboardType aClipboardType,
+                           nsIClipboardDataSnapshot* aClipboardDataSnapshot)
+    : mParent(aParent),
+      mEventMessage(ePaste),
+      mMode(ModeForEvent(ePaste)),
+      mClipboardType(Some(aClipboardType)) {
+  MOZ_ASSERT(aClipboardDataSnapshot);
+
+  mClipboardDataSnapshot = aClipboardDataSnapshot;
+  mItems = new DataTransferItemList(this);
+
+  AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats)> flavors;
+  if (NS_FAILED(aClipboardDataSnapshot->GetFlavorList(flavors))) {
+    NS_WARNING("nsIClipboardDataSnapshot::GetFlavorList() failed");
+    return;
+  }
+
+  // Order is important for DataTransfer; ensure the returned list items follow
+  // the sequence specified in kNonPlainTextExternalFormats.
+  AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats)> typesArray;
+  for (const auto& format : kNonPlainTextExternalFormats) {
+    if (flavors.Contains(format)) {
+      typesArray.AppendElement(format);
+    }
+  }
+
+  CacheExternalData(typesArray, nsContentUtils::GetSystemPrincipal());
+}
+
 DataTransfer::DataTransfer(
     nsISupports* aParent, EventMessage aEventMessage,
     const uint32_t aEffectAllowed, bool aCursorState, bool aIsExternal,
@@ -233,6 +274,110 @@ already_AddRefed<DataTransfer> DataTransfer::Constructor(
 JSObject* DataTransfer::WrapObject(JSContext* aCx,
                                    JS::Handle<JSObject*> aGivenProto) {
   return DataTransfer_Binding::Wrap(aCx, this, aGivenProto);
+}
+
+namespace {
+
+class ClipboardGetDataSnapshotCallback final
+    : public nsIClipboardGetDataSnapshotCallback {
+ public:
+  ClipboardGetDataSnapshotCallback(nsIGlobalObject* aGlobal,
+                                   nsIClipboard::ClipboardType aClipboardType)
+      : mGlobal(aGlobal), mClipboardType(aClipboardType) {}
+
+  // This object will never be held by a cycle-collected object, so it doesn't
+  // need to be cycle-collected despite holding alive cycle-collected objects.
+  NS_DECL_ISUPPORTS
+
+  // nsIClipboardGetDataSnapshotCallback
+  NS_IMETHOD OnSuccess(
+      nsIClipboardDataSnapshot* aClipboardDataSnapshot) override {
+    MOZ_ASSERT(aClipboardDataSnapshot);
+    mDataTransfer = MakeRefPtr<DataTransfer>(
+        ToSupports(mGlobal), mClipboardType, aClipboardDataSnapshot);
+    mComplete = true;
+    return NS_OK;
+  }
+
+  NS_IMETHOD OnError(nsresult aResult) override {
+    mComplete = true;
+    return NS_OK;
+  }
+
+  already_AddRefed<DataTransfer> TakeDataTransfer() {
+    MOZ_ASSERT(mComplete);
+    return mDataTransfer.forget();
+  }
+
+  bool IsComplete() const { return mComplete; }
+
+ protected:
+  ~ClipboardGetDataSnapshotCallback() {
+    MOZ_ASSERT(!mDataTransfer);
+    MOZ_ASSERT(mComplete);
+  };
+
+  nsCOMPtr<nsIGlobalObject> mGlobal;
+  RefPtr<DataTransfer> mDataTransfer;
+  nsIClipboard::ClipboardType mClipboardType;
+  bool mComplete = false;
+};
+
+NS_IMPL_ISUPPORTS(ClipboardGetDataSnapshotCallback,
+                  nsIClipboardGetDataSnapshotCallback)
+
+}  // namespace
+
+// static
+already_AddRefed<DataTransfer>
+DataTransfer::WaitForClipboardDataSnapshotAndCreate(
+    nsPIDOMWindowOuter* aWindow, nsIPrincipal* aSubjectPrincipal) {
+  MOZ_ASSERT(aWindow);
+  MOZ_ASSERT(aSubjectPrincipal);
+
+  nsCOMPtr<nsIClipboard> clipboardService =
+      do_GetService("@mozilla.org/widget/clipboard;1");
+  if (!clipboardService) {
+    return nullptr;
+  }
+
+  BrowsingContext* bc = aWindow->GetBrowsingContext();
+  if (!bc) {
+    return nullptr;
+  }
+
+  WindowContext* wc = bc->GetCurrentWindowContext();
+  if (!wc) {
+    return nullptr;
+  }
+
+  Document* doc = wc->GetExtantDoc();
+  if (!doc) {
+    return nullptr;
+  }
+
+  RefPtr<ClipboardGetDataSnapshotCallback> callback =
+      MakeRefPtr<ClipboardGetDataSnapshotCallback>(
+          doc->GetScopeObject(), nsIClipboard::kGlobalClipboard);
+
+  AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats)> types;
+  types.AppendElements(
+      Span<const nsLiteralCString>(kNonPlainTextExternalFormats));
+
+  nsresult rv = clipboardService->GetDataSnapshot(
+      types, nsIClipboard::kGlobalClipboard, wc, aSubjectPrincipal, callback);
+  if (NS_FAILED(rv)) {
+    return nullptr;
+  }
+
+  AutoSuppressEventHandlingAndSuspend autoSuppress(bc->Group());
+  if (!SpinEventLoopUntil(
+          "DataTransfer::WaitForClipboardDataSnapshotAndCreate"_ns,
+          [&]() { return callback->IsComplete(); })) {
+    return nullptr;
+  }
+
+  return callback->TakeDataTransfer();
 }
 
 void DataTransfer::SetDropEffect(const nsAString& aDropEffect) {
@@ -370,7 +515,7 @@ void DataTransfer::GetData(const nsAString& aFormat, nsAString& aData,
         lastidx = idx + 1;
       }
     } else {
-      aData = stringdata;
+      aData = std::move(stringdata);
     }
   }
 }
@@ -603,16 +748,6 @@ already_AddRefed<DataTransfer> DataTransfer::MozCloneForEvent(
   return dt.forget();
 }
 
-// The order of the types matters. `kFileMime` needs to be one of the first two
-// types. And the order should be the same as the types order defined in
-// MandatoryDataTypesAsCStrings() for Clipboard API.
-static constexpr nsLiteralCString kNonPlainTextExternalFormats[] = {
-    nsLiteralCString(kCustomTypesMime), nsLiteralCString(kFileMime),
-    nsLiteralCString(kHTMLMime),        nsLiteralCString(kRTFMime),
-    nsLiteralCString(kURLMime),         nsLiteralCString(kURLDataMime),
-    nsLiteralCString(kTextMime),        nsLiteralCString(kPNGImageMime),
-    nsLiteralCString(kPDFJSMime)};
-
 namespace {
 nsresult GetClipboardDataSnapshotWithContentAnalysisSync(
     const nsTArray<nsCString>& aFormats,
@@ -704,7 +839,11 @@ void DataTransfer::GetExternalClipboardFormats(const bool& aPlainTextOnly,
           formats, *mClipboardType, wc, getter_AddRefs(clipboardDataSnapshot));
     }
   } else {
-    AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats) + 4> formats;
+    AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats) + 5> formats;
+    if (StaticPrefs::dom_clipboard_customFormatSupport_enabled()) {
+      // Adding kWebCustomFormatMapType to retrieve the web custom formats.
+      formats.AppendElement(kWebCustomFormatMapType);
+    }
     formats.AppendElements(
         Span<const nsLiteralCString>(kNonPlainTextExternalFormats));
     // We will be using this snapshot to provide the data to paste in
@@ -729,7 +868,7 @@ void DataTransfer::GetExternalClipboardFormats(const bool& aPlainTextOnly,
     if (rv == NS_ERROR_CONTENT_BLOCKED) {
       // Use the empty snapshot created in
       // GetClipboardDataSnapshotWithContentAnalysisSync()
-      mClipboardDataSnapshot = clipboardDataSnapshot;
+      mClipboardDataSnapshot = std::move(clipboardDataSnapshot);
     }
     return;
   }
@@ -738,13 +877,21 @@ void DataTransfer::GetExternalClipboardFormats(const bool& aPlainTextOnly,
   // the sequence specified in kNonPlainTextExternalFormats.
   AutoTArray<nsCString, std::size(kNonPlainTextExternalFormats)> flavors;
   clipboardDataSnapshot->GetFlavorList(flavors);
+
+  // First, adding web custom formats.
+  for (const auto& flavor : flavors) {
+    if (StringBeginsWith(flavor, nsLiteralCString(kWebCustomFormatPrefix))) {
+      aResult.AppendElement(flavor);
+    }
+  }
+  // Second, adding format in kNonPlainTextExternalFormats sequence.
   for (const auto& format : kNonPlainTextExternalFormats) {
     if (flavors.Contains(format)) {
       aResult.AppendElement(format);
     }
   }
 
-  mClipboardDataSnapshot = clipboardDataSnapshot;
+  mClipboardDataSnapshot = std::move(clipboardDataSnapshot);
 }
 
 /* static */
@@ -803,16 +950,19 @@ nsresult DataTransfer::SetDataAtInternal(const nsAString& aFormat,
     return NS_ERROR_DOM_INDEX_SIZE_ERR;
   }
 
+  nsAutoString format;
+  GetRealFormat(aFormat, format);
+
   // Don't allow the custom type to be assigned.
-  if (aFormat.EqualsLiteral(kCustomTypesMime)) {
+  if (format.EqualsLiteral(kCustomTypesMime)) {
     return NS_ERROR_DOM_NOT_SUPPORTED_ERR;
   }
 
-  if (!PrincipalMaySetData(aFormat, aData, aSubjectPrincipal)) {
+  if (!PrincipalMaySetData(format, aData, aSubjectPrincipal)) {
     return NS_ERROR_DOM_SECURITY_ERR;
   }
 
-  return SetDataWithPrincipal(aFormat, aData, aIndex, aSubjectPrincipal);
+  return SetDataWithPrincipal(format, aData, aIndex, aSubjectPrincipal);
 }
 
 void DataTransfer::MozSetDataAt(JSContext* aCx, const nsAString& aFormat,
@@ -1035,6 +1185,13 @@ already_AddRefed<nsITransferable> DataTransfer::GetTransferable(
         }
       }
 
+      // If the data is web custom format, use it directly.
+      if (isCustomFormat &&
+          StringBeginsWith(
+              type, NS_LITERAL_STRING_FROM_CSTRING(kWebCustomFormatPrefix))) {
+        isCustomFormat = false;
+      }
+
       uint32_t lengthInBytes;
       nsCOMPtr<nsISupports> convertedData;
 
@@ -1241,6 +1398,23 @@ bool DataTransfer::ConvertFromVariant(nsIVariant* aVariant,
     return true;
   }
 
+  if (type == nsIDataType::VTYPE_CSTRING) {
+    nsAutoCString cStr;
+    if (NS_FAILED(aVariant->GetAsACString(cStr))) {
+      return false;
+    }
+    nsCOMPtr<nsISupportsCString> cStrSupports(
+        do_CreateInstance(NS_SUPPORTS_CSTRING_CONTRACTID));
+    if (!cStrSupports) {
+      return false;
+    }
+    cStrSupports->SetData(cStr);
+    cStrSupports.forget(aSupports);
+    *aLength = cStr.Length();
+
+    return true;
+  }
+
   nsAutoString str;
   nsresult rv = aVariant->GetAsAString(str);
   if (NS_FAILED(rv)) {
@@ -1333,7 +1507,7 @@ already_AddRefed<nsIGlobalObject> DataTransfer::GetGlobal() const {
   nsCOMPtr<nsIGlobalObject> global;
   // This is annoying, but DataTransfer may have various things as parent.
   if (nsCOMPtr<EventTarget> target = do_QueryInterface(mParent)) {
-    global = target->GetOwnerGlobal();
+    global = target->GetRelevantGlobal();
   } else if (RefPtr<Event> event = do_QueryObject(mParent)) {
     global = event->GetParentObject();
   }

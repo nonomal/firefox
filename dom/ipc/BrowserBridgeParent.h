@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -101,8 +99,7 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
       const StyleImageRendering& aImageRendering);
 
 #ifdef ACCESSIBILITY
-  mozilla::ipc::IPCResult RecvSetEmbedderAccessible(PDocAccessibleParent* aDoc,
-                                                    uint64_t aID);
+  mozilla::ipc::IPCResult RecvSetEmbedderAccessible(uint64_t aID);
 #endif
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
@@ -112,7 +109,6 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
 
   RefPtr<BrowserParent> mBrowserParent;
 #ifdef ACCESSIBILITY
-  RefPtr<a11y::DocAccessibleParent> mEmbedderAccessibleDoc;
   uint64_t mEmbedderAccessibleID = 0;
 #endif  // ACCESSIBILITY
 };

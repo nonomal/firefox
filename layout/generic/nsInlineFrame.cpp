@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,7 +14,6 @@
 #include "mozilla/SVGTextFrame.h"
 #include "mozilla/ServoStyleSet.h"
 #include "nsBlockFrame.h"
-#include "nsCSSAnonBoxes.h"
 #include "nsDisplayList.h"
 #include "nsGkAtoms.h"
 #include "nsLayoutUtils.h"
@@ -52,6 +49,15 @@ nsresult nsInlineFrame::GetFrameName(nsAString& aResult) const {
   return MakeFrameName(u"Inline"_ns, aResult);
 }
 #endif
+
+nsInlineFrame::InlineReflowInput::InlineReflowInput(
+    const ReflowInput& aReflowInput,
+    SetParentDuringReflow aSetParentDuringReflow)
+    : mNextInFlow(
+          static_cast<nsInlineFrame*>(aReflowInput.mFrame->GetNextInFlow())),
+      mLineContainer(aReflowInput.mLineLayout->LineContainerFrame()),
+      mLineLayout(aReflowInput.mLineLayout),
+      mSetParentDuringReflow(aSetParentDuringReflow) {}
 
 void nsInlineFrame::InvalidateFrame(uint32_t aDisplayItemKey,
                                     bool aRebuildDisplayItems) {
@@ -169,8 +175,7 @@ nscoord nsInlineFrame::GetCaretBaseline() const {
     // will get placed into a non-empty line unless all lines are empty, I
     // believe...
     if (container && container->LinesAreEmpty()) {
-      nscoord blockSize = container->ContentBSize(GetWritingMode());
-      return GetFontMetricsDerivedCaretBaseline(blockSize);
+      return GetFontMetricsDerivedCaretBaseline();
     }
   }
   return nsIFrame::GetCaretBaseline();
@@ -262,10 +267,10 @@ void nsInlineFrame::AddInlinePrefISize(const IntrinsicSizeInput& aInput,
 
 /* virtual */
 nsIFrame::SizeComputationResult nsInlineFrame::ComputeSize(
-    gfxContext* aRenderingContext, WritingMode aWM, const LogicalSize& aCBSize,
-    nscoord aAvailableISize, const LogicalSize& aMargin,
-    const LogicalSize& aBorderPadding, const StyleSizeOverrides& aSizeOverrides,
-    ComputeSizeFlags aFlags) {
+    const SizeComputationInput& aSizingInput, WritingMode aWM,
+    const LogicalSize& aCBSize, nscoord aAvailableISize,
+    const LogicalSize& aMargin, const LogicalSize& aBorderPadding,
+    const StyleSizeOverrides& aSizeOverrides, ComputeSizeFlags aFlags) {
   // Inlines and text don't compute size before reflow.
   return {LogicalSize(aWM, NS_UNCONSTRAINEDSIZE, NS_UNCONSTRAINEDSIZE),
           AspectRatioUsage::None};
@@ -307,7 +312,7 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
     return;
   }
 
-  bool lazilySetParentPointer = false;
+  SetParentDuringReflow setParentDuringReflow = SetParentDuringReflow::No;
 
   // Check for an overflow list with our prev-in-flow
   nsInlineFrame* prevInFlow = (nsInlineFrame*)GetPrevInFlow();
@@ -315,7 +320,7 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
     AutoFrameListPtr prevOverflowFrames(aPresContext,
                                         prevInFlow->StealOverflowFrames());
     if (prevOverflowFrames) {
-      // Check if we should do the lazilySetParentPointer optimization.
+      // Check if we can defer setting the parent until reflow (optimization).
       // Only do it in simple cases where we're being reflowed for the
       // first time, nothing (e.g. bidi resolution) has already given
       // us children, and there's no next-in-flow, so all our frames
@@ -328,7 +333,7 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
         // list contains thousands of frames this is a big performance issue
         // (see bug #5588)
         mFrames = std::move(*prevOverflowFrames);
-        lazilySetParentPointer = true;
+        setParentDuringReflow = SetParentDuringReflow::Yes;
       } else {
         // Insert the new frames at the beginning of the child list
         // and set their parent pointer
@@ -336,8 +341,8 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
             mFrames.InsertFrames(this, nullptr, std::move(*prevOverflowFrames));
         // If our prev in flow was under the first continuation of a first-line
         // frame then we need to reparent the ComputedStyles to remove the
-        // the special first-line styling. In the lazilySetParentPointer case
-        // we reparent the ComputedStyles when we set their parents in
+        // special first-line styling. In the deferred case, we reparent
+        // the ComputedStyles when we set their parents in
         // nsInlineFrame::ReflowFrames and nsInlineFrame::ReflowInlineFrame.
         if (aReflowInput.mLineLayout->GetInFirstLine()) {
           ReparentChildListStyle(aPresContext, newFrames, this);
@@ -362,12 +367,7 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
   }
 
   // Set our own reflow input (additional state above and beyond aReflowInput).
-  InlineReflowInput irs;
-  irs.mPrevFrame = nullptr;
-  irs.mLineContainer = aReflowInput.mLineLayout->LineContainerFrame();
-  irs.mLineLayout = aReflowInput.mLineLayout;
-  irs.mNextInFlow = (nsInlineFrame*)GetNextInFlow();
-  irs.mSetParentPointer = lazilySetParentPointer;
+  InlineReflowInput irs(aReflowInput, setParentDuringReflow);
 
   if (mFrames.IsEmpty()) {
     // Try to pull over one frame before starting so that we know
@@ -377,10 +377,37 @@ void nsInlineFrame::Reflow(nsPresContext* aPresContext,
 
   ReflowFrames(aPresContext, aReflowInput, irs, aReflowOutput, aStatus);
 
-  ReflowAbsoluteFrames(aPresContext, aReflowOutput, aReflowInput, aStatus);
+  if (!StaticPrefs::layout_abspos_fragment_aware_inline_cb_enabled()) {
+    // This is the legacy, spec-incompatible behavior to reflow abspos children
+    // using only the first inline fragment's rect.
+    ReflowAbsoluteFrames(aPresContext, aReflowOutput, aReflowInput, aStatus);
+  } else {
+    MarkBlockAncestorHavingAbsoluteDescendants(aReflowInput);
+  }
 
   // Note: the line layout code will properly compute our
   // overflow-rect state for us.
+}
+
+void nsInlineFrame::MarkBlockAncestorHavingAbsoluteDescendants(
+    const ReflowInput& aReflowInput) const {
+  if (!HasAbsolutelyPositionedChildren()) {
+    return;
+  }
+
+  // The line container is usually the block ancestor that will run
+  // ReflowAbsoluteDescendantsInInlineFrame(). Ruby is the exception, whose
+  // content is reflowed in a nested line layout with nsRubyTextContainerFrame
+  // as the line container. In that case, keep finding the nearest block
+  // ancestor.
+  nsIFrame* lineContainer = aReflowInput.mLineLayout->LineContainerFrame();
+  nsBlockFrame* block = do_QueryFrame(lineContainer);
+  if (!block) {
+    block = nsLayoutUtils::FindNearestBlockAncestor(lineContainer);
+  }
+  MOZ_ASSERT(block,
+             "An inline absolute containing block must have a block ancestor!");
+  block->AddStateBits(NS_BLOCK_HAS_INLINE_ABSPOS_DESCENDANT);
 }
 
 nsresult nsInlineFrame::AttributeChanged(int32_t aNameSpaceID,
@@ -409,8 +436,8 @@ bool nsInlineFrame::DrainSelfOverflowListInternal(bool aInFirstLine) {
     return false;
   }
 
-  // The frames on our own overflowlist may have been pushed by a
-  // previous lazilySetParentPointer Reflow so we need to ensure the
+  // The frames on our own overflowlist may have been pushed by a previous
+  // reflow that deferred setting their parent, so we need to ensure the
   // correct parent pointer.  This is sometimes skipped by Reflow.
   nsIFrame* firstChild = overflowFrames->FirstChild();
   RestyleManager* restyleManager = PresContext()->RestyleManager();
@@ -497,8 +524,9 @@ void nsInlineFrame::ReflowFrames(nsPresContext* aPresContext,
   nsIFrame* frame = mFrames.FirstChild();
   bool done = false;
   while (frame) {
-    // Check if we should lazily set the child frame's parent pointer.
-    if (irs.mSetParentPointer) {
+    // Set the child frame's parent pointer if we've deferred setting it until
+    // now.
+    if (irs.mSetParentDuringReflow == SetParentDuringReflow::Yes) {
       nsIFrame* child = frame;
       do {
         child->SetParent(this);
@@ -562,7 +590,7 @@ void nsInlineFrame::ReflowFrames(nsPresContext* aPresContext,
       done = aStatus.IsInlineBreak() ||
              (!reflowingFirstLetter && aStatus.IsIncomplete());
       if (done) {
-        if (!irs.mSetParentPointer) {
+        if (irs.mSetParentDuringReflow == SetParentDuringReflow::No) {
           break;
         }
         // Keep reparenting the remaining siblings, but don't reflow them.
@@ -906,7 +934,7 @@ void nsInlineFrame::UpdateStyleOfOwnedAnonBoxesForIBSplit(
   // ComputedStyle.
   RefPtr<ComputedStyle> newContext =
       aRestyleState.StyleSet().ResolveInheritingAnonymousBoxStyle(
-          PseudoStyleType::mozBlockInsideInlineWrapper, ourStyle);
+          PseudoStyleType::MozBlockInsideInlineWrapper, ourStyle);
 
   // We're guaranteed that newContext only differs from the old ComputedStyle on
   // the block in things they might inherit from us.  And changehint processing
@@ -919,7 +947,7 @@ void nsInlineFrame::UpdateStyleOfOwnedAnonBoxesForIBSplit(
                "Must be first continuation");
 
     MOZ_ASSERT(blockFrame->Style()->GetPseudoType() ==
-                   PseudoStyleType::mozBlockInsideInlineWrapper,
+                   PseudoStyleType::MozBlockInsideInlineWrapper,
                "Unexpected kind of ComputedStyle");
 
     for (nsIFrame* cont = blockFrame; cont;
@@ -928,7 +956,15 @@ void nsInlineFrame::UpdateStyleOfOwnedAnonBoxesForIBSplit(
     }
 
     nsIFrame* nextInline = blockFrame->GetProperty(nsIFrame::IBSplitSibling());
-    MOZ_ASSERT(nextInline, "There is always a trailing inline in an IB split");
+    if (MOZ_UNLIKELY(!nextInline)) {
+      MOZ_ASSERT_UNREACHABLE(
+          "There should always a be trailing inline "
+          "in an IB split");
+      // Gracefully bail so that nextInline usage below doesn't
+      // null-deref.  (We can stop worrying about this when we remove
+      // IB split siblings in bug 2031448.)
+      return;
+    }
 
     for (nsIFrame* cont = nextInline; cont;
          cont = cont->GetNextContinuation()) {
@@ -954,13 +990,13 @@ void nsFirstLineFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
                             nsIFrame* aPrevInFlow) {
   nsInlineFrame::Init(aContent, aParent, aPrevInFlow);
   if (!aPrevInFlow) {
-    MOZ_ASSERT(Style()->GetPseudoType() == PseudoStyleType::firstLine);
+    MOZ_ASSERT(Style()->GetPseudoType() == PseudoStyleType::FirstLine);
     return;
   }
 
   // This frame is a continuation - fixup the computed style if aPrevInFlow
   // is the first-in-flow (the only one with a ::first-line pseudo).
-  if (aPrevInFlow->Style()->GetPseudoType() == PseudoStyleType::firstLine) {
+  if (aPrevInFlow->Style()->GetPseudoType() == PseudoStyleType::FirstLine) {
     MOZ_ASSERT(FirstInFlow() == aPrevInFlow);
     // Create a new ComputedStyle that is a child of the parent
     // ComputedStyle thus removing the ::first-line style. This way
@@ -969,12 +1005,12 @@ void nsFirstLineFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
     ComputedStyle* parentContext = aParent->Style();
     RefPtr<ComputedStyle> newSC =
         PresContext()->StyleSet()->ResolveInheritingAnonymousBoxStyle(
-            PseudoStyleType::mozLineFrame, parentContext);
+            PseudoStyleType::MozLineFrame, parentContext);
     SetComputedStyle(newSC);
   } else {
     MOZ_ASSERT(FirstInFlow() != aPrevInFlow);
     MOZ_ASSERT(aPrevInFlow->Style()->GetPseudoType() ==
-               PseudoStyleType::mozLineFrame);
+               PseudoStyleType::MozLineFrame);
   }
 }
 
@@ -1025,11 +1061,7 @@ void nsFirstLineFrame::Reflow(nsPresContext* aPresContext,
   DrainSelfOverflowList();
 
   // Set our own reflow input (additional state above and beyond aReflowInput).
-  InlineReflowInput irs;
-  irs.mPrevFrame = nullptr;
-  irs.mLineContainer = aReflowInput.mLineLayout->LineContainerFrame();
-  irs.mLineLayout = aReflowInput.mLineLayout;
-  irs.mNextInFlow = (nsInlineFrame*)GetNextInFlow();
+  InlineReflowInput irs(aReflowInput, SetParentDuringReflow::No);
 
   bool wasEmpty = mFrames.IsEmpty();
   if (wasEmpty) {
@@ -1062,7 +1094,11 @@ void nsFirstLineFrame::Reflow(nsPresContext* aPresContext,
   ReflowFrames(aPresContext, aReflowInput, irs, aReflowOutput, aStatus);
   aReflowInput.mLineLayout->SetInFirstLine(false);
 
-  ReflowAbsoluteFrames(aPresContext, aReflowOutput, aReflowInput, aStatus);
+  // If we could be an abspos containing block, then this is where we would call
+  // ReflowAbsoluteFrames. But we can't be, per bug 2036239 comment 1.
+  MOZ_ASSERT(!IsAbsoluteContainer(),
+             "None of the properties that apply to ::first-line could make it "
+             "an abspos containing block!");
 
   // Note: the line layout code will properly compute our overflow state for us
 }

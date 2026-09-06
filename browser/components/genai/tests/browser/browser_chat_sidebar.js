@@ -1,6 +1,10 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
+const { sinon } = ChromeUtils.importESModule(
+  "resource://testing-common/Sinon.sys.mjs"
+);
+
 ChromeUtils.defineESModuleGetters(this, {
   PlacesTestUtils: "resource://testing-common/PlacesTestUtils.sys.mjs",
 });
@@ -8,7 +12,7 @@ ChromeUtils.defineESModuleGetters(this, {
 // Used in multiple tests for loading a page in the sidebar
 const TEST_CHAT_PROVIDER_URL = "http://mochi.test:8888/";
 
-registerCleanupFunction(() => {
+registerCleanupFunction(async () => {
   Services.prefs.clearUserPref("sidebar.old-sidebar.has-used");
 });
 
@@ -56,7 +60,7 @@ add_task(async function test_sidebar_render() {
     "Button container set not hidden"
   );
 
-  SidebarController.hide();
+  await SidebarController.hide();
 });
 
 /**
@@ -76,9 +80,9 @@ add_task(async function test_sidebar_providers() {
   await SidebarController.show("viewGenaiChatSidebar");
 
   const origCount = countVisible();
-  Assert.equal(origCount, 5, "Rendered expected number of provider options");
+  Assert.equal(origCount, 4, "Rendered expected number of provider options");
 
-  SidebarController.hide();
+  await SidebarController.hide();
   await SpecialPowers.pushPrefEnv({
     set: [["browser.ml.chat.hideLocalhost", false]],
   });
@@ -86,7 +90,7 @@ add_task(async function test_sidebar_providers() {
 
   Assert.equal(countVisible(), origCount + 1, "Added localhost option");
 
-  SidebarController.hide();
+  await SidebarController.hide();
 });
 
 /**
@@ -96,7 +100,8 @@ add_task(async function test_sidebar_onboarding() {
   Services.fog.testResetFOG();
   await SidebarController.show("viewGenaiChatSidebar");
 
-  const { document, browserPromise } = SidebarController.browser.contentWindow;
+  const win = SidebarController.browser.contentWindow;
+  const { document, browserPromise } = win;
   const label = await TestUtils.waitForCondition(() =>
     document.querySelector("label:has(.localhost)")
   );
@@ -116,6 +121,21 @@ add_task(async function test_sidebar_onboarding() {
     () => browser.currentURI.spec != "about:blank",
     "Should have previewed provider"
   );
+
+  const link = await TestUtils.waitForCondition(() =>
+    document.querySelector(".link-paragraph a")
+  );
+  const expectedURL = link.href;
+
+  const sandbox = sinon.createSandbox();
+  const stub = sandbox.stub(win, "openLink");
+
+  link.click();
+
+  Assert.ok(stub.calledOnce, "openLink should call once");
+  Assert.equal(stub.firstCall.args[0], expectedURL);
+
+  sandbox.restore();
 
   const pickButton = await TestUtils.waitForCondition(() =>
     document.querySelector(".chat_pick .primary:not([disabled])")
@@ -149,7 +169,7 @@ add_task(async function test_sidebar_onboarding() {
   Assert.equal(events[0].extra.step, "1", "First step");
 
   Services.prefs.clearUserPref("browser.ml.chat.provider");
-  SidebarController.hide();
+  await SidebarController.hide();
 });
 
 /**
@@ -195,6 +215,7 @@ add_task(async function test_custom_onboarding() {
   );
 
   BrowserTestUtils.removeTab(tab);
+  await SidebarController.hide();
 });
 
 /**
@@ -218,6 +239,7 @@ add_task(async function test_sidebar_menu() {
   const popup = await TestUtils.waitForCondition(() =>
     document.getElementById("chatbot-menupopup")
   );
+  await BrowserTestUtils.waitForPopupEvent(popup, "shown");
 
   Assert.ok(popup, "Menu popup created");
   let items = popup.querySelectorAll("menuitem");
@@ -233,11 +255,11 @@ add_task(async function test_sidebar_menu() {
   );
 
   // Disable shortcuts via menu
-  items[2].click();
-  const shown = BrowserTestUtils.waitForEvent(popup, "popupshown");
+  await BrowserTestUtils.activateMenuItem(items[2]);
+
   Services.prefs.clearUserPref("browser.ml.chat.provider");
   button.click();
-  await shown;
+  await BrowserTestUtils.waitForPopupEvent(popup, "shown");
 
   items = popup.querySelectorAll("menuitem");
   Assert.ok(!items[1].hasAttribute("checked"), "Shortcuts not shown");
@@ -260,7 +282,7 @@ add_task(async function test_sidebar_menu() {
   const hidden = BrowserTestUtils.waitForEvent(popup, "popuphidden");
   popup.hidePopup();
   await hidden;
-  SidebarController.hide();
+  await SidebarController.hide();
 });
 
 /**
@@ -353,137 +375,136 @@ add_task(async function test_pip_actor_not_chat_sidebar() {
   });
 });
 
-add_task(
-  async function test_chatbot_microphone_access_if_persistent_perm_already_granted_in_tab() {
-    await SpecialPowers.pushPrefEnv({
-      set: [
-        ["media.navigator.streams.fake", true],
-        ["browser.ml.chat.provider", "https://example.org"],
+/**
+ * Check that the sidebar is focused when opened
+ */
+add_task(async function test_sidebar_browser_focus() {
+  const sidebar = document.getElementById("sidebar");
+  await SidebarController.show("viewGenaiChatSidebar");
+  Assert.equal(document.activeElement, sidebar, "Sidebar is focused");
+  await SidebarController.hide();
+});
+
+/**
+ * Check that WebExtension content scripts can be injected into the chatbot browser
+ */
+add_task(async function test_webext_content_script_in_chat_sidebar() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.chat.provider", TEST_CHAT_PROVIDER_URL]],
+  });
+
+  const extension = ExtensionTestUtils.loadExtension({
+    manifest: {
+      content_scripts: [
+        {
+          matches: ["<all_urls>"],
+          js: ["content.js"],
+        },
       ],
-    });
+    },
+    files: {
+      "content.js": `browser.test.sendMessage("injected", document.URL);`,
+    },
+  });
 
-    await BrowserTestUtils.withNewTab("https://example.org", async browser => {
-      const { principal, rawId } = await SpecialPowers.spawn(
-        browser,
-        [],
-        async () => {
-          const stream = await content.navigator.mediaDevices.getUserMedia({
-            audio: true,
-          });
-          const track = stream.getAudioTracks()[0];
-          const id = track.getSettings().deviceId || "default";
-          stream.getTracks().forEach(t => t.stop());
-          return {
-            principal: content.document.nodePrincipal,
-            rawId: id,
-          };
-        }
-      );
+  await extension.startup();
+  await SidebarController.show("viewGenaiChatSidebar");
 
-      Assert.ok(rawId, "Got microphone rawId from the tab");
+  const url = await extension.awaitMessage("injected");
+  Assert.equal(
+    url,
+    TEST_CHAT_PROVIDER_URL,
+    "WebExtension content script injected into chatbot browser"
+  );
 
-      const key = "microphone";
-      SitePermissions.setForPrincipal(
-        principal,
-        key,
-        SitePermissions.ALLOW,
-        SitePermissions.SCOPE_PERSISTENT,
-        browser
-      );
+  await SidebarController.hide();
+  await extension.unload();
+});
 
-      await SidebarController.show("viewGenaiChatSidebar");
+/**
+ * Check that tab-modal prompts requested for the chatbot browser are shown as
+ * tab dialogs owned by the sidebar browser (so that they can be closed
+ * programmatically) instead of falling back to window-modal prompts.
+ */
+add_task(async function test_tab_modal_prompt_in_chat_sidebar() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.chat.provider", TEST_CHAT_PROVIDER_URL]],
+  });
 
-      const { document } = SidebarController.browser.contentWindow;
-      const chatbotBrowserContainer =
-        document.getElementById("browser-container");
-      const chatbotBrowser = chatbotBrowserContainer.querySelector("browser");
+  // Opening a tab dialog on the sidebar browser creates dialog frames that
+  // live as long as the sidebar does, so use a separate window that can be
+  // closed to tear them down instead of leaking them (bug 1513656).
+  const win = await BrowserTestUtils.openNewBrowserWindow();
+  const { SidebarController } = win;
+  await SidebarController.show("viewGenaiChatSidebar");
 
-      await BrowserTestUtils.browserLoaded(chatbotBrowser, false, url => {
-        return new URL(url).origin === "https://example.org";
-      });
+  const chatbotBrowser = await TestUtils.waitForCondition(() => {
+    const sidebarDocument = SidebarController.browser.contentWindow.document;
+    return sidebarDocument
+      .getElementById("browser-container")
+      .querySelector("browser");
+  }, "Chatbot <browser> is loaded in the sidebar");
+  // The prompt has to be requested for a browser that is done loading,
+  // otherwise the navigation closes the tab dialog again right away.
+  await TestUtils.waitForCondition(
+    () =>
+      chatbotBrowser.browsingContext?.currentWindowGlobal &&
+      chatbotBrowser.currentURI?.spec == TEST_CHAT_PROVIDER_URL &&
+      !chatbotBrowser.webProgress?.isLoadingDocument,
+    "Chatbot <browser> loaded the provider page"
+  );
 
-      const chatbotPrincipal = await SpecialPowers.spawn(
-        chatbotBrowser,
-        [],
-        async () => content.document.nodePrincipal
-      );
-
-      let shown = false;
-      let onShown = () => {
-        shown = true;
-      };
-      PopupNotifications.panel.addEventListener("popupshown", onShown);
-
-      await SpecialPowers.spawn(chatbotBrowser, [rawId], async id => {
-        const { WebRTCChild } = SpecialPowers.ChromeUtils.importESModule(
-          "resource:///actors/WebRTCChild.sys.mjs"
-        );
-
-        const mic = [
-          {
-            type: "audioinput",
-            rawName: "fake mic",
-            rawId: id,
-            id,
-            QueryInterface: ChromeUtils.generateQI([Ci.nsIMediaDevice]),
-            mediaSource: "microphone",
-          },
-        ];
-
-        const req = {
-          type: "getUserMedia",
-          windowID: content.windowGlobalChild.outerWindowId,
-          isSecure: true,
-          isHandlingUserInput: true,
-
-          audioInputDevices: mic,
-          videoInputDevices: [],
-          audioOutputDevices: [],
-
-          deviceIndex: 0,
-          devices: mic,
-
-          getConstraints: () => ({ audio: true }),
-          getAudioInputOptions: () => ({ deviceId: id }),
-          getVideoInputOptions: () => ({}),
-          getAudioOutputOptions: () => ({}),
-        };
-
-        WebRTCChild.observe(req, "getUserMedia:request");
-      });
-
-      const sidebarMicPerm = SitePermissions.getForPrincipal(
-        chatbotPrincipal,
-        key,
-        chatbotBrowser
-      );
-
-      is(
-        sidebarMicPerm.state,
-        SitePermissions.ALLOW,
-        "Sidebar chatbot has granted mic allow"
-      );
-      is(
-        sidebarMicPerm.scope,
-        SitePermissions.SCOPE_PERSISTENT,
-        "sidebar chatbot mic access is persistent"
-      );
-      Assert.ok(
-        !shown,
-        "PopupNotification didn't fire because the mic access has been granted"
-      );
-
-      PopupNotifications.panel.removeEventListener("popupshown", onShown);
-      SitePermissions.removeFromPrincipal(principal, key, browser);
-      SitePermissions.removeFromPrincipal(
-        chatbotPrincipal,
-        key,
-        chatbotBrowser
-      );
-    });
-
-    await SidebarController.hide();
-    await SpecialPowers.popPrefEnv();
-    Services.fog.testResetFOG();
+  const promptActor =
+    chatbotBrowser.browsingContext.currentWindowGlobal.getActor("Prompt");
+  const showOnSidebarBrowser =
+    promptActor.shouldShowPromptOnSidebarBrowser(chatbotBrowser);
+  Assert.ok(
+    showOnSidebarBrowser,
+    "Prompts for the chatbot <browser> are shown on the sidebar browser"
+  );
+  if (!showOnSidebarBrowser) {
+    // Continuing would open a blocking window-modal dialog that nothing can
+    // dismiss, hanging the harness rather than failing this test.
+    await BrowserTestUtils.closeWindow(win);
+    return;
   }
-);
+
+  const dialogManager = win.gBrowser
+    .getTabDialogBox(win.document.getElementById("sidebar"))
+    .getTabDialogManager();
+
+  const promptID = "test-chat-sidebar-tab-prompt";
+  let promptRejected = false;
+  const promptPromise = Services.prompt
+    .asyncConfirmEx(
+      chatbotBrowser.browsingContext,
+      Ci.nsIPromptService.MODAL_TYPE_TAB,
+      "Scan in progress",
+      "Reviewing what you pasted",
+      Ci.nsIPromptService.BUTTON_POS_0 *
+        Ci.nsIPromptService.BUTTON_TITLE_CANCEL,
+      null,
+      null,
+      null,
+      null,
+      false,
+      { promptID }
+    )
+    .catch(() => {
+      promptRejected = true;
+    });
+
+  const dialog = await TestUtils.waitForCondition(
+    () => dialogManager.dialogs.find(d => d.promptID == promptID),
+    "Prompt is shown as a tab dialog managed by the sidebar browser"
+  );
+  // Aborting before the dialog document has loaded would close the dialog
+  // without it marking the prompt as aborted.
+  await dialog._dialogReady;
+
+  dialogManager.abortDialogs(d => d.promptID == promptID);
+  await promptPromise;
+  Assert.ok(promptRejected, "Dialog was closed programmatically");
+
+  await BrowserTestUtils.closeWindow(win);
+});

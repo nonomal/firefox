@@ -86,7 +86,7 @@ loader.lazyRequireGetter(
 loader.lazyRequireGetter(
   this,
   "StyleSheetsManager",
-  "resource://devtools/server/actors/utils/stylesheets-manager.js",
+  "resource://devtools/server/actors/stylesheets/stylesheets-manager.js",
   true
 );
 loader.lazyRequireGetter(
@@ -135,6 +135,34 @@ function getChildDocShells(parentDocShell) {
 }
 
 exports.getChildDocShells = getChildDocShells;
+
+/**
+ * Helper to retrieve all the windows (parent, children, or browsing context own window)
+ * that exists in the same process than the given browsing context.
+ *
+ * @param {BrowsingContext} browsingContext
+ * @returns {Array<Window>}
+ */
+function getAllSameProcessGlobalsFromBrowsingContext(browsingContext) {
+  const windows = [];
+  const topBrowsingContext = browsingContext.top;
+  for (const bc of topBrowsingContext.getAllBrowsingContextsInSubtree()) {
+    // Filter out browsingContext which don't expose any docshell (e.g. remote frame)
+    if (!bc.docShell) {
+      continue;
+    }
+    try {
+      windows.push(bc.docShell.domWindow);
+    } catch (e) {
+      // docShell.domWindow may throw when the docshell is being destroyed.
+      // Ignore them. We can't use docShell.isBeingDestroyed as it
+      // is flagging too early. e.g it's already true when hitting a breakpoint
+      // in the unload event.
+    }
+  }
+
+  return windows;
+}
 
 /**
  * Browser-specific actors.
@@ -300,13 +328,16 @@ class WindowGlobalTargetActor extends BaseTargetActor {
       this._shouldAddNewGlobalAsDebuggee.bind(this);
 
     this.makeDebugger = makeDebugger.bind(null, {
-      findDebuggees: () => {
+      findDebuggees: (dbg, includeAllSameProcessGlobals) => {
         const result = [];
         const inspectUAWidgets = Services.prefs.getBoolPref(
           "devtools.inspector.showAllAnonymousContent",
           false
         );
-        for (const win of this.windows) {
+        const windows = includeAllSameProcessGlobals
+          ? getAllSameProcessGlobalsFromBrowsingContext(this.browsingContext)
+          : this.windows;
+        for (const win of windows) {
           result.push(win);
           // Only expose User Agent internal (like <video controls>) when the
           // related pref is set.
@@ -383,7 +414,7 @@ class WindowGlobalTargetActor extends BaseTargetActor {
       });
       Object.defineProperty(this, "window", {
         value: this.window,
-        configurable: false,
+        configurable: true,
         writable: false,
       });
       Object.defineProperty(this, "chromeEventHandler", {
@@ -740,6 +771,8 @@ class WindowGlobalTargetActor extends BaseTargetActor {
         watchpoints: true,
         // Supports back and forward navigation
         navigation: true,
+        // Supports navigation by index
+        navigationByIndex: true,
       },
     };
 
@@ -761,10 +794,10 @@ class WindowGlobalTargetActor extends BaseTargetActor {
   /**
    * Called when the actor is removed from the connection.
    *
-   * @params {object} options
-   * @params {boolean} options.isTargetSwitching: Set to true when this is called during
+   * @param {object} options
+   * @param {boolean} options.isTargetSwitching: Set to true when this is called during
    *         a target switch.
-   * @params {boolean} options.isModeSwitching: Set to true true when this is called as the
+   * @param {boolean} options.isModeSwitching: Set to true true when this is called as the
    *         result of a change to the devtools.browsertoolbox.scope pref.
    */
   destroy({ isTargetSwitching = false, isModeSwitching = false } = {}) {
@@ -774,6 +807,17 @@ class WindowGlobalTargetActor extends BaseTargetActor {
       return;
     }
     this.destroying = true;
+
+    // In case the window already navigated to another origin,
+    // which is possibly in another process, nullify window
+    // as most, if not all attributes would throw.
+    if (Cu.isRemoteProxy(this.window)) {
+      Object.defineProperty(this, "window", {
+        value: null,
+        configurable: true,
+        writable: false,
+      });
+    }
 
     // Force flushing pending resources if the actor isn't already destroyed.
     // This helps notify the client about pending resources on navigation.
@@ -1310,6 +1354,24 @@ class WindowGlobalTargetActor extends BaseTargetActor {
     return {};
   }
 
+  gotoIndex(index) {
+    // Wait a tick so that the response packet can be dispatched before the
+    // subsequent navigation event packet.
+    Services.tm.dispatchToMainThread(
+      DevToolsUtils.makeInfallible(() => {
+        // This won't work while the browser is shutting down and we don't really
+        // care.
+        if (Services.startup.shuttingDown) {
+          return;
+        }
+
+        this.webNavigation.gotoIndex(index, true);
+      }, "WindowGlobalTargetActor.prototype.gotoIndex's delayed body")
+    );
+
+    return {};
+  }
+
   /**
    * Reload the page in this window global.
    *
@@ -1411,6 +1473,17 @@ class WindowGlobalTargetActor extends BaseTargetActor {
       this.emit("use-simple-highlighters-updated");
     }
 
+    if (
+      this.isRootActor &&
+      typeof options.animationsPlayBackRateMultiplier !== "undefined"
+    ) {
+      // animationsPlayBackRateMultiplier can only be set on the top browsing
+      // context (this.browsingContext isn't top when an iframe is selected as
+      // the targeted document in the Browser Toolbox).
+      this.browsingContext.top.animationsPlayBackRateMultiplier =
+        options.animationsPlayBackRateMultiplier;
+    }
+
     if (!this.isTopLevelTarget) {
       // Following DevTools target options should only apply to the top target and be
       // propagated through the window global tree via the platform.
@@ -1447,6 +1520,10 @@ class WindowGlobalTargetActor extends BaseTargetActor {
    * state when closing the toolbox.
    */
   _restoreTargetConfiguration() {
+    if (!this.browsingContext) {
+      return;
+    }
+
     if (this._restoreFocus && this.browsingContext?.isActive && this.window) {
       try {
         this.window.focus();
@@ -1456,6 +1533,10 @@ class WindowGlobalTargetActor extends BaseTargetActor {
           throw e;
         }
       }
+    }
+
+    if (this.isRootActor && !this.browsingContext.isDiscarded) {
+      this.browsingContext.top.animationsPlayBackRateMultiplier = 1;
     }
   }
 

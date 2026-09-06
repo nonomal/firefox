@@ -1,26 +1,27 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=4 sts=2 sw=2 et cin: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "nsIOService.h"
 #include "nsInputStreamPump.h"
-#include "nsIStreamTransportService.h"
-#include "nsIThreadRetargetableStreamListener.h"
-#include "nsThreadUtils.h"
-#include "nsCOMPtr.h"
+
+#include <algorithm>
+
 #include "mozilla/Logging.h"
 #include "mozilla/NonBlockingAsyncInputStream.h"
 #include "mozilla/ProfilerLabels.h"
 #include "mozilla/SlicedInputStream.h"
 #include "mozilla/StaticPrefs_network.h"
-#include "nsIStreamListener.h"
+#include "nsCOMPtr.h"
+#include "nsIInputStreamPriority.h"
 #include "nsILoadGroup.h"
+#include "nsIOService.h"
+#include "nsIStreamListener.h"
+#include "nsIStreamTransportService.h"
+#include "nsIThreadRetargetableStreamListener.h"
 #include "nsNetCID.h"
 #include "nsNetUtil.h"
 #include "nsStreamUtils.h"
-#include <algorithm>
+#include "nsThreadUtils.h"
 
 //
 // MOZ_LOG=nsStreamPump:5
@@ -73,7 +74,10 @@ static nsresult CallPeekFunc(nsIInputStream* aInStream, void* aClosure,
 nsresult nsInputStreamPump::PeekStream(PeekSegmentFun callback, void* closure) {
   RecursiveMutexAutoLock lock(mMutex);
 
-  MOZ_ASSERT(mAsyncStream, "PeekStream called without stream");
+  if (!mAsyncStream) {
+    MOZ_DIAGNOSTIC_ASSERT(false, "PeekStream called without stream");
+    return NS_ERROR_NOT_AVAILABLE;
+  }
 
   nsresult rv = CreateBufferedStreamIfNeeded();
   NS_ENSURE_SUCCESS(rv, rv);
@@ -375,6 +379,13 @@ nsInputStreamPump::AsyncRead(nsIStreamListener* listener) {
     mTargetThread = mozilla::GetCurrentSerialEventTarget();
   }
   NS_ENSURE_STATE(mTargetThread);
+
+  if (mHighPriorityStream) {
+    if (nsCOMPtr<nsIInputStreamPriority> pri =
+            do_QueryInterface(mAsyncStream)) {
+      pri->SetPriority(nsIRunnablePriority::PRIORITY_MEDIUMHIGH);
+    }
+  }
 
   rv = EnsureWaiting();
   if (NS_FAILED(rv)) return rv;

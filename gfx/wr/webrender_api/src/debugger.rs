@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use crate::{DebugFlags, PictureRect, DeviceRect};
+use crate::{DebugFlags, PictureRect, DeviceRect, RenderCommandInfo};
 use crate::image::ImageFormat;
 
 // Shared type definitions between the WR crate and the debugger
@@ -33,15 +33,25 @@ pub struct InitProfileCountersMessage {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct UpdateProfileCountersMessage {
-    pub updates: Vec<ProfileCounterUpdate>,
+pub struct FrameLogMessage {
+    pub profile_counters: Option<Vec<ProfileCounterUpdate>>,
+    pub render_commands: Option<Vec<RenderCommandInfo>>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum DebuggerMessage {
     SetDebugFlags(SetDebugFlagsMessage),
     InitProfileCounters(InitProfileCountersMessage),
-    UpdateProfileCounters(UpdateProfileCountersMessage),
+    UpdateFrameLog(FrameLogMessage),
+}
+
+/// Reply to a `/renderdoc-capture` request: the path of the written `.rdc` file
+/// on success, or an error message. Serialized as the JSON response body so the
+/// client can tell success from failure without inspecting the string itself.
+#[derive(Serialize, Deserialize)]
+pub enum RenderDocReply {
+    Path(String),
+    Error(String),
 }
 
 #[derive(Serialize, Deserialize)]

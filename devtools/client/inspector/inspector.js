@@ -179,6 +179,7 @@ class Inspector extends EventEmitter {
   // Stores all the instances of sidebar panels like rule view, computed view, ...
   #panels = new Map();
   #fluentL10n;
+  #defaultNodeSelected = false;
   #defaultStartupNode;
   #defaultStartupNodeDomReference;
   #defaultStartupNodeSelectionReason;
@@ -222,9 +223,11 @@ class Inspector extends EventEmitter {
     this.#fluentL10n = new FluentL10n();
     await this.#fluentL10n.init(["devtools/client/compatibility.ftl"]);
 
-    // Display the main inspector panel with: search input, markup view and breadcrumbs.
-    this.panelDoc.getElementById("inspector-main-content").style.visibility =
-      "visible";
+    // Add the class that will display the main inspector panel with: search input,
+    // markup view and breadcrumbs.
+    this.panelDoc
+      .getElementById("inspector-main-content")
+      .classList.add("initialized");
 
     // Setup the splitter before watching targets & resources.
     // The markup view will be initialized after we get the first root-node
@@ -247,6 +250,11 @@ class Inspector extends EventEmitter {
     // This is used as a fallback if the currently selected node is removed.
     this.#defaultNode = null;
 
+    this.breadcrumbs = new HTMLBreadcrumbs(this);
+    this.styleChangeTracker = new InspectorStyleChangeTracker(this);
+    this.#setupSearchBox();
+    this.#createInspectorShortcuts();
+
     await this.commands.targetCommand.watchTargets({
       types: [this.commands.targetCommand.TYPES.FRAME],
       onAvailable: this.#onTargetAvailable,
@@ -254,7 +262,7 @@ class Inspector extends EventEmitter {
       onDestroyed: this.#onTargetDestroyed,
     });
 
-    const { TYPES } = this.toolbox.resourceCommand;
+    const { TYPES } = this.commands.resourceCommand;
     this.#watchedResources = [
       // To observe CSS change before opening changes view.
       TYPES.CSS_CHANGE,
@@ -272,25 +280,13 @@ class Inspector extends EventEmitter {
       this.#watchedResources.push(TYPES.ROOT_NODE);
     }
 
-    await this.toolbox.resourceCommand.watchResources(this.#watchedResources, {
+    await this.commands.resourceCommand.watchResources(this.#watchedResources, {
       onAvailable: this.onResourceAvailable,
     });
 
     // Store the URL of the target page prior to navigation in order to ensure
     // telemetry counts in the Grid Inspector are not double counted on reload.
     this.previousURL = this.currentTarget.url;
-
-    // Note: setupSidebar() really has to be called after the first target has
-    // been processed, so that the cssProperties getter works.
-    // But the rest could be moved before the watch* calls.
-    this.styleChangeTracker = new InspectorStyleChangeTracker(this);
-    this.#setupSidebar();
-    this.breadcrumbs = new HTMLBreadcrumbs(this);
-    this.#setupExtensionSidebars();
-    this.#setupSearchBox();
-    this.#createInspectorShortcuts();
-
-    this.#onNewSelection();
 
     this.toolbox.on("host-changed", this.#onHostChanged);
     this.toolbox.nodePicker.on("picker-node-hovered", this.onPickerHovered);
@@ -307,6 +303,17 @@ class Inspector extends EventEmitter {
     );
 
     return this;
+  }
+
+  /**
+   * Finalize the initialization of all UIs which depends on having a selected
+   * node.
+   */
+  #onDefaultNodeSelected() {
+    this.#setupSidebar();
+    this.#setupExtensionSidebars();
+
+    this.#onNewSelection();
   }
 
   // The onTargetAvailable argument is mandatory for TargetCommand.watchTargets.
@@ -370,7 +377,7 @@ class Inspector extends EventEmitter {
 
       if (
         resource.resourceType ===
-          this.toolbox.resourceCommand.TYPES.ROOT_NODE &&
+          this.commands.resourceCommand.TYPES.ROOT_NODE &&
         // It might happen that the ROOT_NODE resource (which is a Front) is already
         // destroyed, and in such case we want to ignore it.
         !resource.isDestroyed() &&
@@ -383,14 +390,16 @@ class Inspector extends EventEmitter {
       // Only consider top level document, and ignore remote iframes top document
       if (
         resource.resourceType ===
-          this.toolbox.resourceCommand.TYPES.DOCUMENT_EVENT &&
+          this.commands.resourceCommand.TYPES.DOCUMENT_EVENT &&
         resource.name === "will-navigate" &&
         isTopLevelTarget
       ) {
         this.#onWillNavigate();
       }
 
-      if (resource.resourceType === this.toolbox.resourceCommand.TYPES.REFLOW) {
+      if (
+        resource.resourceType === this.commands.resourceCommand.TYPES.REFLOW
+      ) {
         this.emit("reflow");
         if (resource.targetFront === this.selection?.nodeFront?.targetFront) {
           // This event will be fired whenever a reflow is detected in the target front of the
@@ -416,7 +425,11 @@ class Inspector extends EventEmitter {
 
     try {
       const defaultNode = await this.#getDefaultNodeForSelection(rootNodeFront);
-      if (!defaultNode) {
+      if (
+        !defaultNode ||
+        // Target was updated mid-flight, abort the initialization.
+        this.currentTarget !== rootNodeFront.targetFront
+      ) {
         return;
       }
 
@@ -429,11 +442,58 @@ class Inspector extends EventEmitter {
 
       await this.#initMarkupView();
 
+      if (this.currentTarget !== rootNodeFront.targetFront) {
+        // Target was updated mid-flight, abort the initialization.
+        return;
+      }
+
       // Setup the toolbar again, since its content may depend on the current document.
-      this.#setupToolbar();
+      await this.#setupToolbar();
+
+      // Finalize initialization when a default node is successfully selected.
+      if (!this.#defaultNodeSelected) {
+        this.#defaultNodeSelected = true;
+        this.#onDefaultNodeSelected();
+      }
     } catch (e) {
       this.#handleRejectionIfNotDestroyed(e);
+      // Show the AppErrorBoundary if the markup view failed to render, unless:
+      // - the toolbox is already closing (-> inspector is destroyed)
+      // - the nodeFront was destroyed, most likely because of a navigation,
+      //   which will reject all pending target actor requests and reject
+      //   getDefaultNodeForSelection.
+      if (
+        !this.#destroyed &&
+        !rootNodeFront.isDestroyed() &&
+        !this.#markupFrame
+      ) {
+        this.#showErrorBoundary(e);
+      }
     }
+  }
+
+  /**
+   * Show detailed information about a crash if the inspector
+   * failed enough to be blank and not render the markup view
+   */
+  #showErrorBoundary(exception) {
+    const STARTUP_L10N = new LocalizationHelper(
+      "devtools/client/locales/startup.properties"
+    );
+    const element = this.React.createElement(
+      this.browserRequire(
+        "resource://devtools/client/shared/components/AppErrorBoundary.js"
+      ),
+      {
+        componentName: "General",
+        panel: STARTUP_L10N.getStr("inspector.panelLabel"),
+      },
+      // Pass en empty list of children to please React
+      []
+    );
+    this.#markupBox = this.panelDoc.getElementById("markup-box");
+    const appErrorBoundary = this.ReactDOM.render(element, this.#markupBox);
+    appErrorBoundary.handleException(exception, this.#toolbox);
   }
 
   async #initMarkupView() {
@@ -458,7 +518,7 @@ class Inspector extends EventEmitter {
         })
       );
 
-      this.#markupFrame.setAttribute("src", "markup/markup.xhtml");
+      this.#markupFrame.setAttribute("src", "markup/markup.html");
 
       await onMarkupFrameLoaded;
     }
@@ -764,7 +824,7 @@ class Inspector extends EventEmitter {
   };
 
   #isFromInspectorWindow = event => {
-    const win = event.originalTarget.ownerGlobal;
+    const win = event.originalTarget.documentGlobal;
     return win === this.panelWin || win.parent === this.panelWin;
   };
 
@@ -1411,6 +1471,12 @@ class Inspector extends EventEmitter {
    *        The tab title
    */
   addExtensionSidebar(id, { title }) {
+    if (!this.#defaultNodeSelected) {
+      // The sidebar is not created yet, #setupExtensionSidebars will create
+      // this extension sidebar when the first root node is available.
+      return;
+    }
+
     if (this.#panels.has(id)) {
       throw new Error(
         `Cannot create an extension sidebar for the existent id: ${id}`
@@ -1445,6 +1511,11 @@ class Inspector extends EventEmitter {
    *        The id of the sidebar tab to destroy.
    */
   removeExtensionSidebar(id) {
+    if (!this.#defaultNodeSelected) {
+      // The extension sidebars were not created yet, nothing to remove.
+      return;
+    }
+
     if (!this.#panels.has(id)) {
       throw new Error(`Unable to find a sidebar panel with id "${id}"`);
     }
@@ -1776,18 +1847,21 @@ class Inspector extends EventEmitter {
     this.toolbox.nodePicker.off("picker-node-hovered", this.onPickerHovered);
     this.toolbox.nodePicker.off("picker-node-picked", this.onPickerPicked);
 
-    // Destroy the sidebar first as it may unregister stuff
-    // and still use random attributes on inspector and layout panel
-    this.sidebar.destroy();
-    // Unregister sidebar listener *after* destroying it
-    // in order to process its destroy event and save sidebar sizes
-    this.sidebar.off("select", this.onSidebarSelect);
-    this.sidebar.off("show", this.onSidebarShown);
-    this.sidebar.off("hide", this.onSidebarHidden);
-    this.sidebar.off("destroy", this.onSidebarHidden);
+    // The sidebar is only created once the first root node is available.
+    if (this.sidebar) {
+      // Destroy the sidebar first as it may unregister stuff
+      // and still use random attributes on inspector and layout panel
+      this.sidebar.destroy();
+      // Unregister sidebar listener *after* destroying it
+      // in order to process its destroy event and save sidebar sizes
+      this.sidebar.off("select", this.onSidebarSelect);
+      this.sidebar.off("show", this.onSidebarShown);
+      this.sidebar.off("hide", this.onSidebarHidden);
+      this.sidebar.off("destroy", this.onSidebarHidden);
+    }
 
     for (const [, panel] of this.#panels) {
-      panel.destroy();
+      panel.destroy({ fromInspectorDestroy: true });
     }
     this.#panels.clear();
 
@@ -1800,17 +1874,13 @@ class Inspector extends EventEmitter {
       this.#search = null;
     }
 
-    this.ruleViewSideBar.destroy();
+    this.ruleViewSideBar?.destroy();
     this.ruleViewSideBar = null;
 
     this.#destroyMarkup();
 
     this.#teardownToolbar();
 
-    this.prefObserver.on(
-      DEFAULT_COLOR_UNIT_PREF,
-      this.#handleDefaultColorUnitPrefChange
-    );
     this.prefObserver.destroy();
 
     this.breadcrumbs.destroy();
@@ -1824,7 +1894,7 @@ class Inspector extends EventEmitter {
       onSelected: this.#onTargetSelected,
       onDestroyed: this.#onTargetDestroyed,
     });
-    const { resourceCommand } = this.toolbox;
+    const { resourceCommand } = this.commands;
     resourceCommand.unwatchResources(this.#watchedResources, {
       onAvailable: this.onResourceAvailable,
     });
@@ -2106,20 +2176,47 @@ class Inspector extends EventEmitter {
   }
 
   /**
-   * Called by toolbox.js on `Esc` keydown.
+   * Called by toolbox.js on `Esc` keydown to check if the inspector panel
+   * should prevent the split console from being toggled.
    *
-   * @param {AbortController} abortController
+   * @returns {boolean} true if the split console toggle should be prevented.
    */
-  onToolboxChromeEventHandlerEscapeKeyDown(abortController) {
-    // If the event tooltip is displayed, hide it and prevent the Esc event listener
-    // of the toolbox to occur (e.g. don't toggle split console)
+  shouldPreventSplitConsoleToggle() {
+    // If the event tooltip is displayed, hide it and prevent the split console
+    // from being toggled.
     if (
       this.markup.hasEventDetailsTooltip() &&
       this.markup.eventDetailsTooltip.isVisible()
     ) {
       this.markup.eventDetailsTooltip.hide();
-      abortController.abort();
+      return true;
     }
+
+    // We only want to see if the RuleView was created, as the tooltips might be displayed
+    // even if the RuleView is not the active tab.
+    if (this.#panels.has("ruleview")) {
+      const ruleView = this.getPanel("ruleview").view;
+      for (const tooltip of ruleView.tooltips.instances.values()) {
+        // If we have a tooltip displayed in the Rules view, hide it and bail.
+        // We can't have multiple tooltips visible at the same time, so it's fine to
+        // hide the first visible one for now.
+        if (tooltip.isVisible()) {
+          tooltip.hide();
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if this inspector instance already started being destroyed.
+   *
+   * @returns {boolean} true if the inspector destroy() was already called.
+   */
+  isDestroyed() {
+    return !!this.#destroyed;
   }
 }
 

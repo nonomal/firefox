@@ -3,13 +3,17 @@
 /* exported MockAlertsService */
 
 function mockServicesChromeScript() {
-  /* eslint-env mozilla/chrome-script */
-
   const MOCK_ALERTS_CID = Components.ID(
     "{48068bc2-40ab-4904-8afd-4cdfb3a385f3}"
   );
   const SYSTEM_CID = Components.ID("{a0ccaaf8-09da-44d8-b250-9ac3e93c8117}");
   const ALERTS_SERVICE_CONTRACT_ID = "@mozilla.org/alerts-service;1";
+
+  const BinaryInputStream = Components.Constructor(
+    "@mozilla.org/binaryinputstream;1",
+    "nsIBinaryInputStream",
+    "setInputStream"
+  );
 
   const { setTimeout } = ChromeUtils.importESModule(
     "resource://gre/modules/Timer.sys.mjs"
@@ -22,22 +26,37 @@ function mockServicesChromeScript() {
   let history = [];
 
   const mockAlertsService = {
-    showAlert(alert, listener) {
+    showAlert(alert, observer) {
+      this.showAlertWithCallbacks(alert, {
+        onAlertShow() {
+          observer.observe(null, "alertshow", alert.cookie);
+        },
+        onAlertClick(action) {
+          observer.observe(action, "alertclickcallback", alert.cookie);
+        },
+        onAlertFinished() {
+          observer.observe(null, "alertfinished", alert.cookie);
+        },
+      });
+    },
+
+    showAlertWithCallbacks(alert, callbacks) {
       activeNotifications[alert.name] = {
-        listener,
+        callbacks,
         cookie: alert.cookie,
         title: alert.title,
+        image: alert.image,
       };
 
       // fake async alert show event
-      if (listener) {
+      if (callbacks) {
         setTimeout(() => {
           if (this.mockFailure) {
-            listener.observe(null, "alertfinished", alert.cookie);
+            callbacks.onAlertFinished();
             return;
           }
 
-          listener.observe(null, "alertshow", alert.cookie);
+          callbacks.onAlertShow();
           if (this.autoClick) {
             let subject;
             if (typeof this.autoClick === "string") {
@@ -45,40 +64,17 @@ function mockServicesChromeScript() {
                 ac => ac.action === this.autoClick
               )[0];
             }
-            listener.observe(subject, "alertclickcallback", alert.cookie);
+            callbacks.onAlertClick(subject);
           }
         }, 100);
       }
     },
 
-    showAlertNotification(
-      imageUrl,
-      title,
-      text,
-      textClickable,
-      cookie,
-      alertListener,
-      name
-    ) {
-      this.showAlert(
-        {
-          name,
-          cookie,
-          title,
-        },
-        alertListener
-      );
-    },
-
     closeAlert(name) {
       let alertNotification = activeNotifications[name];
       if (alertNotification) {
-        if (alertNotification.listener) {
-          alertNotification.listener.observe(
-            null,
-            "alertfinished",
-            alertNotification.cookie
-          );
+        if (alertNotification.callbacks) {
+          alertNotification.callbacks.onAlertFinished();
         }
         delete activeNotifications[name];
       }
@@ -114,8 +110,8 @@ function mockServicesChromeScript() {
   function clickNotifications(doClose) {
     // Until we need to close a specific notification, just click them all.
     for (let [name, notification] of Object.entries(activeNotifications)) {
-      let { listener, cookie } = notification;
-      listener.observe(null, "alertclickcallback", cookie);
+      let { callbacks } = notification;
+      callbacks.onAlertClick();
       if (doClose) {
         mockAlertsService.closeAlert(name);
       }
@@ -164,6 +160,26 @@ function mockServicesChromeScript() {
   addMessageListener("mock-alert-service:get-notification-ids", () =>
     Object.keys(activeNotifications)
   );
+
+  addMessageListener("mock-alert-service:get-icon-image", id => {
+    let image = activeNotifications[id].image;
+    if (!image) {
+      return null;
+    }
+
+    const imgTools = Cc["@mozilla.org/image/tools;1"].getService(Ci.imgITools);
+    let stream = imgTools.encodeImage(image, "image/png");
+    let binaryStream = new BinaryInputStream(stream);
+
+    let count = stream.available();
+    let arrayBuffer = new ArrayBuffer(count);
+    let actuallyRead = binaryStream.readArrayBuffer(count, arrayBuffer);
+    if (actuallyRead != count) {
+      throw Error("Did not read whole stream");
+    }
+
+    return arrayBuffer;
+  });
 
   addMessageListener("mock-alert-service:set-history", value => {
     history = value;
@@ -242,6 +258,12 @@ const MockAlertsService = {
   async getNotificationIds() {
     return await this._chromeScript.sendQuery(
       "mock-alert-service:get-notification-ids"
+    );
+  },
+  async getIconImage(id) {
+    return await this._chromeScript.sendQuery(
+      "mock-alert-service:get-icon-image",
+      id
     );
   },
   async setHistory(ids) {

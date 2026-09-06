@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-*/
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -129,6 +128,8 @@ class MediaStreamTrackSource : public nsISupports {
   virtual void Destroy() {}
 
   struct CloneResult {
+    ~CloneResult();
+
     RefPtr<MediaStreamTrackSource> mSource;
     RefPtr<mozilla::MediaTrack> mInputTrack;
   };
@@ -592,7 +593,7 @@ class MediaStreamTrack : public DOMEventTargetHelper, public SupportsWeakPtr {
    * Forces the ready state to a particular value, for instance when we're
    * cloning an already ended track.
    */
-  void SetReadyState(MediaStreamTrackState aState);
+  virtual void SetReadyState(MediaStreamTrackState aState);
 
   /**
    * Notified by the MediaTrackGraph, through our owning MediaStream on the

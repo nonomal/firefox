@@ -4,59 +4,55 @@
 
 package org.mozilla.fenix.ui
 
-import androidx.compose.ui.test.junit4.AndroidComposeTestRule
-import org.junit.Ignore
+import androidx.compose.ui.test.junit4.v2.AndroidComposeTestRule as AndroidComposeTestRuleV2
 import org.junit.Rule
 import org.junit.Test
+import org.mozilla.fenix.customannotations.Converted
 import org.mozilla.fenix.customannotations.SmokeTest
+import org.mozilla.fenix.helpers.FenixTestRule
 import org.mozilla.fenix.helpers.HomeActivityIntentTestRule
 import org.mozilla.fenix.helpers.RetryTestRule
+import org.mozilla.fenix.helpers.RetryableComposeTestRule
 import org.mozilla.fenix.helpers.TestAssetHelper.getGenericAsset
 import org.mozilla.fenix.helpers.TestHelper.waitUntilSnackbarGone
-import org.mozilla.fenix.helpers.TestSetup
 import org.mozilla.fenix.helpers.perf.DetectMemoryLeaksRule
 import org.mozilla.fenix.ui.robots.homeScreen
 import org.mozilla.fenix.ui.robots.navigationToolbar
 
 /**
- *  Tests for verifying the presence of home screen and first-run homescreen elements
+ * Tests for verifying the presence of home screen and first-run homescreen elements
  *
- *  Note: For private browsing, navigation bar and tabs see separate test class
- *
+ * Note: For private browsing, navigation bar and tabs see separate test class
  */
+class HomeScreenTest {
+    @get:Rule(order = 0) val fenixTestRule: FenixTestRule = FenixTestRule()
 
-class HomeScreenTest : TestSetup() {
-    @get:Rule(order = 0)
-    val activityTestRule =
-        AndroidComposeTestRule(
-            HomeActivityIntentTestRule.withDefaultSettingsOverrides(),
-        ) { it.activity }
+    private val mockWebServer
+        get() = fenixTestRule.mockWebServer
 
-    @get:Rule(order = 1)
-    val memoryLeaksRule = DetectMemoryLeaksRule()
+    @get:Rule(order = 1) val retryTestRule = RetryTestRule(3)
 
-    @Rule(order = 2)
-    @JvmField
-    val retryTestRule = RetryTestRule(3)
+    @get:Rule(order = 2)
+    val retryableComposeTestRule = RetryableComposeTestRule {
+        AndroidComposeTestRuleV2(HomeActivityIntentTestRule.withDefaultSettingsOverrides()) { it.activity }
+    }
+
+    private val composeTestRule
+        get() = retryableComposeTestRule.current
+
+    @get:Rule(order = 3) val memoryLeaksRule = DetectMemoryLeaksRule(composeTestRule = { composeTestRule })
 
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/235396
     @Test
     fun homeScreenItemsTest() {
-        // Workaround to make sure the Pocket articles are populated before starting the test.
-        homeScreen {
-        }.openThreeDotMenu {
-        }.openSettings {
-        }.goBack {
+        homeScreen(composeTestRule) {
             verifyHomeWordmark()
             verifyHomePrivateBrowsingButton()
-            verifyExistingTopSitesTabs(activityTestRule, "Wikipedia")
-            verifyExistingTopSitesTabs(activityTestRule, "Google")
-            verifyCollectionsHeader(activityTestRule)
-            verifyNoCollectionsText(activityTestRule)
+            verifyExistingTopSitesTabs("Wikipedia")
+            verifyExistingTopSitesTabs("Google")
             verifyThoughtProvokingStories(true)
             verifyNavigationToolbar()
             verifyHomeMenuButton()
-            verifyTabButton()
             verifyTabCounter("0")
         }
     }
@@ -64,21 +60,26 @@ class HomeScreenTest : TestSetup() {
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/244199
     @Test
     fun privateBrowsingHomeScreenItemsTest() {
-        homeScreen { }.togglePrivateBrowsingMode()
+        homeScreen(composeTestRule) {}.togglePrivateBrowsingMode()
 
-        homeScreen {
-            verifyPrivateBrowsingHomeScreenItems()
-        }.openPrivateBrowsingModeLearnMoreLink(activityTestRule) {
-            verifyUrl("common-myths-about-private-browsing")
-        }
+        homeScreen(composeTestRule) {
+                verifyPrivateBrowsingHomeScreenItems()
+            }
+            .openPrivateBrowsingModeLearnMoreLink {
+                verifyUrl("common-myths-about-private-browsing")
+            }
     }
 
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/1364362
+    @Converted(
+        replacedBy = ["org.mozilla.fenix.ui.efficiency.tests.HomeTest#verifyContinueSectionTest"],
+        bug = 2039207,
+        since = "2026-05",
+    )
     @SmokeTest
-    @Ignore("disabled - https://bugzilla.mozilla.org/show_bug.cgi?id=1989405")
     @Test
-    fun verifyJumpBackInSectionTest() {
-        activityTestRule.activityRule.applySettingsExceptions {
+    fun verifyContinueSectionTest() {
+        composeTestRule.activityRule.applySettingsExceptions {
             it.isRecentlyVisitedFeatureEnabled = false
             it.isPocketEnabled = false
         }
@@ -86,45 +87,45 @@ class HomeScreenTest : TestSetup() {
         val firstWebPage = mockWebServer.getGenericAsset(4)
         val secondWebPage = mockWebServer.getGenericAsset(1)
 
-        navigationToolbar {
-        }.enterURLAndEnterToBrowser(firstWebPage.url) {
-            verifyPageContent(firstWebPage.content)
-            verifyUrl(firstWebPage.url.toString())
-        }.goToHomescreen(activityTestRule) {
-            verifyJumpBackInSectionIsDisplayed()
-            verifyJumpBackInItemTitle(activityTestRule, firstWebPage.title)
-            verifyJumpBackInItemWithUrl(activityTestRule, firstWebPage.url.toString())
-            verifyJumpBackInShowAllButton()
-        }.clickJumpBackInShowAllButton(activityTestRule) {
-            verifyExistingOpenTabs(firstWebPage.title)
-        }.closeTabDrawer {
-        }
+        navigationToolbar(composeTestRule) {}
+            .enterURLAndEnterToBrowser(firstWebPage.url) {
+                verifyPageContent(firstWebPage.content)
+                verifyUrl(firstWebPage.url.toString())
+            }
+            .goToHomescreen {
+                verifyContinueSectionIsDisplayed()
+                verifyContinueItemTitle(composeTestRule, firstWebPage.title)
+                verifyContinueItemWithUrl(composeTestRule, firstWebPage.url.toString())
+            }
 
-        navigationToolbar {
-        }.enterURLAndEnterToBrowser(secondWebPage.url) {
-            verifyPageContent(secondWebPage.content)
-            verifyUrl(secondWebPage.url.toString())
-        }.goToHomescreen(activityTestRule) {
-            verifyJumpBackInSectionIsDisplayed()
-            verifyJumpBackInItemTitle(activityTestRule, secondWebPage.title)
-            verifyJumpBackInItemWithUrl(activityTestRule, secondWebPage.url.toString())
-        }.openTabDrawer(activityTestRule) {
-            closeTabWithTitle(secondWebPage.title)
-            waitUntilSnackbarGone()
-            verifyExistingOpenTabs(firstWebPage.title)
-        }.closeTabDrawer {
-        }
+        navigationToolbar(composeTestRule) {}
+            .enterURLAndEnterToBrowser(secondWebPage.url) {
+                verifyPageContent(secondWebPage.content)
+                verifyUrl(secondWebPage.url.toString())
+            }
+            .goToHomescreen {
+                verifyContinueSectionIsDisplayed()
+                verifyContinueItemTitle(composeTestRule, secondWebPage.title)
+                verifyContinueItemWithUrl(composeTestRule, secondWebPage.url.toString())
+            }
+            .openTabDrawer {
+                closeTabWithTitle(secondWebPage.title)
+                waitUntilSnackbarGone()
+                verifyExistingOpenTabs(firstWebPage.title)
+            }
+            .closeTabDrawer {}
 
-        homeScreen {
-            verifyJumpBackInSectionIsDisplayed()
-            verifyJumpBackInItemTitle(activityTestRule, firstWebPage.title)
-            verifyJumpBackInItemWithUrl(activityTestRule, firstWebPage.url.toString())
-        }.openTabDrawer(activityTestRule) {
-            closeTab()
-        }
+        homeScreen(composeTestRule) {
+                verifyContinueSectionIsDisplayed()
+                verifyContinueItemTitle(composeTestRule, firstWebPage.title)
+                verifyContinueItemWithUrl(composeTestRule, firstWebPage.url.toString())
+            }
+            .openTabDrawer {
+                closeTab()
+            }
 
-        homeScreen {
-            verifyJumpBackInSectionIsNotDisplayed(activityTestRule)
+        homeScreen(composeTestRule) {
+            verifyContinueSectionIsNotDisplayed()
         }
     }
 }

@@ -261,14 +261,12 @@ class SkipfailsMode(Mode):
         replace_tbd_mode: bool,
     ) -> int:
         if (
-            sum(
-                [
-                    carryover_mode,
-                    known_intermittents_mode,
-                    new_failures_mode,
-                    replace_tbd_mode,
-                ]
-            )
+            sum([
+                carryover_mode,
+                known_intermittents_mode,
+                new_failures_mode,
+                replace_tbd_mode,
+            ])
             > 1
         ):
             raise Exception(
@@ -797,7 +795,7 @@ class Skipfails:
                     tcs = i
             if tcs < 0:
                 raise PermissionError("Error querying mozci with default User-Agent")
-            msg = f'Error querying mozci with User-Agent: {mozci.data.handler.sources[tcs].session.headers["User-Agent"]}'
+            msg = f"Error querying mozci with User-Agent: {mozci.data.handler.sources[tcs].session.headers['User-Agent']}"
             if self.user_agent is None:
                 raise PermissionError(msg)
             else:
@@ -1441,7 +1439,7 @@ class Skipfails:
     def resolve_failure_filename(self, path: str, kind: str, manifest: str) -> str:
         filename = DEF
         if kind == Kind.TOML:
-            filename = self.get_filename_in_manifest(manifest.split(":")[-1], path)
+            filename = self.get_filename_in_manifest(manifest.rsplit(":", 1)[-1], path)
         elif kind == Kind.WPT:
             filename = os.path.basename(path)
         elif kind == Kind.LIST:
@@ -1491,7 +1489,7 @@ class Skipfails:
         a boolean (indicating if the basename has been handled in the manifest)
         """
 
-        path: str = path.split(":")[-1]
+        path: str = path.rsplit(":", 1)[-1]
         self.info(f"\n\n===== Skip failure in manifest: {manifest} =====")
         self.info(f"    path: {path}")
         self.info(f"    label: {label}")
@@ -1900,17 +1898,13 @@ class Skipfails:
         import taskcluster
 
         url: OptStr = None
-        index = taskcluster.Index(
-            {
-                "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
-            }
-        )
+        index = taskcluster.Index({
+            "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
+        })
         route = "gecko.v2.mozilla-central.latest.source.test-info-all"
-        queue = taskcluster.Queue(
-            {
-                "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
-            }
-        )
+        queue = taskcluster.Queue({
+            "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
+        })
 
         # Typing from findTask is wrong, so we need to convert to Any
         result: OptTaskResult = index.findTask(route)
@@ -1972,7 +1966,7 @@ class Skipfails:
             elif tsan:
                 skip_if += "ThreadSanitizer"
             # See implicit VARIANT_DEFAULTS in
-            # https://searchfox.org/mozilla-central/source/layout/tools/reftest/manifest.sys.mjs#30
+            # https://searchfox.org/firefox-main/source/layout/tools/reftest/manifest.sys.mjs#30
             no_fission = "!fission" not in runtimes
             snapshot = "snapshot" in runtimes
             swgl = "swgl" in runtimes
@@ -2042,7 +2036,8 @@ class Skipfails:
                     if not self.platform_permutations:
                         self._fetch_platform_permutations()
                     permutations = (
-                        self.platform_permutations.get(manifest, {})
+                        self.platform_permutations
+                        .get(manifest, {})
                         .get(os, {})
                         .get(os_version, {})
                         .get(arch, None)
@@ -2694,9 +2689,9 @@ class Skipfails:
                 difference = 0
                 pixels = 0
             if difference > 0:
-                self.error_summary[group][allmods][RUNS][task_id][
-                    DIFFERENCE
-                ] = difference
+                self.error_summary[group][allmods][RUNS][task_id][DIFFERENCE] = (
+                    difference
+                )
             if pixels > 0:
                 self.error_summary[group][allmods][RUNS][task_id][PIXELS] = pixels
             if status != FAIL:
@@ -2756,9 +2751,7 @@ class Skipfails:
                     if summary.endswith("single tracking bug"):
                         bugid: int = bug.get("id", None)
                         line_number = top["line_number"] + 1
-                        log_url: str = (
-                            f"https://treeherder.mozilla.org/logviewer?repo={repo}&job_id={job_id}&lineNumber={line_number}"
-                        )
+                        log_url: str = f"https://treeherder.mozilla.org/logviewer?repo={repo}&job_id={job_id}&lineNumber={line_number}"
                         comment += f"\nError log line {line_number}: {log_url}"
         return (bugid, comment, line_number)
 

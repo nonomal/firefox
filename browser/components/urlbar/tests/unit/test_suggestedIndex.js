@@ -532,8 +532,8 @@ async function doSuggestedIndexTest({
   for (let i = 0; i < resultCount; i++) {
     results.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         resultSpan: spansByIndex[results.length],
         payload: {
           url: "http://example.com/" + i,
@@ -546,8 +546,8 @@ async function doSuggestedIndexTest({
   for (let suggestedIndex of suggestedIndexes) {
     results.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         suggestedIndex,
         resultSpan: spansByIndex[results.length],
         payload: {
@@ -561,11 +561,13 @@ async function doSuggestedIndexTest({
   UrlbarPrefs.set("maxRichResults", maxRichResults);
   let provider = registerBasicTestProvider(results);
   let context = createContext(undefined, { providers: [provider.name] });
-  let controller = UrlbarTestUtils.newMockController();
 
   // Finally, search and check the results.
   let expectedResults = expected.map(i => results[i]);
-  await UrlbarProvidersManager.startQuery(context, controller);
+  await ProvidersManager.getInstanceForSap("urlbar").startQuery(
+    context,
+    UrlbarTestUtils.mockChildController().parentController
+  );
   Assert.deepEqual(context.results, expectedResults);
 }
 

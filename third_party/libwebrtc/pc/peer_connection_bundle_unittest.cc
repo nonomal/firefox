@@ -16,9 +16,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/string_view.h"
 #include "api/candidate.h"
 #include "api/create_modular_peer_connection_factory.h"
 #include "api/enable_media_with_defaults.h"
+#include "api/environment/environment.h"
 #include "api/jsep.h"
 #include "api/media_types.h"
 #include "api/peer_connection_interface.h"
@@ -28,7 +30,6 @@
 #include "api/scoped_refptr.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/stats/rtcstats_objects.h"
-#include "api/test/rtc_error_matchers.h"
 #include "api/video_codecs/video_decoder_factory_template.h"
 #include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
 #include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
@@ -43,7 +44,7 @@
 #include "p2p/base/p2p_constants.h"
 #include "p2p/base/port_allocator.h"
 #include "p2p/base/transport_info.h"
-#include "pc/channel.h"
+#include "pc/jsep_transport_controller.h"
 #include "pc/peer_connection.h"
 #include "pc/peer_connection_wrapper.h"
 #include "pc/rtp_transceiver.h"
@@ -61,8 +62,11 @@
 #include "rtc_base/socket_address.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/virtual_socket_server.h"
+#include "test/create_test_environment.h"
+#include "test/create_test_field_trials.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
+#include "test/run_loop.h"
 #include "test/wait_until.h"
 
 #ifdef WEBRTC_ANDROID
@@ -121,28 +125,24 @@ class PeerConnectionWrapperForBundleTest : public PeerConnectionWrapper {
   }
 
   RtpTransportInternal* voice_rtp_transport() {
-    return (voice_channel() ? voice_channel()->rtp_transport() : nullptr);
-  }
-
-  VoiceChannel* voice_channel() {
     auto transceivers = GetInternalPeerConnection()->GetTransceiversInternal();
     for (const auto& transceiver : transceivers) {
-      if (transceiver->media_type() == MediaType::AUDIO) {
-        return static_cast<VoiceChannel*>(transceiver->internal()->channel());
+      if (transceiver->media_type() == MediaType::AUDIO && transceiver->mid()) {
+        return GetInternalPeerConnection()
+            ->transport_controller_n()
+            ->GetRtpTransport(*transceiver->mid());
       }
     }
     return nullptr;
   }
 
   RtpTransportInternal* video_rtp_transport() {
-    return (video_channel() ? video_channel()->rtp_transport() : nullptr);
-  }
-
-  VideoChannel* video_channel() {
     auto transceivers = GetInternalPeerConnection()->GetTransceiversInternal();
     for (const auto& transceiver : transceivers) {
-      if (transceiver->media_type() == MediaType::VIDEO) {
-        return static_cast<VideoChannel*>(transceiver->internal()->channel());
+      if (transceiver->media_type() == MediaType::VIDEO && transceiver->mid()) {
+        return GetInternalPeerConnection()
+            ->transport_controller_n()
+            ->GetRtpTransport(*transceiver->mid());
       }
     }
     return nullptr;
@@ -192,7 +192,9 @@ class PeerConnectionBundleBaseTest : public ::testing::Test {
   typedef std::unique_ptr<PeerConnectionWrapperForBundleTest> WrapperPtr;
 
   explicit PeerConnectionBundleBaseTest(SdpSemantics sdp_semantics)
-      : main_(&vss_), sdp_semantics_(sdp_semantics) {
+      : env_(CreateTestEnvironment()),
+        main_(&vss_),
+        sdp_semantics_(sdp_semantics) {
 #ifdef WEBRTC_ANDROID
     InitializeAndroidObjects();
 #endif
@@ -202,7 +204,16 @@ class PeerConnectionBundleBaseTest : public ::testing::Test {
     return CreatePeerConnection(RTCConfiguration());
   }
 
+  WrapperPtr CreatePeerConnection(absl::string_view field_trials) {
+    return CreatePeerConnection(RTCConfiguration(), field_trials);
+  }
+
   WrapperPtr CreatePeerConnection(const RTCConfiguration& config) {
+    return CreatePeerConnection(config, "");
+  }
+
+  WrapperPtr CreatePeerConnection(const RTCConfiguration& config,
+                                  absl::string_view field_trials) {
     // Each PeerConnection has its own `NetworkManager` which is injected into
     // `PeerConnectionFactoryDependencies`, thus each PeerConnection in these
     // tests is created with own PeerConnectionFactory.
@@ -224,6 +235,7 @@ class PeerConnectionBundleBaseTest : public ::testing::Test {
         std::make_unique<VideoDecoderFactoryTemplate<
             LibvpxVp8DecoderTemplateAdapter, LibvpxVp9DecoderTemplateAdapter,
             OpenH264DecoderTemplateAdapter, Dav1dDecoderTemplateAdapter>>();
+    pcf_deps.env = env_;
     EnableMediaWithDefaults(pcf_deps);
 
     scoped_refptr<PeerConnectionFactoryInterface> pc_factory =
@@ -234,8 +246,12 @@ class PeerConnectionBundleBaseTest : public ::testing::Test {
     modified_config.set_port_allocator_flags(PORTALLOCATOR_DISABLE_TCP |
                                              PORTALLOCATOR_DISABLE_RELAY);
     modified_config.sdp_semantics = sdp_semantics_;
-    auto result = pc_factory->CreatePeerConnectionOrError(
-        modified_config, PeerConnectionDependencies(observer.get()));
+    PeerConnectionDependencies pc_deps(observer.get());
+    if (!field_trials.empty()) {
+      pc_deps.trials = CreateTestFieldTrialsPtr(field_trials);
+    }
+    auto result = pc_factory->CreatePeerConnectionOrError(modified_config,
+                                                          std::move(pc_deps));
     if (!result.ok()) {
       return nullptr;
     }
@@ -267,8 +283,9 @@ class PeerConnectionBundleBaseTest : public ::testing::Test {
     return candidate;
   }
 
+  const Environment env_;
   VirtualSocketServer vss_;
-  AutoSocketServerThread main_;
+  test::RunLoop main_;
   const SdpSemantics sdp_semantics_;
 };
 
@@ -313,7 +330,9 @@ TEST_P(PeerConnectionBundleTest,
   config.rtcp_mux_policy = PeerConnectionInterface::kRtcpMuxPolicyNegotiate;
   auto caller = CreatePeerConnectionWithAudioVideo(config);
   caller->network()->AddInterface(kCallerAddress);
-  auto callee = CreatePeerConnectionWithAudioVideo(config);
+  // Munging allowed: kRtcpMux (30)
+  auto callee = CreatePeerConnectionWithAudioVideo(
+      config, "WebRTC-NoSdpMangleAllowForTesting/Enabled,30/");
   callee->network()->AddInterface(kCalleeAddress);
 
   ASSERT_TRUE(callee->SetRemoteDescription(caller->CreateOfferAndSetAsLocal()));
@@ -322,14 +341,11 @@ TEST_P(PeerConnectionBundleTest,
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(options_no_bundle);
   SdpContentsForEach(RemoveRtcpMux(), answer->description());
-  ASSERT_TRUE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  ASSERT_TRUE(callee->SetLocalDescription(answer->Clone()));
   ASSERT_TRUE(caller->SetRemoteDescription(std::move(answer)));
 
   // Check that caller has separate RTP and RTCP candidates for each media.
-  EXPECT_THAT(WaitUntil([&] { return caller->IsIceGatheringDone(); },
-                        ::testing::IsTrue()),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return caller->IsIceGatheringDone(); }));
   EXPECT_THAT(
       GetCandidateComponents(caller->observer()->GetCandidatesByMline(0)),
       UnorderedElementsAre(ICE_CANDIDATE_COMPONENT_RTP,
@@ -340,9 +356,7 @@ TEST_P(PeerConnectionBundleTest,
                            ICE_CANDIDATE_COMPONENT_RTCP));
 
   // Check that callee has separate RTP and RTCP candidates for each media.
-  EXPECT_THAT(WaitUntil([&] { return callee->IsIceGatheringDone(); },
-                        ::testing::IsTrue()),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return callee->IsIceGatheringDone(); }));
   EXPECT_THAT(
       GetCandidateComponents(callee->observer()->GetCandidatesByMline(0)),
       UnorderedElementsAre(ICE_CANDIDATE_COMPONENT_RTP,
@@ -369,9 +383,7 @@ TEST_P(PeerConnectionBundleTest,
   ASSERT_TRUE(
       caller->SetRemoteDescription(callee->CreateAnswer(options_no_bundle)));
 
-  EXPECT_THAT(WaitUntil([&] { return caller->IsIceGatheringDone(); },
-                        ::testing::IsTrue()),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return caller->IsIceGatheringDone(); }));
 
   EXPECT_EQ(1u, caller->observer()->GetCandidatesByMline(0).size());
   EXPECT_EQ(1u, caller->observer()->GetCandidatesByMline(1).size());
@@ -392,9 +404,7 @@ TEST_P(PeerConnectionBundleTest,
   ASSERT_TRUE(callee->SetRemoteDescription(caller->CreateOfferAndSetAsLocal()));
   ASSERT_TRUE(caller->SetRemoteDescription(callee->CreateAnswer()));
 
-  EXPECT_THAT(WaitUntil([&] { return caller->IsIceGatheringDone(); },
-                        ::testing::IsTrue()),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return caller->IsIceGatheringDone(); }));
 
   EXPECT_EQ(1u, caller->observer()->GetCandidatesByMline(0).size());
   EXPECT_EQ(0u, caller->observer()->GetCandidatesByMline(1).size());
@@ -617,8 +627,7 @@ TEST_P(PeerConnectionBundleTest, FailToSetDescriptionWithBundleAndNoRtcpMux) {
   SdpContentsForEach(RemoveRtcpMux(), offer->description());
 
   std::string error;
-  EXPECT_FALSE(caller->SetLocalDescription(CloneSessionDescription(offer.get()),
-                                           &error));
+  EXPECT_FALSE(caller->SetLocalDescription(offer->Clone(), &error));
   EXPECT_EQ(
       "Failed to set local offer sdp: rtcp-mux must be enabled when BUNDLE is "
       "enabled.",
@@ -672,20 +681,10 @@ TEST_P(PeerConnectionBundleTest,
   ASSERT_TRUE(
       caller->AddIceCandidateToMedia(&audio_candidate2, MediaType::AUDIO));
 
-  EXPECT_THAT(
-      WaitUntil(
-          [&] {
-            return caller->HasConnectionWithRemoteAddress(kAudioAddress1);
-          },
-          ::testing::IsTrue()),
-      IsRtcOk());
-  EXPECT_THAT(
-      WaitUntil(
-          [&] {
-            return caller->HasConnectionWithRemoteAddress(kAudioAddress2);
-          },
-          ::testing::IsTrue()),
-      IsRtcOk());
+  EXPECT_TRUE(WaitUntil(
+      [&] { return caller->HasConnectionWithRemoteAddress(kAudioAddress1); }));
+  EXPECT_TRUE(WaitUntil(
+      [&] { return caller->HasConnectionWithRemoteAddress(kAudioAddress2); }));
   EXPECT_FALSE(caller->HasConnectionWithRemoteAddress(kVideoAddress));
 }
 
@@ -728,8 +727,7 @@ TEST_P(PeerConnectionBundleTest, ApplyDescriptionWithSameSsrcsBundledFails) {
   options.use_rtp_mux = true;
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(options);
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   // Modify the remote SDP to make two m= sections have the same SSRC.
   ASSERT_GE(offer->description()->contents().size(), 2U);
   ReplaceFirstSsrc(offer->description()
@@ -761,8 +759,7 @@ TEST_P(PeerConnectionBundleTest,
   options.use_rtp_mux = false;
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(options);
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   // Modify the remote SDP to make two m= sections have the same SSRC.
   ASSERT_GE(offer->description()->contents().size(), 2U);
   ReplaceFirstSsrc(offer->description()
@@ -803,7 +800,7 @@ TEST_P(PeerConnectionBundleTest, RejectDescriptionChangingBundleTag) {
   ContentGroup new_bundle_group(GROUP_TYPE_BUNDLE);
   new_bundle_group.AddContentName(second_mid);
 
-  auto re_offer = CloneSessionDescription(offer.get());
+  auto re_offer = offer->Clone();
   callee->SetRemoteDescription(std::move(offer));
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(options);
@@ -835,7 +832,7 @@ TEST_P(PeerConnectionBundleTest, RemovingContentAndRejectBundleGroup) {
 
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOfferAndSetAsLocal();
-  auto re_offer = CloneSessionDescription(offer.get());
+  auto re_offer = offer->Clone();
 
   // Removing the second MID from the BUNDLE group.
   auto* old_bundle_group =
@@ -859,7 +856,9 @@ TEST_P(PeerConnectionBundleTest, RemovingContentAndRejectBundleGroup) {
 // This tests that the BUNDLE group in answer should be a subset of the offered
 // group.
 TEST_P(PeerConnectionBundleTest, AddContentToBundleGroupInAnswerNotSupported) {
-  auto caller = CreatePeerConnectionWithAudioVideo();
+  // Munging allowed: kBundle (33)
+  auto caller = CreatePeerConnectionWithAudioVideo(
+      "WebRTC-NoSdpMangleAllowForTesting/Enabled,33/");
   auto callee = CreatePeerConnectionWithAudioVideo();
 
   std::unique_ptr<SessionDescriptionInterface> offer = caller->CreateOffer();
@@ -870,8 +869,7 @@ TEST_P(PeerConnectionBundleTest, AddContentToBundleGroupInAnswerNotSupported) {
   bundle_group.AddContentName(first_mid);
   offer->description()->RemoveGroupByName(GROUP_TYPE_BUNDLE);
   offer->description()->AddGroup(bundle_group);
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   EXPECT_TRUE(callee->SetRemoteDescription(std::move(offer)));
 
   std::unique_ptr<SessionDescriptionInterface> answer = callee->CreateAnswer();
@@ -896,8 +894,7 @@ TEST_P(PeerConnectionBundleTest, RejectBundleGroupWithNonExistingMid) {
   offer->description()->RemoveGroupByName(GROUP_TYPE_BUNDLE);
   offer->description()->AddGroup(invalid_bundle_group);
 
-  EXPECT_FALSE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_FALSE(caller->SetLocalDescription(offer->Clone()));
   EXPECT_FALSE(callee->SetRemoteDescription(std::move(offer)));
 }
 
@@ -921,8 +918,7 @@ TEST_P(PeerConnectionBundleTest, RemoveContentFromBundleGroup) {
   answer->description()->RemoveGroupByName(GROUP_TYPE_BUNDLE);
   answer->description()->AddGroup(invalid_bundle_group);
 
-  EXPECT_FALSE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  EXPECT_FALSE(callee->SetLocalDescription(answer->Clone()));
 }
 
 INSTANTIATE_TEST_SUITE_P(PeerConnectionBundleTest,
@@ -961,7 +957,9 @@ TEST_F(PeerConnectionBundleTestUnifiedPlan,
 }
 
 TEST_F(PeerConnectionBundleTestUnifiedPlan, MultipleBundleGroups) {
-  auto caller = CreatePeerConnection();
+  // Munging allowed: kBundle (33)
+  auto caller =
+      CreatePeerConnection("WebRTC-NoSdpMangleAllowForTesting/Enabled,33/");
   caller->AddAudioTrack("0_audio");
   caller->AddAudioTrack("1_audio");
   caller->AddVideoTrack("2_audio");
@@ -982,12 +980,10 @@ TEST_F(PeerConnectionBundleTestUnifiedPlan, MultipleBundleGroups) {
   offer->description()->AddGroup(bundle_group1);
   offer->description()->AddGroup(bundle_group2);
 
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   EXPECT_TRUE(callee->SetRemoteDescription(std::move(offer)));
   std::unique_ptr<SessionDescriptionInterface> answer = callee->CreateAnswer();
-  EXPECT_TRUE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  EXPECT_TRUE(callee->SetLocalDescription(answer->Clone()));
   EXPECT_TRUE(caller->SetRemoteDescription(std::move(answer)));
 
   // Verify bundling on sender side.
@@ -1016,9 +1012,11 @@ TEST_F(PeerConnectionBundleTestUnifiedPlan, MultipleBundleGroups) {
 // Test that, with the "max-compat" bundle policy, it's possible to add an m=
 // section that's not part of an existing bundle group.
 TEST_F(PeerConnectionBundleTestUnifiedPlan, AddNonBundledSection) {
+  // Munging allowed: kBundle (33)
   RTCConfiguration config;
   config.bundle_policy = PeerConnectionInterface::kBundlePolicyMaxCompat;
-  auto caller = CreatePeerConnection(config);
+  auto caller = CreatePeerConnection(
+      config, "WebRTC-NoSdpMangleAllowForTesting/Enabled,33/");
   caller->AddAudioTrack("0_audio");
   caller->AddAudioTrack("1_audio");
   auto callee = CreatePeerConnection(config);
@@ -1026,12 +1024,10 @@ TEST_F(PeerConnectionBundleTestUnifiedPlan, AddNonBundledSection) {
   // Establish an existing BUNDLE group.
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(RTCOfferAnswerOptions());
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   EXPECT_TRUE(callee->SetRemoteDescription(std::move(offer)));
   std::unique_ptr<SessionDescriptionInterface> answer = callee->CreateAnswer();
-  EXPECT_TRUE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  EXPECT_TRUE(callee->SetLocalDescription(answer->Clone()));
   EXPECT_TRUE(caller->SetRemoteDescription(std::move(answer)));
 
   // Add a track but munge SDP so it's not part of the bundle group.
@@ -1042,12 +1038,10 @@ TEST_F(PeerConnectionBundleTestUnifiedPlan, AddNonBundledSection) {
   bundle_group.AddContentName("0");
   bundle_group.AddContentName("1");
   offer->description()->AddGroup(bundle_group);
-  EXPECT_TRUE(
-      caller->SetLocalDescription(CloneSessionDescription(offer.get())));
+  EXPECT_TRUE(caller->SetLocalDescription(offer->Clone()));
   EXPECT_TRUE(callee->SetRemoteDescription(std::move(offer)));
   answer = callee->CreateAnswer();
-  EXPECT_TRUE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  EXPECT_TRUE(callee->SetLocalDescription(answer->Clone()));
   EXPECT_TRUE(caller->SetRemoteDescription(std::move(answer)));
 
   // Verify bundling on the sender side.

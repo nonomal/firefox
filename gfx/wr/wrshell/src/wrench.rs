@@ -330,7 +330,7 @@ impl YamlWriter {
         let pipeline = &scene.pipelines[&pipeline_id];
 
         self.build_spatial_tree(
-            &pipeline.display_list.display_list,
+            &pipeline.display_list,
             pipeline_id,
         );
 
@@ -615,11 +615,8 @@ impl YamlWriter {
                     DisplayItem::SetGradientStops => {}
                     DisplayItem::SetFilterOps => {}
                     DisplayItem::SetFilterData => {}
-                    DisplayItem::SetFilterPrimitives => {}
                     DisplayItem::SetPoints => {}
                     DisplayItem::PopAllShadows => {}
-                    DisplayItem::ReuseItems(..) => {}
-                    DisplayItem::RetainedItems(..) => {}
                     DisplayItem::RepeatingImage(..) => {}
                     DisplayItem::YuvImage(..) => {}
                     DisplayItem::BackdropFilter(..) => {}
@@ -627,7 +624,6 @@ impl YamlWriter {
                     DisplayItem::Gradient(..) => {}
                     DisplayItem::RadialGradient(..) => {}
                     DisplayItem::ConicGradient(..) => {}
-                    DisplayItem::ClearRectangle(..) => {}
                     DisplayItem::Line(..) => {}
                     DisplayItem::HitTest(..) => {}
                     DisplayItem::PushReferenceFrame(..) => {}

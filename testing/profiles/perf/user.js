@@ -5,24 +5,15 @@
 // Base preferences file used by performance harnesses
 /* globals user_pref */
 user_pref("app.normandy.api_url", "https://127.0.0.1/selfsupport-dummy/");
-user_pref("browser.EULA.override", true);
-user_pref("browser.addon-watch.interval", -1); // Deactivate add-on watching
 // Disable Bookmark backups by default.
 user_pref("browser.bookmarks.max_backups", 0);
 user_pref("browser.cache.disk.smart_size.enabled", false);
-user_pref("browser.contentHandlers.types.0.uri", "http://127.0.0.1/rss?url=%s");
-user_pref("browser.contentHandlers.types.1.uri", "http://127.0.0.1/rss?url=%s");
-user_pref("browser.contentHandlers.types.2.uri", "http://127.0.0.1/rss?url=%s");
-user_pref("browser.contentHandlers.types.3.uri", "http://127.0.0.1/rss?url=%s");
-user_pref("browser.contentHandlers.types.4.uri", "http://127.0.0.1/rss?url=%s");
-user_pref("browser.contentHandlers.types.5.uri", "http://127.0.0.1/rss?url=%s");
 user_pref("browser.link.open_newwindow", 2);
 user_pref("browser.newtabpage.activity-stream.default.sites", "");
 user_pref("browser.newtabpage.activity-stream.telemetry", false);
 // Don't load or render cfrs by default
 user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features", false);
 user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons", false);
-user_pref("browser.reader.detectedFirstArticle", true);
 user_pref("browser.safebrowsing.blockedURIs.enabled", false);
 user_pref("browser.safebrowsing.downloads.enabled", false);
 user_pref("browser.safebrowsing.downloads.remote.url", "http://127.0.0.1/safebrowsing-dummy/downloads");
@@ -43,11 +34,12 @@ user_pref("datareporting.healthreport.documentServerURI", "http://127.0.0.1/heal
 user_pref("devtools.chrome.enabled", false);
 user_pref("devtools.debugger.remote-enabled", false);
 user_pref("devtools.theme", "light");
-user_pref("devtools.timeline.enabled", false);
 user_pref("dom.allow_scripts_to_close_windows", true);
 user_pref("dom.disable_open_during_load", false);
 user_pref("dom.disable_window_flip", true);
 user_pref("dom.disable_window_move_resize", true);
+// Enough so that they survive across the warm page reloads, and then some.
+user_pref("layout.css.stylesheet-cache.timeout_ms", 1000000);
 // required to prevent non-local access to push.services.mozilla.com
 user_pref("dom.push.connection.enabled", false);
 user_pref("extensions.autoDisableScopes", 10);
@@ -63,8 +55,6 @@ user_pref("extensions.update.background.url", "http://127.0.0.1/extensions-dummy
 user_pref("extensions.update.notifyUser", false);
 user_pref("extensions.update.url", "http://127.0.0.1/extensions-dummy/updateURL");
 user_pref("identity.fxaccounts.auth.uri", "https://127.0.0.1/fxa-dummy/");
-user_pref("identity.fxaccounts.migrateToDevEdition", false);
-user_pref("media.capturestream_hints.enabled", true);
 user_pref("media.gmp-manager.url", "http://127.0.0.1/gmpmanager-dummy/update.xml");
 // Don't block old libavcodec libraries when testing, because our test systems
 // cannot easily be upgraded.
@@ -72,6 +62,7 @@ user_pref("media.libavcodec.allow-obsolete", true);
 user_pref("media.navigator.enabled", true);
 user_pref("media.navigator.permission.disabled", true);
 user_pref("media.peerconnection.enabled", true);
+user_pref("network.captive-portal-service.enabled", true);
 // Set places maintenance far in the future (the maximum time possible in an
 // int32_t) to avoid it kicking in during tests. The maintenance can take a
 // relatively long time which may cause unnecessary intermittents and slow down
@@ -80,9 +71,7 @@ user_pref("places.database.lastMaintenance", 2147483647);
 user_pref("privacy.reduceTimerPrecision", false); // Bug 1445243 - reduces precision of tests
 user_pref("privacy.trackingprotection.annotate_channels", false);
 user_pref("privacy.trackingprotection.enabled", false);
-user_pref("privacy.trackingprotection.introURL", "http://127.0.0.1/trackingprotection/tour");
 user_pref("privacy.trackingprotection.pbmode.enabled", false);
-user_pref("security.enable_java", false);
 user_pref("network.protocol-handler.external.ext+damp", true);
 user_pref("network.protocol-handler.external.ext+twinopen", true);
 user_pref("security.fileuri.strict_origin_policy", false);
@@ -112,3 +101,8 @@ user_pref("browser.tabs.remote.systemTriggeredAboutBlankAnywhere", true);
 user_pref("media.webspeech.synth.dont_notify_on_error", true);
 // Turn off update
 user_pref("app.update.disabledForTesting", true);
+
+// Turn off remote settings improvements and nimbus
+user_pref("nimbus.rollouts.enabled", false);
+user_pref("app.shield.optoutstudies.enabled", false);
+user_pref("services.sync.prefs.sync.app.shield.optoutstudies.enabled", false);

@@ -5,41 +5,40 @@
 package org.mozilla.fenix.settings
 
 import android.content.Context
-import android.content.res.ColorStateList
 import android.util.AttributeSet
-import android.view.LayoutInflater
+import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.TextView
 import androidx.annotation.AttrRes
 import androidx.annotation.ColorInt
-import androidx.core.widget.ImageViewCompat
+import androidx.core.view.updateLayoutParams
 import androidx.preference.Preference
 import androidx.preference.PreferenceViewHolder
-import com.google.android.material.color.MaterialColors
-import org.mozilla.fenix.R
 import com.google.android.material.R as materialR
+import com.google.android.material.color.MaterialColors
+import mozilla.components.support.ktx.android.content.pixelSizeFor
+import org.mozilla.fenix.GleanMetrics.CustomizationSettings
+import org.mozilla.fenix.R
+import org.mozilla.fenix.ext.isWideWindow
+import org.mozilla.fenix.utils.view.addToRadioGroup
 
 /**
- * Custom Preference that renders the options list.
- * Selecting an option moves it to the top and persists to SharedPreferences.
+ * Custom Preference that renders the options list. Selecting an option moves it to the top and persists to
+ * SharedPreferences.
  */
-internal abstract class ToolbarShortcutPreference @JvmOverloads constructor(
+internal abstract class ToolbarShortcutPreference
+@JvmOverloads
+constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : Preference(context, attrs) {
 
-    @ColorInt
-    private var colorTertiary: Int = 0
+    @ColorInt private var colorTertiary: Int = 0
 
-    @ColorInt
-    private var colorOnSurface: Int = 0
+    @ColorInt private var colorOnSurface: Int = 0
 
-    @ColorInt
-    private var colorOnSurfaceVariant: Int = 0
+    @ColorInt private var colorOnSurfaceVariant: Int = 0
 
     init {
         layoutResource = R.layout.preference_toolbar_shortcut
@@ -47,108 +46,113 @@ internal abstract class ToolbarShortcutPreference @JvmOverloads constructor(
     }
 
     protected abstract val options: List<ShortcutOption>
+
+    /**
+     * Returns whether [option] can be selected. A disabled option is still shown but greyed out and non-clickable.
+     * Defaults to `true`.
+     */
+    protected open fun isOptionEnabled(option: ShortcutOption): Boolean = true
+
     protected abstract fun readSelectedKey(): String
+
     protected abstract fun writeSelectedKey(key: String)
-    protected abstract fun getSelectedIconImageView(holder: PreferenceViewHolder): ImageView
+
+    protected abstract fun getToolbarType(): String
+
+    protected abstract fun getSelectedIconImageView(holder: PreferenceViewHolder): ImageView?
+
+    /**
+     * The toolbar type reported in telemetry. Separate from [getToolbarType] so a preference can reuse another type's
+     * preview layout but still be reported on its own.
+     */
+    protected open fun getTelemetryToolbarType(): String =
+        when (getToolbarType()) {
+            EXPANDED_TOOLBAR_TYPE -> EXPANDED_TOOLBAR_TYPE
+            else -> SIMPLE_TOOLBAR_TYPE
+        }
 
     override fun onBindViewHolder(holder: PreferenceViewHolder) {
         super.onBindViewHolder(holder)
 
-        val selectedIcon = getSelectedIconImageView(holder)
-        val selectedContainer = holder.findViewById(R.id.selected_container) as LinearLayout
-        val optionsContainer = holder.findViewById(R.id.options_container) as LinearLayout
-        val separator = holder.findViewById(R.id.separator) as View
+        configureShortcutPreview(holder)
 
-        colorTertiary = holder.itemView.getMaterialColor(materialR.attr.colorTertiary)
-        colorOnSurface = holder.itemView.getMaterialColor(materialR.attr.colorOnSurface)
-        colorOnSurfaceVariant = holder.itemView.getMaterialColor(materialR.attr.colorOnSurfaceVariant)
+        getSelectedIconImageView(holder)?.let { imageView ->
+            getSelectedOption().icon?.let { iconResource ->
+                colorTertiary = holder.itemView.getMaterialColor(materialR.attr.colorTertiary)
+                colorOnSurface = holder.itemView.getMaterialColor(materialR.attr.colorOnSurface)
+                colorOnSurfaceVariant = holder.itemView.getMaterialColor(materialR.attr.colorOnSurfaceVariant)
 
+                imageView.setImageResource(iconResource)
+            }
+        }
+    }
+
+    private fun configureShortcutPreview(holder: PreferenceViewHolder) {
+        val shortcutPreviewId =
+            when (getToolbarType()) {
+                EXPANDED_TOOLBAR_TYPE -> R.id.toolbar_expanded_shortcut_preview
+                NO_SHORTCUT_SIMPLE_TOOLBAR_TYPE -> R.id.toolbar_simple_no_shortcut_preview
+                else -> R.id.toolbar_simple_shortcut_preview
+            }
+        val shortcutPreview = holder.itemView.findViewById<View>(shortcutPreviewId)
+
+        shortcutPreview?.updateLayoutParams<LinearLayout.LayoutParams> {
+            if (context.isWideWindow()) {
+                gravity = Gravity.NO_GRAVITY
+                marginStart = context.pixelSizeFor(R.dimen.top_bar_alignment_margin_start)
+                marginEnd = 0
+            } else {
+                gravity = Gravity.CENTER_HORIZONTAL
+                val horizontalMargin = context.pixelSizeFor(R.dimen.radiobutton_preference_margin_start)
+                marginStart = horizontalMargin
+                marginEnd = horizontalMargin
+            }
+        }
+    }
+
+    private fun getSelectedOption(): ShortcutOption {
         val selectedKey = readSelectedKey()
-        val selected = options.firstOrNull {
+        return options.firstOrNull {
             it.key == ShortcutType.fromValue(selectedKey)
         } ?: options.first()
-        selectedIcon.setImageResource(selected.icon)
-        selectedContainer.removeAllViews()
-        selectedContainer.addView(
-            makeRow(
-                parent = selectedContainer,
-                option = selected,
-                isChecked = true,
-                isEnabled = false,
-                onClick = {},
-            ),
-        )
-
-        val remaining = options.filter { it.key != selected.key }.distinctBy { it.key }
-        optionsContainer.removeAllViews()
-        remaining.forEach { opt ->
-            optionsContainer.addView(
-                makeRow(
-                    parent = optionsContainer,
-                    option = opt,
-                    isChecked = false,
-                    isEnabled = true,
-                ) { newlySelected ->
-                    writeSelectedKey(newlySelected.key.value)
-                    selectedIcon.setImageResource(newlySelected.icon)
-                    notifyChanged()
-                },
-            )
-        }
-
-        separator.visibility = if (remaining.isEmpty()) View.GONE else View.VISIBLE
     }
 
-    private fun makeRow(
-        parent: ViewGroup,
-        option: ShortcutOption,
-        isChecked: Boolean,
-        isEnabled: Boolean,
-        onClick: (ShortcutOption) -> Unit,
-    ): View {
-        val row = LayoutInflater.from(context)
-            .inflate(R.layout.toolbar_shortcut_row, parent, false) as LinearLayout
+    @Suppress("SpreadOperator")
+    fun getShortcutOptions(): List<RadioButtonPreference> {
+        val shortcutOptions =
+            options
+                .distinctBy { it.key }
+                .map { newOption ->
+                    createShortcutRadioButton(
+                        newOption = newOption,
+                        selectedOption = getSelectedOption(),
+                    )
+                }
 
-        val radio = row.findViewById<RadioButton>(R.id.row_radio)
-        val icon = row.findViewById<ImageView>(R.id.row_icon)
-        val label = row.findViewById<TextView>(R.id.row_label)
-
-        icon.setImageResource(option.icon)
-        label.setText(option.label)
-
-        radio?.setStartCheckedIndicator()
-        radio.isChecked = isChecked
-        radio.isEnabled = true
-
-        label.setTextColor(
-            if (isChecked) colorTertiary else colorOnSurface,
-        )
-
-        ImageViewCompat.setImageTintList(
-            icon,
-            ColorStateList.valueOf(
-                if (isChecked) colorTertiary else colorOnSurface,
-            ),
-        )
-
-        radio.buttonTintList = ColorStateList(
-            arrayOf(
-                intArrayOf(android.R.attr.state_checked),
-                intArrayOf(-android.R.attr.state_checked),
-            ),
-            intArrayOf(colorTertiary, colorOnSurfaceVariant),
-        )
-
-        row.isEnabled = isEnabled
-        row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-
-        if (isEnabled) {
-            val clicker = View.OnClickListener { onClick(option) }
-            row.setOnClickListener(clicker)
-        }
-
-        return row
+        addToRadioGroup(*shortcutOptions.toTypedArray())
+        return shortcutOptions
     }
+
+    private fun createShortcutRadioButton(
+        newOption: ShortcutOption,
+        selectedOption: ShortcutOption,
+    ): RadioButtonPreference =
+        RadioButtonPreference(context).apply {
+            key = newOption.key.value
+            title = context.getString(newOption.label)
+            isEnabled = isOptionEnabled(newOption)
+            setCheckedWithoutClickListener(newOption == selectedOption)
+            onClickListener {
+                CustomizationSettings.toolbarShortcutSelection.record(
+                    CustomizationSettings.ToolbarShortcutSelectionExtra(
+                        toolbarType = getTelemetryToolbarType(),
+                        item = newOption.key.value,
+                    )
+                )
+                writeSelectedKey(newOption.key.value)
+                notifyChanged()
+            }
+        }
 
     private fun View.getMaterialColor(@AttrRes attr: Int): Int {
         return MaterialColors.getColor(this, attr)

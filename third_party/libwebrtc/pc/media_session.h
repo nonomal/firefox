@@ -17,9 +17,10 @@
 #include <string>
 #include <vector>
 
+#include "api/environment/environment.h"
 #include "api/media_types.h"
 #include "api/rtc_error.h"
-#include "media/base/media_engine.h"
+#include "api/transport/sctp_transport_factory_interface.h"
 #include "media/base/stream_params.h"
 #include "p2p/base/ice_credentials_iterator.h"
 #include "p2p/base/transport_description.h"
@@ -33,28 +34,19 @@
 
 namespace webrtc {
 
-// Forward declaration due to circular dependecy.
-class ConnectionContext;
-
-}  // namespace webrtc
-
-namespace webrtc {
-
 // Creates media session descriptions according to the supplied codecs and
 // other fields, as well as the supplied per-call options.
 // When creating answers, performs the appropriate negotiation
 // of the various fields to determine the proper result.
 class MediaSessionDescriptionFactory {
  public:
-  // This constructor automatically sets up the factory to get its configuration
-  // from the specified MediaEngine (when provided).
   // The TransportDescriptionFactory, the UniqueRandomIdGenerator, and the
   // PayloadTypeSuggester are not owned by MediaSessionDescriptionFactory, so
   // they must be kept alive by the user of this class.
-  MediaSessionDescriptionFactory(MediaEngineInterface* media_engine,
-                                 bool rtx_enabled,
+  MediaSessionDescriptionFactory(const Environment& env,
                                  UniqueRandomIdGenerator* ssrc_generator,
                                  const TransportDescriptionFactory* factory,
+                                 SctpTransportFactoryInterface* sctp_factory,
                                  CodecLookupHelper* codec_lookup_helper);
 
   RtpHeaderExtensions filtered_rtp_header_extensions(
@@ -144,6 +136,7 @@ class MediaSessionDescriptionFactory {
       const RtpHeaderExtensions& header_extensions,
       StreamParamsVec* current_streams,
       SessionDescription* answer,
+      bool include_ccfb_in_answer,
       IceCredentialsIterator* ice_credentials) const;
 
   RTCError AddDataContentForAnswer(
@@ -173,13 +166,19 @@ class MediaSessionDescriptionFactory {
     return ssrc_generator_.get();
   }
 
+  // Feedback format according to RFC-8888 will be offered if true.
+  const bool offer_rfc_8888_;
+  // Feedback format according to RFC-8888 will be accepted if offered.
+  const bool accept_offer_with_rfc_8888_;
   bool is_unified_plan_ = false;
   // This object may or may not be owned by this class.
   AlwaysValidPointer<UniqueRandomIdGenerator> const ssrc_generator_;
   bool enable_encrypted_rtp_header_extensions_ = true;
   const TransportDescriptionFactory* transport_desc_factory_;
+  SctpTransportFactoryInterface* sctp_factory_;
   CodecLookupHelper* codec_lookup_helper_;
   bool payload_types_in_transport_trial_enabled_;
+  const Environment env_;
 };
 
 // Convenience functions.

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,7 +13,7 @@ class HTMLTableElement;
 class HTMLTableCellElement final : public nsGenericHTMLElement {
  public:
   explicit HTMLTableCellElement(
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
       : nsGenericHTMLElement(std::move(aNodeInfo)) {
     SetHasWeirdParserInsertionMode();
   }
@@ -100,7 +98,7 @@ class HTMLTableCellElement final : public nsGenericHTMLElement {
                       nsIPrincipal* aMaybeScriptedPrincipal,
                       nsAttrValue& aResult) override;
   nsMapRuleToAttributesFunc GetAttributeMappingFunction() const override;
-  NS_IMETHOD_(bool) IsAttributeMapped(const nsAtom* aAttribute) const override;
+  bool IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const override;
   // Get mapped attributes of ancestor table, if any
   StyleLockedDeclarationBlock* GetMappedAttributesInheritedFromTable() const;
 

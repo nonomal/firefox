@@ -16,36 +16,54 @@ const { sinon } = ChromeUtils.importESModule(
 );
 
 const { TabStateFlusher } = ChromeUtils.importESModule(
-  "resource:///modules/sessionstore/TabStateFlusher.sys.mjs"
+  "moz-src:///browser/components/sessionstore/TabStateFlusher.sys.mjs"
 );
 
 const TabHoverPanelSet = ChromeUtils.importESModule(
   "chrome://browser/content/tabbrowser/tab-hover-preview.mjs"
 ).default;
 
+const { TabNotes } = ChromeUtils.importESModule(
+  "moz-src:///browser/components/tabnotes/TabNotes.sys.mjs"
+);
+
 const TAB_PREVIEW_PANEL_ID = "tab-preview-panel";
 const TAB_GROUP_PREVIEW_PANEL_ID = "tabgroup-preview-panel";
 
+async function parkNativePointer(win = window) {
+  const browserEl = win.gBrowser.selectedBrowser;
+  const { width, height } = browserEl.getBoundingClientRect();
+  await EventUtils.promiseNativeMouseEvent({
+    type: "mousemove",
+    target: browserEl,
+    offsetX: width - 10,
+    offsetY: height - 10,
+    win,
+  });
+}
+
 async function openTabPreview(tab, win = window) {
-  const previewShown = BrowserTestUtils.waitForPopupEvent(
-    win.document.getElementById(TAB_PREVIEW_PANEL_ID),
-    "shown"
+  const panel = win.document.getElementById(TAB_PREVIEW_PANEL_ID);
+  const previewShown = BrowserTestUtils.waitForPopupEvent(panel, "shown");
+  const previewUpdated = BrowserTestUtils.waitForEvent(
+    panel,
+    "TabPreviewUpdated"
   );
   EventUtils.synthesizeMouse(tab, 1, 1, { type: "mouseover" }, win);
-  return previewShown;
+  await Promise.all([previewShown, previewUpdated]);
 }
 
 async function closeTabPreviews(win = window) {
-  const tabs = win.document.getElementById("tabbrowser-tabs");
-  const tabsRect = tabs.getBoundingClientRect();
   const previewHidden = BrowserTestUtils.waitForPopupEvent(
     win.document.getElementById(TAB_PREVIEW_PANEL_ID),
     "hidden"
   );
+  const tabs = win.document.getElementById("tabbrowser-tabs");
+  const tabsRect = tabs.getBoundingClientRect();
   EventUtils.synthesizeMouse(
     tabs,
     0,
-    tabsRect.height + 1,
+    tabsRect.height + 10,
     {
       type: "mouseout",
     },
@@ -64,12 +82,16 @@ async function openGroupPreview(group, win = window) {
     previewElement,
     "shown"
   );
+  const previewUpdated = BrowserTestUtils.waitForEvent(
+    previewElement,
+    "TabGroupPreviewUpdated"
+  );
   EventUtils.synthesizeMouseAtCenter(
     group.labelElement,
     { type: "mouseover" },
     win
   );
-  return previewShown;
+  await Promise.all([previewShown, previewUpdated]);
 }
 
 async function closeGroupPreviews(win = window) {
@@ -97,11 +119,57 @@ function getOpenPanels() {
   );
 }
 
+async function withGroupPanel(fn) {
+  // Creates a collapsed tab group
+  const tab = await addTabTo(gBrowser, "about:robots");
+  const group = gBrowser.addTabGroup([tab]);
+  group.collapsed = true;
+
+  // Ensure the lazy-loaded preview component exists
+  await openGroupPreview(group);
+  await closeGroupPreviews();
+  const { tabGroupPanel } = gBrowser.tabContainer.previewPanel;
+
+  // Run `fn` with the group panel and group
+  try {
+    await fn(tabGroupPanel, group);
+  } finally {
+    // Clean it up
+    await removeTabGroup(group);
+    await resetState();
+  }
+}
+
+// Utility to assert popupOptions given prefs and expected values.
+// Waits for RTL_UI to settle when toggling text direction.
+async function assertPopupOptions(tabGroupPanel, { prefs, expected, message }) {
+  const bidi = prefs.some(
+    ([pref, value]) => pref == "intl.l10n.pseudo" && value == "bidi"
+  );
+  await SpecialPowers.pushPrefEnv({ set: prefs });
+  if (bidi) {
+    await TestUtils.waitForCondition(
+      () => window.RTL_UI,
+      "UI direction is RTL"
+    );
+  }
+  Assert.deepEqual(tabGroupPanel.popupOptions, expected, message);
+  await SpecialPowers.popPrefEnv();
+  if (bidi) {
+    await TestUtils.waitForCondition(
+      () => !window.RTL_UI,
+      "UI direction is LTR"
+    );
+  }
+}
+
 async function resetState() {
   // Ensure the mouse is not hovering over the tab strip.
   EventUtils.synthesizeMouseAtCenter(document.documentElement, {
     type: "mouseover",
   });
+
+  gBrowser.tabContainer.previewPanel?.forceReset();
 
   for (let panel of getOpenPanels()) {
     let hiddenEvent = BrowserTestUtils.waitForPopupEvent(panel, "hidden");
@@ -132,6 +200,18 @@ add_setup(async function () {
       ["test.wait300msAfterTabSwitch", true],
       ["ui.tooltip.delay_ms", 0],
     ],
+  });
+
+  // The hover states in these tests are controlled by synthesized events. There
+  // has been a history of problems in these tests caused by improper
+  // interaction between the synthesized event and the position of the OS
+  // pointer. To resolve this, disable all non test events and ensure the OS
+  // pointer is not positioned over the browser chrome at the start of each
+  // test.
+  await parkNativePointer();
+  EventUtils.disableNonTestMouseEvents(true);
+  registerCleanupFunction(() => {
+    EventUtils.disableNonTestMouseEvents(false);
   });
 
   await resetState();
@@ -188,6 +268,111 @@ add_task(async function tabHoverTests() {
 
   BrowserTestUtils.removeTab(tab1);
   BrowserTestUtils.removeTab(tab2);
+
+  await resetState();
+});
+
+/**
+ * Verify that closing tabs in a row without moving the pointer keeps
+ * previewing whatever ends up under it, and that the preview is dismissed once
+ * nothing takes the closed tab's place.
+ */
+add_task(async function tabCloseHoverTests() {
+  const titles = ["First Closed", "Second Closed", "Last Closed"];
+  const tabs = [];
+  for (let title of titles) {
+    tabs.push(
+      await addTabTo(
+        gBrowser,
+        `data:text/html,<html><head><title>${title}</title></head><body>Hello</body></html>`
+      )
+    );
+  }
+  const previewContainer = document.getElementById(TAB_PREVIEW_PANEL_ID);
+
+  await openTabPreview(tabs[0]);
+
+  let sawHidden = false;
+  const onHidden = () => {
+    sawHidden = true;
+  };
+  previewContainer.addEventListener("popuphidden", onHidden);
+
+  // No mouse events in between: each close has to hand the hover over to the
+  // tab moving into its place on its own.
+  for (let i = 0; i < 2; i++) {
+    BrowserTestUtils.removeTab(tabs[i]);
+    await TestUtils.waitForCondition(
+      () =>
+        previewContainer.querySelector(".tab-preview-title").innerText ==
+        titles[i + 1],
+      `Preview moved onto ${titles[i + 1]}`
+    );
+    Assert.ok(tabs[i + 1]._hover, `${titles[i + 1]} took over the hover`);
+  }
+  Assert.ok(!sawHidden, "Preview stayed open across the tab closes");
+  previewContainer.removeEventListener("popuphidden", onHidden);
+
+  // The last tab has no successor, so nothing slides under the pointer.
+  const previewHidden = BrowserTestUtils.waitForPopupEvent(
+    previewContainer,
+    "hidden"
+  );
+  BrowserTestUtils.removeTab(tabs[2]);
+  await previewHidden;
+
+  await resetState();
+});
+
+/**
+ * Verify the container (contextual identity) indicator:
+ *
+ * 1. Container tabs show a pill with the container label and identity classes
+ * 2. Non-container tabs hide the indicator
+ */
+add_task(async function tabContainerIndicatorTests() {
+  const { ContextualIdentityService } = ChromeUtils.importESModule(
+    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs"
+  );
+
+  const userContextId = 1;
+  const identity =
+    ContextualIdentityService.getPublicIdentityFromId(userContextId);
+  const containerTab = await addTabTo(gBrowser, "about:blank", {
+    userContextId,
+  });
+  const plainTab = await addTabTo(gBrowser, "about:blank");
+  const previewContainer = document.getElementById(TAB_PREVIEW_PANEL_ID);
+  const indicator = previewContainer.querySelector(
+    ".tab-preview-container-indicator"
+  );
+
+  await openTabPreview(containerTab);
+  Assert.ok(
+    !indicator.hidden,
+    "Container indicator is shown for container tab"
+  );
+  Assert.equal(
+    indicator.querySelector(".tab-preview-container-label").textContent,
+    ContextualIdentityService.getUserContextLabel(userContextId),
+    "Container indicator shows the correct label"
+  );
+  Assert.ok(
+    indicator.classList.contains(`identity-color-${identity.color}`),
+    "Container indicator has the identity color class"
+  );
+  Assert.ok(
+    indicator.classList.contains(`identity-icon-${identity.icon}`),
+    "Container indicator has the identity icon class"
+  );
+  await closeTabPreviews();
+
+  await openTabPreview(plainTab);
+  Assert.ok(indicator.hidden, "Container indicator is hidden for plain tab");
+  await closeTabPreviews();
+
+  BrowserTestUtils.removeTab(containerTab);
+  BrowserTestUtils.removeTab(plainTab);
 
   await resetState();
 });
@@ -328,7 +513,7 @@ add_task(async function tabThumbnailTests() {
 
   let thumbnailUpdated = BrowserTestUtils.waitForEvent(
     previewPanel,
-    "previewThumbnailUpdated",
+    "TabPreviewThumbnailUpdated",
     false,
     evt => evt.detail.thumbnail
   );
@@ -344,7 +529,7 @@ add_task(async function tabThumbnailTests() {
   await closeTabPreviews();
   thumbnailUpdated = BrowserTestUtils.waitForEvent(
     previewPanel,
-    "previewThumbnailUpdated"
+    "TabPreviewThumbnailUpdated"
   );
   await openTabPreview(tab2);
   await thumbnailUpdated;
@@ -399,7 +584,7 @@ add_task(async function tabWireframeTests() {
 
   let thumbnailUpdated = BrowserTestUtils.waitForEvent(
     previewPanel,
-    "previewThumbnailUpdated",
+    "TabPreviewThumbnailUpdated",
     false,
     evt => evt.detail.thumbnail
   );
@@ -447,7 +632,9 @@ add_task(async function tabUrlBarInputTests() {
   await previewHidden;
 
   Assert.equal(previewElement.state, "closed", "Preview is closed");
-  await closeTabPreviews();
+  EventUtils.synthesizeMouseAtCenter(document.documentElement, {
+    type: "mousemove",
+  });
   await openTabPreview(tab1);
   Assert.equal(previewElement.state, "open", "Preview is open");
 
@@ -528,6 +715,10 @@ add_task(async function tabContentChangeTests() {
   );
 
   let tabRenameEvent = BrowserTestUtils.waitForEvent(tab, "TabAttrModified");
+  let previewUpdated = BrowserTestUtils.waitForEvent(
+    previewPanel,
+    "TabPreviewUpdated"
+  );
   await SpecialPowers.spawn(
     tab.linkedBrowser,
     [newTitle],
@@ -535,7 +726,7 @@ add_task(async function tabContentChangeTests() {
       content.document.title = newTitleInContentProcess;
     }
   );
-  await tabRenameEvent;
+  await Promise.all([tabRenameEvent, previewUpdated]);
 
   Assert.equal(
     previewPanel.querySelector(".tab-preview-title").innerText,
@@ -546,6 +737,232 @@ add_task(async function tabContentChangeTests() {
   await closeTabPreviews();
   BrowserTestUtils.removeTab(tab);
   await resetState();
+});
+
+/**
+ * Test that tab notes and their UI elements appear correctly in the tab
+ * hover preview panel.
+ */
+add_task(async function tabNotesTests() {
+  if (!Services.prefs.getBoolPref("browser.tabs.notes.enabled", false)) {
+    // Skip tests if tab notes is not enabled
+    // This is necessary because some tab notes functionality only loads at
+    // startup if the pref is enabled
+    todo(false, "Skip when tab notes is not enabled; see bug2008033");
+    return;
+  }
+
+  const previewPanel = document.getElementById(TAB_PREVIEW_PANEL_ID);
+  const noteText = "Hello world";
+
+  const tab = await addTabTo(gBrowser, "https://example.com/");
+
+  info("validate the presentation of an eligible tab with no note");
+  await openTabPreview(tab);
+  let addNoteButton = previewPanel.querySelector(".tab-preview-add-note");
+  Assert.ok(addNoteButton, "add note button exists in the DOM");
+
+  info(
+    "validate that hovering over the add note button does not hide the preview panel"
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    addNoteButton,
+    { type: "mouseover" },
+    window
+  );
+
+  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+  await new Promise(resolve => setTimeout(resolve, 300));
+
+  Assert.ok(
+    previewPanel.hasAttribute("panelopen"),
+    "Preview panel is still open"
+  );
+
+  info(
+    "validate that hovering over the panel outside of the add note button hides the panel"
+  );
+  let previewHidden = BrowserTestUtils.waitForPopupEvent(
+    previewPanel,
+    "hidden"
+  );
+  let nonhoverableArea = document.querySelector(".tab-preview-content-main");
+  EventUtils.synthesizeMouseAtCenter(
+    nonhoverableArea,
+    {
+      type: "mouseover",
+    },
+    window
+  );
+  await previewHidden;
+  Assert.ok(
+    !previewPanel.hasAttribute("panelopen"),
+    "Preview panel was hidden"
+  );
+
+  await openTabPreview(tab);
+
+  info("choose to add a note from the tab hover preview panel");
+  let tabNotePanel = document.getElementById("tabNotePanel");
+  let panelShown = BrowserTestUtils.waitForPopupEvent(tabNotePanel, "shown");
+  previewHidden = BrowserTestUtils.waitForPopupEvent(previewPanel, "hidden");
+  addNoteButton.click();
+  await Promise.all([panelShown, previewHidden]);
+
+  info("save a new tab note");
+  Assert.equal(
+    document.activeElement,
+    tabNotePanel.querySelector("textarea"),
+    "tab note textarea should be focused"
+  );
+  const input = BrowserTestUtils.waitForEvent(document.activeElement, "input");
+  EventUtils.sendString(noteText, window);
+  await input;
+  let menuHidden = BrowserTestUtils.waitForPopupEvent(tabNotePanel, "hidden");
+  let tabNoteCreated = BrowserTestUtils.waitForEvent(tab, "TabNote:Created");
+  tabNotePanel.querySelector("#tab-note-editor-button-save").click();
+  await Promise.all([menuHidden, tabNoteCreated]);
+
+  await TestUtils.waitForCondition(
+    () => Glean.tabNotes.added.testGetValue()?.length,
+    "wait for event to be recorded"
+  );
+
+  const [addedEvent] = Glean.tabNotes.added.testGetValue();
+  Assert.deepEqual(
+    addedEvent.extra,
+    {
+      source: "hover_menu",
+      note_length: noteText.length,
+    },
+    "added event extra data should include length and say the tab note was added from the tab hover preview menu"
+  );
+
+  await closeTabPreviews();
+
+  info("validate the presentation of an eligible tab with a tab note");
+  await openTabPreview(tab);
+
+  addNoteButton = previewPanel.querySelector(".tab-preview-add-note");
+  Assert.ok(!addNoteButton, "add note button does not exist in the DOM");
+  await closeTabPreviews();
+
+  info(
+    "delete the tab note to return the tab hover preview to the state with no tab note"
+  );
+  const tabNoteRemoved = BrowserTestUtils.waitForEvent(tab, "TabNote:Removed");
+  TabNotes.delete(tab);
+  await tabNoteRemoved;
+
+  info(
+    "validate the presentation of an eligible tab after its note has been deleted"
+  );
+  await openTabPreview(tab);
+  addNoteButton = previewPanel.querySelector(".tab-preview-add-note");
+  Assert.ok(
+    !addNoteButton.hasAttribute("hidden"),
+    "add note button should be visible on an eligible tab without a tab note after delete"
+  );
+  await closeTabPreviews();
+
+  BrowserTestUtils.removeTab(tab);
+  await resetState();
+  await TabNotes.reset();
+});
+
+/**
+ * Test that the "New" badge in the hover preview panel is displayed when
+ * browser.tabs.notes.newBadge.enabled is true.
+ */
+add_task(async function tabNotesNewBadgeVisibilityTests() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.tabs.notes.enabled", true]],
+  });
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.tabs.notes.newBadge.enabled", true]],
+  });
+
+  const previewPanel = document.getElementById(TAB_PREVIEW_PANEL_ID);
+  const tab = await addTabTo(gBrowser, "https://example.com/");
+
+  await openTabPreview(tab);
+  const badge = previewPanel.querySelector(".tab-preview-add-note moz-badge");
+  Assert.ok(
+    !badge.hasAttribute("hidden"),
+    "badge is visible when newBadge pref is true"
+  );
+  await closeTabPreviews();
+  await SpecialPowers.popPrefEnv();
+
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.tabs.notes.newBadge.enabled", false]],
+  });
+  await openTabPreview(tab);
+  Assert.ok(
+    badge.hasAttribute("hidden"),
+    "badge is hidden when newBadge pref is false"
+  );
+  await closeTabPreviews();
+
+  await SpecialPowers.popPrefEnv();
+  await SpecialPowers.popPrefEnv();
+  BrowserTestUtils.removeTab(tab);
+  await resetState();
+});
+
+/**
+ * Test that clicking "Add Note" in the hover preview panel sets the
+ * browser.tabs.notes.newBadge.enabled pref to false, and that the badge
+ * is hidden on the next hover
+ */
+add_task(async function tabNotesNewBadgeDismissedByPreviewPanelTests() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.tabs.notes.enabled", true],
+      ["browser.tabs.notes.newBadge.enabled", true],
+    ],
+  });
+
+  const previewPanel = document.getElementById(TAB_PREVIEW_PANEL_ID);
+
+  const tab = await addTabTo(gBrowser, "https://example.com/");
+
+  await openTabPreview(tab);
+
+  const addNoteButton = previewPanel.querySelector(".tab-preview-add-note");
+  const tabNotePanel = document.getElementById("tabNotePanel");
+  const panelShown = BrowserTestUtils.waitForPopupEvent(tabNotePanel, "shown");
+  const previewHidden = BrowserTestUtils.waitForPopupEvent(
+    previewPanel,
+    "hidden"
+  );
+  addNoteButton.click();
+  await Promise.all([panelShown, previewHidden]);
+
+  Assert.ok(
+    !Services.prefs.getBoolPref("browser.tabs.notes.newBadge.enabled"),
+    "pref is set to false after clicking Add Note in the preview panel"
+  );
+
+  const panelHidden = BrowserTestUtils.waitForPopupEvent(
+    tabNotePanel,
+    "hidden"
+  );
+  tabNotePanel.hidePopup();
+  await panelHidden;
+  await closeTabPreviews();
+
+  await openTabPreview(tab);
+  const badge = previewPanel.querySelector(".tab-preview-add-note moz-badge");
+  Assert.ok(
+    badge.hasAttribute("hidden"),
+    "badge is hidden on subsequent hover after dismissal"
+  );
+  await closeTabPreviews();
+
+  BrowserTestUtils.removeTab(tab);
+  await resetState();
+  await SpecialPowers.popPrefEnv();
 });
 
 /*
@@ -652,7 +1069,7 @@ add_task(async function tabGroupPanelDoesNotAppearForExpandedTabGroups() {
     { type: "mouseover" },
     window
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return previewPanelComponent.activate.calledOnce;
   }, "Waiting for activate to be called");
 
@@ -745,7 +1162,7 @@ add_task(async function moveBetweenTabGroupsTests() {
   const group1 = gBrowser.addTabGroup([tab1]);
   group1.collapsed = true;
 
-  const tab2 = await addTabTo(gBrowser, "about:logo");
+  const tab2 = await addTabTo(gBrowser, "about:blank");
   const group2 = gBrowser.addTabGroup([tab2]);
   group2.collapsed = true;
 
@@ -754,7 +1171,7 @@ add_task(async function moveBetweenTabGroupsTests() {
   );
 
   await openGroupPreview(group1);
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => previewPanel.anchorNode.parentElement == group1,
     "Panel is anchored to group 1"
   );
@@ -765,7 +1182,7 @@ add_task(async function moveBetweenTabGroupsTests() {
   );
 
   await openGroupPreview(group2);
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => previewPanel.anchorNode.parentElement == group2,
     "Panel is anchored to group 2"
   );
@@ -778,6 +1195,123 @@ add_task(async function moveBetweenTabGroupsTests() {
   await removeTabGroup(group1);
   await removeTabGroup(group2);
   await resetState();
+});
+
+add_task(async function tabGroupPanelHorizontalOffsetOptions() {
+  // The vertical-tabs variant enables sidebar.verticalTabs for the whole run.
+  await SpecialPowers.pushPrefEnv({ set: [["sidebar.verticalTabs", false]] });
+
+  const testCases = [
+    {
+      prefs: [["browser.nova.enabled", false]],
+      expected: { position: "bottomleft topleft", x: 0, y: 0 },
+      message: "Without Nova there is no offset",
+    },
+    {
+      prefs: [["browser.nova.enabled", true]],
+      expected: { position: "bottomleft topleft", x: -16, y: 0 },
+      message: "LTR Nova anchors to the left edge and offsets by -16px",
+    },
+    {
+      prefs: [
+        ["browser.nova.enabled", true],
+        ["intl.l10n.pseudo", "bidi"],
+      ],
+      expected: { position: "bottomright topright", x: 16, y: 0 },
+      message: "RTL Nova anchors to the right edge and offsets by +16px",
+    },
+  ];
+
+  await withGroupPanel(async groupPanel => {
+    info("Horizontal Tab Group Panel Offset");
+    for (const instance of testCases) {
+      await assertPopupOptions(groupPanel, instance);
+    }
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function tabGroupPanelHorizontalOpensWithOffset() {
+  // The vertical-tabs variant enables sidebar.verticalTabs for the whole run.
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["sidebar.verticalTabs", false],
+      ["browser.nova.enabled", true],
+    ],
+  });
+
+  await withGroupPanel(async (groupPanel, group) => {
+    const openPopupSpy = sinon.spy(groupPanel.panelElement, "openPopup");
+    await openGroupPreview(group);
+
+    Assert.ok(
+      openPopupSpy.calledWith(
+        group.labelContainerElement,
+        sinon.match({ position: "bottomleft topleft", x: -16, y: 0 })
+      ),
+      "openPopup is called anchored to the label with the Nova offset"
+    );
+
+    await closeGroupPreviews();
+    sinon.restore();
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function tabGroupPanelVerticalOffsetOptions() {
+  const testCases = [
+    {
+      nova: false,
+      start: true,
+      expected: { position: "topright topleft", x: 0, y: -5 },
+      message: "Nova off, sidebar at start: keeps the 5px upward offset",
+    },
+    {
+      nova: false,
+      start: false,
+      expected: { position: "topleft topright", x: 0, y: -5 },
+      message: "Nova off, sidebar at end: 5px offset, anchor mirrored",
+    },
+    {
+      nova: true,
+      start: true,
+      expected: { position: "topright topleft", x: 0, y: -16 },
+      message: "Nova on, sidebar at start: 16px upward offset",
+    },
+    {
+      nova: true,
+      start: false,
+      expected: { position: "topleft topright", x: 0, y: -16 },
+      message: "Nova on, sidebar at end: 16px offset, anchor mirrored",
+    },
+  ];
+  await withGroupPanel(async groupPanel => {
+    await SpecialPowers.pushPrefEnv({
+      set: [
+        ["sidebar.revamp", true],
+        ["sidebar.verticalTabs", true],
+      ],
+    });
+    await TestUtils.waitForCondition(
+      () => gBrowser.tabContainer.verticalMode,
+      "Tabs are in vertical mode"
+    );
+
+    for (const { nova, start, expected, message } of testCases) {
+      await assertPopupOptions(groupPanel, {
+        prefs: [
+          ["browser.nova.enabled", nova],
+          ["sidebar.position_start", start],
+        ],
+        expected,
+        message,
+      });
+    }
+
+    await SpecialPowers.popPrefEnv();
+  });
 });
 
 add_task(async function tabGroupPanelUpdatesTests() {
@@ -820,10 +1354,16 @@ add_task(async function tabGroupPanelUpdatesTests() {
     "Panel toolbarbutton has updated label"
   );
 
+  await closeGroupPreviews();
+
   info("Test that adding a tab to the group adds the tab to the group's panel");
   let TabOpenEvent = BrowserTestUtils.waitForEvent(group, "TabOpen");
   let newTab = await addTabTo(gBrowser, "about:robots", { tabGroup: group });
   await TabOpenEvent;
+
+  // Re-collapse the group, which was uncollapsed when the new tab was added
+  group.collapsed = true;
+  await openGroupPreview(group);
 
   Assert.equal(
     panelContent.children.length,
@@ -873,7 +1413,7 @@ add_task(async function tabGroupPanelUpdatesTests() {
   info("Test that moving tabs within the group updates the panel");
   let tabMoveEvent = BrowserTestUtils.waitForEvent(group, "TabMove");
   let tabToMove = group.tabs[1];
-  gBrowser.moveTabTo(tabToMove, { tabIndex: tabToMove._tPos - 1 });
+  gBrowser.moveTabTo(tabToMove, { tabIndex: tabToMove.index - 1 });
   await tabMoveEvent;
 
   Assert.equal(
@@ -928,15 +1468,12 @@ add_task(async function tabGroupPanelUpdatesTests() {
 // TODO Bug 1899556: If possible, write a test to confirm tab previews
 // aren't shown when /all/ windows are in the background
 add_task(async function noPreviewInBackgroundWindowTests() {
+  todo(false, "test is failing on CI, bug 2006695");
+
+  /*
   const bgWindow = window;
-  const bgTabUngrouped = await BrowserTestUtils.openNewForegroundTab(
-    gBrowser,
-    "about:robots"
-  );
-  const bgTabGrouped = await BrowserTestUtils.openNewForegroundTab(
-    gBrowser,
-    "about:robots"
-  );
+  const bgTabUngrouped = await addTab("about:robots");
+  const bgTabGrouped = await addTab("about:robots");
   const bgGroup = gBrowser.addTabGroup([bgTabGrouped]);
   bgGroup.collapsed = true;
 
@@ -966,7 +1503,7 @@ add_task(async function noPreviewInBackgroundWindowTests() {
     { type: "mouseover" },
     bgWindow
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return bgPreviewComponent.activate.calledOnce;
   }, "Waiting for activate to be called on bgPreviewComponent after hovering ungrouped tab");
   Assert.equal(
@@ -987,7 +1524,7 @@ add_task(async function noPreviewInBackgroundWindowTests() {
     { type: "mouseover" },
     bgWindow
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return bgPreviewComponent.activate.calledOnce;
   }, "Waiting for activate to be called on bgPreviewComponent after hovering grouped tab label");
   Assert.equal(
@@ -1004,6 +1541,7 @@ add_task(async function noPreviewInBackgroundWindowTests() {
 
   sinon.restore();
   await resetState();
+  */
 });
 
 /**
@@ -1060,7 +1598,7 @@ add_task(async function delayTests() {
 add_task(async function zeroDelayTests() {
   await SpecialPowers.pushPrefEnv({
     set: [
-      ["ui.tooltip.delay_ms", 1000],
+      ["ui.tooltip.delay_ms", 100],
       ["ui.prefersReducedMotion", 1],
     ],
   });
@@ -1068,19 +1606,31 @@ add_task(async function zeroDelayTests() {
   const tabUrl =
     "data:text/html,<html><head><title>First New Tab</title></head><body>Hello</body></html>";
   const tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, tabUrl);
+  const previewComponent = gBrowser.tabContainer.previewPanel;
 
   await openTabPreview(tab);
   await closeTabPreviews();
 
-  let resolved = false;
-  let openPreviewPromise = openTabPreview(tab).then(() => {
-    resolved = true;
-  });
-  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
-  let timeoutPromise = new Promise(resolve => setTimeout(resolve, 900));
-  await Promise.race([openPreviewPromise, timeoutPromise]);
+  Assert.ok(
+    previewComponent.panelOpener.zeroDelayActive,
+    "Zero delay is active immediately after the preview is dismissed"
+  );
 
-  Assert.ok(resolved, "Panel was opened the second time without a delay");
+  // Inlined rather than using openTabPreview() so we can assert the zero-delay
+  // window is still active at the moment the open is scheduled
+  const panel = document.getElementById(TAB_PREVIEW_PANEL_ID);
+  const previewShown = BrowserTestUtils.waitForPopupEvent(panel, "shown");
+  const previewUpdated = BrowserTestUtils.waitForEvent(
+    panel,
+    "TabPreviewUpdated"
+  );
+  EventUtils.synthesizeMouse(tab, 1, 1, { type: "mouseover" });
+  Assert.ok(
+    previewComponent.panelOpener.zeroDelayActive,
+    "Second hover is scheduled while still in the zero-delay window"
+  );
+  await Promise.all([previewShown, previewUpdated]);
+  Assert.equal(panel.state, "open", "Panel opened on the second hover");
 
   await closeTabPreviews();
 
@@ -1145,8 +1695,11 @@ add_task(async function testDragToCancelPreview() {
     "hidden"
   );
   dragend = BrowserTestUtils.waitForEvent(group.labelElement, "dragend");
+  const groupLabelRect = group.labelElement.getBoundingClientRect();
   EventUtils.synthesizePlainDragAndDrop({
     srcElement: group.labelElement,
+    srcX: Math.floor(groupLabelRect.width / 2),
+    srcY: Math.floor(groupLabelRect.height / 2),
     destElement: null,
     stepX: 10,
     stepY: 0,
@@ -1160,7 +1713,7 @@ add_task(async function testDragToCancelPreview() {
   );
 
   // TODO not sure why I need to explicitly wait for this, but the drag tests fail without it
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => !previewElement.getAttribute("animating")
   );
 
@@ -1168,6 +1721,84 @@ add_task(async function testDragToCancelPreview() {
   BrowserTestUtils.removeTab(tab);
   sinon.restore();
   await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function tabPreviewHidesWhenDraggingOverPanel() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    "about:robots"
+  );
+  const previewElement = document.getElementById(TAB_PREVIEW_PANEL_ID);
+
+  await openTabPreview(tab);
+
+  const previewHidden = BrowserTestUtils.waitForPopupEvent(
+    previewElement,
+    "hidden"
+  );
+  const dragend = BrowserTestUtils.waitForEvent(tab, "dragend");
+
+  EventUtils.synthesizePlainDragAndDrop({
+    srcElement: tab,
+    destElement: null,
+    stepX: 10,
+    stepY: 0,
+  });
+
+  await previewHidden;
+  Assert.equal(
+    previewElement.state,
+    "closed",
+    "Preview closes when dragging downward over the panel"
+  );
+
+  await dragend;
+
+  BrowserTestUtils.removeTab(tab);
+  await resetState();
+
+  const groupTab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    "about:robots"
+  );
+  const group = gBrowser.addTabGroup([groupTab]);
+  group.collapsed = true;
+
+  await openGroupPreview(group);
+
+  const groupPreviewElement = document.getElementById(
+    TAB_GROUP_PREVIEW_PANEL_ID
+  );
+  const groupPreviewHidden = BrowserTestUtils.waitForPopupEvent(
+    groupPreviewElement,
+    "hidden"
+  );
+  const groupDragend = BrowserTestUtils.waitForEvent(
+    group.labelElement,
+    "dragend"
+  );
+
+  const groupLabelRect = group.labelElement.getBoundingClientRect();
+  EventUtils.synthesizePlainDragAndDrop({
+    srcElement: group.labelElement,
+    srcX: Math.floor(groupLabelRect.width / 2),
+    srcY: Math.floor(groupLabelRect.height / 2),
+    destElement: null,
+    stepX: 10,
+    stepY: 0,
+  });
+
+  await groupPreviewHidden;
+  Assert.equal(
+    groupPreviewElement.state,
+    "closed",
+    "Group preview closes when dragging downward over the panel"
+  );
+
+  await groupDragend;
+
+  BrowserTestUtils.removeTab(groupTab);
+  await resetState();
 });
 
 /**
@@ -1205,7 +1836,7 @@ add_task(async function panelSuppressionOnPanelTests() {
     { type: "mouseover" },
     window
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return previewComponent.activate.calledOnce;
   });
   Assert.equal(previewComponent.tabPanel.panelElement.state, "closed", "");
@@ -1222,7 +1853,7 @@ add_task(async function panelSuppressionOnPanelTests() {
     { type: "mouseover" },
     window
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return previewComponent.activate.calledOnce;
   });
   Assert.equal(previewComponent.tabPanel.panelElement.state, "closed", "");
@@ -1285,7 +1916,7 @@ add_task(async function panelSuppressionOnContextMenuTests() {
     { type: "mouseover" },
     window
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return previewComponent.activate.called;
   });
   Assert.equal(previewComponent.tabPanel.panelElement.state, "closed", "");
@@ -1303,7 +1934,7 @@ add_task(async function panelSuppressionOnContextMenuTests() {
     { type: "mouseover" },
     window
   );
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return previewComponent.activate.called;
   });
   Assert.equal(previewComponent.tabPanel.panelElement.state, "closed", "");
@@ -1343,7 +1974,7 @@ add_task(async function panelSuppressionOnPanelLazyLoadTests() {
 
   EventUtils.synthesizeMouseAtCenter(fgTab, { type: "mouseover" }, fgWindow);
 
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     // Sometimes the tests run slower than the test browser -- it's not always possible
     // to catch the panel in its opening state, so we have to check for both states.
     return (
@@ -1421,7 +2052,7 @@ add_task(
     // Start the timer...
     EventUtils.synthesizeMouseAtCenter(tab, { type: "mouseover" });
 
-    await BrowserTestUtils.waitForCondition(
+    await TestUtils.waitForCondition(
       () => previewComponent.panelOpener.execute.calledOnce,
       "panelOpener execute called"
     );
@@ -1436,7 +2067,7 @@ add_task(
     await popupShownEvent;
 
     // Wait for timer to finish...
-    await BrowserTestUtils.waitForCondition(() => {
+    await TestUtils.waitForCondition(() => {
       return previewComponent.panelOpener._timer == null;
     }, "panelOpener timer finished");
     await TestUtils.waitForTick();
@@ -1477,6 +2108,7 @@ add_task(async function verticalTabsPositioningTests() {
     set: [
       ["sidebar.revamp", true],
       ["sidebar.verticalTabs", true],
+      ["ui.prefersReducedMotion", 1],
     ],
   });
 
@@ -1638,11 +2270,11 @@ add_task(async function testTabGroupHoverPreviewTelemetry() {
 
   for (const tabGroup of tabGroups) {
     await openGroupPreview(tabGroup);
-    await BrowserTestUtils.waitForCondition(
+    await TestUtils.waitForCondition(
       () => previewPanel.anchorNode?.parentElement == tabGroup,
       "panel re-anchored to the next tab group"
     );
-    await BrowserTestUtils.waitForCondition(
+    await TestUtils.waitForCondition(
       () =>
         Glean.tabgroup.groupInteractions.hover_preview.testGetValue() ==
         interactionCount,

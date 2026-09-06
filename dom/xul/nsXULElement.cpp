@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -104,6 +103,7 @@
 #include "nsIScriptContext.h"
 #include "nsISupportsUtils.h"
 #include "nsIURI.h"
+#include "nsIURIWithSizeOf.h"
 #include "nsIXPConnect.h"
 #include "nsMenuPopupFrame.h"
 #include "nsNodeInfoManager.h"
@@ -139,7 +139,7 @@ uint32_t nsXULPrototypeAttribute::gNumCacheFills;
 // nsXULElement
 //
 
-nsXULElement::nsXULElement(already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+nsXULElement::nsXULElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : nsStyledElement(std::move(aNodeInfo)) {
   XUL_PROTOTYPE_ATTRIBUTE_METER(gNumElements);
 }
@@ -148,7 +148,7 @@ nsXULElement::~nsXULElement() = default;
 
 /* static */
 nsXULElement* NS_NewBasicXULElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo) {
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo) {
   RefPtr<mozilla::dom::NodeInfo> nodeInfo(std::move(aNodeInfo));
   auto* nim = nodeInfo->NodeInfoManager();
   return new (nim) nsXULElement(nodeInfo.forget());
@@ -156,7 +156,7 @@ nsXULElement* NS_NewBasicXULElement(
 
 /* static */
 nsXULElement* nsXULElement::Construct(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo) {
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo) {
   // NOTE: If you add elements here, you probably also want to change
   // mozilla::dom::binding_detail::HTMLConstructor in BindingUtils.cpp to take
   // them into account, otherwise you'll start getting "Illegal constructor"
@@ -209,6 +209,7 @@ nsXULElement* nsXULElement::Construct(
       nodeInfo->Equals(nsGkAtoms::thumb) ||
       nodeInfo->Equals(nsGkAtoms::button) ||
       nodeInfo->Equals(nsGkAtoms::menuitem) ||
+      nodeInfo->Equals(nsGkAtoms::richlistitem) ||
       nodeInfo->Equals(nsGkAtoms::toolbarbutton) ||
       nodeInfo->Equals(nsGkAtoms::toolbarpaletteitem) ||
       nodeInfo->Equals(nsGkAtoms::scrollbarbutton)) {
@@ -235,33 +236,23 @@ already_AddRefed<Element> nsXULElement::CreateFromPrototype(
   }
 
   nsXULElement* element = FromNode(baseElement);
-
-  if (aPrototype->mHasIdAttribute) {
-    element->SetHasID();
-  }
-  if (aPrototype->mHasClassAttribute) {
-    element->SetMayHaveClass();
-  }
-  if (aPrototype->mHasStyleAttribute) {
-    element->SetMayHaveStyle();
-  }
-
   element->MakeHeavyweight(aPrototype);
-
-  // Check each attribute on the prototype to see if we need to do
-  // any additional processing and hookup that would otherwise be
-  // done 'automagically' by SetAttr().
-  for (const auto& attribute : aPrototype->mAttributes) {
-    element->AddListenerForAttributeIfNeeded(attribute.mName);
-  }
-
   return baseElement.forget();
 }
 
 nsresult NS_NewXULElement(Element** aResult,
-                          already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo,
+                          already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
                           FromParser aFromParser, nsAtom* aIsAtom,
                           mozilla::dom::CustomElementDefinition* aDefinition) {
+  return NS_NewXULElement(aResult, std::move(aNodeInfo), aFromParser, aIsAtom,
+                          aDefinition, Nothing());
+}
+
+nsresult NS_NewXULElement(
+    Element** aResult, already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
+    FromParser aFromParser, nsAtom* aIsAtom,
+    mozilla::dom::CustomElementDefinition* aDefinition,
+    Maybe<RefPtr<CustomElementRegistry>> aCustomElementRegistry) {
   RefPtr<mozilla::dom::NodeInfo> nodeInfo = aNodeInfo;
 
   MOZ_ASSERT(nodeInfo, "need nodeinfo for non-proto Create");
@@ -276,11 +267,12 @@ nsresult NS_NewXULElement(Element** aResult,
   }
 
   return nsContentUtils::NewXULOrHTMLElement(aResult, nodeInfo, aFromParser,
-                                             aIsAtom, aDefinition);
+                                             aIsAtom, aDefinition,
+                                             std::move(aCustomElementRegistry));
 }
 
 void NS_TrustedNewXULElement(
-    Element** aResult, already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo) {
+    Element** aResult, already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo) {
   RefPtr<mozilla::dom::NodeInfo> ni = aNodeInfo;
   MOZ_ASSERT(ni, "need nodeinfo for non-proto Create");
 
@@ -306,18 +298,11 @@ NS_INTERFACE_MAP_END_INHERITING(nsStyledElement)
 nsresult nsXULElement::Clone(mozilla::dom::NodeInfo* aNodeInfo,
                              nsINode** aResult) const {
   *aResult = nullptr;
-
-  RefPtr<mozilla::dom::NodeInfo> ni = aNodeInfo;
-  RefPtr<nsXULElement> element = Construct(ni.forget());
-
-  nsresult rv = const_cast<nsXULElement*>(this)->CopyInnerTo(
-      element, ReparseAttributes::No);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  RefPtr<nsXULElement> element = Construct(do_AddRef(aNodeInfo));
+  MOZ_TRY(const_cast<nsXULElement*>(this)->CopyInnerTo(element));
   // Note that we're _not_ copying mControllers.
-
   element.forget(aResult);
-  return rv;
+  return NS_OK;
 }
 
 //----------------------------------------------------------------------
@@ -520,12 +505,6 @@ void nsXULElement::AddListenerForAttributeIfNeeded(nsAtom* aLocalName) {
   }
 }
 
-void nsXULElement::AddListenerForAttributeIfNeeded(const nsAttrName& aName) {
-  if (aName.IsAtom()) {
-    AddListenerForAttributeIfNeeded(aName.Atom());
-  }
-}
-
 class XULInContentErrorReporter : public Runnable {
  public:
   explicit XULInContentErrorReporter(Document& aDocument)
@@ -563,7 +542,8 @@ nsresult nsXULElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   Document& doc = aContext.OwnerDoc();
   if (!IsInNativeAnonymousSubtree() && !doc.AllowXULXBL() &&
       !doc.HasWarnedAbout(DeprecatedOperations::eImportXULIntoContent)) {
-    nsContentUtils::AddScriptRunner(new XULInContentErrorReporter(doc));
+    nsContentUtils::AddScriptRunner(
+        MakeAndAddRef<XULInContentErrorReporter>(doc));
   }
 
 #ifdef DEBUG
@@ -852,7 +832,7 @@ nsresult nsXULElement::DispatchXULCommand(const EventChainVisitor& aVisitor,
         nullptr, orig->IsControl(), orig->IsAlt(), orig->IsShift(),
         orig->IsMeta(), inputSource, button);
   } else {
-    NS_WARNING("A XUL element is attached to a command that doesn't exist!\n");
+    NS_WARNING("A XUL element is attached to a command that doesn't exist!");
   }
   return NS_OK;
 }
@@ -904,8 +884,7 @@ nsresult nsXULElement::PreHandleEvent(EventChainVisitor& aVisitor) {
 //----------------------------------------------------------------------
 // Implementation methods
 
-NS_IMETHODIMP_(bool)
-nsXULElement::IsAttributeMapped(const nsAtom* aAttribute) const {
+bool nsXULElement::IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const {
   return false;
 }
 
@@ -924,7 +903,9 @@ void nsXULElement::Click(CallerType aCallerType) {
 
 void nsXULElement::ClickWithInputSource(uint16_t aInputSource,
                                         bool aIsTrustedEvent) {
-  if (BoolAttrIsTrue(nsGkAtoms::disabled)) return;
+  if (State().HasState(ElementState::DISABLED)) {
+    return;
+  }
 
   nsCOMPtr<Document> doc = GetComposedDoc();  // Strong just in case
   if (doc) {
@@ -1020,48 +1001,15 @@ nsresult nsXULElement::AddPopupListener(nsAtom* aName) {
 //----------------------------------------------------------------------
 
 nsresult nsXULElement::MakeHeavyweight(nsXULPrototypeElement* aPrototype) {
-  if (!aPrototype) {
-    return NS_OK;
-  }
-
-  size_t i;
-  nsresult rv;
-  for (i = 0; i < aPrototype->mAttributes.Length(); ++i) {
-    nsXULPrototypeAttribute* protoattr = &aPrototype->mAttributes[i];
-    nsAttrValue attrValue;
-
-    // Style rules need to be cloned.
-    if (protoattr->mValue.Type() == nsAttrValue::eCSSDeclaration) {
-      DeclarationBlock* decl = protoattr->mValue.GetCSSDeclarationValue();
-      RefPtr<DeclarationBlock> declClone = decl->Clone();
-
-      nsString stringValue;
-      protoattr->mValue.ToString(stringValue);
-
-      attrValue.SetTo(declClone.forget(), &stringValue);
-    } else {
-      attrValue.SetTo(protoattr->mValue);
-    }
-
-    bool oldValueSet;
-    // XXX we might wanna have a SetAndTakeAttr that takes an nsAttrName
-    if (protoattr->mName.IsAtom()) {
-      rv = mAttrs.SetAndSwapAttr(protoattr->mName.Atom(), attrValue,
-                                 &oldValueSet);
-    } else {
-      rv = mAttrs.SetAndSwapAttr(protoattr->mName.NodeInfo(), attrValue,
-                                 &oldValueSet);
-    }
-    NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_ASSERT(aPrototype);
+  for (const auto& protoattr : aPrototype->mAttributes) {
+    nsAttrValue value(protoattr.mValue);
+    MOZ_TRY(SetParsedAttr(
+        protoattr.mName.NamespaceID(), protoattr.mName.LocalName(),
+        protoattr.mName.GetPrefix(), value,
+        /* aNotify = */ false, mozilla::dom::IsKnownNewAttr::No));
   }
   return NS_OK;
-}
-
-bool nsXULElement::BoolAttrIsTrue(nsAtom* aName) const {
-  const nsAttrValue* attr = GetAttrInfo(kNameSpaceID_None, aName).mValue;
-
-  return attr && attr->Type() == nsAttrValue::eAtom &&
-         attr->GetAtomValue() == nsGkAtoms::_true;
 }
 
 bool nsXULElement::IsEventAttributeNameInternal(nsAtom* aName) {
@@ -1380,7 +1328,6 @@ nsresult nsXULPrototypeElement::SetAttrAt(uint32_t aPos,
   }
 
   if (mAttributes[aPos].mName.Equals(nsGkAtoms::id) && !aValue.IsEmpty()) {
-    mHasIdAttribute = true;
     // Store id as atom.
     // id="" means that the element has no id. Not that it has
     // emptystring as id.
@@ -1391,6 +1338,19 @@ nsresult nsXULPrototypeElement::SetAttrAt(uint32_t aPos,
     mAttributes[aPos].mValue.ParseAtom(aValue);
 
     return NS_OK;
+  } else if (mAttributes[aPos].mName.Equals(nsGkAtoms::aria_controls) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_describedby) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_details) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_errormessage) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_flowto) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_labelledby) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::aria_owns) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::control) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::_for) ||
+             mAttributes[aPos].mName.Equals(nsGkAtoms::headers)) {
+    mAttributes[aPos].mValue.ParseAtomArray(aValue);
+
+    return NS_OK;
   } else if (mAttributes[aPos].mName.Equals(nsGkAtoms::is)) {
     // Store is as atom.
     mAttributes[aPos].mValue.ParseAtom(aValue);
@@ -1398,13 +1358,11 @@ nsresult nsXULPrototypeElement::SetAttrAt(uint32_t aPos,
 
     return NS_OK;
   } else if (mAttributes[aPos].mName.Equals(nsGkAtoms::_class)) {
-    mHasClassAttribute = true;
     // Compute the element's class list
     mAttributes[aPos].mValue.ParseAtomArray(aValue);
 
     return NS_OK;
   } else if (mAttributes[aPos].mName.Equals(nsGkAtoms::style)) {
-    mHasStyleAttribute = true;
     // Parse the element's 'style' attribute
 
     // This is basically duplicating what nsINode::NodePrincipal() does
@@ -1421,6 +1379,7 @@ nsresult nsXULPrototypeElement::SetAttrAt(uint32_t aPos,
         aValue, data, eCompatibility_FullStandards, nullptr,
         StyleCssRuleType::Style);
     if (declaration) {
+      declaration->SetImmutable();
       mAttributes[aPos].mValue.SetTo(declaration.forget(), &aValue);
 
       return NS_OK;
@@ -2010,6 +1969,19 @@ nsresult nsXULPrototypeScript::InstantiateScript(
 }
 
 void nsXULPrototypeScript::Set(JS::Stencil* aStencil) { mStencil = aStencil; }
+
+void nsXULPrototypeScript::AddSizeOfExcludingThis(nsWindowSizes& aSizes,
+                                                  size_t* aNodeSize) const {
+  // It is okay to include the size of mSrcURI here even though it might have
+  // strong references from elsewhere because the URI was created for this
+  // object, in XULContentSinkImpl::OpenScript() or
+  // nsXULPrototypeElement::Deserialize(). Only objects that created their own
+  // URI will call nsIURIWithSizeOf::SizeOfIncludingThis().
+  if (mSrcURI) {
+    *aNodeSize += SizeOfIncludingThisIfURIWithSizeOf(
+        mSrcURI, aSizes.mState.mMallocSizeOf);
+  }
+}
 
 //----------------------------------------------------------------------
 //

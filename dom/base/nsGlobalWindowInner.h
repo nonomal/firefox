@@ -1,24 +1,10 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsGlobalWindowInner_h___
-#define nsGlobalWindowInner_h___
+#ifndef nsGlobalWindowInner_h_
+#define nsGlobalWindowInner_h_
 
-#include "nsHashKeys.h"
-#include "nsPIDOMWindow.h"
-
-// Local Includes
-// Helper Classes
-#include "mozilla/WeakPtr.h"
-#include "nsCOMPtr.h"
-#include "nsCycleCollectionParticipant.h"
-#include "nsTHashMap.h"
-#include "nsWeakReference.h"
-
-// Interfaces Needed
 #include "Units.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/CallState.h"
@@ -26,9 +12,11 @@
 #include "mozilla/FlushType.h"
 #include "mozilla/LinkedList.h"
 #include "mozilla/MozPromise.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/StorageAccess.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/WeakPtr.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/ChromeMessageBroadcaster.h"
 #include "mozilla/dom/DebuggerNotificationManager.h"
@@ -41,18 +29,23 @@
 #include "mozilla/dom/StorageEvent.h"
 #include "mozilla/dom/WindowBinding.h"
 #include "mozilla/dom/WindowProxyHolder.h"
+#include "nsCOMPtr.h"
 #include "nsCheapSets.h"
-#include "nsIBrowserDOMWindow.h"
+#include "nsCycleCollectionParticipant.h"
+#include "nsHashKeys.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIPrincipal.h"
 #include "nsIScriptGlobalObject.h"
 #include "nsIScriptObjectPrincipal.h"
-#include "nsSize.h"
+#include "nsPIDOMWindow.h"
+#include "nsTHashMap.h"
 #include "nsThreadUtils.h"
+#include "nsWeakReference.h"
 #include "nsWrapperCacheInlines.h"
 #include "prclist.h"
 
 class nsIArray;
+class nsIBrowserDOMWindow;
 class nsIBaseWindow;
 class nsIContent;
 class nsICookieJarSettings;
@@ -110,6 +103,7 @@ class Crypto;
 class CustomElementRegistry;
 class DataTransfer;
 class DocGroup;
+class DocumentPictureInPicture;
 class External;
 class FunctionOrTrustedScriptOrString;
 class Gamepad;
@@ -259,8 +253,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   bool IsEligibleForMessaging() override;
 
   void ReportToConsole(uint32_t aErrorFlags, const nsCString& aCategory,
-                       nsContentUtils::PropertiesFile aFile,
-                       const nsCString& aMessageName,
+                       PropertiesFile aFile, const nsCString& aMessageName,
                        const nsTArray<nsString>& aParams,
                        const mozilla::SourceLocation& aLocation) override;
 
@@ -303,9 +296,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   bool ComputeDefaultWantsUntrusted(mozilla::ErrorResult& aRv) final;
 
-  virtual nsPIDOMWindowOuter* GetOwnerGlobalForBindingsInternal() override;
-
-  virtual nsIGlobalObject* GetOwnerGlobal() const override;
+  nsIGlobalObject* GetRelevantGlobal() const override;
 
   EventTarget* GetTargetForDOMEvent() override;
 
@@ -392,7 +383,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   void NoteDOMContentLoaded();
 
-  virtual nsresult FireDelayedDOMEvents(bool aIncludeSubWindows) override;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult FireDelayedDOMEvents(
+      bool aIncludeSubWindows) override;
 
   virtual void MaybeUpdateTouchState() override;
 
@@ -460,12 +452,16 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // frame.
   mozilla::ScrollContainerFrame* GetScrollContainerFrame();
 
-  nsresult Observe(nsISupports* aSubject, const char* aTopic,
-                   const char16_t* aData);
+  MOZ_CAN_RUN_SCRIPT nsresult Observe(nsISupports* aSubject, const char* aTopic,
+                                      const char16_t* aData);
 
   void ObserveStorageNotification(mozilla::dom::StorageEvent* aEvent,
                                   const char16_t* aStorageType,
                                   bool aPrivateBrowsing);
+
+  // Called by DocGroup when managing MediaSource URLs.
+  void NoteMediaSourceURL(const nsACString& aURL);
+  void UnnoteMediaSourceURL(const nsACString& aURL);
 
   static void Init();
   static void ShutDown();
@@ -596,7 +592,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   }
 #define WINDOW_ONLY_EVENT EVENT
 #define TOUCH_EVENT EVENT
-#include "mozilla/EventNameList.h"
+#include "mozilla/EventNameList.inc"
 #undef TOUCH_EVENT
 #undef WINDOW_ONLY_EVENT
 #undef BEFOREUNLOAD_EVENT
@@ -625,9 +621,9 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   mozilla::dom::BarProp* GetToolbar(mozilla::ErrorResult& aError);
   void GetStatus(nsAString& aStatus, mozilla::ErrorResult& aError);
   void SetStatus(const nsAString& aStatus, mozilla::ErrorResult& aError);
-  void Close(mozilla::dom::CallerType aCallerType,
-             mozilla::ErrorResult& aError);
-  nsresult Close() override;
+  MOZ_CAN_RUN_SCRIPT void Close(mozilla::dom::CallerType aCallerType,
+                                mozilla::ErrorResult& aError);
+  MOZ_CAN_RUN_SCRIPT nsresult Close() override;
   bool GetClosed(mozilla::ErrorResult& aError);
   void Stop(mozilla::ErrorResult& aError);
   void Focus(mozilla::dom::CallerType aCallerType,
@@ -668,14 +664,19 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   already_AddRefed<mozilla::dom::CookieStore> CookieStore();
 
+  mozilla::dom::DocumentPictureInPicture* GetExtantDocumentPictureInPicture()
+      const override {
+    return mDocumentPiP;
+  }
+
+  mozilla::dom::DocumentPictureInPicture* DocumentPictureInPicture();
+
   // https://w3c.github.io/webappsec-secure-contexts/#dom-window-issecurecontext
   bool IsSecureContext() const;
 
   mozilla::dom::External* External();
 
   mozilla::dom::Worklet* GetPaintWorklet(mozilla::ErrorResult& aRv);
-
-  void GetRegionalPrefsLocales(nsTArray<nsString>& aLocales);
 
   void GetWebExposedLocales(nsTArray<nsString>& aLocales);
 
@@ -684,6 +685,10 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   void StoreSharedWorker(mozilla::dom::SharedWorker* aSharedWorker);
 
   void ForgetSharedWorker(mozilla::dom::SharedWorker* aSharedWorker);
+
+  void UpdateSharedWorkersLanguageOverride(const nsCString& aLanguageOverride);
+
+  void UpdateSharedWorkerTimezoneOverride(const nsAString& aTimezoneOverride);
 
  public:
   void Alert(nsIPrincipal& aSubjectPrincipal, mozilla::ErrorResult& aError);
@@ -746,8 +751,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   void Btoa(const nsAString& aBinaryData, nsAString& aAsciiBase64String,
             mozilla::ErrorResult& aError);
 
-  void MaybeNotifyStorageKeyUsed();
-
   mozilla::dom::Storage* GetSessionStorage(mozilla::ErrorResult& aError);
   mozilla::dom::Storage* GetLocalStorage(mozilla::ErrorResult& aError);
   mozilla::dom::Selection* GetSelection(mozilla::ErrorResult& aError);
@@ -774,6 +777,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   void ResizeBy(int32_t aWidthDif, int32_t aHeightDif,
                 mozilla::dom::CallerType aCallerType,
                 mozilla::ErrorResult& aError);
+  void MoveResize(int32_t aX, int32_t aY, int32_t aWidth, int32_t aHeight,
+                  mozilla::ErrorResult& aError);
   void Scroll(double aXScroll, double aYScroll) {
     ScrollTo(aXScroll, aYScroll);
   }
@@ -866,9 +871,12 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   int32_t GetScrollMinY(mozilla::ErrorResult& aError);
   int32_t GetScrollMaxX(mozilla::ErrorResult& aError);
   int32_t GetScrollMaxY(mozilla::ErrorResult& aError);
-  bool GetFullScreen(mozilla::ErrorResult& aError);
+  bool GetFullScreen(mozilla::dom::CallerType aCallerType,
+                     mozilla::ErrorResult& aError);
   bool GetFullScreen() override;
-  void SetFullScreen(bool aFullscreen, mozilla::ErrorResult& aError);
+  MOZ_CAN_RUN_SCRIPT void SetFullScreen(bool aFullscreen,
+                                        mozilla::dom::CallerType aCallerType,
+                                        mozilla::ErrorResult& aError);
   bool Find(const nsAString& aString, bool aCaseSensitive, bool aBackwards,
             bool aWrapAround, bool aWholeWord, bool aSearchInFrames,
             bool aShowDialog, mozilla::ErrorResult& aError);
@@ -966,17 +974,20 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   bool OriginAgentCluster() const;
 
   mozilla::dom::WebTaskScheduler* Scheduler();
-  void SetWebTaskSchedulingState(
-      mozilla::dom::WebTaskSchedulingState* aState) override;
-  mozilla::dom::WebTaskSchedulingState* GetWebTaskSchedulingState()
-      const override {
-    return mWebTaskSchedulingState;
-  }
 
   MOZ_CAN_RUN_SCRIPT bool SynthesizeMouseEvent(
       const nsAString& aType, float aOffsetX, float aOffsetY,
       const mozilla::dom::SynthesizeMouseEventData& aMouseEventData,
       const mozilla::dom::SynthesizeMouseEventOptions& aOptions,
+      const mozilla::dom::Optional<
+          mozilla::OwningNonNull<mozilla::dom::VoidFunction>>& aCallback,
+      mozilla::ErrorResult& aError);
+
+  MOZ_CAN_RUN_SCRIPT bool SynthesizeTouchEvent(
+      const nsAString& aType,
+      const nsTArray<mozilla::dom::SynthesizeTouchEventData>& aTouches,
+      const int32_t aModifiers,
+      const mozilla::dom::SynthesizeTouchEventOptions& aOptions,
       const mozilla::dom::Optional<
           mozilla::OwningNonNull<mozilla::dom::VoidFunction>>& aCallback,
       mozilla::ErrorResult& aError);
@@ -991,12 +1002,16 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
                         JS::Handle<JS::Value> aValue,
                         mozilla::ErrorResult& aError);
 
-  MOZ_CAN_RUN_SCRIPT nsresult GetInnerWidth(double* aWidth) override;
-  MOZ_CAN_RUN_SCRIPT nsresult GetInnerHeight(double* aHeight) override;
+  MOZ_CAN_RUN_SCRIPT nsresult
+  GetInnerWidth(mozilla::dom::CallerType aCallerType, double* aWidth) override;
+  MOZ_CAN_RUN_SCRIPT nsresult GetInnerHeight(
+      mozilla::dom::CallerType aCallerType, double* aHeight) override;
 
  public:
-  MOZ_CAN_RUN_SCRIPT double GetInnerWidth(mozilla::ErrorResult& aError);
-  MOZ_CAN_RUN_SCRIPT double GetInnerHeight(mozilla::ErrorResult& aError);
+  MOZ_CAN_RUN_SCRIPT double GetInnerWidth(mozilla::dom::CallerType aCallerType,
+                                          mozilla::ErrorResult& aError);
+  MOZ_CAN_RUN_SCRIPT double GetInnerHeight(mozilla::dom::CallerType aCallerType,
+                                           mozilla::ErrorResult& aError);
   int32_t GetScreenX(mozilla::dom::CallerType aCallerType,
                      mozilla::ErrorResult& aError);
   int32_t GetScreenY(mozilla::dom::CallerType aCallerType,
@@ -1057,17 +1072,16 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // Helper to convert a void returning child method into an implicit
   // CallState::Continue value.
   template <typename Return, typename Method, typename... Args>
-  typename std::enable_if<std::is_void<Return>::value, mozilla::CallState>::type
-  CallDescendant(nsGlobalWindowInner* aWindow, Method aMethod,
-                 Args&&... aArgs) {
+  std::enable_if_t<std::is_void_v<Return>, mozilla::CallState> CallDescendant(
+      nsGlobalWindowInner* aWindow, Method aMethod, Args&&... aArgs) {
     (aWindow->*aMethod)(aArgs...);
     return mozilla::CallState::Continue;
   }
 
   // Helper that passes through the CallState value from a child method.
   template <typename Return, typename Method, typename... Args>
-  typename std::enable_if<std::is_same<Return, mozilla::CallState>::value,
-                          mozilla::CallState>::type
+  std::enable_if_t<std::is_same_v<Return, mozilla::CallState>,
+                   mozilla::CallState>
   CallDescendant(nsGlobalWindowInner* aWindow, Method aMethod,
                  Args&&... aArgs) {
     return (aWindow->*aMethod)(aArgs...);
@@ -1099,7 +1113,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   already_AddRefed<nsIWebBrowserChrome> GetWebBrowserChrome();
   bool IsPrivateBrowsing();
 
-  void FireOfflineStatusEventIfChanged();
+  MOZ_CAN_RUN_SCRIPT void FireOfflineStatusEventIfChanged();
 
  public:
   // Inner windows only.
@@ -1226,7 +1240,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   bool IsPlayingAudio() override;
 
   // Dispatch a runnable related to the global.
-  nsresult Dispatch(already_AddRefed<nsIRunnable>&& aRunnable) const final;
+  nsresult Dispatch(already_AddRefed<nsIRunnable> aRunnable) const final;
   nsISerialEventTarget* SerialEventTarget() const final;
 
   void DisableIdleCallbackRequests();
@@ -1300,7 +1314,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   RefPtr<mozilla::dom::ContentMediaController> mContentMediaController;
 
   RefPtr<mozilla::dom::WebTaskSchedulerMainThread> mWebTaskScheduler;
-  RefPtr<mozilla::dom::WebTaskSchedulingState> mWebTaskSchedulingState;
 
   RefPtr<mozilla::dom::TrustedTypePolicyFactory> mTrustedTypePolicyFactory;
 
@@ -1395,6 +1408,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   RefPtr<mozilla::dom::cache::CacheStorage> mCacheStorage;
   RefPtr<mozilla::dom::Console> mConsole;
   RefPtr<mozilla::dom::CookieStore> mCookieStore;
+  RefPtr<mozilla::dom::DocumentPictureInPicture> mDocumentPiP;
   RefPtr<mozilla::dom::Worklet> mPaintWorklet;
   RefPtr<mozilla::dom::External> mExternal;
 
@@ -1423,11 +1437,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // instead.
   mozilla::Maybe<mozilla::StorageAccess> mStorageAllowedCache;
   uint32_t mStorageAllowedReasonCache;
-
-  // When window associated storage is accessed we need to notify the parent
-  // process. This flag is used to ensure we only do it once per window
-  // lifetime.
-  bool hasNotifiedStorageKeyUsed{false};
 
   RefPtr<mozilla::dom::DebuggerNotificationManager>
       mDebuggerNotificationManager;
@@ -1499,7 +1508,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   nsTArray<mozilla::WeakPtr<Document>> mDataDocumentsForMemoryReporting;
 
-  static InnerWindowByIdTable* sInnerWindowsById;
+  static mozilla::StaticAutoPtr<InnerWindowByIdTable> sInnerWindowsById;
 
   // Members in the mChromeFields member should only be used in chrome windows.
   // All accesses to this field should be guarded by a check of mIsChrome.
@@ -1512,6 +1521,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // Cache the DataTransfer created for a paste event, this will be reset after
   // the event is dispatched.
   RefPtr<mozilla::dom::DataTransfer> mCurrentPasteDataTransfer;
+
+  nsTArray<nsCString> mMediaSourceURLs;
 
   // These fields are used by the inner and outer windows to prevent
   // programatically moving the window while the mouse is down.
@@ -1533,39 +1544,4 @@ inline nsISupports* ToCanonicalSupports(nsGlobalWindowInner* p) {
   return static_cast<mozilla::dom::EventTarget*>(p);
 }
 
-// XXX: EWW - This is an awful hack - let's not do this
-#include "nsGlobalWindowOuter.h"
-
-inline nsIGlobalObject* nsGlobalWindowInner::GetOwnerGlobal() const {
-  return const_cast<nsGlobalWindowInner*>(this);
-}
-
-inline nsGlobalWindowOuter* nsGlobalWindowInner::GetInProcessTopInternal() {
-  nsGlobalWindowOuter* outer = GetOuterWindowInternal();
-  nsCOMPtr<nsPIDOMWindowOuter> top = outer ? outer->GetInProcessTop() : nullptr;
-  if (top) {
-    return nsGlobalWindowOuter::Cast(top);
-  }
-  return nullptr;
-}
-
-inline nsGlobalWindowOuter*
-nsGlobalWindowInner::GetInProcessScriptableTopInternal() {
-  nsPIDOMWindowOuter* top = GetInProcessScriptableTop();
-  return nsGlobalWindowOuter::Cast(top);
-}
-
-inline nsIScriptContext* nsGlobalWindowInner::GetContextInternal() {
-  if (mOuterWindow) {
-    return GetOuterWindowInternal()->mContext;
-  }
-
-  return nullptr;
-}
-
-inline nsGlobalWindowOuter* nsGlobalWindowInner::GetOuterWindowInternal()
-    const {
-  return nsGlobalWindowOuter::Cast(GetOuterWindow());
-}
-
-#endif /* nsGlobalWindowInner_h___ */
+#endif /* nsGlobalWindowInner_h_ */

@@ -1,25 +1,63 @@
-From: Landry Breuil <landry@rhaalovely.net>
-Date: Mon, 27 Oct 2025 17:42:00 +0000
-Subject: Bug 1994630: fix build on OpenBSD/arm64 after bug 1988042 r=mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Tue, 7 Apr 2026 19:06:00 -0500
+Subject: Bug 2030139 - (fix-15fd636394) disable perfetto usage to avoid new
+ third_party library.
 
-we return false on BSD in Supports(), so no need to include something which doesn't exist
-
-Differential Revision: https://phabricator.services.mozilla.com/D268827
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/6bcf80824ecafc424e41b136705ba08370d66254
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/f1981bae2720ec8087be98eb7f5f323c1d233640
 ---
- rtc_base/cpu_info.cc | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
+ video/video_stream_encoder.cc | 20 ++++++++------------
+ 1 file changed, 8 insertions(+), 12 deletions(-)
 
-diff --git a/rtc_base/cpu_info.cc b/rtc_base/cpu_info.cc
-index b51c9e950e..d8469535c6 100644
---- a/rtc_base/cpu_info.cc
-+++ b/rtc_base/cpu_info.cc
-@@ -38,7 +38,7 @@
- #if defined(WEBRTC_ARCH_X86_FAMILY) && defined(_MSC_VER)
- #include <intrin.h>
- #endif
--#if defined(WEBRTC_ARCH_ARM_FAMILY) && (defined(WEBRTC_LINUX) || defined(WEBRTC_BSD))
-+#if defined(WEBRTC_ARCH_ARM_FAMILY) && defined(WEBRTC_LINUX)
- #include <asm/hwcap.h>
- #include <sys/auxv.h>
- #endif
+diff --git a/video/video_stream_encoder.cc b/video/video_stream_encoder.cc
+index 4d10a3a418..13d45b3aa7 100644
+--- a/video/video_stream_encoder.cc
++++ b/video/video_stream_encoder.cc
+@@ -859,13 +859,11 @@ void VideoStreamEncoder::AddAdaptationResource(
+   // Map any externally added resources as kCpu for the sake of stats reporting.
+   // TODO(hbos): Make the manager map any unknown resources to kCpu and get rid
+   // of this MapResourceToReason() call.
+-  TRACE_EVENT_BEGIN("webrtc",
+-                    "VideoStreamEncoder::AddAdaptationResource(latency)",
+-                    perfetto::Track::FromPointer(this));
++  TRACE_EVENT_ASYNC_BEGIN0(
++      "webrtc", "VideoStreamEncoder::AddAdaptationResource(latency)", this);
+   encoder_queue_->PostTask([this, resource = std::move(resource)] {
+-    TRACE_EVENT_END("webrtc",
+-                    /* VideoStreamEncoder::AddAdaptationResource(latency) */
+-                    perfetto::Track::FromPointer(this));
++    TRACE_EVENT_ASYNC_END0(
++        "webrtc", "VideoStreamEncoder::AddAdaptationResource(latency)", this);
+     RTC_DCHECK_RUN_ON(encoder_queue_.get());
+     additional_resources_.push_back(resource);
+     stream_resource_manager_.AddResource(resource, VideoAdaptationReason::kCpu);
+@@ -1715,8 +1713,7 @@ void VideoStreamEncoder::TraceFrameDropStart() {
+   RTC_DCHECK_RUN_ON(encoder_queue_.get());
+   // Start trace event only on the first frame after encoder is paused.
+   if (!encoder_paused_and_dropped_frame_) {
+-    TRACE_EVENT_BEGIN("webrtc", "EncoderPaused",
+-                      perfetto::Track::FromPointer(this));
++    TRACE_EVENT_ASYNC_BEGIN0("webrtc", "EncoderPaused", this);
+   }
+   encoder_paused_and_dropped_frame_ = true;
+ }
+@@ -1725,8 +1722,7 @@ void VideoStreamEncoder::TraceFrameDropEnd() {
+   RTC_DCHECK_RUN_ON(encoder_queue_.get());
+   // End trace event on first frame after encoder resumes, if frame was dropped.
+   if (encoder_paused_and_dropped_frame_) {
+-    TRACE_EVENT_END("webrtc", /* EncoderPaused */
+-                    perfetto::Track::FromPointer(this));
++    TRACE_EVENT_ASYNC_END0("webrtc", "EncoderPaused", this);
+   }
+   encoder_paused_and_dropped_frame_ = false;
+ }
+@@ -2185,8 +2181,8 @@ void VideoStreamEncoder::EncodeVideoFrame(const VideoFrame& video_frame,
+   }
+   accumulated_update_rect_is_valid_ = true;
+ 
+-  TRACE_EVENT_INSTANT("webrtc", "Encode", perfetto::Track::FromPointer(this),
+-                      "render_time", video_frame.render_time_ms());
++  TRACE_EVENT_ASYNC_STEP_INTO0("webrtc", "Video", video_frame.render_time_ms(),
++                               "Encode");
+ 
+   stream_resource_manager_.OnEncodeStarted(out_frame, time_when_posted_us);
+ 

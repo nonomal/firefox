@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsPIDOMWindow_h__
-#define nsPIDOMWindow_h__
+#ifndef nsPIDOMWindow_h_
+#define nsPIDOMWindow_h_
 
 #include "Units.h"
 #include "js/TypeDecls.h"
@@ -72,6 +70,7 @@ class WebIdentityHandler;
 class WindowContext;
 class WindowGlobalChild;
 class CustomElementRegistry;
+class DocumentPictureInPicture;
 enum class CallerType : uint32_t;
 }  // namespace mozilla::dom
 
@@ -172,6 +171,10 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   bool HasActiveMediaKeysInstance();
 
   mozilla::dom::Performance* GetPerformance();
+
+  mozilla::dom::Performance* GetPerformanceIfExists() const {
+    return mPerformance;
+  }
 
   void QueuePerformanceNavigationTiming();
 
@@ -349,6 +352,7 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   mozilla::Maybe<mozilla::dom::ClientInfo> GetClientInfo() const;
   mozilla::Maybe<mozilla::dom::ClientState> GetClientState() const;
   mozilla::Maybe<mozilla::dom::ServiceWorkerDescriptor> GetController() const;
+  mozilla::dom::ClientSource* GetClientSource() const;
 
   void SetPolicyContainer(nsIPolicyContainer* aPolicyContainer);
   nsIPolicyContainer* GetPolicyContainer();
@@ -401,7 +405,8 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
 
   // Fire any DOM notification events related to things that happened while
   // the window was frozen.
-  virtual nsresult FireDelayedDOMEvents(bool aIncludeSubWindows) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult FireDelayedDOMEvents(
+      bool aIncludeSubWindows) = 0;
 
   /**
    * Get the docshell in this window.
@@ -586,8 +591,10 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
 
   virtual nsresult GetControllers(nsIControllers** aControllers) = 0;
 
-  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerWidth(double* aWidth) = 0;
-  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerHeight(double* aHeight) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerWidth(
+      mozilla::dom::CallerType aCallerType, double* aWidth) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerHeight(
+      mozilla::dom::CallerType aCallerType, double* aHeight) = 0;
 
   virtual already_AddRefed<nsDOMCSSDeclaration> GetComputedStyle(
       mozilla::dom::Element& aElt, const nsAString& aPseudoElt,
@@ -596,7 +603,7 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   virtual bool GetFullScreen() = 0;
 
   virtual nsresult Focus(mozilla::dom::CallerType aCallerType) = 0;
-  virtual nsresult Close() = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult Close() = 0;
 
   mozilla::dom::DocGroup* GetDocGroup() const;
 
@@ -628,6 +635,9 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
 
   // Called when a CloseWatcher is removed from the manager
   void NotifyCloseWatcherRemoved();
+
+  virtual mozilla::dom::DocumentPictureInPicture*
+  GetExtantDocumentPictureInPicture() const = 0;
 
  protected:
   void CreatePerformanceObjectIfNeeded();
@@ -875,22 +885,16 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
     return mDoc;
   }
 
-  // Set the window up with an about:blank document with the given principal and
-  // potentially a policyContainer and a COEP.
-  virtual void SetInitialPrincipal(
-      nsIPrincipal* aNewWindowPrincipal, nsIPolicyContainer* aPolicyContainer,
-      const mozilla::Maybe<nsILoadInfo::CrossOriginEmbedderPolicy>& aCoep) = 0;
-
-  // Returns an object containing the window's state.  This also suspends
-  // all running timeouts in the window.
-  virtual already_AddRefed<nsISupports> SaveWindowState() = 0;
-
-  // Restore the window state from aState.
-  virtual nsresult RestoreWindowState(nsISupports* aState) = 0;
+  // Set the window up with an about:blank document with the given principal.
+  // Base URI, COEP and PolicyContainer of the current document will be
+  // retained.
+  MOZ_CAN_RUN_SCRIPT virtual void SetInitialPrincipal(
+      nsIPrincipal* aNewWindowPrincipal) = 0;
 
   // Fire any DOM notification events related to things that happened while
   // the window was frozen.
-  virtual nsresult FireDelayedDOMEvents(bool aIncludeSubWindows) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult FireDelayedDOMEvents(
+      bool aIncludeSubWindows) = 0;
 
   /**
    * Get the docshell in this window.
@@ -915,7 +919,7 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    *
    * aDocument must not be null.
    */
-  virtual nsresult SetNewDocument(
+  MOZ_CAN_RUN_SCRIPT virtual nsresult SetNewDocument(
       Document* aDocument, nsISupports* aState, bool aForceReuseInnerWindow,
       mozilla::dom::WindowGlobalChild* aActor = nullptr) = 0;
 
@@ -945,15 +949,15 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   virtual void LeaveModalState() = 0;
 
   virtual bool CanClose() = 0;
-  virtual void ForceClose() = 0;
+  MOZ_CAN_RUN_SCRIPT virtual void ForceClose() = 0;
 
   /**
    * Moves the top-level window into fullscreen mode if aIsFullScreen is true,
    * otherwise exits fullscreen.
    */
-  virtual nsresult SetFullscreenInternal(FullscreenReason aReason,
-                                         bool aIsFullscreen) = 0;
-  virtual void FullscreenWillChange(bool aIsFullscreen) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult SetFullscreenInternal(
+      FullscreenReason aReason, bool aIsFullscreen) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual void FullscreenWillChange(bool aIsFullscreen) = 0;
   /**
    * This function should be called when the fullscreen state is flipped.
    * If no widget is involved the fullscreen change, this method is called
@@ -962,7 +966,8 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    *
    * @param aIsFullscreen indicates whether the widget is in fullscreen.
    */
-  virtual void FinishFullscreenChange(bool aIsFullscreen) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual void FinishFullscreenChange(
+      bool aIsFullscreen) = 0;
 
   virtual void ForceFullScreenInWidget() = 0;
 
@@ -1036,7 +1041,7 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    *
    * Outer windows only.
    */
-  virtual bool DispatchCustomEvent(
+  MOZ_CAN_RUN_SCRIPT virtual bool DispatchCustomEvent(
       const nsAString& aEventName,
       mozilla::ChromeOnlyDispatch aChromeOnlyDispatch =
           mozilla::ChromeOnlyDispatch::eNo) = 0;
@@ -1092,17 +1097,14 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
                               const nsAString& aOptions, nsIArray* aArguments,
                               mozilla::dom::BrowsingContext** _retval) = 0;
 
-  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerWidth(double* aWidth) = 0;
-  MOZ_CAN_RUN_SCRIPT virtual nsresult GetInnerHeight(double* aHeight) = 0;
-
   virtual mozilla::dom::Element* GetFrameElement() = 0;
 
   virtual bool Closed() = 0;
   virtual bool GetFullScreen() = 0;
-  virtual nsresult SetFullScreen(bool aFullscreen) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult SetFullScreen(bool aFullscreen) = 0;
 
   virtual nsresult Focus(mozilla::dom::CallerType aCallerType) = 0;
-  virtual nsresult Close() = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult Close() = 0;
 
   virtual nsresult MoveBy(int32_t aXDif, int32_t aYDif) = 0;
 
@@ -1162,6 +1164,4 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   uint32_t mMarkedCCGeneration;
 };
 
-#include "nsPIDOMWindowInlines.h"
-
-#endif  // nsPIDOMWindow_h__
+#endif  // nsPIDOMWindow_h_

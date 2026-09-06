@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,6 +15,7 @@
 #include "InternalError.h"
 #include "OutOfMemoryError.h"
 #include "PipelineLayout.h"
+#include "PromiseHelpers.h"
 #include "QuerySet.h"
 #include "Queue.h"
 #include "RenderBundleEncoder.h"
@@ -28,7 +28,6 @@
 #include "Utility.h"
 #include "ValidationError.h"
 #include "ipc/WebGPUChild.h"
-#include "js/ArrayBuffer.h"
 #include "js/Value.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/ErrorResult.h"
@@ -39,6 +38,7 @@
 #include "mozilla/dom/VideoFrame.h"
 #include "mozilla/dom/WebGPUBinding.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webgpu/ffi/wgpu.h"
 #include "nsGlobalWindowInner.h"
 
 namespace mozilla::webgpu {
@@ -70,6 +70,7 @@ Device::Device(Adapter* const aParent, RawId aDeviceId, RawId aQueueId,
       mAdapterInfo(std::move(aAdapterInfo)),
       mSupportSharedTextureInSwapChain(
           aParent->SupportSharedTextureInSwapChain()),
+      mLost(false),
       mLostPromise(std::move(aLostPromise)),
       mQueue(new class Queue(this, aQueueId)) {
   GetChild()->RegisterDevice(this);
@@ -89,13 +90,14 @@ dom::Promise* Device::GetLost(ErrorResult& aRv) {
 
 void Device::ResolveLost(dom::GPUDeviceLostReason aReason,
                          const nsAString& aMessage) {
-  if (mLostPromise->State() != dom::Promise::PromiseState::Pending) {
-    // The lost promise was already resolved or rejected.
+  if (mLost) {
     return;
   }
+  mLost = true;
+
   RefPtr<DeviceLostInfo> info =
       MakeRefPtr<DeviceLostInfo>(GetParentObject(), aReason, aMessage);
-  mLostPromise->MaybeResolve(info);
+  promise::MaybeResolve(RefPtr(mLostPromise), std::move(info));
 }
 
 already_AddRefed<Buffer> Device::CreateBuffer(
@@ -103,24 +105,29 @@ already_AddRefed<Buffer> Device::CreateBuffer(
   return Buffer::Create(this, GetId(), aDesc, aRv);
 }
 
-already_AddRefed<Texture> Device::CreateTextureForSwapChain(
-    const dom::GPUCanvasConfiguration* const aConfig,
-    const gfx::IntSize& aCanvasSize, layers::RemoteTextureOwnerId aOwnerId) {
-  MOZ_ASSERT(aConfig);
-
+/* static */ dom::GPUTextureDescriptor Device::SwapChainTextureDescriptor(
+    const dom::GPUCanvasConfiguration& aConfig,
+    const gfx::IntSize& aCanvasSize) {
   dom::GPUTextureDescriptor desc;
   desc.mDimension = dom::GPUTextureDimension::_2d;
   auto& sizeDict = desc.mSize.SetAsGPUExtent3DDict();
   sizeDict.mWidth = aCanvasSize.width;
   sizeDict.mHeight = aCanvasSize.height;
   sizeDict.mDepthOrArrayLayers = 1;
-  desc.mFormat = aConfig->mFormat;
+  desc.mFormat = aConfig.mFormat;
   desc.mMipLevelCount = 1;
   desc.mSampleCount = 1;
-  desc.mUsage = aConfig->mUsage | dom::GPUTextureUsage_Binding::COPY_SRC;
-  desc.mViewFormats = aConfig->mViewFormats;
+  desc.mUsage = aConfig.mUsage | dom::GPUTextureUsage_Binding::COPY_SRC;
+  desc.mViewFormats = aConfig.mViewFormats;
+  return desc;
+}
 
-  return CreateTexture(desc, Some(aOwnerId));
+already_AddRefed<Texture> Device::CreateTextureForSwapChain(
+    const dom::GPUCanvasConfiguration* const aConfig,
+    const gfx::IntSize& aCanvasSize, layers::RemoteTextureOwnerId aOwnerId) {
+  MOZ_ASSERT(aConfig);
+  return CreateTexture(SwapChainTextureDescriptor(*aConfig, aCanvasSize),
+                       Some(aOwnerId));
 }
 
 already_AddRefed<Texture> Device::CreateTexture(
@@ -131,42 +138,14 @@ already_AddRefed<Texture> Device::CreateTexture(
 already_AddRefed<Texture> Device::CreateTexture(
     const dom::GPUTextureDescriptor& aDesc,
     Maybe<layers::RemoteTextureOwnerId> aOwnerId) {
-  ffi::WGPUTextureDescriptor desc = {};
-
-  webgpu::StringHelper label(aDesc.mLabel);
-  desc.label = label.Get();
-
-  if (aDesc.mSize.IsRangeEnforcedUnsignedLongSequence()) {
-    const auto& seq = aDesc.mSize.GetAsRangeEnforcedUnsignedLongSequence();
-    desc.size.width = seq.Length() > 0 ? seq[0] : 1;
-    desc.size.height = seq.Length() > 1 ? seq[1] : 1;
-    desc.size.depth_or_array_layers = seq.Length() > 2 ? seq[2] : 1;
-  } else if (aDesc.mSize.IsGPUExtent3DDict()) {
-    const auto& dict = aDesc.mSize.GetAsGPUExtent3DDict();
-    desc.size.width = dict.mWidth;
-    desc.size.height = dict.mHeight;
-    desc.size.depth_or_array_layers = dict.mDepthOrArrayLayers;
-  } else {
-    MOZ_CRASH("Unexpected union");
-  }
-  desc.mip_level_count = aDesc.mMipLevelCount;
-  desc.sample_count = aDesc.mSampleCount;
-  desc.dimension = ffi::WGPUTextureDimension(aDesc.mDimension);
-  desc.format = ConvertTextureFormat(aDesc.mFormat);
-  desc.usage = aDesc.mUsage;
-
-  AutoTArray<ffi::WGPUTextureFormat, 8> viewFormats;
-  for (auto format : aDesc.mViewFormats) {
-    viewFormats.AppendElement(ConvertTextureFormat(format));
-  }
-  desc.view_formats = {viewFormats.Elements(), viewFormats.Length()};
+  ConvertTextureDescriptor desc(aDesc);
 
   Maybe<ffi::WGPUSwapChainId> ownerId;
   if (aOwnerId.isSome()) {
     ownerId = Some(ffi::WGPUSwapChainId{aOwnerId->mId});
   }
 
-  RawId id = ffi::wgpu_client_create_texture(GetClient(), GetId(), &desc,
+  RawId id = ffi::wgpu_client_create_texture(GetClient(), GetId(), desc.Get(),
                                              ownerId.ptrOr(nullptr));
 
   RefPtr<Texture> texture = new Texture(this, id, aDesc);
@@ -222,7 +201,7 @@ void Device::ExpireExternalTextures() {
 
 already_AddRefed<Sampler> Device::CreateSampler(
     const dom::GPUSamplerDescriptor& aDesc) {
-  ffi::WGPUSamplerDescriptor desc = {};
+  ffi::WGPUFfiSamplerDescriptor desc = {};
   webgpu::StringHelper label(aDesc.mLabel);
 
   desc.label = label.Get();
@@ -236,7 +215,7 @@ already_AddRefed<Sampler> Device::CreateSampler(
   desc.lod_max_clamp = aDesc.mLodMaxClamp;
   desc.max_anisotropy = aDesc.mMaxAnisotropy;
 
-  ffi::WGPUCompareFunction comparison = ffi::WGPUCompareFunction_Sentinel;
+  ffi::WGPUCompareFunction comparison;
   if (aDesc.mCompare.WasPassed()) {
     comparison = ConvertCompareFunction(aDesc.mCompare.Value());
     desc.compare = &comparison;
@@ -251,7 +230,7 @@ already_AddRefed<Sampler> Device::CreateSampler(
 
 already_AddRefed<CommandEncoder> Device::CreateCommandEncoder(
     const dom::GPUCommandEncoderDescriptor& aDesc) {
-  ffi::WGPUCommandEncoderDescriptor desc = {};
+  ffi::WGPUFfiCommandEncoderDescriptor desc = {};
 
   webgpu::StringHelper label(aDesc.mLabel);
   desc.label = label.Get();
@@ -266,9 +245,37 @@ already_AddRefed<CommandEncoder> Device::CreateCommandEncoder(
 
 already_AddRefed<RenderBundleEncoder> Device::CreateRenderBundleEncoder(
     const dom::GPURenderBundleEncoderDescriptor& aDesc) {
-  auto id = ffi::wgpu_client_make_render_bundle_encoder_id(GetClient());
-  RefPtr<RenderBundleEncoder> encoder =
-      new RenderBundleEncoder(this, id, aDesc);
+  ffi::WGPUFfiRenderBundleEncoderDescriptor desc = {};
+  desc.sample_count = aDesc.mSampleCount;
+
+  webgpu::StringHelper label(aDesc.mLabel);
+  desc.label = label.Get();
+
+  ffi::WGPUTextureFormat depthStencilFormat;
+  if (aDesc.mDepthStencilFormat.WasPassed()) {
+    depthStencilFormat =
+        ConvertTextureFormat(aDesc.mDepthStencilFormat.Value());
+    desc.depth_stencil_format = &depthStencilFormat;
+  }
+
+  std::vector<ffi::WGPUFfiOption_TextureFormat> colorFormats = {};
+  for (const auto i : IntegerRange(aDesc.mColorFormats.Length())) {
+    ffi::WGPUFfiOption_TextureFormat opt = {};
+    if (aDesc.mColorFormats[i].IsNull()) {
+      opt.tag = ffi::WGPUFfiOption_TextureFormat_None_TextureFormat;
+    } else {
+      opt.tag = ffi::WGPUFfiOption_TextureFormat_Some_TextureFormat;
+      opt.some = ConvertTextureFormat(aDesc.mColorFormats[i].Value());
+    }
+    colorFormats.push_back(opt);
+  }
+
+  desc.color_formats = {colorFormats.data(), colorFormats.size()};
+
+  RawId id = ffi::wgpu_client_create_render_bundle_encoder(GetClient(), GetId(),
+                                                           &desc);
+
+  RefPtr<RenderBundleEncoder> encoder = new RenderBundleEncoder(this, id);
   encoder->SetLabel(aDesc.mLabel);
   return encoder.forget();
 }
@@ -343,13 +350,18 @@ already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
     optional.AppendElement(data);
   }
 
-  nsTArray<ffi::WGPUBindGroupLayoutEntry> entries(aDesc.mEntries.Length());
+  nsTArray<ffi::WGPUFfiBindGroupLayoutEntry> entries(aDesc.mEntries.Length());
   for (size_t i = 0; i < aDesc.mEntries.Length(); ++i) {
     const auto& entry = aDesc.mEntries[i];
-    ffi::WGPUBindGroupLayoutEntry e = {};
+    ffi::WGPUFfiBindGroupLayoutEntry e = {};
     e.binding = entry.mBinding;
     e.visibility = entry.mVisibility;
+
+    size_t numTypesSpecified = 0;
+    auto markTypeFound = [&numTypesSpecified]() { numTypesSpecified += 1; };
+
     if (entry.mBuffer.WasPassed()) {
+      markTypeFound();
       switch (entry.mBuffer.Value().mType) {
         case dom::GPUBufferBindingType::Uniform:
           e.ty = ffi::WGPURawBindingType_UniformBuffer;
@@ -365,12 +377,14 @@ already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
       e.min_binding_size = entry.mBuffer.Value().mMinBindingSize;
     }
     if (entry.mTexture.WasPassed()) {
+      markTypeFound();
       e.ty = ffi::WGPURawBindingType_SampledTexture;
       e.view_dimension = &optional[i].dim;
       e.texture_sample_type = &optional[i].type;
       e.multisampled = entry.mTexture.Value().mMultisampled;
     }
     if (entry.mStorageTexture.WasPassed()) {
+      markTypeFound();
       switch (entry.mStorageTexture.Value().mAccess) {
         case dom::GPUStorageTextureAccess::Write_only: {
           e.ty = ffi::WGPURawBindingType_WriteonlyStorageTexture;
@@ -392,6 +406,7 @@ already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
       e.storage_texture_format = &optional[i].format;
     }
     if (entry.mSampler.WasPassed()) {
+      markTypeFound();
       e.ty = ffi::WGPURawBindingType_Sampler;
       switch (entry.mSampler.Value().mType) {
         case dom::GPUSamplerBindingType::Filtering:
@@ -405,12 +420,30 @@ already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
       }
     }
     if (entry.mExternalTexture.WasPassed()) {
+      markTypeFound();
       e.ty = ffi::WGPURawBindingType_ExternalTexture;
     }
+
+    switch (numTypesSpecified) {
+      case 1:
+        // This is what we want. 👍
+        break;
+
+      case 0:
+        e.ty = ffi::WGPURawBindingType_Error;
+        e.error_case = ffi::WGPUBindingTypeError_NoneSpecified;
+        break;
+
+      default:
+        e.ty = ffi::WGPURawBindingType_Error;
+        e.error_case = ffi::WGPUBindingTypeError_MultipleSpecified;
+        break;
+    }
+
     entries.AppendElement(e);
   }
 
-  ffi::WGPUBindGroupLayoutDescriptor desc = {};
+  ffi::WGPUFfiBindGroupLayoutDescriptor desc = {};
 
   webgpu::StringHelper label(aDesc.mLabel);
   desc.label = label.Get();
@@ -430,10 +463,10 @@ already_AddRefed<PipelineLayout> Device::CreatePipelineLayout(
       aDesc.mBindGroupLayouts.Length());
 
   for (const auto& layout : aDesc.mBindGroupLayouts) {
-    bindGroupLayouts.AppendElement(layout->GetId());
+    bindGroupLayouts.AppendElement(layout ? layout->GetId() : 0);
   }
 
-  ffi::WGPUPipelineLayoutDescriptor desc = {};
+  ffi::WGPUFfiPipelineLayoutDescriptor desc = {};
 
   webgpu::StringHelper label(aDesc.mLabel);
   desc.label = label.Get();
@@ -450,11 +483,11 @@ already_AddRefed<PipelineLayout> Device::CreatePipelineLayout(
 
 already_AddRefed<BindGroup> Device::CreateBindGroup(
     const dom::GPUBindGroupDescriptor& aDesc) {
-  nsTArray<ffi::WGPUBindGroupEntry> entries(aDesc.mEntries.Length());
+  nsTArray<ffi::WGPUFfiBindGroupEntry> entries(aDesc.mEntries.Length());
   CanvasContextArray canvasContexts;
   nsTArray<RefPtr<ExternalTexture>> externalTextures;
   for (const auto& entry : aDesc.mEntries) {
-    ffi::WGPUBindGroupEntry e = {};
+    ffi::WGPUFfiBindGroupEntry e = {};
     e.binding = entry.mBinding;
     auto setTextureViewBinding =
         [&e, &canvasContexts](const TextureView& texture_view) {
@@ -472,6 +505,7 @@ already_AddRefed<BindGroup> Device::CreateBindGroup(
       }
       e.buffer = buffer->GetId();
       e.offset = 0;
+      e.size_passed = false;
       e.size = 0;
     } else if (entry.mResource.IsGPUBufferBinding()) {
       const auto& bufBinding = entry.mResource.GetAsGPUBufferBinding();
@@ -481,7 +515,12 @@ already_AddRefed<BindGroup> Device::CreateBindGroup(
       }
       e.buffer = bufBinding.mBuffer->GetId();
       e.offset = bufBinding.mOffset;
-      e.size = bufBinding.mSize.WasPassed() ? bufBinding.mSize.Value() : 0;
+      e.size_passed = bufBinding.mSize.WasPassed();
+      if (e.size_passed) {
+        e.size = bufBinding.mSize.Value();
+      } else {
+        e.size = 0;
+      }
     } else if (entry.mResource.IsGPUTexture()) {
       auto texture = entry.mResource.GetAsGPUTexture();
       const dom::GPUTextureViewDescriptor defaultDesc{};
@@ -507,7 +546,7 @@ already_AddRefed<BindGroup> Device::CreateBindGroup(
     entries.AppendElement(e);
   }
 
-  ffi::WGPUBindGroupDescriptor desc = {};
+  ffi::WGPUFfiBindGroupDescriptor desc = {};
 
   webgpu::StringHelper label(aDesc.mLabel);
   desc.label = label.Get();
@@ -659,10 +698,8 @@ already_AddRefed<ShaderModule> Device::CreateShaderModule(
 
   shaderModule->SetLabel(aDesc.mLabel);
 
-  auto pending_promise = WebGPUChild::PendingCreateShaderModulePromise{
-      RefPtr(promise), RefPtr(this), RefPtr(shaderModule)};
-  GetChild()->mPendingCreateShaderModulePromises.push_back(
-      std::move(pending_promise));
+  GetChild()->EnqueueCreateShaderModulePromise(
+      PendingCreateShaderModulePromise{std::move(promise), this, shaderModule});
 
   return shaderModule.forget();
 }
@@ -670,7 +707,7 @@ already_AddRefed<ShaderModule> Device::CreateShaderModule(
 RawId CreateComputePipelineImpl(RawId deviceId, WebGPUChild* aChild,
                                 const dom::GPUComputePipelineDescriptor& aDesc,
                                 bool isAsync) {
-  ffi::WGPUComputePipelineDescriptor desc = {};
+  ffi::WGPUFfiComputePipelineDescriptor desc = {};
   nsCString entryPoint;
   nsTArray<nsCString> constantKeys;
   nsTArray<ffi::WGPUConstantEntry> constants;
@@ -717,18 +754,17 @@ RawId CreateRenderPipelineImpl(RawId deviceId, WebGPUChild* aChild,
                                const dom::GPURenderPipelineDescriptor& aDesc,
                                bool isAsync) {
   // A bunch of stack locals that we can have pointers into
-  nsTArray<ffi::WGPUVertexBufferLayout> vertexBuffers;
+  nsTArray<ffi::WGPUFfiOption_FfiVertexBufferLayout> vertexBuffers;
   nsTArray<ffi::WGPUVertexAttribute> vertexAttributes;
-  ffi::WGPURenderPipelineDescriptor desc = {};
+  ffi::WGPUFfiRenderPipelineDescriptor desc = {};
   nsCString vsEntry, fsEntry;
   nsTArray<nsCString> vsConstantKeys, fsConstantKeys;
   nsTArray<ffi::WGPUConstantEntry> vsConstants, fsConstants;
   ffi::WGPUIndexFormat stripIndexFormat = ffi::WGPUIndexFormat_Uint16;
   ffi::WGPUFace cullFace = ffi::WGPUFace_Front;
-  ffi::WGPUVertexState vertexState = {};
-  ffi::WGPUFragmentState fragmentState = {};
-  nsTArray<ffi::WGPUColorTargetState> colorStates;
-  nsTArray<ffi::WGPUBlendState> blendStates;
+  ffi::WGPUFfiVertexState vertexState = {};
+  ffi::WGPUFfiFragmentState fragmentState = {};
+  nsTArray<ffi::WGPUFfiOption_ColorTargetState> colorStates;
 
   webgpu::StringHelper label(aDesc.mLabel);
   desc.label = label.Get();
@@ -767,8 +803,12 @@ RawId CreateRenderPipelineImpl(RawId deviceId, WebGPUChild* aChild,
     }
 
     for (const auto& vertex_desc : stage.mBuffers) {
-      ffi::WGPUVertexBufferLayout vb_desc = {};
-      if (!vertex_desc.IsNull()) {
+      ffi::WGPUFfiOption_FfiVertexBufferLayout opt_vb_desc = {};
+      if (vertex_desc.IsNull()) {
+        opt_vb_desc.tag =
+            ffi::WGPUFfiOption_FfiVertexBufferLayout_None_FfiVertexBufferLayout;
+      } else {
+        ffi::WGPUFfiVertexBufferLayout vb_desc = {};
         const auto& vd = vertex_desc.Value();
         vb_desc.array_stride = vd.mArrayStride;
         vb_desc.step_mode = ffi::WGPUVertexStepMode(vd.mStepMode);
@@ -781,14 +821,21 @@ RawId CreateRenderPipelineImpl(RawId deviceId, WebGPUChild* aChild,
           ad.shader_location = vat.mShaderLocation;
           vertexAttributes.AppendElement(ad);
         }
+        opt_vb_desc.tag =
+            ffi::WGPUFfiOption_FfiVertexBufferLayout_Some_FfiVertexBufferLayout;
+        opt_vb_desc.some = vb_desc;
       }
-      vertexBuffers.AppendElement(vb_desc);
+      vertexBuffers.AppendElement(opt_vb_desc);
     }
     // Now patch up all the pointers to attribute lists.
     size_t numAttributes = 0;
     for (auto& vb_desc : vertexBuffers) {
-      vb_desc.attributes.data = vertexAttributes.Elements() + numAttributes;
-      numAttributes += vb_desc.attributes.length;
+      if (vb_desc.tag ==
+          ffi::WGPUFfiOption_FfiVertexBufferLayout_Some_FfiVertexBufferLayout) {
+        vb_desc.some.attributes.data =
+            vertexAttributes.Elements() + numAttributes;
+        numAttributes += vb_desc.some.attributes.length;
+      }
     }
 
     vertexState.buffers = {vertexBuffers.Elements(), vertexBuffers.Length()};
@@ -820,25 +867,28 @@ RawId CreateRenderPipelineImpl(RawId deviceId, WebGPUChild* aChild,
                                        fsConstants.Length()};
     }
 
-    // Note: we pre-collect the blend states into a different array
-    // so that we can have non-stale pointers into it.
-    for (const auto& colorState : stage.mTargets) {
+    for (const auto& colorStateOrNull : stage.mTargets) {
+      ffi::WGPUFfiOption_ColorTargetState opt = {};
+      if (colorStateOrNull.IsNull()) {
+        opt.tag = ffi::WGPUFfiOption_ColorTargetState_None_ColorTargetState;
+        colorStates.AppendElement(opt);
+        continue;
+      }
+      const auto& colorState = colorStateOrNull.Value();
       ffi::WGPUColorTargetState desc = {};
       desc.format = ConvertTextureFormat(colorState.mFormat);
-      desc.write_mask = colorState.mWriteMask;
-      colorStates.AppendElement(desc);
-      ffi::WGPUBlendState bs = {};
       if (colorState.mBlend.WasPassed()) {
         const auto& blend = colorState.mBlend.Value();
-        bs.alpha = ConvertBlendComponent(blend.mAlpha);
-        bs.color = ConvertBlendComponent(blend.mColor);
+        desc.blend.tag = ffi::WGPUFfiOption_BlendState_Some_BlendState;
+        desc.blend.some.alpha = ConvertBlendComponent(blend.mAlpha);
+        desc.blend.some.color = ConvertBlendComponent(blend.mColor);
+      } else {
+        desc.blend.tag = ffi::WGPUFfiOption_BlendState_None_BlendState;
       }
-      blendStates.AppendElement(bs);
-    }
-    for (size_t i = 0; i < colorStates.Length(); ++i) {
-      if (stage.mTargets[i].mBlend.WasPassed()) {
-        colorStates[i].blend = &blendStates[i];
-      }
+      desc.write_mask = colorState.mWriteMask;
+      opt.tag = ffi::WGPUFfiOption_ColorTargetState_Some_ColorTargetState;
+      opt.some = desc;
+      colorStates.AppendElement(opt);
     }
 
     fragmentState.targets = {colorStates.Elements(), colorStates.Length()};
@@ -905,10 +955,8 @@ already_AddRefed<dom::Promise> Device::CreateComputePipelineAsync(
   RawId pipelineId =
       CreateComputePipelineImpl(GetId(), GetChild(), aDesc, true);
 
-  auto pending_promise = WebGPUChild::PendingCreatePipelinePromise{
-      RefPtr(promise), RefPtr(this), false, pipelineId, aDesc.mLabel};
-  GetChild()->mPendingCreatePipelinePromises.push_back(
-      std::move(pending_promise));
+  GetChild()->EnqueueCreatePipelinePromise(PendingCreatePipelinePromise{
+      promise, this, false, pipelineId, aDesc.mLabel});
 
   return promise.forget();
 }
@@ -922,10 +970,8 @@ already_AddRefed<dom::Promise> Device::CreateRenderPipelineAsync(
 
   RawId pipelineId = CreateRenderPipelineImpl(GetId(), GetChild(), aDesc, true);
 
-  auto pending_promise = WebGPUChild::PendingCreatePipelinePromise{
-      RefPtr(promise), RefPtr(this), true, pipelineId, aDesc.mLabel};
-  GetChild()->mPendingCreatePipelinePromises.push_back(
-      std::move(pending_promise));
+  GetChild()->EnqueueCreatePipelinePromise(PendingCreatePipelinePromise{
+      promise, this, true, pipelineId, aDesc.mLabel});
 
   return promise.forget();
 }
@@ -944,16 +990,20 @@ already_AddRefed<Texture> Device::InitSwapChain(
     return nullptr;
   }
 
-  const layers::RGBDescriptor rgbDesc(aCanvasSize, aFormat);
+  const layers::RGBDescriptor rgbDesc(aCanvasSize, aFormat,
+                                      gfx::ColorSpace2::SRGB,
+                                      gfx::TransferFunction::SRGB);
+
+  auto textureDesc = SwapChainTextureDescriptor(*aConfig, aCanvasSize);
+  ConvertTextureDescriptor ffiDesc(textureDesc);
 
   ffi::wgpu_client_create_swap_chain(
-      GetClient(), GetId(), mQueue->GetId(), rgbDesc.size().Width(),
-      rgbDesc.size().Height(), (int8_t)rgbDesc.format(), aOwnerId.mId,
-      aUseSharedTextureInSwapChain);
+      GetClient(), GetId(), mQueue->GetId(), ffiDesc.Get(),
+      (int8_t)rgbDesc.format(), aOwnerId.mId, aUseSharedTextureInSwapChain);
 
   // TODO: `mColorSpace`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846608>
   // TODO: `mAlphaMode`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846605>
-  return CreateTextureForSwapChain(aConfig, aCanvasSize, aOwnerId);
+  return CreateTexture(textureDesc, Some(aOwnerId));
 }
 
 bool Device::CheckNewWarning(const nsACString& aMessage) {
@@ -964,7 +1014,7 @@ void Device::Destroy() {
   // Unmap all buffers from this device, as specified by
   // https://gpuweb.github.io/gpuweb/#dom-gpudevice-destroy.
   dom::AutoJSAPI jsapi;
-  if (jsapi.Init(GetOwnerGlobal())) {
+  if (jsapi.Init(GetRelevantGlobal())) {
     IgnoredErrorResult rv;
     for (const auto& buffer : mTrackedBuffers) {
       buffer->Unmap(jsapi.cx(), rv);
@@ -975,16 +1025,26 @@ void Device::Destroy() {
 
   ffi::wgpu_client_destroy_device(GetClient(), GetId());
 
-  if (mLostPromise->State() != dom::Promise::PromiseState::Pending) {
-    return;
+  if (!mLost) {
+    mLost = true;
+    GetChild()->RegisterDeviceLostPromise(GetId(), mLostPromise);
   }
-  RefPtr<dom::Promise> pending_promise = mLostPromise;
-  GetChild()->mPendingDeviceLostPromises.insert(
-      {GetId(), std::move(pending_promise)});
 }
 
 void Device::PushErrorScope(const dom::GPUErrorFilter& aFilter) {
-  ffi::wgpu_client_push_error_scope(GetClient(), GetId(), (uint8_t)aFilter);
+  ffi::WGPUFfiErrorFilter filter;
+  switch (aFilter) {
+    case dom::GPUErrorFilter::Validation:
+      filter = ffi::WGPUFfiErrorFilter_Validation;
+      break;
+    case dom::GPUErrorFilter::Out_of_memory:
+      filter = ffi::WGPUFfiErrorFilter_OutOfMemory;
+      break;
+    case dom::GPUErrorFilter::Internal:
+      filter = ffi::WGPUFfiErrorFilter_Internal;
+      break;
+  }
+  ffi::wgpu_client_push_error_scope(GetClient(), GetId(), filter);
 }
 
 already_AddRefed<dom::Promise> Device::PopErrorScope(ErrorResult& aRv) {
@@ -995,10 +1055,8 @@ already_AddRefed<dom::Promise> Device::PopErrorScope(ErrorResult& aRv) {
 
   ffi::wgpu_client_pop_error_scope(GetClient(), GetId());
 
-  auto pending_promise =
-      WebGPUChild::PendingPopErrorScopePromise{RefPtr(promise), RefPtr(this)};
-  GetChild()->mPendingPopErrorScopePromises.push_back(
-      std::move(pending_promise));
+  GetChild()->EnqueuePopErrorScopePromise(
+      PendingPopErrorScopePromise{promise, this});
 
   return promise.forget();
 }

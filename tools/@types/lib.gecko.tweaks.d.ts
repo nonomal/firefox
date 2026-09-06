@@ -35,6 +35,12 @@ interface XULElementTagNameMap {
 }
 
 interface Document {
+  // Map elements created in the SVG namespace to the relevant type.
+  createElementNS(
+    namespace: "http://www.w3.org/2000/svg",
+    qualifiedName: string,
+    options?: string | ElementCreationOptions
+  ): SVGElement;
   createXULElement<K extends keyof XULElementTagNameMap>(
     localName: K,
     options?: string | ElementCreationOptions
@@ -67,6 +73,25 @@ interface MessageListenerManagerMixin {
     msg: string,
     listener: { receiveMessage(_: ReceiveMessageArgument & { data }) }
   );
+}
+
+// @typescript/dom-lib-generator drops `matches` unless it's Element-shaped.
+interface MatchPattern {
+  matches(uri: URI, explicit?: boolean): boolean;
+  matches(url: string, explicit?: boolean): boolean;
+}
+
+interface MatchPatternSet {
+  matches(uri: URI, explicit?: boolean): boolean;
+  matches(url: string, explicit?: boolean): boolean;
+}
+
+interface ChannelWrapper {
+  matches(
+    filter?: MozRequestFilter,
+    extension?: WebExtensionPolicy | null,
+    options?: MozRequestMatchOptions
+  ): boolean;
 }
 
 interface MozQueryInterface {

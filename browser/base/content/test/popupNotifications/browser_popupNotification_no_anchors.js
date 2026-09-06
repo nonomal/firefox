@@ -49,7 +49,7 @@ var tests = [
       this.oldSelectedTab = gBrowser.selectedTab;
       await BrowserTestUtils.openNewForegroundTab(
         gBrowser,
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         "http://example.com/"
       );
 
@@ -61,7 +61,10 @@ var tests = [
       this.notification = showNotification(this.notifyObj);
     },
     async onShown(popup) {
-      await promiseTabLoadEvent(gBrowser.selectedTab, "about:blank");
+      await BrowserTestUtils.loadURIString({
+        browser: gBrowser.selectedTab.linkedBrowser,
+        uriString: "about:blank",
+      });
 
       checkPopup(popup, this.notifyObj);
       is(
@@ -102,8 +105,12 @@ var tests = [
         "geo anchor shouldn't be visible"
       );
 
-      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
-      await promiseTabLoadEvent(gBrowser.selectedTab, "http://example.com/");
+      // eslint-disable-next-line sdl/no-insecure-url
+      await BrowserTestUtils.loadURIString({
+        browser: gBrowser.selectedTab.linkedBrowser,
+        // eslint-disable-next-line sdl/no-insecure-url
+        uriString: "http://example.com/",
+      });
 
       isnot(
         document.getElementById("geo-notification-icon").getBoundingClientRect()
@@ -245,7 +252,7 @@ var tests = [
       this.oldSelectedTab = gBrowser.selectedTab;
       await BrowserTestUtils.openNewForegroundTab(
         gBrowser,
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         "http://example.com/"
       );
       await hidden;

@@ -1,9 +1,14 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "CompositorWidgetParent.h"
 
+#include <ddraw.h>
+
+#include "RemoteBackbuffer.h"
+#include "VRShMem.h"
+#include "VsyncDispatcher.h"
+#include "WinCompositorWindowThread.h"
 #include "mozilla/StaticPrefs_layers.h"
 #include "mozilla/gfx/DeviceManagerDx.h"
 #include "mozilla/gfx/Point.h"
@@ -13,12 +18,6 @@
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/PlatformWidgetTypes.h"
 #include "nsWindow.h"
-#include "VsyncDispatcher.h"
-#include "WinCompositorWindowThread.h"
-#include "VRShMem.h"
-#include "RemoteBackbuffer.h"
-
-#include <ddraw.h>
 
 namespace mozilla {
 namespace widget {
@@ -70,12 +69,19 @@ LayoutDeviceIntSize CompositorWidgetParent::GetClientSize() {
 already_AddRefed<gfx::DrawTarget>
 CompositorWidgetParent::StartRemoteDrawingInRegion(
     const LayoutDeviceIntRegion& aInvalidRegion) {
-  MOZ_ASSERT(mRemoteBackbufferClient);
+  if (!mRemoteBackbufferClient) {
+    MOZ_DIAGNOSTIC_CRASH("Missing mRemoteBackbufferClient for SW compositing!");
+    return nullptr;
+  }
   return mRemoteBackbufferClient->BorrowDrawTarget();
 }
 
 void CompositorWidgetParent::EndRemoteDrawingInRegion(
     gfx::DrawTarget* aDrawTarget, const LayoutDeviceIntRegion& aInvalidRegion) {
+  if (!mRemoteBackbufferClient) {
+    MOZ_DIAGNOSTIC_CRASH("Missing mRemoteBackbufferClient for SW compositing!");
+    return;
+  }
   (void)mRemoteBackbufferClient->PresentDrawTarget(
       aInvalidRegion.ToUnknownRegion());
 }

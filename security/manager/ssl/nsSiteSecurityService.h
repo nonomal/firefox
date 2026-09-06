@@ -2,17 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef __nsSiteSecurityService_h__
-#define __nsSiteSecurityService_h__
+#ifndef _nsSiteSecurityService_h_
+#define _nsSiteSecurityService_h_
 
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/Dafsa.h"
+#include "mozpkix/pkixtypes.h"
 #include "nsCOMPtr.h"
 #include "nsIDataStorage.h"
 #include "nsISiteSecurityService.h"
 #include "nsString.h"
 #include "nsTArray.h"
-#include "mozpkix/pkixtypes.h"
 #include "prtime.h"
 
 class nsIURI;
@@ -142,4 +142,4 @@ class nsSiteSecurityService : public nsISiteSecurityService {
   const mozilla::Dafsa mDafsa;
 };
 
-#endif  // __nsSiteSecurityService_h__
+#endif  // _nsSiteSecurityService_h_

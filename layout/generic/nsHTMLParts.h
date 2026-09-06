@@ -1,13 +1,11 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 /* factory functions for rendering object classes */
 
-#ifndef nsHTMLParts_h___
-#define nsHTMLParts_h___
+#ifndef nsHTMLParts_h_
+#define nsHTMLParts_h_
 
 #include "nsFrameState.h"
 #include "nsISupports.h"
@@ -23,6 +21,7 @@ class nsIFragmentContentSink;
 class nsIFrame;
 class nsIURI;
 class nsListControlFrame;
+class nsTextControlFrame;
 class nsNodeInfoManager;
 class nsTableColFrame;
 namespace mozilla {
@@ -46,15 +45,7 @@ nsBlockFrame* NS_NewBlockFrame(mozilla::PresShell* aPresShell,
 // Special Generated Content Node. It contains text taken from an
 // attribute of its *grandparent* content node.
 nsresult NS_NewAttributeContent(nsNodeInfoManager* aNodeInfoManager,
-                                int32_t aNameSpaceID, nsAtom* aAttrName,
-                                nsAtom* aFallback, nsIContent** aResult);
-
-// Create a basic area frame but the GetFrameForPoint is overridden to always
-// return the option frame
-// By default, area frames will extend
-// their height to cover any children that "stick out".
-nsContainerFrame* NS_NewSelectsAreaFrame(mozilla::PresShell* aPresShell,
-                                         mozilla::ComputedStyle* aStyle);
+                                nsAtom* aAttrName, nsIContent** aResult);
 
 nsIFrame* NS_NewBRFrame(mozilla::PresShell* aPresShell,
                         mozilla::ComputedStyle* aStyle);
@@ -132,8 +123,8 @@ nsIFrame* NS_NewFileControlFrame(mozilla::PresShell* aPresShell,
                                  mozilla::ComputedStyle* aStyle);
 nsIFrame* NS_NewColorControlFrame(mozilla::PresShell* aPresShell,
                                   mozilla::ComputedStyle* aStyle);
-nsIFrame* NS_NewTextControlFrame(mozilla::PresShell* aPresShell,
-                                 mozilla::ComputedStyle* aStyle);
+nsTextControlFrame* NS_NewTextControlFrame(mozilla::PresShell* aPresShell,
+                                           mozilla::ComputedStyle* aStyle);
 nsListControlFrame* NS_NewListControlFrame(mozilla::PresShell* aPresShell,
                                            mozilla::ComputedStyle* aStyle);
 nsComboboxControlFrame* NS_NewComboboxControlFrame(
@@ -144,12 +135,8 @@ nsIFrame* NS_NewMeterFrame(mozilla::PresShell* aPresShell,
                            mozilla::ComputedStyle* aStyle);
 nsIFrame* NS_NewRangeFrame(mozilla::PresShell* aPresShell,
                            mozilla::ComputedStyle* aStyle);
-nsIFrame* NS_NewNumberControlFrame(mozilla::PresShell* aPresShell,
-                                   mozilla::ComputedStyle* aStyle);
 nsIFrame* NS_NewDateTimeControlFrame(mozilla::PresShell* aPresShell,
                                      mozilla::ComputedStyle* aStyle);
-nsIFrame* NS_NewSearchControlFrame(mozilla::PresShell* aPresShell,
-                                   mozilla::ComputedStyle* aStyle);
 
 // Table frame factories
 class nsTableWrapperFrame;
@@ -174,4 +161,4 @@ nsTableCellFrame* NS_NewTableCellFrame(mozilla::PresShell* aPresShell,
                                        mozilla::ComputedStyle* aStyle,
                                        nsTableFrame* aTableFrame);
 
-#endif /* nsHTMLParts_h___ */
+#endif /* nsHTMLParts_h_ */

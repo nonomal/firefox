@@ -1,7 +1,22 @@
-/* vim: set ts=4 sts=4 sw=4 et tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+
+const lazy = {};
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "removeRecordsEnabled",
+  "browser.autocomplete.removeRecords.enabled",
+  false
+);
+ChromeUtils.defineLazyGetter(
+  lazy,
+  "l10n",
+  () => new Localization(["toolkit/main-window/autocomplete.ftl"], true)
+);
 
 /**
  * This autocomplete result combines 3 arrays of entries, fixedEntries and
@@ -110,7 +125,21 @@ export class FormHistoryAutoCompleteResult {
   }
 
   getCommentAt(index) {
-    return this.getAt(index).comment ?? "";
+    const comment = this.getAt(index).comment ?? "";
+    if (!lazy.removeRecordsEnabled || !this.#isFormHistoryEntry(index)) {
+      return comment;
+    }
+    // The trash button is a non-functional placeholder for now
+    const parsed = comment ? JSON.parse(comment) : {};
+    return JSON.stringify({
+      ...parsed,
+      secondaryAction: {
+        type: "delete",
+        label: lazy.l10n.formatValueSync(
+          "autocomplete-delete-form-history-entry"
+        ),
+      },
+    });
   }
 
   getStyleAt(index) {
@@ -133,7 +162,14 @@ export class FormHistoryAutoCompleteResult {
 
   getImageAt(index) {
     const item = this.getAt(index);
-    return item?.image || "";
+
+    return (
+      item?.image ||
+      (this.getStyleAt(index) === "fromhistory"
+        ? // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
+          "chrome://browser/skin/history.svg"
+        : "")
+    );
   }
 
   getFinalCompleteValueAt(index) {
@@ -148,7 +184,7 @@ export class FormHistoryAutoCompleteResult {
     if (this.#isFormHistoryEntry(index)) {
       const [removedEntry] = this.entries.splice(index, 1);
       const actor =
-        this.input.ownerGlobal.windowGlobalChild.getActor("FormHistory");
+        this.input.documentGlobal.windowGlobalChild.getActor("FormHistory");
       actor.sendAsyncMessage("FormHistory:RemoveEntry", {
         inputName: this.inputName,
         value: removedEntry.text,

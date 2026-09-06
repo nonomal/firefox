@@ -300,7 +300,7 @@ add_test(function test_locale_service_glue() {
   run_next_test();
 });
 
-add_test(function test_font_langauge_group() {
+add_test(function test_font_language_group() {
   const origAvLocales = localeService.availableLocales;
 
   for (const [locales, expGroup] of [
@@ -334,6 +334,81 @@ add_test(function test_font_langauge_group() {
   }
 
   localeService.availableLocales = origAvLocales;
+
+  run_next_test();
+});
+
+add_test(function test_url_fixup_suffix() {
+  const origAvLocales = localeService.availableLocales;
+
+  for (const [locales, expSuffix] of [
+    [["be"], ".by"],
+    [["cs"], ".cz"],
+    [["da"], ".dk"],
+    [["nb-NO", "nn-NO"], ".no"],
+    [["sk"], ".sk"],
+    [["en-US", "fi"], ".com"],
+  ]) {
+    for (const locale of locales) {
+      localeService.availableLocales = [locale, "en-US"];
+      localeService.requestedLocales = [locale];
+      Assert.equal(localeService.urlFixupSuffix, expSuffix, locale);
+    }
+  }
+
+  localeService.availableLocales = origAvLocales;
+
+  run_next_test();
+});
+
+add_test(function test_isLocalizedEnough() {
+  const OVERRIDE_PREF = "intl.l10n.coverage.test-override";
+
+  Assert.strictEqual(
+    localeService.isLocalizedEnough("browser/browser/foo.ftl", "", 1.0),
+    true,
+    "Missing coverage data counts as fully covered"
+  );
+
+  Services.prefs.setBoolPref(OVERRIDE_PREF, true);
+  Assert.strictEqual(
+    localeService.isLocalizedEnough(
+      "browser/browser/foo.ftl",
+      OVERRIDE_PREF,
+      1.5
+    ),
+    true,
+    "A true override pref forces enablement"
+  );
+  Services.prefs.clearUserPref(OVERRIDE_PREF);
+
+  run_next_test();
+});
+
+add_test(function test_areMessagesLocalized() {
+  const OVERRIDE_PREF = "intl.l10n.coverage.test-override";
+
+  Assert.strictEqual(
+    localeService.areMessagesLocalized(
+      "browser/browser/foo.ftl",
+      ["msg-a"],
+      ""
+    ),
+    true,
+    "Missing coverage data counts as fully localized"
+  );
+
+  Services.prefs.setBoolPref(OVERRIDE_PREF, true);
+  Assert.strictEqual(
+    localeService.areMessagesLocalized(
+      "browser/browser/foo.ftl",
+      ["msg-a", "msg-b"],
+      OVERRIDE_PREF
+    ),
+    true,
+    "A true override pref forces localization"
+  );
+  Services.prefs.clearUserPref(OVERRIDE_PREF);
 
   run_next_test();
 });

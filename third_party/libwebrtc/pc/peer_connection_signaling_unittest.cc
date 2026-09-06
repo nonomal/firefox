@@ -25,6 +25,7 @@
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_replace.h"
+#include "absl/strings/string_view.h"
 #include "api/audio/audio_device.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -39,7 +40,6 @@
 #include "api/rtp_sender_interface.h"
 #include "api/rtp_transceiver_interface.h"
 #include "api/scoped_refptr.h"
-#include "api/test/rtc_error_matchers.h"
 #include "api/units/time_delta.h"
 #include "api/video_codecs/video_decoder_factory_template.h"
 #include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
@@ -63,8 +63,10 @@
 #include "rtc_base/string_encode.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/virtual_socket_server.h"
+#include "test/create_test_field_trials.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
+#include "test/run_loop.h"
 #include "test/wait_until.h"
 
 #ifdef WEBRTC_ANDROID
@@ -140,19 +142,33 @@ class PeerConnectionSignalingBaseTest : public ::testing::Test {
         std::make_unique<VideoDecoderFactoryTemplate<
             LibvpxVp8DecoderTemplateAdapter, LibvpxVp9DecoderTemplateAdapter,
             OpenH264DecoderTemplateAdapter, Dav1dDecoderTemplateAdapter>>(),
-        nullptr /* audio_mixer */, nullptr /* audio_processing */);
+        nullptr /* audio_mixer */, nullptr /* audio_processing */,
+        nullptr /* audio_frame_processor */, CreateTestFieldTrialsPtr());
   }
 
   WrapperPtr CreatePeerConnection() {
     return CreatePeerConnection(RTCConfiguration());
   }
 
+  WrapperPtr CreatePeerConnection(absl::string_view field_trials) {
+    return CreatePeerConnection(RTCConfiguration(), field_trials);
+  }
+
   WrapperPtr CreatePeerConnection(const RTCConfiguration& config) {
+    return CreatePeerConnection(config, "");
+  }
+
+  WrapperPtr CreatePeerConnection(const RTCConfiguration& config,
+                                  absl::string_view field_trials) {
     auto observer = std::make_unique<MockPeerConnectionObserver>();
     RTCConfiguration modified_config = config;
     modified_config.sdp_semantics = sdp_semantics_;
-    auto result = pc_factory_->CreatePeerConnectionOrError(
-        modified_config, PeerConnectionDependencies(observer.get()));
+    PeerConnectionDependencies pc_deps(observer.get());
+    if (!field_trials.empty()) {
+      pc_deps.trials = CreateTestFieldTrialsPtr(field_trials);
+    }
+    auto result = pc_factory_->CreatePeerConnectionOrError(modified_config,
+                                                           std::move(pc_deps));
     if (!result.ok()) {
       return nullptr;
     }
@@ -198,7 +214,7 @@ class PeerConnectionSignalingBaseTest : public ::testing::Test {
   }
 
   std::unique_ptr<VirtualSocketServer> vss_;
-  AutoSocketServerThread main_;
+  test::RunLoop main_;
   scoped_refptr<PeerConnectionFactoryInterface> pc_factory_;
   const SdpSemantics sdp_semantics_;
 };
@@ -277,7 +293,9 @@ class PeerConnectionSignalingStateTest
     SignalingState state = std::get<0>(state_tuple);
     bool closed = std::get<1>(state_tuple);
 
-    auto wrapper = CreatePeerConnectionWithAudioVideo(GetConfig());
+    // Munging allowed: kWithoutCreateAnswer (2)
+    auto wrapper = CreatePeerConnectionWithAudioVideo(
+        GetConfig(), "WebRTC-NoSdpMangleAllowForTesting/Enabled,2/");
     switch (state) {
       case SignalingState::kStable: {
         break;
@@ -368,7 +386,7 @@ TEST_P(PeerConnectionSignalingStateTest, SetLocalOffer) {
     auto wrapper_for_offer =
         CreatePeerConnectionInState(SignalingState::kHaveLocalOffer);
     std::unique_ptr<SessionDescriptionInterface> offer =
-        CloneSessionDescription(wrapper_for_offer->pc()->local_description());
+        wrapper_for_offer->pc()->local_description()->Clone();
 
     std::string error;
     ASSERT_FALSE(wrapper->SetLocalDescription(std::move(offer), &error));
@@ -381,8 +399,7 @@ TEST_P(PeerConnectionSignalingStateTest, SetLocalOffer) {
 TEST_P(PeerConnectionSignalingStateTest, SetLocalPrAnswer) {
   auto wrapper_for_pranswer =
       CreatePeerConnectionInState(SignalingState::kHaveLocalPrAnswer);
-  auto pranswer =
-      CloneSessionDescription(wrapper_for_pranswer->pc()->local_description());
+  auto pranswer = wrapper_for_pranswer->pc()->local_description()->Clone();
 
   auto wrapper = CreatePeerConnectionUnderTest();
   if (wrapper->signaling_state() == SignalingState::kHaveLocalPrAnswer ||
@@ -420,7 +437,7 @@ TEST_P(PeerConnectionSignalingStateTest, SetRemoteOffer) {
   auto wrapper_for_offer =
       CreatePeerConnectionInState(SignalingState::kHaveRemoteOffer);
   std::unique_ptr<SessionDescriptionInterface> offer =
-      CloneSessionDescription(wrapper_for_offer->pc()->remote_description());
+      wrapper_for_offer->pc()->remote_description()->Clone();
 
   auto wrapper = CreatePeerConnectionUnderTest();
   if (wrapper->signaling_state() == SignalingState::kStable ||
@@ -438,8 +455,7 @@ TEST_P(PeerConnectionSignalingStateTest, SetRemoteOffer) {
 TEST_P(PeerConnectionSignalingStateTest, SetRemotePrAnswer) {
   auto wrapper_for_pranswer =
       CreatePeerConnectionInState(SignalingState::kHaveRemotePrAnswer);
-  auto pranswer =
-      CloneSessionDescription(wrapper_for_pranswer->pc()->remote_description());
+  auto pranswer = wrapper_for_pranswer->pc()->remote_description()->Clone();
 
   auto wrapper = CreatePeerConnectionUnderTest();
   if (wrapper->signaling_state() == SignalingState::kHaveLocalOffer ||
@@ -589,10 +605,8 @@ TEST_P(PeerConnectionSignalingTest, CreateOffersAndShutdown) {
     // We expect to have received a notification now even if the PeerConnection
     // was terminated. The offer creation may or may not have succeeded, but we
     // must have received a notification.
-    EXPECT_THAT(
-        WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                  {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-        IsRtcOk());
+    EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                          {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   }
 }
 
@@ -606,9 +620,8 @@ TEST_P(PeerConnectionSignalingTest, CloseCreateOfferAndShutdown) {
   caller->pc()->Close();
   caller->pc()->CreateOffer(observer.get(), RTCOfferAnswerOptions());
   caller.reset(nullptr);
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
 }
 
 TEST_P(PeerConnectionSignalingTest,
@@ -702,9 +715,8 @@ TEST_P(PeerConnectionSignalingTest,
   bool checkpoint_reached = false;
   Thread::Current()->PostTask(
       [&checkpoint_reached] { checkpoint_reached = true; });
-  EXPECT_THAT(WaitUntil([&] { return checkpoint_reached; }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return checkpoint_reached; },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   // If resolving the observer was pending, it must now have been called.
   EXPECT_TRUE(observer->called());
 }
@@ -748,10 +760,8 @@ TEST_P(PeerConnectionSignalingTest, CreateOfferBlocksSetRemoteDescription) {
   // yet.
   EXPECT_EQ(0u, callee->pc()->GetReceivers().size());
   // EXPECT_TRUE_WAIT causes messages to be processed...
-  EXPECT_THAT(
-      WaitUntil([&] { return offer_observer->called(); }, ::testing::IsTrue(),
-                {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-      IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return offer_observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   // Now that the offer has been completed, SetRemoteDescription() will have
   // been executed next in the chain.
   EXPECT_EQ(2u, callee->pc()->GetReceivers().size());
@@ -771,9 +781,8 @@ TEST_P(PeerConnectionSignalingTest,
   EXPECT_EQ(PeerConnection::kStable, caller->signaling_state());
 
   // Wait for messages to be processed.
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   EXPECT_TRUE(observer->result());
   EXPECT_TRUE(caller->pc()->pending_local_description());
   EXPECT_EQ(SdpType::kOffer,
@@ -798,9 +807,8 @@ TEST_P(PeerConnectionSignalingTest,
   EXPECT_FALSE(callee->pc()->current_local_description());
 
   // Wait for messages to be processed.
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   EXPECT_TRUE(observer->result());
   EXPECT_TRUE(callee->pc()->current_local_description());
   EXPECT_EQ(SdpType::kAnswer,
@@ -818,11 +826,9 @@ TEST_P(PeerConnectionSignalingTest,
       MockSetSessionDescriptionObserver::Create();
   caller->pc()->SetLocalDescription(
       caller_set_local_description_observer.get());
-  EXPECT_THAT(
+  EXPECT_TRUE(
       WaitUntil([&] { return caller_set_local_description_observer->called(); },
-                ::testing::IsTrue(),
-                {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-      IsRtcOk());
+                {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   ASSERT_TRUE(caller->pc()->pending_local_description());
 
   // SetRemoteDescription(offer)
@@ -830,19 +836,16 @@ TEST_P(PeerConnectionSignalingTest,
       MockSetSessionDescriptionObserver::Create();
   callee->pc()->SetRemoteDescription(
       callee_set_remote_description_observer.get(),
-      CloneSessionDescription(caller->pc()->pending_local_description())
-          .release());
+      caller->pc()->pending_local_description()->Clone().release());
 
   // SetLocalDescription(), implicitly creating an answer.
   auto callee_set_local_description_observer =
       MockSetSessionDescriptionObserver::Create();
   callee->pc()->SetLocalDescription(
       callee_set_local_description_observer.get());
-  EXPECT_THAT(
+  EXPECT_TRUE(
       WaitUntil([&] { return callee_set_local_description_observer->called(); },
-                ::testing::IsTrue(),
-                {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-      IsRtcOk());
+                {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   // Chaining guarantees SetRemoteDescription() happened before
   // SetLocalDescription().
   EXPECT_TRUE(callee_set_remote_description_observer->called());
@@ -853,13 +856,10 @@ TEST_P(PeerConnectionSignalingTest,
       MockSetSessionDescriptionObserver::Create();
   caller->pc()->SetRemoteDescription(
       caller_set_remote_description_observer.get(),
-      CloneSessionDescription(callee->pc()->current_local_description())
-          .release());
-  EXPECT_THAT(
-      WaitUntil(
-          [&] { return caller_set_remote_description_observer->called(); },
-          ::testing::IsTrue(), {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-      IsRtcOk());
+      callee->pc()->current_local_description()->Clone().release());
+  EXPECT_TRUE(WaitUntil(
+      [&] { return caller_set_remote_description_observer->called(); },
+      {.timeout = TimeDelta::Millis(kWaitTimeout)}));
 
   EXPECT_EQ(PeerConnection::kStable, caller->signaling_state());
   EXPECT_EQ(PeerConnection::kStable, callee->signaling_state());
@@ -875,9 +875,8 @@ TEST_P(PeerConnectionSignalingTest,
 
   // The operation should fail asynchronously.
   EXPECT_FALSE(observer->called());
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   EXPECT_FALSE(observer->result());
   // This did not affect the signaling state.
   EXPECT_EQ(PeerConnection::kClosed, caller->pc()->signaling_state());
@@ -897,9 +896,8 @@ TEST_P(PeerConnectionSignalingTest,
 
   // The operation should fail asynchronously.
   EXPECT_FALSE(observer->called());
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   EXPECT_FALSE(observer->result());
   // This did not affect the signaling state.
   EXPECT_EQ(PeerConnection::kClosed, caller->pc()->signaling_state());
@@ -1194,10 +1192,8 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest,
             EXPECT_TRUE(pc->GetTransceivers()[0]->mid().has_value());
           });
   caller->pc()->CreateOffer(offer_observer.get(), RTCOfferAnswerOptions());
-  EXPECT_THAT(WaitUntil([&] { return offer_observer->was_called(); },
-                        ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return offer_observer->was_called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
 }
 
 // Test that transports are shown in the sender/receiver API after offer/answer.
@@ -1211,13 +1207,13 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest,
   EXPECT_FALSE(HasDtlsTransport(callee));
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(RTCOfferAnswerOptions());
-  caller->SetLocalDescription(CloneSessionDescription(offer.get()));
+  caller->SetLocalDescription(offer->Clone());
   EXPECT_TRUE(HasDtlsTransport(caller));
   callee->SetRemoteDescription(std::move(offer));
   EXPECT_FALSE(HasDtlsTransport(callee));
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(RTCOfferAnswerOptions());
-  callee->SetLocalDescription(CloneSessionDescription(answer.get()));
+  callee->SetLocalDescription(answer->Clone());
   EXPECT_TRUE(HasDtlsTransport(callee));
   caller->SetRemoteDescription(std::move(answer));
   EXPECT_TRUE(HasDtlsTransport(caller));
@@ -1233,12 +1229,12 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest, DtlsTransportsMergeWhenBundled) {
   EXPECT_FALSE(HasDtlsTransport(callee));
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(RTCOfferAnswerOptions());
-  caller->SetLocalDescription(CloneSessionDescription(offer.get()));
+  caller->SetLocalDescription(offer->Clone());
   EXPECT_EQ(2, NumberOfDtlsTransports(caller));
   callee->SetRemoteDescription(std::move(offer));
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(RTCOfferAnswerOptions());
-  callee->SetLocalDescription(CloneSessionDescription(answer.get()));
+  callee->SetLocalDescription(answer->Clone());
   caller->SetRemoteDescription(std::move(answer));
   EXPECT_EQ(1, NumberOfDtlsTransports(caller));
 
@@ -1256,12 +1252,12 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest,
   unbundle_options.use_rtp_mux = false;
   std::unique_ptr<SessionDescriptionInterface> offer =
       caller->CreateOffer(unbundle_options);
-  caller->SetLocalDescription(CloneSessionDescription(offer.get()));
+  caller->SetLocalDescription(offer->Clone());
   EXPECT_EQ(2, NumberOfDtlsTransports(caller));
   callee->SetRemoteDescription(std::move(offer));
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(RTCOfferAnswerOptions());
-  callee->SetLocalDescription(CloneSessionDescription(answer.get()));
+  callee->SetLocalDescription(answer->Clone());
   EXPECT_EQ(2, NumberOfDtlsTransports(callee));
   caller->SetRemoteDescription(std::move(answer));
   EXPECT_EQ(2, NumberOfDtlsTransports(caller));
@@ -1300,9 +1296,8 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest,
 
   // When the Operations Chain becomes empty again, a new negotiation needed
   // event will be generated that is not suppressed.
-  EXPECT_THAT(WaitUntil([&] { return observer->called(); }, ::testing::IsTrue(),
-                        {.timeout = TimeDelta::Millis(kWaitTimeout)}),
-              IsRtcOk());
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
   EXPECT_TRUE(caller->observer()->has_negotiation_needed_event());
   EXPECT_TRUE(caller->pc()->ShouldFireNegotiationNeededEvent(
       caller->observer()->latest_negotiation_needed_event()));
@@ -1329,7 +1324,7 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest,
 
   // Upon rolling back to "stable", a new negotiation needed event will be
   // generated that is not suppressed.
-  callee->SetLocalDescription(CreateSessionDescription(SdpType::kRollback, ""));
+  callee->SetLocalDescription(CreateRollbackSessionDescription());
   EXPECT_TRUE(callee->observer()->has_negotiation_needed_event());
   EXPECT_TRUE(callee->pc()->ShouldFireNegotiationNeededEvent(
       callee->observer()->latest_negotiation_needed_event()));
@@ -1372,8 +1367,7 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest, RtxReofferApt) {
 
   std::unique_ptr<SessionDescriptionInterface> answer =
       callee->CreateAnswer(RTCOfferAnswerOptions());
-  EXPECT_TRUE(
-      callee->SetLocalDescription(CloneSessionDescription(answer.get())));
+  EXPECT_TRUE(callee->SetLocalDescription(answer->Clone()));
 
   callee->pc()->GetTransceivers()[0]->StopStandard();
   auto reoffer = callee->CreateOffer(RTCOfferAnswerOptions());
@@ -1406,7 +1400,36 @@ TEST_F(PeerConnectionSignalingUnifiedPlanTest, LoopbackSdpIsPossible) {
   EXPECT_TRUE(caller->SetLocalDescription(std::move(offer)));
   std::unique_ptr<SessionDescriptionInterface> answer =
       CreateSessionDescription(SdpType::kAnswer, answer_sdp);
-  EXPECT_TRUE(caller->SetRemoteDescription(std::move(answer)));
+}
+
+TEST_F(PeerConnectionSignalingUnifiedPlanTest,
+       ParameterlessSetLocalDescriptionUsesLastCreatedOffer) {
+  RTCConfiguration config;
+  config.type = PeerConnectionInterface::kNone;
+  auto caller = CreatePeerConnection(config);
+  caller->AddTransceiver(MediaType::AUDIO);
+
+  // Create offer. This populates last_created_offer_.
+  std::unique_ptr<SessionDescriptionInterface> offer =
+      caller->CreateOffer(RTCOfferAnswerOptions());
+  std::string offer_sdp;
+  ASSERT_TRUE(offer->ToString(&offer_sdp));
+
+  // Call parameterless SetLocalDescription.
+  auto observer = make_ref_counted<FakeSetLocalDescriptionObserver>();
+  caller->pc()->SetLocalDescription(observer);
+  EXPECT_TRUE(WaitUntil([&] { return observer->called(); },
+                        {.timeout = TimeDelta::Millis(kWaitTimeout)}));
+  EXPECT_TRUE(observer->error().ok());
+
+  // Verify that the applied local description matches the last created offer.
+  const SessionDescriptionInterface* local_desc =
+      caller->pc()->local_description();
+  ASSERT_NE(nullptr, local_desc);
+  std::string local_sdp;
+  ASSERT_TRUE(local_desc->ToString(&local_sdp));
+
+  EXPECT_EQ(offer_sdp, local_sdp);
 }
 
 }  // namespace webrtc

@@ -12,12 +12,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/attribution/AttributionCode.sys.mjs",
   NormandyUtils: "resource://normandy/lib/NormandyUtils.sys.mjs",
   Region: "resource://gre/modules/Region.sys.mjs",
+  SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
   ShellService: "moz-src:///browser/components/shell/ShellService.sys.mjs",
   TelemetryArchive: "resource://gre/modules/TelemetryArchive.sys.mjs",
   TelemetryController: "resource://gre/modules/TelemetryController.sys.mjs",
   UpdateUtils: "resource://gre/modules/UpdateUtils.sys.mjs",
-  WindowsVersionInfo:
-    "resource://gre/modules/components-utils/WindowsVersionInfo.sys.mjs",
+  WindowsRegistry: "resource://gre/modules/WindowsRegistry.sys.mjs",
 });
 
 function getOsVersion() {
@@ -145,7 +145,7 @@ export class ClientEnvironmentBase {
 
   static get searchEngine() {
     return (async () => {
-      const defaultEngineInfo = await Services.search.getDefault();
+      const defaultEngineInfo = await lazy.SearchService.getDefault();
       return defaultEngineInfo.telemetryId;
     })();
   }
@@ -251,7 +251,30 @@ export class ClientEnvironmentBase {
           return null;
         }
 
-        return lazy.WindowsVersionInfo.get({ throwOnError: false }).buildNumber;
+        let build = Number(Services.sysinfo.get("build"));
+        return Number.isInteger(build) ? build : null;
+      },
+
+      /**
+       * Gets the Windows Update Build Revision (UBR), the minor build number
+       * shown alongside the build number (eg. the `3693` in `19045.3693`). Only
+       * present on Windows 10 and later.
+       *
+       * @returns {number | null} The UBR, or null on non-Windows platforms,
+       *    older Windows versions, or if there is an error.
+       */
+      get windowsUBR() {
+        if (!osInfo.isWindows) {
+          return null;
+        }
+
+        const ubr = lazy.WindowsRegistry.readRegKey(
+          Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE,
+          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+          "UBR",
+          Ci.nsIWindowsRegKey.WOW64_64
+        );
+        return Number.isInteger(ubr) ? ubr : null;
       },
 
       get macVersion() {

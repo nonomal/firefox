@@ -64,25 +64,21 @@ class RTC_EXPORT EncodedImageCallback {
     bool drop_next_frame = false;
   };
 
-  // Used to signal the encoder about reason a frame is dropped.
-  // kDroppedByMediaOptimizations - dropped by MediaOptimizations (for rate
-  // limiting purposes).
-  // kDroppedByEncoder - dropped by encoder's internal rate limiter.
-  // TODO(bugs.webrtc.org/10164): Delete this enum? It duplicates the more
-  // general VideoStreamEncoderObserver::DropReason. Also,
-  // kDroppedByMediaOptimizations is not produced by any encoder, but by
-  // VideoStreamEncoder.
-  enum class DropReason : uint8_t {
-    kDroppedByMediaOptimizations,
-    kDroppedByEncoder
-  };
-
   // Callback function which is called when an image has been encoded.
   virtual Result OnEncodedImage(
       const EncodedImage& encoded_image,
       const CodecSpecificInfo* codec_specific_info) = 0;
 
-  virtual void OnDroppedFrame(DropReason /* reason */) {}
+  // Callback function called when an encoder has decided to drop a frame.
+  // This is usually either because of rate control buffer overflow or because
+  // the rate allocation of a given spatial index is set to zero, disabling it.
+  // The `rtp_timestamp` parameter uniquely identifier the temporal unit and
+  // thus the corresponding input frame. If `is_end_of_temporal_unit` is true,
+  // it means that no further callback to neither `OnEncodedImage()` nor
+  // `OnFrameDropped()` is expected for this RTP timestamp.
+  virtual void OnFrameDropped(uint32_t rtp_timestamp,
+                              int spatial_id,
+                              bool is_end_of_temporal_unit) = 0;
 };
 
 class RTC_EXPORT VideoEncoder {
@@ -152,6 +148,12 @@ class RTC_EXPORT VideoEncoder {
     }
   };
 
+  struct RTC_EXPORT Resolution {
+    Resolution(int width, int height) : width(width), height(height) {}
+    int width = 0;
+    int height = 0;
+  };
+
   // Struct containing metadata about the encoder implementing this interface.
   struct RTC_EXPORT EncoderInfo {
     static constexpr uint8_t kMaxFramerateFraction =
@@ -211,6 +213,9 @@ class RTC_EXPORT VideoEncoder {
     // thresholds will be used in CPU adaptation.
     bool is_hardware_accelerated;
 
+    // If this field is true, this encoder opts into CPU overuse detection.
+    bool enable_cpu_overuse_detection;
+
     // For each spatial layer (simulcast stream or SVC layer), represented as an
     // element in `fps_allocation` a vector indicates how many temporal layers
     // the encoder is using for that spatial layer.
@@ -266,6 +271,14 @@ class RTC_EXPORT VideoEncoder {
     // configuration. This may be used to determine if the encoder has reached
     // its target video quality for static screenshare content.
     std::optional<int> min_qp;
+
+    // Maximum resolution accessed by software encoder,
+    // i.e. resolution needed for cpu readable image.
+    // This has to be set by software encoders.
+    // If it's not set, mapping will happen during the
+    // encode time, otherwise more optimal implementation
+    // specific path may be used.
+    std::optional<Resolution> mapped_resolution;
   };
 
   struct RTC_EXPORT RateControlParameters {

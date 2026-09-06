@@ -64,6 +64,8 @@ import mozilla.components.compose.browser.toolbar.concept.PageOrigin.Companion.T
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarInteraction
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarInteraction.BrowserToolbarEvent
 import mozilla.components.compose.browser.toolbar.utils.PageOriginContextualMenuBuilder
+import mozilla.components.compose.browser.toolbar.utils.sanitizeUrlForDisplay
+import mozilla.components.compose.browser.toolbar.utils.truncateUrlAroundDomain
 import mozilla.components.support.ktx.kotlin.getRegistrableDomainIndexRange
 import mozilla.components.support.utils.ClipboardHandler
 
@@ -79,8 +81,8 @@ private const val FADE_LENGTH = 66
  * @param url the URL of the webpage. Can be `null` or empty, in which vase the [hint] will be shown.
  * @param title the title of the webpage. Can be `null` or empty, in which case only [url] or [hint] will be shown.
  * @param onClick Optional [BrowserToolbarEvent] to be dispatched when this layout is clicked.
- * @param onLongClick Optional [BrowserToolbarInteraction] describing how to handle this layout being long clicked.
- * To ensure long clicks handling the normal click behavior should also be set.
+ * @param onLongClick Optional [BrowserToolbarInteraction] describing how to handle this layout being long clicked. To
+ *   ensure long clicks handling the normal click behavior should also be set.
  * @param onInteraction [BrowserToolbarInteraction] to be dispatched when this layout is interacted with.
  * @param onInteraction Callback for handling [BrowserToolbarEvent]s on user interactions.
  */
@@ -99,57 +101,62 @@ internal fun Origin(
 ) {
     val view = LocalView.current
     val haptic = LocalHapticFeedback.current
-    val shouldReactToLongClicks = remember(onLongClick, contextualMenuOptions) {
-        onLongClick != null || contextualMenuOptions.isNotEmpty()
-    }
+    val shouldReactToLongClicks =
+        remember(onLongClick, contextualMenuOptions) {
+            onLongClick != null || contextualMenuOptions.isNotEmpty()
+        }
     var showMenu by remember { mutableStateOf(false) }
     val clipboardHandler = remember(view) { ClipboardHandler(view.context) }
 
     val shouldShowTitle = remember(title) { title != null && title.isNotBlank() }
-    val urlTextSize = remember(shouldShowTitle) {
-        when (shouldShowTitle) {
-            true -> URL_TEXT_SIZE_WITH_TITLE
-            false -> URL_TEXT_SIZE_ALONE
+    val urlTextSize =
+        remember(shouldShowTitle) {
+            when (shouldShowTitle) {
+                true -> URL_TEXT_SIZE_WITH_TITLE
+                false -> URL_TEXT_SIZE_ALONE
+            }
         }
-    }
 
     val hint = stringResource(hint)
-    val urlToShow: CharSequence = remember(url) {
-        when (url == null || url.isBlank()) {
-            true -> hint
-            else -> url
+    val urlToShow: CharSequence =
+        remember(url) {
+            when (url == null || url.isBlank()) {
+                true -> hint
+                else -> url
+            }
         }
-    }
+    val contentDescription: String = getContentDescription(urlToShow, hint, title)
 
     CompositionLocalProvider(LocalIndication provides NoRippleIndication) {
         Box(
             contentAlignment = Alignment.CenterStart,
-            modifier = modifier
-                .clearAndSetSemantics {
-                    this.contentDescription = "${title ?: ""} $urlToShow. $hint"
-                }
-                .clickable(
-                    enabled = onClick != null && !shouldReactToLongClicks,
-                ) {
-                    view.playSoundEffect(SoundEffectConstants.CLICK)
-                    onInteraction(requireNotNull(onClick))
-                }
-                .thenConditional(
-                    Modifier.combinedClickable(
-                        role = Button,
-                        onClick = {
-                            onClick?.let {
-                                view.playSoundEffect(SoundEffectConstants.CLICK)
-                                onInteraction(it)
-                            }
-                        },
-                        onLongClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            showMenu = true
-                            onLongClick?.let { onInteraction(it) }
-                        },
-                    ),
-                ) { shouldReactToLongClicks },
+            modifier =
+                modifier
+                    .clearAndSetSemantics {
+                        this.contentDescription = contentDescription
+                    }
+                    .clickable(enabled = onClick != null && !shouldReactToLongClicks) {
+                        view.playSoundEffect(SoundEffectConstants.CLICK)
+                        onInteraction(requireNotNull(onClick))
+                    }
+                    .thenConditional(
+                        Modifier.combinedClickable(
+                            role = Button,
+                            onClick = {
+                                onClick?.let {
+                                    view.playSoundEffect(SoundEffectConstants.CLICK)
+                                    onInteraction(it)
+                                }
+                            },
+                            onLongClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                showMenu = true
+                                onLongClick?.let { onInteraction(it) }
+                            },
+                        )
+                    ) {
+                        shouldReactToLongClicks
+                    },
         ) {
             Column(verticalArrangement = Center) {
                 val hasTitle = !title.isNullOrBlank()
@@ -179,10 +186,11 @@ private fun Title(
     FadedText(
         text = title,
         modifier = Modifier.testTag(ADDRESSBAR_TITLE),
-        style = TextStyle(
-            fontSize = URL_TEXT_SIZE_ALONE.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-        ),
+        style =
+            TextStyle(
+                fontSize = URL_TEXT_SIZE_ALONE.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            ),
         truncationDirection = textGravity.toTextTruncationDirection(),
         fadeLength = FADE_LENGTH.dp,
     )
@@ -196,22 +204,32 @@ private fun Url(
 ) {
     // Ensure compatibility with MaterialTheme attributes. See bug 1936346 for more context.
     val materialTextStyle = LocalTextStyle.current
-    val urlString = remember(url) { url.toString() }
-    val registrableDomainIndexRange = remember(url) {
-        url.getRegistrableDomainIndexRange()
-    }
+
+    val (urlString, registrableDomainIndexRange) =
+        remember(url) {
+            sanitizeUrlForDisplay(
+                url = url.toString(),
+                registrableDomainIndexRange = url.getRegistrableDomainIndexRange(),
+            )
+        }
+    val (truncatedUrl, adjustedDomainIndexRange) =
+        remember(urlString, registrableDomainIndexRange) {
+            truncateUrlAroundDomain(urlString, registrableDomainIndexRange)
+        }
 
     HighlightedDomainUrl(
-        url = urlString,
-        registrableDomainIndexRange = registrableDomainIndexRange,
-        fadedTextStyle = materialTextStyle.merge(
-            fontSize = fontSize.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        ),
-        boldedTextStyle = materialTextStyle.merge(
-            fontSize = fontSize.sp,
-            color = color,
-        ),
+        url = truncatedUrl,
+        registrableDomainIndexRange = adjustedDomainIndexRange,
+        fadedTextStyle =
+            materialTextStyle.merge(
+                fontSize = fontSize.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        boldedTextStyle =
+            materialTextStyle.merge(
+                fontSize = fontSize.sp,
+                color = color,
+            ),
         modifier = Modifier.testTag(ADDRESSBAR_URL),
     )
 }
@@ -239,29 +257,40 @@ private fun LongPressMenu(
         horizontalAlignment = Start,
         verticalAlignment = Bottom,
     ) {
-        val menuItems = PageOriginContextualMenuBuilder.buildMenuOptions(
-            clipboard = clipboard,
-            allowedMenuOptions = contextualMenuOptions,
-        )
+        val menuItems =
+            PageOriginContextualMenuBuilder.buildMenuOptions(
+                clipboard = clipboard,
+                allowedMenuOptions = contextualMenuOptions,
+            )
         CustomPlacementPopupHorizontalContent {
             items(menuItems) { menuItem ->
                 menuItemComposable(menuItem) { event ->
-                    onDismiss()
-                    onInteraction(event)
-                }.invoke()
+                        onDismiss()
+                        onInteraction(event)
+                    }
+                    .invoke()
             }
         }
     }
 }
 
-private fun TextGravity.toTextTruncationDirection() = when (this) {
-    TEXT_GRAVITY_START -> END
-    TEXT_GRAVITY_END -> START
-}
+private fun TextGravity.toTextTruncationDirection() =
+    when (this) {
+        TEXT_GRAVITY_START -> END
+        TEXT_GRAVITY_END -> START
+    }
 
-/**
- * Custom indication disabling click ripples.
- */
+@Composable
+private fun getContentDescription(urlToShow: CharSequence, hint: String, title: String?) =
+    remember(urlToShow) {
+        if (urlToShow == hint) {
+            hint
+        } else {
+            "${title ?: ""} $urlToShow. $hint"
+        }
+    }
+
+/** Custom indication disabling click ripples. */
 private object NoRippleIndication : IndicationNodeFactory {
     override fun create(interactionSource: InteractionSource): DelegatableNode =
         object : Modifier.Node(), DrawModifierNode {
@@ -269,6 +298,7 @@ private object NoRippleIndication : IndicationNodeFactory {
         }
 
     override fun equals(other: Any?) = other === this
+
     override fun hashCode(): Int = System.identityHashCode(this)
 }
 

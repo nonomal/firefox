@@ -18,8 +18,6 @@
   class MozTabbrowserTabs extends MozElements.TabsBase {
     static observedAttributes = ["orient"];
 
-    #mustUpdateTabMinHeight = false;
-    #tabMinHeight = 36;
     #animatingGroups = new Set();
 
     constructor() {
@@ -32,10 +30,14 @@
       this.addEventListener("TabShow", this);
       this.addEventListener("TabHoverStart", this);
       this.addEventListener("TabHoverEnd", this);
+      this.addEventListener("TabNoteIconHoverStart", this);
+      this.addEventListener("TabNoteIconHoverEnd", this);
       this.addEventListener("TabGroupLabelHoverStart", this);
       this.addEventListener("TabGroupLabelHoverEnd", this);
-      this.addEventListener("TabGroupExpand", this);
-      this.addEventListener("TabGroupCollapse", this);
+      // Capture collapse/expand early so we mark animating groups before
+      // overflow/underflow handlers run.
+      this.addEventListener("TabGroupExpand", this, true);
+      this.addEventListener("TabGroupCollapse", this, true);
       this.addEventListener("TabGroupAnimationComplete", this);
       this.addEventListener("TabGroupCreate", this);
       this.addEventListener("TabGroupRemoved", this);
@@ -63,11 +65,14 @@
       this.arrowScrollbox = document.getElementById(
         "tabbrowser-arrowscrollbox"
       );
-      this.arrowScrollbox.addEventListener("wheel", this, true);
       this.arrowScrollbox.addEventListener("underflow", this);
       this.arrowScrollbox.addEventListener("overflow", this);
       this.pinnedTabsContainer = document.getElementById(
         "pinned-tabs-container"
+      );
+      this.pinnedTabsContainer.setAttribute(
+        "orient",
+        this.getAttribute("orient")
       );
 
       // Override arrowscrollbox.js method, since our scrollbox's children are
@@ -101,13 +106,11 @@
       // this then arrowscrollbox computes this value by calling
       // _getScrollableElements and dividing the box size by that number.
       // However in the tabstrip case we already know the answer to this as,
-      // when we're overflowing, it is always the same as the tab min width or
-      // height. For tab group labels, the number won't exactly match, but
-      // that shouldn't be a problem in practice since the arrowscrollbox
-      // stops at element bounds when finishing scrolling.
+      // when we're overflowing, it is always the same as the tab min width.
+      // Vertical mode scrolls natively and takes the amount from
+      // -moz-line-scroll-amount.
       Object.defineProperty(this.arrowScrollbox, "lineScrollAmount", {
-        get: () =>
-          this.verticalMode ? this.#tabMinHeight : this._tabMinWidthPref,
+        get: () => this._tabMinWidthPref,
       });
 
       this.baseConnect();
@@ -128,16 +131,6 @@
 
       this.allTabs[0].label = this.emptyTabTitle;
 
-      // Hide the secondary text for locales where it is unsupported due to size constraints.
-      const language = Services.locale.appLocaleAsBCP47;
-      const unsupportedLocales = Services.prefs.getCharPref(
-        "browser.tabs.secondaryTextUnsupportedLocales"
-      );
-      this.toggleAttribute(
-        "secondarytext-unsupported",
-        unsupportedLocales.split(",").includes(language.split("-")[0])
-      );
-
       this.newTabButton.setAttribute(
         "aria-label",
         DynamicShortcutTooltip.getText("tabs-newtab-button")
@@ -152,6 +145,7 @@
       this._fullscreenMutationObserver.observe(document.documentElement, {
         attributeFilter: ["inFullscreen", "inDOMFullscreen"],
       });
+      window.addEventListener("uidensitychanged", this);
 
       this.boundObserve = (...args) => this.observe(...args);
       Services.prefs.addObserver("privacy.userContext", this.boundObserve);
@@ -176,7 +170,6 @@
         }
       );
       this.#updateTabMinWidth(this._tabMinWidthPref);
-      this.#updateTabMinHeight();
 
       CustomizableUI.addListener(this);
       this._updateNewTabVisibility();
@@ -187,6 +180,9 @@
         "browser.tabs.closeTabByDblclick",
         false
       );
+
+      // The base class set these up before we had the arrowscrollbox.
+      this.updateWheelListeners();
 
       XPCOMUtils.defineLazyPreferenceGetter(
         this,
@@ -221,42 +217,17 @@
 
       this.tooltip = "tabbrowser-tab-tooltip";
 
-      Services.prefs.addObserver(
-        "browser.tabs.dragDrop.multiselectStacking",
-        this.boundObserve
-      );
-      this.observe(
-        null,
-        "nsPref:changed",
-        "browser.tabs.dragDrop.multiselectStacking"
-      );
-    }
-
-    #initializeDragAndDrop() {
-      this.tabDragAndDrop = Services.prefs.getBoolPref(
-        "browser.tabs.dragDrop.multiselectStacking",
-        true
-      )
-        ? new window.TabStacking(this)
-        : new window.TabDragAndDrop(this);
+      this.tabDragAndDrop = new window.TabDragAndDrop(this);
       this.tabDragAndDrop.init();
     }
 
     attributeChangedCallback(name, oldValue, newValue) {
-      if (name != "orient") {
-        return;
-      }
-
-      if (this.overflowing) {
-        // reset this value so we don't have incorrect styling for vertical tabs
+      if (name == "orient") {
+        // reset this attribute so we don't have incorrect styling for vertical tabs
         this.removeAttribute("overflow");
+        this.#updateTabMinWidth();
+        this.pinnedTabsContainer?.setAttribute("orient", newValue);
       }
-
-      this.#updateTabMinWidth();
-      this.#updateTabMinHeight();
-
-      this.pinnedTabsContainer.setAttribute("orient", newValue);
-
       super.attributeChangedCallback(name, oldValue, newValue);
     }
 
@@ -356,6 +327,24 @@
       this.previewPanel?.deactivate(event.target);
     }
 
+    on_TabNoteIconHoverStart(event) {
+      if (!this._showTabHoverPreview) {
+        return;
+      }
+      this.ensureTabPreviewPanelLoaded();
+      this.previewPanel.activateNotePanel(
+        event.target,
+        event.detail.noteIconElement
+      );
+    }
+
+    on_TabNoteIconHoverEnd(event) {
+      this.previewPanel?.deactivateNotePanel(event.target);
+      if (event.detail.returningToTab) {
+        this.previewPanel?.activate(event.target);
+      }
+    }
+
     cancelTabGroupPreview() {
       this.previewPanel?.panelOpener.clear();
     }
@@ -388,7 +377,11 @@
     }
 
     on_TabGroupAnimationComplete(event) {
-      this.#animatingGroups.delete(event.target.id);
+      // Delay clearing the animating flag so overflow/underflow handlers
+      // triggered by the size change can observe it and skip auto-scroll.
+      window.requestAnimationFrame(() => {
+        this.#animatingGroups.delete(event.target.id);
+      });
     }
 
     on_TabGroupCreate() {
@@ -520,11 +513,18 @@
         let tab = event.target?.closest("tab");
         if (tab) {
           if (tab.multiselected) {
-            gBrowser.removeMultiSelectedTabs();
+            gBrowser.removeMultiSelectedTabs({
+              metricsContext: gBrowser.TabMetrics.userTriggeredContext(
+                gBrowser.TabMetrics.METRIC_SOURCE.MIDDLE_CLICK
+              ),
+            });
           } else {
             gBrowser.removeTab(tab, {
               animate: true,
               triggeringEvent: event,
+              metricsContext: gBrowser.TabMetrics.userTriggeredContext(
+                gBrowser.TabMetrics.METRIC_SOURCE.MIDDLE_CLICK
+              ),
             });
           }
         } else if (isTabGroupLabel(event.target)) {
@@ -591,32 +591,37 @@
           }
         }
       } else if (keyComboForMove) {
+        let moveOptions = {
+          metricsContext: gBrowser.TabMetrics.userTriggeredContext(
+            gBrowser.TabMetrics.METRIC_SOURCE.KEYBOARD
+          ),
+        };
         switch (event.keyCode) {
           case KeyEvent.DOM_VK_UP:
-            gBrowser.moveTabBackward();
+            gBrowser.moveTabBackward(moveOptions);
             break;
           case KeyEvent.DOM_VK_DOWN:
-            gBrowser.moveTabForward();
+            gBrowser.moveTabForward(moveOptions);
             break;
           case KeyEvent.DOM_VK_RIGHT:
             if (RTL_UI) {
-              gBrowser.moveTabBackward();
+              gBrowser.moveTabBackward(moveOptions);
             } else {
-              gBrowser.moveTabForward();
+              gBrowser.moveTabForward(moveOptions);
             }
             break;
           case KeyEvent.DOM_VK_LEFT:
             if (RTL_UI) {
-              gBrowser.moveTabForward();
+              gBrowser.moveTabForward(moveOptions);
             } else {
-              gBrowser.moveTabBackward();
+              gBrowser.moveTabBackward(moveOptions);
             }
             break;
           case KeyEvent.DOM_VK_HOME:
-            gBrowser.moveTabToStart();
+            gBrowser.moveTabToStart(undefined, moveOptions);
             break;
           case KeyEvent.DOM_VK_END:
-            gBrowser.moveTabToEnd();
+            gBrowser.moveTabToEnd(undefined, moveOptions);
             break;
           default:
             // Consume the keydown event for the above keyboard
@@ -740,11 +745,27 @@
       this.tabDragAndDrop.handle_dragleave(event);
     }
 
+    /**
+     * Only reached while switching tabs by scrolling is enabled, since that's
+     * when the listener exists.
+     */
     on_wheel(event) {
-      if (
-        Services.prefs.getBoolPref("toolkit.tabbox.switchByScrolling", false)
-      ) {
-        event.stopImmediatePropagation();
+      // The tabs are switched from the legacy scroll event in tabbox.js. Keep
+      // the arrowscrollbox from scrolling on top of that.
+      event.stopImmediatePropagation();
+    }
+
+    updateWheelListeners() {
+      super.updateWheelListeners();
+
+      if (!this.arrowScrollbox) {
+        // Called from the base class constructor, before init().
+        return;
+      }
+      if (this.switchByScrolling) {
+        this.arrowScrollbox.addEventListener("wheel", this, true);
+      } else {
+        this.arrowScrollbox.removeEventListener("wheel", this, true);
       }
     }
 
@@ -800,6 +821,11 @@
         gBrowser.tabGroupMenu.openEditModal(this.ariaFocusedItem.group);
         event.preventDefault();
       }
+    }
+
+    on_uidensitychanged() {
+      this._updateCloseButtons();
+      this._handleTabSelect(true);
     }
 
     // Utilities
@@ -871,6 +897,23 @@
     get allGroups() {
       let children = Array.from(this.arrowScrollbox.children);
       return children.filter(node => node.tagName == "tab-group");
+    }
+
+    get allSplitViews() {
+      let children = Array.from(this.arrowScrollbox.children);
+      let splitViews = [];
+      for (let node of children) {
+        if (node.tagName == "tab-split-view-wrapper") {
+          splitViews.push(node);
+        } else if (node.tagName == "tab-group") {
+          splitViews.push(
+            ...Array.from(node.children).filter(
+              child => child.tagName == "tab-split-view-wrapper"
+            )
+          );
+        }
+      }
+      return splitViews;
     }
 
     /**
@@ -987,7 +1030,7 @@
           !(
             (isTab(child) && child.visible) ||
             isTabGroup(child) ||
-            isSplitViewWrapper(child)
+            (isSplitViewWrapper(child) && child.visible)
           )
         ) {
           continue;
@@ -997,14 +1040,13 @@
           child.labelElement.elementIndex = elementIndex++;
           dragAndDropElements.push(child.labelElement);
 
-          let visibleChildren = Array.from(child.children).filter(
-            ele => ele.visible || ele.tagName == "tab-split-view-wrapper"
+          let tabsAndSplitViews = child.tabsAndSplitViews.filter(
+            node => node.visible
           );
-
-          visibleChildren.forEach(tab => {
-            tab.elementIndex = elementIndex++;
+          tabsAndSplitViews.forEach(ele => {
+            ele.elementIndex = elementIndex++;
           });
-          dragAndDropElements.push(...visibleChildren);
+          dragAndDropElements.push(...tabsAndSplitViews);
         } else {
           child.elementIndex = elementIndex++;
           dragAndDropElements.push(child);
@@ -1059,6 +1101,34 @@
 
     #isMovingTab() {
       return this.hasAttribute("movingtab");
+    }
+
+    isContainerVerticalPinnedGrid(tab) {
+      return (
+        tab.pinned &&
+        this.verticalMode &&
+        this.hasAttribute("expanded") &&
+        !this.expandOnHover
+      );
+    }
+
+    /**
+     * @override
+     * @param {-1|1} aDir
+     * @param {boolean} aWrap
+     * @param {Event} [aEvent] The DOM event that triggered this call.
+     */
+    advanceSelectedTab(aDir, aWrap, aEvent) {
+      let prevTab = gBrowser.selectedTab;
+      super.advanceSelectedTab(aDir, aWrap, aEvent);
+      if (gBrowser.selectedTab !== prevTab) {
+        gBrowser.recordTabMetrics(
+          gBrowser.TabMetrics.METRIC_ACTION.ACTIVATE,
+          gBrowser.TabMetrics.userTriggeredContext(
+            gBrowser.TabMetrics.sourceForEvent(aEvent)
+          )
+        );
+      }
     }
 
     /**
@@ -1117,7 +1187,16 @@
       // group label.
       let newItem = ariaFocusableItems[newItemIndex];
       if (isTab(newItem)) {
+        let prevTab = gBrowser.selectedTab;
         this._selectNewTab(newItem, aDir, aWrap);
+        if (gBrowser.selectedTab !== prevTab) {
+          gBrowser.recordTabMetrics(
+            gBrowser.TabMetrics.METRIC_ACTION.ACTIVATE,
+            gBrowser.TabMetrics.userTriggeredContext(
+              gBrowser.TabMetrics.METRIC_SOURCE.KEYBOARD
+            )
+          );
+        }
       }
       this.ariaFocusedItem = newItem;
 
@@ -1152,10 +1231,6 @@
       }
 
       node.before(tab);
-
-      if (this.#mustUpdateTabMinHeight) {
-        this.#updateTabMinHeight();
-      }
     }
 
     #updateTabMinWidth(val) {
@@ -1163,53 +1238,6 @@
         "--tab-min-width-pref",
         (val ?? this._tabMinWidthPref) + "px"
       );
-    }
-
-    #updateTabMinHeight() {
-      if (!this.verticalMode || !window.toolbar.visible) {
-        this.#mustUpdateTabMinHeight = false;
-        return;
-      }
-
-      // Find at least one tab we can scroll to.
-      let firstScrollableTab = this.visibleTabs.find(
-        this.arrowScrollbox._canScrollToElement
-      );
-
-      if (!firstScrollableTab) {
-        // If not, we're in a pickle. We should never get here except if we
-        // also don't use the outcome of this work (because there's nothing to
-        // scroll so we don't care about the scrollbox size).
-        // So just set a flag so we re-run once we do have a new tab.
-        this.#mustUpdateTabMinHeight = true;
-        return;
-      }
-
-      let { height } =
-        window.windowUtils.getBoundsWithoutFlushing(firstScrollableTab);
-
-      // Use the current known height or a sane default.
-      this.#tabMinHeight = height || 36;
-
-      // The height we got may be incorrect if a flush is pending so re-check it after
-      // a flush completes.
-      window
-        .promiseDocumentFlushed(() => {})
-        .then(
-          () => {
-            height =
-              window.windowUtils.getBoundsWithoutFlushing(
-                firstScrollableTab
-              ).height;
-
-            if (height) {
-              this.#tabMinHeight = height;
-            }
-          },
-          () => {
-            /* ignore errors */
-          }
-        );
     }
 
     get _isCustomizing() {
@@ -1225,12 +1253,9 @@
       }
     }
 
-    observe(aSubject, aTopic, aData) {
+    observe(aSubject, aTopic) {
       switch (aTopic) {
         case "nsPref:changed": {
-          if (aData == "browser.tabs.dragDrop.multiselectStacking") {
-            this.#initializeDragAndDrop();
-          }
           // This is has to deal with changes in
           // privacy.userContext.enabled and
           // privacy.userContext.newTabContainerOnLeftClick.enabled.
@@ -1332,7 +1357,11 @@
           let rect = ele => {
             return window.windowUtils.getBoundsWithoutFlushing(ele);
           };
-          let tab = this.visibleTabs[gBrowser.pinnedTabCount];
+          // See bug 2007766, we need to find the first tab that isn't
+          // inside a split view, because those can be narrower than the threshold.
+          let tab = this.visibleTabs
+            .slice(gBrowser.pinnedTabCount)
+            .find(t => !t.splitview);
           if (tab && rect(tab).width <= this._tabClipWidth) {
             this.setAttribute("closebuttons", "activetab");
           } else {
@@ -1379,7 +1408,7 @@
         return;
       }
 
-      let isEndTab = aClosingTab && aClosingTab._tPos > tabs.at(-1)._tPos;
+      let isEndTab = aClosingTab && aClosingTab.index > tabs.at(-1).index;
 
       if (!this._tabDefaultMaxWidth) {
         this._tabDefaultMaxWidth = parseFloat(
@@ -1481,12 +1510,6 @@
         this.removeAttribute("using-closing-tabs-spacer");
         this._closingTabsSpacer.style.width = 0;
       }
-    }
-
-    uiDensityChanged() {
-      this._updateCloseButtons();
-      this.#updateTabMinHeight();
-      this._handleTabSelect(true);
     }
 
     _notifyBackgroundTab(aTab) {
@@ -1630,8 +1653,8 @@
         return this.tabbox.tabpanels.firstElementChild;
       }
 
-      // If the tab's browser is lazy, we need to `_insertBrowser` in order
-      // to have a linkedPanel.  This will also serve to bind the browser
+      // If the tab's browser is lazy, we need to call `insertBrowser()` in
+      // order to have a linkedPanel.  This will also serve to bind the browser
       // and make it ready to use. We only do this if the tab is selected
       // because otherwise, callers might end up unintentionally binding the
       // browser for lazy background tabs.
@@ -1639,7 +1662,7 @@
         if (!aTab.selected) {
           return null;
         }
-        gBrowser._insertBrowser(aTab);
+        gBrowser.insertBrowser(aTab);
       }
       return document.getElementById(aTab.linkedPanel);
     }
@@ -1705,12 +1728,9 @@
     destroy() {
       if (this.boundObserve) {
         Services.prefs.removeObserver("privacy.userContext", this.boundObserve);
-        Services.prefs.removeObserver(
-          "browser.tabs.dragDrop.multiselectStacking",
-          this.boundObserve
-        );
       }
       CustomizableUI.removeListener(this);
+      this.previewPanel?.forceReset();
     }
 
     updateTabSoundLabel(tab) {

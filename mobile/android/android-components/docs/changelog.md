@@ -4,7 +4,106 @@ title: Changelog
 permalink: /changelog/
 ---
 
-# 147.0 (In Development)
+# 157.0 (In Development)
+
+# 156.0
+* **browser-domains**
+    * ⚠️ **Breaking change**: Removed the deprecated `DomainAutoCompleteProvider` class. Use `ShippedDomainsProvider` or `CustomDomainsProvider` instead.
+* **browser-state**
+    * ⚠️ **Breaking change**: Removed `TabPartition` and `TabGroup` from `BrowserState`.
+* **feature-accounts**
+    * 🆕 Added `FxaCapability.PAIRING_V2`, which advertises `capabilities.pairingVersion` in the `fxaccounts:fxa_status` WebChannel response and enables the `fxaccounts:pair_oauth_start` WebChannel command.
+* **support-ktx**
+    * 🆕 Added `File.toSampledBitmap` and `InputStream.toSampledBitmap`, which subsample as they decode so an image is never allocated at full resolution. [Bug 2061502](https://bugzilla.mozilla.org/show_bug.cgi?id=2061502)
+    * ⚠️ **Breaking change**: `String.base64ToBitmap` now takes the target width and height, in pixels, and subsamples to suit. [Bug 2061502](https://bugzilla.mozilla.org/show_bug.cgi?id=2061502)
+* **feature-addons**, **feature-prompts**
+    * Add-on and identity credential icons are now decoded at the size they are displayed at. [Bug 2061502](https://bugzilla.mozilla.org/show_bug.cgi?id=2061502)
+* **compose-base**
+    * 🆕 Added `Modifier.debouncedToggleable`to prevent rapid successive toggles from calling `onValueChange`. [Bug 2064179](https://bugzilla.mozilla.org/show_bug.cgi?id=2064179)
+    * 🆕 `Modifier.debouncedClickable` now accepts a `Role` for accessibility services. [Bug 2064181](https://bugzilla.mozilla.org/show_bug.cgi?id=2064181)
+
+# 155.0
+
+# 154.0
+* **browser-icons**
+    * ⚠️ **Breaking change**: Removed the `useMerinoManifest` parameter from `BrowserIcons`. The Merino manifest is now always used as the icon source. Removed `TippyTopIconPreparer` and the `IconRequest.Resource.Type.TIPPY_TOP` resource type. [Bug 2047476](https://bugzilla.mozilla.org/show_bug.cgi?id=2047476)
+* **support-base**
+    * 🆕 Added `Action.NEXT` and `Action.PREVIOUS` to the `Fact`.
+* **feature-media**
+    * 🆕 The media notification now emits `Action.NEXT` and `Action.PREVIOUS` facts when the next/previous track buttons are tapped.
+* **compose-base**
+    * 🆕 Added a version of `FloatingActionButton` that accepts a custom icon composable. [Bug 2050581](https://bugzilla.mozilla.org/show_bug.cgi?id=2050581)
+* **browser-engine-gecko**
+    * Fixed the autocomplete selection prompts (login, credit card, and address) not being dismissed when the associated input field loses focus. [Bug 2040184](https://bugzilla.mozilla.org/show_bug.cgi?id=2040184)
+* **feature-webcompat-reporter**
+    * 🆕 Added `sendGleanBrokenSiteReport` which sends a broken site report using Glean. [Bug 2054543](https://bugzilla.mozilla.org/show_bug.cgi?id=2054543)).
+* **concept-engine**, **browser-engine-gecko**, **browser-engine-system**, **browser-state**, **support-test-fakes**
+    * ⚠️ **Breaking change**: Removed the cookie banner handling feature. Removed the `mozilla.components.concept.engine.cookiehandling` package (`CookieBannersStorage`) and `GeckoCookieBannersStorage`, `EngineSession.CookieBannerHandlingMode`, `EngineSession.CookieBannerHandlingStatus`, `EngineSession.Observer.onCookieBannerChange`, `EngineSession.hasCookieBannerRuleForSession`, the `Settings.cookieBannerHandling*` settings, the `cookieBanner*` parameters of `TrackingProtectionPolicy.toContentBlockingSetting`, `CookieBannerAction` and `SessionState.cookieBanner` (also removed from `SessionState.createCopy`). [Bug 2058143](https://bugzilla.mozilla.org/show_bug.cgi?id=2058143)
+
+# 153.0
+* **support-utils**
+  * 🆕 Added `DiskLruCacheStore` to provide shared `DiskLruCache` read, write, remove, and clear helpers for disk-backed components.
+  * 🆕 Added `CacheDirectoryMigration` to help migrating the cache directory used by `DiskLruCache`.
+* **concept-sync**, **service-firefox-accounts**
+    * ⚠️ **Breaking change**: Removed `OAuthAccount.beginOAuthFlow`, `OAuthAccount.beginPairingFlow`, `OAuthAccount.completeOAuthFlow` and the `AuthFlowUrl` type. Sign-in is now driven entirely through the state machine via `FxaAccountManager.beginAuthentication` / `finishAuthentication`.
+
+# 152.0
+* **browser-engine-gecko**
+    * 🆕 New `getTrackingProtectionEventsByDateRange`, `sumAllTrackingProtectionEvents` and `getEarliestTrackingProtectionDate` APIs to query the tracking protection database from Gecko. [Bug 2031989](https://bugzilla.mozilla.org/show_bug.cgi?id=2031989)
+* **feature-session**
+    * 🆕 New `FetchTrackingEventsUseCase`, `FetchTotalTrackersBlockedUseCase` and `FetchEarliestTrackingDateUseCase` usecases to query for tracking protection related dertails from the current engine. [Bug 2031989](https://bugzilla.mozilla.org/show_bug.cgi?id=2031989)
+
+# 151.0
+* **browser-engine-gecko**
+  * 🆕 New Engine Settings API - `useContentBlockingDatabase` that allows controlling whether the content blocking database is enabled. [Bug 2030082](https://bugzilla.mozilla.org/show_bug.cgi?id=2030082)
+
+# 150.0
+* **browser-engine-gecko**
+  * 🆕 The content blocking log will now inform also of blocked cross-site cookies. [Bug 2020898](https://bugzilla.mozilla.org/show_bug.cgi?id=2020898)
+* **support-utils**
+  * The `Browsers().isDefaultBrowser()` method has been removed in favor of a more performant version available as a `Browsers.isDefaultBrowser()` static method. [Bug 2008662](https://bugzilla.mozilla.org/show_bug.cgi?id=2008662)
+
+* **service-firefox-accounts**
+  * ⚠️ **Breaking change**: Removed `currentDeviceId` and `sessionToken` from `mozilla.components.service.fxa.store.Account`.
+  * Added the `FxaAccountManager.connectedAccount` method, which will return an `OAuthAccount` only if the user is in the `Connected` state.
+
+* **support-test**
+    * ⚠️ **Breaking change**: Removed `MainCoroutineRule`. Inject Main Dispatcher if you need to override it in tests. [Bug 1984347](https://bugzilla.mozilla.org/show_bug.cgi?id=1984347)
+
+# 149.0
+* **lib-state**
+  * ⚠️ **Breaking change**: Removed the composableStore API from `ComposeExtensions.kt` in favor of the newer one from `StoreProvider.kt`. [Bug 2017822](https://bugzilla.mozilla.org/show_bug.cgi?id=2017822)
+* **feature-search**
+  * `RegionMiddleware` will not anymore handle `BrowserStore`'s `InitAction`. If you need the region set when the application starts ensure either of `UpdateDistribution` or `RefreshSearchEnginesAction` is dispatched. [Bug 2012962](https://bugzilla.mozilla.org/show_bug.cgi?id=2012962)
+
+* **browser-engine-gecko**
+  * 🆕 New Settings API `DownloadDelegate` that used for `getSuggestedFilename` inside `GeckoEngineSession`.[Bug 2014471](https://bugzilla.mozilla.org/show_bug.cgi?id=2014471)
+* **browser-engine-gecko** and **concept-engine**
+  * 🆕 New Engine Settings API `firefoxRelay` that can be see to different modes with `FirefoxRelayMode`.
+  * Updated GeckoEngine and BrowserPreferencesRuntime to accommodate registering and unregistering multiple browser preferences at a time for observation. [Bug 2006095](https://bugzilla.mozilla.org/show_bug.cgi?id=2006095)
+  * Added `processBackPressed` API to `EngineSession` to handle back navigation events to dismiss some HTML elements such as &lt;dialog&gt;. [Bug 1966467](https://bugzilla.mozilla.org/show_bug.cgi?id=1966467)
+
+* **concept-storage**
+  * Introduced `Login.hint` for context on the login origin that an embedder can use to determine how to handle it.
+
+* **lib-state**
+  * ⚠️ **Breaking change**: Removed flowScoped with the default `coroutineScope` set to `MainScope()`. Always provide your own `CoroutineDispatcher`.
+
+# 148.0
+* **support-utils**
+  * `keyboardAsState` available to use in Jetpack Compose code to know when the IME is shown or hidden. This works more reliably on older Android versions than the frameworks `isImeVisible` API. [Bug 1988730](https://bugzilla.mozilla.org/show_bug.cgi?id=1988730).
+* **browser-engine-gecko** and **concept-engine**
+  * Add optional link text support to HitResult.UNKNOWN to allow getting the text associated with a link in response to a long click
+* **feature-contextmenu**
+  * 🆕 New: "Copy link text" context menu candidate to allow for the ability to copy link text [Bug 1809303](https://bugzilla.mozilla.org/show_bug.cgi?id=1809303)
+* **lib-state**
+  * ⚠️ **Breaking change**: Removed `MiddlewareContext`. You can now pass in a `Store` directly when invoking a `Middleware`. [Bug 2005443](https://bugzilla.mozilla.org/show_bug.cgi?id=2005443).
+* **lib-crash**
+  * 🆕 New `CrashReporter.registerDeferredInitializer()` allows registering a lazy initializer for CrashReporter that is evaluated only when `requireInstance` is accessed, avoiding immediate initialization of dependencies [Bug 2005839](https://bugzilla.mozilla.org/show_bug.cgi?id=2005839)
+
+# 147.0
+* **browser-state**:
+  * ⚠️ **Breaking change**: New `Unknown` third state for the `SecurityStatus` of the connection used in a tab. The `secure` property has been migrated to `isSecure`. [Bug 2000617](https://bugzilla.mozilla.org/show_bug.cgi?id=2000617).
 * **lib-state**
     * ⚠️ **Breaking change**: Removed thread marshalling from Stores [Bug 1980348](https://bugzilla.mozilla.org/show_bug.cgi?id=1980348).
         * `Store.dispatch` is now invoked on the calling thread.

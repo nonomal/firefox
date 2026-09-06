@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -90,8 +88,8 @@ void HTMLSharedListElement::MapOLAttributesIntoRule(
   HTMLSharedListElement::MapAttributesIntoRule(aBuilder);
 }
 
-NS_IMETHODIMP_(bool)
-HTMLSharedListElement::IsAttributeMapped(const nsAtom* aAttribute) const {
+bool HTMLSharedListElement::IsNoNamespaceAttrMapped(
+    const nsAtom* aAttribute) const {
   if (mNodeInfo->Equals(nsGkAtoms::ul)) {
     static const MappedAttributeEntry attributes[] = {{nsGkAtoms::type},
                                                       {nullptr}};
@@ -118,7 +116,7 @@ HTMLSharedListElement::IsAttributeMapped(const nsAtom* aAttribute) const {
     return FindAttributeDependence(aAttribute, map);
   }
 
-  return nsGenericHTMLElement::IsAttributeMapped(aAttribute);
+  return nsGenericHTMLElement::IsNoNamespaceAttrMapped(aAttribute);
 }
 
 nsMapRuleToAttributesFunc HTMLSharedListElement::GetAttributeMappingFunction()

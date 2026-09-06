@@ -1,12 +1,11 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // Original author: ekr@rtfm.com
 
-#ifndef mediapipeline_h__
-#define mediapipeline_h__
+#ifndef mediapipeline_h_
+#define mediapipeline_h_
 
 #include <map>
 
@@ -56,6 +55,7 @@ namespace dom {
 class MediaStreamTrack;
 struct RTCRTPContributingSourceStats;
 class RTCStatsTimestampMaker;
+class RTCErrorParams;
 }  // namespace dom
 
 struct MediaPipelineReceiveControlInterface {
@@ -185,8 +185,11 @@ class MediaPipeline : public sigslot::has_slots<> {
   virtual void SendPacket(MediaPacket&& packet);
 
   // Process slots on transports
-  void RtpStateChange(const std::string& aTransportId, TransportLayer::State);
-  void RtcpStateChange(const std::string& aTransportId, TransportLayer::State);
+  void RtpStateChange(const std::string& aTransportId, TransportLayer::State,
+                      const nsTArray<nsTArray<uint8_t>>& aRemoteCerts,
+                      Maybe<dom::RTCErrorParams>);
+  void RtcpStateChange(const std::string& aTransportId, TransportLayer::State,
+                       Maybe<dom::RTCErrorParams>);
   virtual void CheckTransportStates();
   void PacketReceived(std::string& aTransportId, MediaPacket& packet);
   void RtpPacketReceived(std::string& aTransportId, MediaPacket& packet);

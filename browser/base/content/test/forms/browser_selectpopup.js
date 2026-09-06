@@ -288,10 +288,7 @@ async function doSelectTests(contentType, content) {
 
 add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["test.wait300msAfterTabSwitch", true],
-      ["dom.forms.select.customstyling", true],
-    ],
+    set: [["dom.forms.select.customstyling", true]],
   });
 });
 
@@ -515,8 +512,8 @@ add_task(async function test_event_order() {
 
         let eventsPromise = SpecialPowers.spawn(
           browser,
-          [[mode, expected]],
-          async function ([contentMode, contentExpected]) {
+          [mode, expected],
+          async function (contentMode, contentExpected) {
             return new Promise(resolve => {
               function onEvent(event) {
                 select.removeEventListener(event.type, onEvent);

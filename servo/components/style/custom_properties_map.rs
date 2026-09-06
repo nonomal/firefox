@@ -10,6 +10,7 @@ use crate::selector_map::PrecomputedHasher;
 use indexmap::IndexMap;
 use servo_arc::Arc;
 use std::hash::BuildHasherDefault;
+use std::sync::LazyLock;
 
 /// A map for a set of custom properties, which implements copy-on-write behavior on insertion with
 /// cheap copying.
@@ -23,19 +24,17 @@ impl Default for CustomPropertiesMap {
 }
 
 /// We use None in the value to represent a removed entry.
-type OwnMap =
+pub type OwnMap =
     IndexMap<Name, Option<ComputedRegisteredValue>, BuildHasherDefault<PrecomputedHasher>>;
 
-lazy_static! {
-    static ref EMPTY: Arc<Inner> = {
-        Arc::new_leaked(Inner {
-            own_properties: Default::default(),
-            parent: None,
-            len: 0,
-            ancestor_count: 0,
-        })
-    };
-}
+static EMPTY: LazyLock<Arc<Inner>> = LazyLock::new(|| {
+    Arc::new_leaked(Inner {
+        own_properties: Default::default(),
+        parent: None,
+        len: 0,
+        ancestor_count: 0,
+    })
+});
 
 #[derive(Debug, Clone)]
 struct Inner {
@@ -134,7 +133,7 @@ impl Inner {
 
     fn insert(&mut self, name: &Name, value: Option<ComputedRegisteredValue>) {
         let new = self.own_properties.insert(name.clone(), value).is_none();
-        if new && self.parent.as_ref().map_or(true, |p| p.get(name).is_none()) {
+        if new && self.parent.as_ref().is_none_or(|p| p.get(name).is_none()) {
             self.len += 1;
         }
     }

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,19 +7,25 @@
 #ifndef mozilla_UniquePtrExtensions_h
 #define mozilla_UniquePtrExtensions_h
 
+#include <cstdlib>
 #include <type_traits>
 
-#include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
-#include "mozilla/DebugOnly.h"
-#include "mozilla/fallible.h"
+#include "mozilla/Types.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/fallible.h"
 
 #ifdef XP_WIN
 #  include <cstdint>
 #endif
 #if defined(XP_DARWIN)
 #  include <mach/mach.h>
+
+#  include "mozilla/Assertions.h"
+#  include "mozilla/DebugOnly.h"
+#endif
+#if defined(XP_UNIX) && (defined(DEBUG) || defined(FUZZING))
+#  include "mozilla/Assertions.h"
 #endif
 
 namespace mozilla {
@@ -110,24 +114,26 @@ struct FileHandleHelper {
 #endif
   }
 
-  MOZ_IMPLICIT constexpr FileHandleHelper() : mHandle(kInvalidHandle) {}
+  MOZ_IMPLICIT constexpr FileHandleHelper() = default;
 
   MOZ_IMPLICIT constexpr FileHandleHelper(std::nullptr_t)
-      : mHandle(kInvalidHandle) {}
+      : FileHandleHelper() {}
 
-  bool operator!=(std::nullptr_t) const {
+  static bool IsValid(FileHandleType aHandle) {
 #ifdef XP_WIN
     // Windows uses both nullptr and INVALID_HANDLE_VALUE (-1 cast to
     // HANDLE) in different situations, but nullptr is more reliably
     // null while -1 is also valid input to some calls that take
     // handles.  So class considers both to be null (since neither
     // should be closed) but default-constructs as nullptr.
-    if (mHandle == (void*)-1) {
+    if (aHandle == (void*)-1) {
       return false;
     }
 #endif
-    return mHandle != kInvalidHandle;
+    return aHandle != kInvalidHandle;
   }
+
+  bool operator!=(std::nullptr_t) const { return IsValid(mHandle); }
 
   operator FileHandleType() const { return mHandle; }
 
@@ -142,13 +148,11 @@ struct FileHandleHelper {
 
   // When there's only one user-defined conversion operator, the
   // compiler will use that to derive equality, but that doesn't work
-  // when the conversion is ambiguoug (the XP_WIN case above).
-  bool operator==(const FileHandleHelper& aOther) const {
-    return mHandle == aOther.mHandle;
-  }
+  // when the conversion is ambiguous (the XP_WIN case above).
+  bool operator==(const FileHandleHelper& aOther) const = default;
 
  private:
-  FileHandleType mHandle;
+  FileHandleType mHandle{kInvalidHandle};
 
 #ifdef XP_WIN
   // See above for why this is nullptr.  (Also, INVALID_HANDLE_VALUE
@@ -225,11 +229,27 @@ using UniqueFileHandle =
 
 #ifndef __wasm__
 // WASI does not have `dup`
+// On Unix, these set the close-on-exec flag for the new fd.
 MFBT_API UniqueFileHandle DuplicateFileHandle(detail::FileHandleType aFile);
 inline UniqueFileHandle DuplicateFileHandle(const UniqueFileHandle& aFile) {
   return DuplicateFileHandle(aFile.get());
 }
+#endif  // not wasm
+
+#ifdef XP_UNIX
+// For systems that don't have the full set of POSIX atomic cloexec APIs.
+MFBT_API void SetCloseOnExec(detail::FileHandleType aFile);
+inline void SetCloseOnExec(const UniqueFileHandle& aFile) {
+  SetCloseOnExec(aFile.get());
+}
 #endif
+
+inline bool FileHandleIsValid(detail::FileHandleType aFile) {
+  return detail::FileHandleHelper::IsValid(aFile);
+}
+inline bool FileHandleIsValid(const UniqueFileHandle& aFile) {
+  return aFile != nullptr;
+}
 
 #if defined(XP_DARWIN)
 // A RAII class for a Mach port that names a send right.

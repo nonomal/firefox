@@ -5,24 +5,22 @@
 package org.mozilla.fenix.termsofuse.store
 
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 
 /**
  * [Middleware] that reacts to various [TermsOfUsePromptAction]s
  *
  * @param repository the repository for the terms of use prompt
  */
-class TermsOfUsePromptPreferencesMiddleware(
-    private val repository: TermsOfUsePromptRepository,
-) : Middleware<TermsOfUsePromptState, TermsOfUsePromptAction> {
+class TermsOfUsePromptPreferencesMiddleware(private val repository: TermsOfUsePromptRepository) :
+    Middleware<TermsOfUsePromptState, TermsOfUsePromptAction> {
     override fun invoke(
-        context: MiddlewareContext<TermsOfUsePromptState, TermsOfUsePromptAction>,
+        store: Store<TermsOfUsePromptState, TermsOfUsePromptAction>,
         next: (TermsOfUsePromptAction) -> Unit,
         action: TermsOfUsePromptAction,
     ) {
         when (action) {
-            is TermsOfUsePromptAction.OnAcceptClicked ->
-                repository.updateHasAcceptedTermsOfUsePreference()
+            is TermsOfUsePromptAction.OnAcceptClicked -> repository.updateHasAcceptedTermsOfUsePreference()
 
             is TermsOfUsePromptAction.OnRemindMeLaterClicked -> {
                 repository.updateHasPostponedAcceptingTermsOfUsePreference()
@@ -31,18 +29,23 @@ class TermsOfUsePromptPreferencesMiddleware(
             is TermsOfUsePromptAction.OnPromptManuallyDismissed ->
                 repository.updateHasPostponedAcceptingTermsOfUsePreference()
 
-            is TermsOfUsePromptAction.OnPromptDismissed ->
+            is TermsOfUsePromptAction.OnPromptDismissed -> {
                 repository.updateLastTermsOfUsePromptTimeInMillis()
+                repository.isShowingPrompt = false
+            }
 
-            is TermsOfUsePromptAction.OnImpression ->
+            is TermsOfUsePromptAction.OnImpression -> {
                 repository.incrementTermsOfUsePromptDisplayedCount()
+            }
+
+            is TermsOfUsePromptAction.OnPromptCreated -> {
+                repository.isShowingPrompt = true
+            }
 
             // no-ops
             is TermsOfUsePromptAction.OnLearnMoreClicked,
             is TermsOfUsePromptAction.OnPrivacyNoticeClicked,
-            is TermsOfUsePromptAction.OnTermsOfUseClicked,
-                -> {
-            }
+            is TermsOfUsePromptAction.OnTermsOfUseClicked -> {}
         }
 
         next(action)

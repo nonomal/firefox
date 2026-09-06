@@ -12,9 +12,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.tooling.preview.PreviewParameter
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 /**
  * Settings section header.
@@ -23,29 +24,22 @@ import org.mozilla.fenix.theme.Theme
  * @param modifier [Modifier] to be applied to the layout.
  */
 @Composable
-fun SettingsSectionHeader(text: String, modifier: Modifier = Modifier) {
+fun SettingsSectionHeader(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
     Text(
         text = text,
         style = FirefoxTheme.typography.headline8,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = MaterialTheme.colorScheme.onSurface,
         modifier = modifier.semantics { heading() },
     )
 }
 
-@Composable
-@PreviewLightDark
-private fun SettingsSectionHeaderPreview() {
-    FirefoxTheme {
-        Surface {
-            SettingsSectionHeader("Settings")
-        }
-    }
-}
-
-@Composable
 @Preview
-private fun SettingsSectionHeaderPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
+@Composable
+private fun SettingsSectionHeaderPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         Surface {
             SettingsSectionHeader("Settings")
         }

@@ -1,4 +1,3 @@
-/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -38,6 +37,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   ClientID: "resource://gre/modules/ClientID.sys.mjs",
   CoveragePing: "resource://gre/modules/CoveragePing.sys.mjs",
+  NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   TelemetryArchive: "resource://gre/modules/TelemetryArchive.sys.mjs",
   TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
   TelemetryEventPing: "resource://gre/modules/EventPing.sys.mjs",
@@ -50,7 +50,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   TelemetryUntrustedModulesPing:
     "resource://gre/modules/UntrustedModulesPing.sys.mjs",
   UninstallPing: "resource://gre/modules/UninstallPing.sys.mjs",
-  UpdatePing: "resource://gre/modules/UpdatePing.sys.mjs",
   UsageReporting: "resource://gre/modules/UsageReporting.sys.mjs",
 });
 
@@ -528,6 +527,27 @@ var Impl = {
         JSON.stringify(aOptions)
     );
 
+    const disabledPings =
+      lazy.NimbusFeatures.legacyTelemetry.getVariable("disabledPings") ?? [];
+    const UNCONTROLLABLE_PINGS = [
+      "main",
+      "first-shutdown",
+      "new-profile",
+      "deletion-request",
+    ];
+    if (disabledPings.includes(aType)) {
+      if (UNCONTROLLABLE_PINGS.includes(aType)) {
+        this._log.warn(
+          `submitExternalPing - type: ${aType} not controllable, but is in the list of disabledPings ${JSON.stringify(disabledPings)}. Ping will submit as normal. Please remove ping type "${aType}" from the Nimbus config.`
+        );
+      } else {
+        this._log.trace(
+          `submitExternalPing - type ${aType} disabled by Nimbus.`
+        );
+        return Promise.reject(new Error("Ping disabled."));
+      }
+    }
+
     // Reject pings sent after shutdown.
     if (this._shutDown) {
       const errorMessage =
@@ -742,11 +762,6 @@ var Impl = {
     this._clientID = lazy.ClientID.getCachedClientID();
     this._profileGroupID = lazy.ClientID.getCachedProfileGroupID();
 
-    // Init the update ping telemetry as early as possible. This won't have
-    // an impact on startup.
-    lazy.UpdatePing.earlyInit();
-
-    // Delay full telemetry initialization to give the browser time to
     // run various late initializers. Otherwise our gathered memory
     // footprint and other numbers would be too optimistic.
     this._delayedInitTaskDeferred = Promise.withResolvers();
@@ -876,8 +891,6 @@ var Impl = {
       if (this._delayedNewPingTask) {
         await this._delayedNewPingTask.finalize();
       }
-
-      lazy.UpdatePing.shutdown();
 
       lazy.TelemetryEventPing.shutdown();
 

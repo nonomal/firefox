@@ -1,42 +1,33 @@
-From: =?UTF-8?q?Emilio=20Cobos=20=C3=81lvarez?= <emilio@crisal.io>
-Date: Wed, 12 Nov 2025 05:17:00 +0000
-Subject: Bug 1768116 - Compile as C++20. r=glandium,webrtc-reviewers,mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Wed, 8 Apr 2026 10:58:00 -0500
+Subject: Bug 2030139 - (fix-bb3693c382) fix linux builds for constexpr
+ containing std::string
 
-Co-authored-by: Chris Peterson <cpeterson@mozilla.com>
-
-Differential Revision: https://phabricator.services.mozilla.com/D271779
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/a076ddec60822b1d20f39dd468e025f712b3ba4d
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/cab51cf0d4e9e67e9f5b053128d05e859d47b7c2
 ---
- BUILD.gn | 12 +-----------
- 1 file changed, 1 insertion(+), 11 deletions(-)
+ modules/portal/pipewire_utils.cc | 9 +++++++++
+ 1 file changed, 9 insertions(+)
 
-diff --git a/BUILD.gn b/BUILD.gn
-index 2b3e510f76..b7b2edb51f 100644
---- a/BUILD.gn
-+++ b/BUILD.gn
-@@ -315,16 +315,6 @@ config("common_config") {
-   cflags_objc = []
-   defines = []
+diff --git a/modules/portal/pipewire_utils.cc b/modules/portal/pipewire_utils.cc
+index 850726cc58..7008696b7d 100644
+--- a/modules/portal/pipewire_utils.cc
++++ b/modules/portal/pipewire_utils.cc
+@@ -28,9 +28,18 @@
  
--  # We should be able to remove this after c++20 is enabled
--  # across the Mozilla tree.
--  if (build_with_mozilla) {
--    if (is_win) {
--      cflags_cc += [ "-std:c++20" ]
--    } else {
--      cflags_cc += [ "-std=gnu++20" ]
--    }
--  }
--
-   if (rtc_enable_protobuf) {
-     defines += [ "WEBRTC_ENABLE_PROTOBUF=1" ]
-   } else {
-@@ -430,7 +420,7 @@ config("common_config") {
-         # "-Wnested-externs",  (C/Obj-C only)
-       ]
-       cflags_objc += [ "-Wstrict-prototypes" ]
--      cflags_cc += [
-+      cflags_cc = [
-         "-Wnon-virtual-dtor",
+ namespace webrtc {
  
-         # This is enabled for clang; enable for gcc as well.
++#if defined(__GNUC__) && defined(WEBRTC_MOZILLA_BUILD)
++// Mozilla linux builds are using -std=gnu++20, which doesn't approve
++// of using std::string in a constexpr.  PipewireVersion now contains
++// std::string as of libwebrtc commit d167fe9296.
++static const PipeWireVersion kReentrantDeinitMinVersion = {.major = 0,
++                                                           .minor = 3,
++                                                           .micro = 49};
++#else
+ constexpr PipeWireVersion kReentrantDeinitMinVersion = {.major = 0,
+                                                         .minor = 3,
+                                                         .micro = 49};
++#endif
+ 
+ PipeWireVersion PipeWireVersion::Parse(const std::string_view& version) {
+   std::vector<std::string_view> parsed_version = split(version, '.');

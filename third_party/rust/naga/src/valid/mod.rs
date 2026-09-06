@@ -7,6 +7,7 @@ mod compose;
 mod expression;
 mod function;
 mod handles;
+pub(crate) mod immediates;
 mod interface;
 mod r#type;
 
@@ -30,13 +31,14 @@ pub use compose::ComposeError;
 pub use expression::{check_literal_value, LiteralError};
 pub use expression::{ConstExpressionError, ExpressionError};
 pub use function::{CallError, FunctionError, LocalVariableError, SubgroupError};
+pub use immediates::{ImmediateSlots, ImmediateSlotsOverflowError, ImmediateUsage};
 pub use interface::{EntryPointError, GlobalVariableError, VaryingError};
-pub use r#type::{Disalignment, PushConstantError, TypeError, TypeFlags, WidthError};
+pub use r#type::{Disalignment, ImmediateError, TypeError, TypeFlags, WidthError};
 
 use self::handles::InvalidHandleError;
 
 /// Maximum size of a type, in bytes.
-pub const MAX_TYPE_SIZE: u32 = 0x4000_0000; // 1GB
+pub const MAX_TYPE_SIZE: u32 = i32::MAX as u32;
 
 bitflags::bitflags! {
     /// Validation flags.
@@ -83,29 +85,29 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct Capabilities: u32 {
-        /// Support for [`AddressSpace::PushConstant`][1].
+    pub struct Capabilities: u64 {
+        /// Support for [`AddressSpace::Immediate`][1].
         ///
-        /// [1]: crate::AddressSpace::PushConstant
-        const PUSH_CONSTANT = 1 << 0;
+        /// [1]: crate::AddressSpace::Immediate
+        const IMMEDIATES = 1 << 0;
         /// Float values with width = 8.
         const FLOAT64 = 1 << 1;
         /// Support for [`BuiltIn::PrimitiveIndex`][1].
         ///
         /// [1]: crate::BuiltIn::PrimitiveIndex
         const PRIMITIVE_INDEX = 1 << 2;
-        /// Support for non-uniform indexing of sampled textures and storage buffer arrays.
-        const SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING = 1 << 3;
-        /// Support for non-uniform indexing of storage texture arrays.
-        const STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING = 1 << 4;
-        /// Support for non-uniform indexing of uniform buffer arrays.
-        const UNIFORM_BUFFER_ARRAY_NON_UNIFORM_INDEXING = 1 << 5;
-        /// Support for non-uniform indexing of samplers.
-        const SAMPLER_NON_UNIFORM_INDEXING = 1 << 6;
-        /// Support for [`BuiltIn::ClipDistance`].
+        /// Support for binding arrays of sampled textures and samplers.
+        const TEXTURE_AND_SAMPLER_BINDING_ARRAY = 1 << 3;
+        /// Support for binding arrays of uniform buffers.
+        const BUFFER_BINDING_ARRAY = 1 << 4;
+        /// Support for binding arrays of storage textures.
+        const STORAGE_TEXTURE_BINDING_ARRAY = 1 << 5;
+        /// Support for binding arrays of storage buffers.
+        const STORAGE_BUFFER_BINDING_ARRAY = 1 << 6;
+        /// Support for [`BuiltIn::ClipDistances`].
         ///
-        /// [`BuiltIn::ClipDistance`]: crate::BuiltIn::ClipDistance
-        const CLIP_DISTANCE = 1 << 7;
+        /// [`BuiltIn::ClipDistances`]: crate::BuiltIn::ClipDistances
+        const CLIP_DISTANCES = 1 << 7;
         /// Support for [`BuiltIn::CullDistance`].
         ///
         /// [`BuiltIn::CullDistance`]: crate::BuiltIn::CullDistance
@@ -190,6 +192,38 @@ bitflags::bitflags! {
         const SHADER_BARYCENTRICS = 1 << 29;
         /// Support for task shaders, mesh shaders, and per-primitive fragment inputs
         const MESH_SHADER = 1 << 30;
+        /// Support for mesh shaders which output points.
+        const MESH_SHADER_POINT_TOPOLOGY = 1 << 31;
+        /// Support for non-uniform indexing of binding arrays of sampled textures and samplers.
+        const TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING = 1 << 32;
+        /// Support for non-uniform indexing of binding arrays of uniform buffers.
+        const BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING = 1 << 33;
+        /// Support for non-uniform indexing of binding arrays of storage textures.
+        const STORAGE_TEXTURE_BINDING_ARRAY_NON_UNIFORM_INDEXING = 1 << 34;
+        /// Support for non-uniform indexing of binding arrays of storage buffers.
+        const STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING = 1 << 35;
+        /// Support for cooperative matrix types and operations
+        const COOPERATIVE_MATRIX = 1 << 36;
+        /// Support for per-vertex fragment input.
+        const PER_VERTEX = 1 << 37;
+        /// Support for ray generation, any hit, closest hit, and miss shaders.
+        const RAY_TRACING_PIPELINE = 1 << 38;
+        /// Support for draw index builtin
+        const DRAW_INDEX = 1 << 39;
+        /// Support for binding arrays of acceleration structures.
+        const ACCELERATION_STRUCTURE_BINDING_ARRAY = 1 << 40;
+        /// Support for the `@coherent` memory decoration on storage buffers.
+        const MEMORY_DECORATION_COHERENT = 1 << 41;
+        /// Support for the `@volatile` memory decoration on storage buffers.
+        const MEMORY_DECORATION_VOLATILE = 1 << 42;
+        /// Support for 16-bit integer types.
+        const SHADER_INT16 = 1 << 43;
+        /// Support for [`Interpolation::Linear`] (`@interpolate(linear)` in WGSL).
+        ///
+        /// This is core WebGPU, but GLSL ES (and thus WebGL) has no `noperspective` qualifier (unless enabled by extensions).
+        ///
+        /// [`Interpolation::Linear`]: crate::Interpolation::Linear
+        const LINEAR_INTERPOLATION = 1 << 44;
     }
 }
 
@@ -205,7 +239,24 @@ impl Capabilities {
             Self::DUAL_SOURCE_BLENDING => Some(Ext::DualSourceBlending),
             // NOTE: `SHADER_FLOAT16_IN_FLOAT32` _does not_ require the `f16` extension
             Self::SHADER_FLOAT16 => Some(Ext::F16),
-            Self::CLIP_DISTANCE => Some(Ext::ClipDistances),
+            Self::SHADER_INT16 => Some(Ext::WgpuInt16),
+            Self::CLIP_DISTANCES => Some(Ext::ClipDistances),
+            Self::MESH_SHADER => Some(Ext::WgpuMeshShader),
+            Self::RAY_QUERY => Some(Ext::WgpuRayQuery),
+            Self::RAY_HIT_VERTEX_POSITION => Some(Ext::WgpuRayQueryVertexReturn),
+            Self::COOPERATIVE_MATRIX => Some(Ext::WgpuCooperativeMatrix),
+            Self::RAY_TRACING_PIPELINE => Some(Ext::WgpuRayTracingPipeline),
+            Self::PER_VERTEX => Some(Ext::WgpuPerVertex),
+            Self::BUFFER_BINDING_ARRAY
+            | Self::BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Self::STORAGE_BUFFER_BINDING_ARRAY
+            | Self::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Self::STORAGE_TEXTURE_BINDING_ARRAY
+            | Self::STORAGE_TEXTURE_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Self::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+            | Self::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING => {
+                Some(Ext::WgpuBindingArray)
+            }
             _ => None,
         }
     }
@@ -278,12 +329,17 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct ShaderStages: u8 {
+    pub struct ShaderStages: u16 {
         const VERTEX = 0x1;
         const FRAGMENT = 0x2;
         const COMPUTE = 0x4;
         const MESH = 0x8;
         const TASK = 0x10;
+        const RAY_GENERATION = 0x20;
+        const ANY_HIT = 0x40;
+        const CLOSEST_HIT = 0x80;
+        const MISS = 0x100;
+        const COMPUTE_LIKE = Self::COMPUTE.bits() | Self::TASK.bits() | Self::MESH.bits();
     }
 }
 
@@ -327,9 +383,7 @@ pub struct Validator {
     types: Vec<r#type::TypeInfo>,
     layouter: Layouter,
     location_mask: BitSet,
-    blend_src_mask: BitSet,
     ep_resource_bindings: FastHashSet<crate::ResourceBinding>,
-    #[allow(dead_code)]
     switch_values: FastHashSet<crate::SwitchValue>,
     valid_expression_list: Vec<Handle<crate::Expression>>,
     valid_expression_set: HandleSet<crate::Expression>,
@@ -358,6 +412,33 @@ pub struct Validator {
     /// [`Expression`]: crate::Expression
     /// [`Statement`]: crate::Statement
     needs_visit: HandleSet<crate::Expression>,
+
+    /// Whether any trace rays call is called, and whether all have vertex return.
+    /// If one call doesn't use vertex ruturn, builtins for triangle vertex positions
+    /// (not yet implemented) are not allowed.
+    trace_rays_vertex_return: TraceRayVertexReturnState,
+
+    /// The type of the ray payload, this must always be the same type in a particular
+    /// entrypoint
+    trace_rays_payload_type: Option<Handle<crate::Type>>,
+}
+
+#[derive(Debug)]
+enum TraceRayVertexReturnState {
+    /// No trace ray calls yet have been found.
+    NoTraceRays,
+    /// Trace ray calls have been found, at least
+    /// one uses an acceleration structure that
+    /// does not have the flag enabling vertex return.
+    #[expect(
+        unused,
+        reason = "Don't yet have vertex return builtins to return this error for."
+    )]
+    NoVertexReturn(crate::Span),
+    /// Trace ray calls have been found, all
+    /// acceleration structures have the flag enabling
+    /// vertex return.
+    VertexReturn,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -457,6 +538,7 @@ impl crate::TypeInner {
             Self::Scalar { .. }
             | Self::Vector { .. }
             | Self::Matrix { .. }
+            | Self::CooperativeMatrix { .. }
             | Self::Array {
                 size: crate::ArraySize::Constant(_),
                 ..
@@ -535,7 +617,7 @@ impl Validator {
                 stages |= ShaderStages::VERTEX;
             }
             if capabilities.contains(Capabilities::SUBGROUP) {
-                stages |= ShaderStages::FRAGMENT | ShaderStages::COMPUTE;
+                stages |= ShaderStages::FRAGMENT | ShaderStages::COMPUTE_LIKE;
             }
             stages
         };
@@ -548,7 +630,6 @@ impl Validator {
             types: Vec::new(),
             layouter: Layouter::default(),
             location_mask: BitSet::new(),
-            blend_src_mask: BitSet::new(),
             ep_resource_bindings: FastHashSet::default(),
             switch_values: FastHashSet::default(),
             valid_expression_list: Vec::new(),
@@ -556,15 +637,19 @@ impl Validator {
             override_ids: FastHashSet::default(),
             overrides_resolved: false,
             needs_visit: HandleSet::new(),
+            trace_rays_vertex_return: TraceRayVertexReturnState::NoTraceRays,
+            trace_rays_payload_type: None,
         }
     }
 
-    pub fn subgroup_stages(&mut self, stages: ShaderStages) -> &mut Self {
+    // TODO(https://github.com/gfx-rs/wgpu/issues/8207): Consider removing this
+    pub const fn subgroup_stages(&mut self, stages: ShaderStages) -> &mut Self {
         self.subgroup_stages = stages;
         self
     }
 
-    pub fn subgroup_operations(&mut self, operations: SubgroupOperationSet) -> &mut Self {
+    // TODO(https://github.com/gfx-rs/wgpu/issues/8207): Consider removing this
+    pub const fn subgroup_operations(&mut self, operations: SubgroupOperationSet) -> &mut Self {
         self.subgroup_operations = operations;
         self
     }
@@ -573,8 +658,7 @@ impl Validator {
     pub fn reset(&mut self) {
         self.types.clear();
         self.layouter.clear();
-        self.location_mask.clear();
-        self.blend_src_mask.clear();
+        self.location_mask.make_empty();
         self.ep_resource_bindings.clear();
         self.switch_values.clear();
         self.valid_expression_list.clear();
@@ -629,6 +713,8 @@ impl Validator {
         match gctx.types[o.ty].inner {
             crate::TypeInner::Scalar(
                 crate::Scalar::BOOL
+                | crate::Scalar::I16
+                | crate::Scalar::U16
                 | crate::Scalar::I32
                 | crate::Scalar::U32
                 | crate::Scalar::F16
@@ -653,7 +739,7 @@ impl Validator {
     pub fn validate(
         &mut self,
         module: &crate::Module,
-    ) -> Result<ModuleInfo, WithSpan<ValidationError>> {
+    ) -> Result<ModuleInfo, Box<WithSpan<ValidationError>>> {
         self.overrides_resolved = false;
         self.validate_impl(module)
     }
@@ -668,7 +754,7 @@ impl Validator {
     pub fn validate_resolved_overrides(
         &mut self,
         module: &crate::Module,
-    ) -> Result<ModuleInfo, WithSpan<ValidationError>> {
+    ) -> Result<ModuleInfo, Box<WithSpan<ValidationError>>> {
         self.overrides_resolved = true;
         self.validate_impl(module)
     }
@@ -676,11 +762,11 @@ impl Validator {
     fn validate_impl(
         &mut self,
         module: &crate::Module,
-    ) -> Result<ModuleInfo, WithSpan<ValidationError>> {
+    ) -> Result<ModuleInfo, Box<WithSpan<ValidationError>>> {
         self.reset();
         self.reset_types(module.types.len());
 
-        Self::validate_module_handles(module).map_err(|e| e.with_span())?;
+        Self::validate_module_handles(module).map_err(|e| Box::new((*e).with_span()))?;
 
         self.layouter.update(module.to_ctx()).map_err(|e| {
             let handle = e.ty;
@@ -712,6 +798,10 @@ impl Validator {
                     }
                     .with_span_handle(handle, &module.types)
                 })?;
+            debug_assert!(
+                ty_info.flags.contains(TypeFlags::CONSTRUCTIBLE)
+                    == module.types[handle].inner.is_constructible(&module.types)
+            );
             mod_info.type_flags.push(ty_info.flags);
             self.types[handle.index()] = ty_info;
         }
@@ -786,14 +876,14 @@ impl Validator {
             match self.validate_function(fun, module, &mod_info, false) {
                 Ok(info) => mod_info.functions.push(info),
                 Err(error) => {
-                    return Err(error.and_then(|source| {
+                    return Err(Box::new(error.and_then(|source| {
                         ValidationError::Function {
                             handle,
                             name: fun.name.clone().unwrap_or_default(),
                             source,
                         }
                         .with_span_handle(handle, &module.functions)
-                    }))
+                    })))
                 }
             }
         }
@@ -801,25 +891,29 @@ impl Validator {
         let mut ep_map = FastHashSet::default();
         for ep in module.entry_points.iter() {
             if !ep_map.insert((ep.stage, &ep.name)) {
-                return Err(ValidationError::EntryPoint {
-                    stage: ep.stage,
-                    name: ep.name.clone(),
-                    source: EntryPointError::Conflict,
-                }
-                .with_span()); // TODO: keep some EP span information?
+                return Err(Box::new(
+                    ValidationError::EntryPoint {
+                        stage: ep.stage,
+                        name: ep.name.clone(),
+                        source: EntryPointError::Conflict,
+                    }
+                    .with_span(),
+                )); // TODO: keep some EP span information?
             }
 
             match self.validate_entry_point(ep, module, &mod_info) {
-                Ok(info) => mod_info.entry_points.push(info),
+                Ok(info) => {
+                    mod_info.entry_points.push(info);
+                }
                 Err(error) => {
-                    return Err(error.and_then(|source| {
+                    return Err(Box::new(error.and_then(|source| {
                         ValidationError::EntryPoint {
                             stage: ep.stage,
                             name: ep.name.clone(),
                             source,
                         }
                         .with_span()
-                    }));
+                    })));
                 }
             }
         }

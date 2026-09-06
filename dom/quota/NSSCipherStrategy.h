@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,7 +15,6 @@
 #include "mozilla/InitializedOnce.h"
 #include "mozilla/Result.h"
 #include "mozilla/Span.h"
-#include "nsTArray.h"
 
 namespace mozilla::dom::quota {
 
@@ -30,9 +27,13 @@ struct NSSCipherStrategy {
 
   static Result<KeyType, nsresult> GenerateKey();
 
-  nsresult Init(CipherMode aCipherMode, Span<const uint8_t> aKey,
-                Span<const uint8_t> aInitialIv = Span<const uint8_t>{});
+  nsresult Init(CipherMode aCipherMode, Span<const uint8_t> aKey);
 
+  // On encrypt the whole of aIv is written -- a freshly generated nonce in the
+  // leading 12 bytes, the authentication tag in the trailing 16, random filler
+  // in between -- and the caller must store all of it alongside the ciphertext.
+  // Its incoming contents are ignored. On decrypt aIv supplies that same stored
+  // nonce and tag.
   nsresult Cipher(Span<uint8_t> aIv, Span<const uint8_t> aIn,
                   Span<uint8_t> aOut);
 
@@ -47,7 +48,6 @@ struct NSSCipherStrategy {
   // XXX Remove EarlyDestructible, remove moving of the CipherStrategy.
   LazyInitializedOnceEarlyDestructible<const CipherMode> mMode;
   LazyInitializedOnceEarlyDestructible<const UniquePK11Context> mPK11Context;
-  nsTArray<uint8_t> mIv;
 };
 
 }  // namespace mozilla::dom::quota

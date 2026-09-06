@@ -1,15 +1,11 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <new>
 #include <numeric>
-#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -266,8 +262,8 @@ class DOM_Quota_EncryptedStream : public ::testing::Test {
   static std::unique_ptr<NSSInitContext, NSSInitContextDeleter> sNssContext;
 };
 
-MOZ_CONSTINIT std::unique_ptr<NSSInitContext,
-                              DOM_Quota_EncryptedStream::NSSInitContextDeleter>
+constinit std::unique_ptr<NSSInitContext,
+                          DOM_Quota_EncryptedStream::NSSInitContextDeleter>
     DOM_Quota_EncryptedStream::sNssContext;
 
 enum struct FlushMode { AfterEachChunk, Never };

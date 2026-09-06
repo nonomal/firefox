@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -22,6 +20,7 @@
 #include "nsIScriptError.h"
 #include "nsIWebProgressListener.h"
 #include "nsIXULRuntime.h"
+#include "nsPIDOMWindowInlines.h"
 #include "nsRFPTargetSetIDL.h"
 #include "nsRefPtrHashtable.h"
 #include "nsContentUtils.h"
@@ -72,12 +71,7 @@ bool WindowContext::IsCurrent() const {
   return mBrowsingContext->mCurrentWindowContext == this;
 }
 
-bool WindowContext::IsInBFCache() {
-  if (mozilla::SessionHistoryInParent()) {
-    return mBrowsingContext->IsInBFCache();
-  }
-  return TopWindowContext()->GetWindowStateSaved();
-}
+bool WindowContext::IsInBFCache() { return mBrowsingContext->IsInBFCache(); }
 
 already_AddRefed<nsIRFPTargetSetIDL>
 WindowContext::GetOverriddenFingerprintingSettingsWebIDL() const {
@@ -87,9 +81,8 @@ WindowContext::GetOverriddenFingerprintingSettingsWebIDL() const {
     return nullptr;
   }
 
-  nsCOMPtr<nsIRFPTargetSetIDL> protections =
-      new nsRFPTargetSetIDL(overriddenFingerprintingSettings.ref());
-  return protections.forget();
+  return MakeAndAddRef<nsRFPTargetSetIDL>(
+      overriddenFingerprintingSettings.ref());
 }
 
 nsGlobalWindowInner* WindowContext::GetInnerWindow() const {
@@ -364,6 +357,11 @@ bool WindowContext::CanSet(FieldIndex<IDX_HasActivePeerConnections>, bool,
   return XRE_IsParentProcess() && IsTop();
 }
 
+bool WindowContext::CanSet(FieldIndex<IDX_IsFramebustingAllowed>,
+                           const bool& aValue, ContentParent* aSource) {
+  return CheckOnlyOwningProcessCanSet(aSource);
+}
+
 void WindowContext::ProcessCloseRequest() {
   MOZ_ASSERT(XRE_IsParentProcess(), "Window must be Global Parent");
   BrowsingContext* top = mBrowsingContext->Top();
@@ -476,12 +474,6 @@ void WindowContext::DidSet(FieldIndex<IDX_HasReportedShadowDOMUsage>,
       }
     }
   }
-}
-
-bool WindowContext::CanSet(FieldIndex<IDX_WindowStateSaved>, bool aValue,
-                           ContentParent* aSource) {
-  return !mozilla::SessionHistoryInParent() && IsTop() &&
-         CheckOnlyOwningProcessCanSet(aSource);
 }
 
 void WindowContext::CreateFromIPC(IPCInitializer&& aInit) {
@@ -614,6 +606,36 @@ bool WindowContext::HasValidTransientUserGestureActivation() {
          (TimeStamp::Now() - mLastActivationTimestamp) <= timeout;
 }
 
+template <typename F>
+static void ConsumeUserGestureActivationBetweenPiP(BrowsingContext* aTop,
+                                                   F&& aCallback) {
+  // https://wicg.github.io/document-picture-in-picture/#user-activation-propagation
+  // Monkey patch to consume user activation
+  if (aTop->GetIsDocumentPiP()) {
+    // 4. If top is a PIP window, then extend navigables with the opener
+    // window's inclusive decendant navigables
+    RefPtr<BrowsingContext> opener = aTop->GetOpener();
+    if (!opener) {
+      return;
+    }
+    opener->GetBrowsingContext()->PreOrderWalk(aCallback);
+  } else {
+    // 5. Get top-level navigable's last opened PiP window
+    nsGlobalWindowInner* pip = aTop->GetOpenedDocumentPiPWindow();
+    if (!pip) {
+      return;
+    }
+
+    // 6. Extend navigables with the inclusive descendant navigables of the PIP
+    // window.
+    BrowsingContext* pipBC = pip->GetBrowsingContext();
+    NS_ENSURE_TRUE_VOID(pipBC);
+    WindowContext* pipWC = pipBC->GetCurrentWindowContext();
+    NS_ENSURE_TRUE_VOID(pipWC);
+    pipBC->PreOrderWalk(aCallback);
+  }
+}
+
 // https://html.spec.whatwg.org/#consume-user-activation
 bool WindowContext::ConsumeTransientUserGestureActivation() {
   MOZ_ASSERT(IsInProcess());
@@ -631,7 +653,7 @@ bool WindowContext::ConsumeTransientUserGestureActivation() {
 
   // 3. Let navigables be the inclusive descendant navigables of top's active
   // document.
-  top->PreOrderWalk([&](BrowsingContext* aBrowsingContext) {
+  auto callback = [&](BrowsingContext* aBrowsingContext) {
     // 4. Let windows be the list of Window objects constructed by taking the
     // active window of each item in navigables.
     WindowContext* windowContext = aBrowsingContext->GetCurrentWindowContext();
@@ -650,7 +672,10 @@ bool WindowContext::ConsumeTransientUserGestureActivation() {
       (void)windowContext->SetUserActivationStateAndModifiers(
           stateAndModifiers.GetRawData());
     }
-  });
+  };
+  top->PreOrderWalk(callback);
+
+  ConsumeUserGestureActivationBetweenPiP(top, callback);
 
   return true;
 }
@@ -708,6 +733,18 @@ bool WindowContext::CanShowPopup() {
   }
 
   return !StaticPrefs::dom_disable_open_during_load();
+}
+
+bool WindowContext::CanFramebust() {
+  uint32_t permit = GetPopupPermission();
+  if (permit == nsIPermissionManager::ALLOW_ACTION) {
+    return true;
+  }
+  if (permit == nsIPermissionManager::DENY_ACTION) {
+    return false;
+  }
+
+  return !StaticPrefs::dom_security_framebusting_intervention_enabled();
 }
 
 void WindowContext::TransientSetHasActivePeerConnections() {
@@ -804,6 +841,10 @@ bool ParamTraits<MaybeDiscarded<WindowContext>>::Read(
   if (id == 0) {
     *aResult = nullptr;
   } else if (RefPtr<WindowContext> wc = WindowContext::GetById(id)) {
+    if (!wc->Group()->IsKnownForMessageReader(aReader)) {
+      return false;
+    }
+
     *aResult = std::move(wc);
   } else {
     aResult->SetDiscarded(id);
@@ -811,23 +852,9 @@ bool ParamTraits<MaybeDiscarded<WindowContext>>::Read(
   return true;
 }
 
-void ParamTraits<WindowContext::IPCInitializer>::Write(
-    MessageWriter* aWriter, const WindowContext::IPCInitializer& aInit) {
-  // Write actor ID parameters.
-  WriteParam(aWriter, aInit.mInnerWindowId);
-  WriteParam(aWriter, aInit.mOuterWindowId);
-  WriteParam(aWriter, aInit.mBrowsingContextId);
-  WriteParam(aWriter, aInit.mFields);
-}
-
-bool ParamTraits<WindowContext::IPCInitializer>::Read(
-    MessageReader* aReader, WindowContext::IPCInitializer* aInit) {
-  // Read actor ID parameters.
-  return ReadParam(aReader, &aInit->mInnerWindowId) &&
-         ReadParam(aReader, &aInit->mOuterWindowId) &&
-         ReadParam(aReader, &aInit->mBrowsingContextId) &&
-         ReadParam(aReader, &aInit->mFields);
-}
+IMPLEMENT_IPC_SERIALIZER_WITH_FIELDS(WindowContext::IPCInitializer,
+                                     mInnerWindowId, mOuterWindowId,
+                                     mBrowsingContextId, mFields);
 
 template struct ParamTraits<WindowContext::BaseTransaction>;
 

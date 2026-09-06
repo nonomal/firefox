@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+// @ts-nocheck - TODO - Remove this to type check this file.
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(
@@ -74,6 +76,15 @@ export class MLEngineWorker {
    */
   put() {
     throw new Error("Method not implemented.");
+  }
+
+  /**
+   * Returns true if the native ONNX runtime is available, otherwise false.
+   *
+   * @returns {boolean}
+   */
+  isNativeOnnxRuntimeAvailable() {
+    return globalThis.InferenceSession?.isAvailable() ?? false;
   }
 
   /**
@@ -152,3 +163,5 @@ export class MLEngineWorker {
 }
 
 new MLEngineWorker();
+
+export { lazy as _lazyForTestMocking };

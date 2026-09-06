@@ -612,7 +612,14 @@ export var AddonTestUtils = {
     }
   },
 
+  _calledOverrideCertDB: false,
+
   overrideCertDB() {
+    if (this._calledOverrideCertDB) {
+      throw new Error("Don't call overrideCertDB more than once.");
+    }
+    this._calledOverrideCertDB = true;
+
     let verifyCert = async (file, result, signatureInfos, callback) => {
       if (
         result == Cr.NS_ERROR_SIGNED_JAR_NOT_SIGNED &&
@@ -1168,7 +1175,7 @@ export var AddonTestUtils = {
    * Creates an XPI with the given files and installs it.
    *
    * @param {object} files
-   *        A files object as would be passed to {@see #createTempXPI}.
+   *        A files object as would be passed to {@link createTempXPIFile()}.
    * @returns {Promise}
    *        A promise which resolves when the add-on is installed.
    */
@@ -1546,8 +1553,8 @@ export var AddonTestUtils = {
 
   /**
    * @property {number} updateReason
-   *        The default update reason for {@see promiseFindAddonUpdates}
-   *        calls. May be overwritten by tests which primarily check for
+   *        The default update reason for {@link promiseFindAddonUpdates()} calls.
+   *        May be overwritten by tests which primarily check for
    *        updates with a particular reason.
    */
   updateReason: AddonManager.UPDATE_WHEN_PERIODIC_UPDATE,
@@ -1889,42 +1896,38 @@ export var AddonTestUtils = {
   // AMTelemetry events helpers.
 
   /**
-   * Formerly this function re-routed telemetry events. Now it just ensures
-   * that there are no unexamined events after the test file is exiting.
-   */
-  hookAMTelemetryEvents() {
-    this.testScope.registerCleanupFunction(() => {
-      this.testScope.Assert.deepEqual(
-        [],
-        this.getAMTelemetryEvents(),
-        "No unexamined telemetry events after test is finished"
-      );
-    });
-  },
-
-  /**
-   * Retrive any AMTelemetry event collected and clears _all_ telemetry events.
+   * Assert that the expected "sitepermission" addon install telemetry steps
+   * were recorded, then optionally reset FOG so that a subsequent call only
+   * sees events recorded after the previous call to this helper.
    *
-   * @returns {Array<object>}
-   *          The array of the collected telemetry data.
+   * @param {object} options
+   * @param {Array<string>} options.expectedSteps
+   *        The expected step extra var values for install events.
+   * @param {boolean} [options.resetFOG]
+   *        Whether to reset FOG after the assertion. Defaults to false.
+   * @param {Function} [options.onEvent]
+   *        If provided, called once per matched event (extra object), e.g. to
+   *        accumulate values across several calls within the same test task.
    */
-  getAMTelemetryEvents() {
-    // This duplicates some logic from TelemetryTestUtils.
-    let snapshots = Services.telemetry.snapshotEvents(
-      Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
-      /* clear = */ true
+  assertSitePermissionInstallSteps({
+    expectedSteps,
+    resetFOG = false,
+    onEvent,
+  }) {
+    let amInstallEvents = this.getAMGleanEvents("install", {
+      addon_type: "sitepermission",
+    });
+    this.testScope.Assert.deepEqual(
+      amInstallEvents.map(evt => evt.step),
+      expectedSteps,
+      "got expected sitepermission install telemetry events"
     );
-    let events = (snapshots.parent ?? [])
-      .filter(entry => entry[1] == "addonsManager")
-      .map(entry => ({
-        // The callers don't expect the timestamp or the category.
-        method: entry[2],
-        object: entry[3],
-        value: entry[4],
-        extra: entry[5],
-      }));
-
-    return events;
+    if (resetFOG) {
+      Services.fog.testResetFOG();
+    }
+    if (onEvent) {
+      amInstallEvents.forEach(onEvent);
+    }
   },
 
   /**

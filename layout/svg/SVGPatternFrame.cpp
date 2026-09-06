@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -141,9 +139,9 @@ static float MaxExpansion(const Matrix& aMatrix) {
 static bool IncludeBBoxScale(const SVGAnimatedViewBox& aViewBox,
                              uint32_t aPatternContentUnits,
                              uint32_t aPatternUnits) {
-  return (!aViewBox.IsExplicitlySet() &&
+  return (!aViewBox.HasRect() &&
           aPatternContentUnits == SVG_UNIT_TYPE_OBJECTBOUNDINGBOX) ||
-         (aViewBox.IsExplicitlySet() &&
+         (aViewBox.HasRect() &&
           aPatternUnits == SVG_UNIT_TYPE_OBJECTBOUNDINGBOX);
 }
 
@@ -171,9 +169,9 @@ static Matrix GetPatternMatrix(nsIFrame* aSource,
 
   // revert the vector effect transform so that the pattern appears unchanged
   if (aFillOrStroke == &nsStyleSVG::mStroke) {
-    gfxMatrix userToOuterSVG;
-    if (SVGUtils::GetNonScalingStrokeTransform(aSource, &userToOuterSVG)) {
-      patternMatrix *= userToOuterSVG;
+    if (Maybe<gfxMatrix> userToOuterSVG =
+            SVGUtils::GetNonScalingStrokeTransform(aSource)) {
+      patternMatrix *= *userToOuterSVG;
     }
   }
 
@@ -189,8 +187,8 @@ static nsresult GetTargetGeometry(gfxRect* aBBox,
   *aBBox =
       aOverrideBounds
           ? *aOverrideBounds
-          : SVGUtils::GetBBox(aTarget, SVGUtils::eUseFrameBoundsForOuterSVG |
-                                           SVGUtils::eBBoxIncludeFillGeometry);
+          : SVGUtils::GetBBox(aTarget, {SVGBBoxFlag::UseFrameBoundsForOuterSVG,
+                                        SVGBBoxFlag::IncludeFillGeometry});
 
   // Sanity check
   if (IncludeBBoxScale(aViewBox, aPatternContentUnits, aPatternUnits) &&
@@ -239,7 +237,8 @@ void SVGPatternFrame::PaintChildren(DrawTarget* aDrawTarget,
       // The CTM of each frame referencing us can be different
       ISVGDisplayableFrame* SVGFrame = do_QueryFrame(kid);
       if (SVGFrame) {
-        SVGFrame->NotifySVGChanged(ISVGDisplayableFrame::TRANSFORM_CHANGED);
+        SVGFrame->NotifySVGChanged(
+            ISVGDisplayableFrame::ChangeFlag::TransformChanged);
         tm = SVGUtils::GetTransformMatrixInUserSpace(kid) * tm;
       }
 
@@ -318,7 +317,7 @@ already_AddRefed<SourceSurface> SVGPatternFrame::PaintPattern(
   if (patternWithChildren->mCTM) {
     *patternWithChildren->mCTM = ctm;
   } else {
-    patternWithChildren->mCTM = MakeUnique<gfxMatrix>(ctm);
+    patternWithChildren->mCTM = std::make_unique<gfxMatrix>(ctm);
   }
 
   // Get the bounding box of the pattern.  This will be used to determine
@@ -470,7 +469,7 @@ const SVGAnimatedViewBox& SVGPatternFrame::GetViewBox(nsIContent* aDefault) {
   const SVGAnimatedViewBox& thisViewBox =
       static_cast<SVGPatternElement*>(GetContent())->mViewBox;
 
-  if (thisViewBox.IsExplicitlySet()) {
+  if (thisViewBox.HasRect()) {
     return thisViewBox;
   }
 
@@ -624,15 +623,14 @@ gfxMatrix SVGPatternFrame::ConstructCTM(const SVGAnimatedViewBox& aViewBox,
     scaleX = scaleY = MaxExpansion(callerCTM);
   }
 
-  if (!aViewBox.IsExplicitlySet()) {
+  if (!aViewBox.HasRect()) {
     return gfxMatrix(scaleX, 0.0, 0.0, scaleY, 0.0, 0.0);
+  }
+  if (aViewBox.IsEmpty()) {
+    return gfxMatrix(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);  // singular
   }
   const SVGViewBox& viewBox =
       aViewBox.GetAnimValue() * Style()->EffectiveZoom().ToFloat();
-
-  if (!viewBox.IsValid()) {
-    return gfxMatrix(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);  // singular
-  }
 
   float viewportWidth, viewportHeight;
   if (targetContent->IsSVGElement()) {
@@ -670,7 +668,7 @@ already_AddRefed<gfxPattern> SVGPatternFrame::GetPaintServerPattern(
     float aGraphicOpacity, imgDrawingParams& aImgParams,
     const gfxRect* aOverrideBounds) {
   if (aGraphicOpacity == 0.0f) {
-    return do_AddRef(new gfxPattern(DeviceColor()));
+    return MakeAndAddRef<gfxPattern>(DeviceColor());
   }
 
   // Paint it!

@@ -5,6 +5,7 @@
 //! A nested declarations rule.
 //! https://drafts.csswg.org/css-nesting-1/#nested-declarations-rule
 
+use crate::derives::*;
 use crate::properties::PropertyDeclarationBlock;
 use crate::shared_lock::{
     DeepCloneWithLock, Locked, SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard,
@@ -33,8 +34,8 @@ impl NestedDeclarationsRule {
 impl DeepCloneWithLock for NestedDeclarationsRule {
     fn deep_clone_with_lock(&self, lock: &SharedRwLock, guard: &SharedRwLockReadGuard) -> Self {
         Self {
-            block: Arc::new(lock.wrap(self.block.read_with(&guard).clone())),
-            source_location: self.source_location.clone(),
+            block: Arc::new(lock.wrap(self.block.read_with(guard).clone())),
+            source_location: self.source_location,
         }
     }
 }

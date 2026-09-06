@@ -1,4 +1,3 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,12 +15,6 @@
  */
 
 "use strict";
-
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
 
 function getLoadContext() {
   return window.docShell.QueryInterface(Ci.nsILoadContext);
@@ -52,8 +45,8 @@ async function cutCurrentSelection(elementQueryString, property, browser) {
   // The editor should be empty after cut.
   await SpecialPowers.spawn(
     browser,
-    [[elementQueryString, property]],
-    async function ([contentElementQueryString, contentProperty]) {
+    [elementQueryString, property],
+    async function (contentElementQueryString, contentProperty) {
       let element = content.document.querySelector(contentElementQueryString);
       is(
         element[contentProperty],

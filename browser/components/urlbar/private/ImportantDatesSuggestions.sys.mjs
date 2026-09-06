@@ -8,10 +8,10 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   QuickSuggest: "moz-src:///browser/components/urlbar/QuickSuggest.sys.mjs",
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
-  UrlbarUtils: "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 const SHOW_COUNTDOWN_THRESHOLD_DAYS = 30;
@@ -212,10 +212,9 @@ export class ImportantDatesSuggestions extends SuggestProvider {
 
     let dateString = this.#formatDateOrRange(eventDateOrRange);
     return new lazy.UrlbarResult({
-      type: lazy.UrlbarUtils.RESULT_TYPE.SEARCH,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.SEARCH,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       isBestMatch: true,
-      hideRowLabel: true,
       richSuggestionIconSize: 24,
       payload: {
         title: dateString,
@@ -230,15 +229,18 @@ export class ImportantDatesSuggestions extends SuggestProvider {
         isManageable: true,
         isBlockable: true,
       },
-      payloadHighlights: {
-        title: [
-          // Make whole title bold.
-          [0, dateString.length],
-        ],
+      highlights: {
+        title: lazy.UrlbarShared.HIGHLIGHT.ALL,
       },
     });
   }
 
+  /**
+   * @param {UrlbarQueryContext} _queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   * @param {string} _searchString
+   */
   onEngagement(_queryContext, controller, details, _searchString) {
     switch (details.selType) {
       case "manage":
@@ -247,10 +249,11 @@ export class ImportantDatesSuggestions extends SuggestProvider {
       case "dismiss": {
         let { result } = details;
         lazy.QuickSuggest.dismissResult(result);
-        result.acknowledgeDismissalL10n = {
-          id: "firefox-suggest-dismissal-acknowledgment-one",
-        };
-        controller.removeResult(result);
+        controller.removeResult(result, {
+          acknowledgeDismissalL10n: {
+            id: "firefox-suggest-dismissal-acknowledgment-one",
+          },
+        });
         break;
       }
     }

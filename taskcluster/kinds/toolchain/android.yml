@@ -193,7 +193,7 @@ linux64-jdk-repack:
         toolchain-artifact: project/gecko/jdk/jdk-linux.tar.zst
         toolchain-alias: linux64-jdk
         toolchain-env:
-            JAVA_HOME: "/builds/worker/fetches/jdk/jdk-17.0.17+10"
+            JAVA_HOME: "/builds/worker/fetches/jdk/jdk-17.0.18+8"
 
 linux64-android-sdk-linux-repack:
     description: "Android SDK (Linux) repack toolchain build"
@@ -261,16 +261,22 @@ linux64-android-gradle-dependencies:
         sparse-profile: null
         resources:
             - '*.gradle'
+            - 'config/milestone.txt'
             - 'gradle.properties'
             - 'gradle/**'
             - 'mobile/android/**/*.gradle'
+            - 'mobile/android/**/*.gradle.kts'
             - 'mobile/android/**/gradle.properties'
             - 'mobile/android/android-components/plugins/dependencies/src/main/java/ApplicationServices.kt'
             - 'mobile/android/android-components/plugins/dependencies/src/main/java/DependenciesPlugin.kt'
             - 'mobile/android/config/mozconfigs/android-arm-gradle-dependencies/**'
             - 'mobile/android/config/mozconfigs/common*'
             - 'mobile/android/gradle.configure'
+            # The enumeration passes live here.
+            - 'mobile/android/mach_commands.py'
             - 'taskcluster/scripts/misc/android-gradle-dependencies/**'
+            - 'third_party/application-services/**/*.gradle'
+            - 'third_party/application-services/.buildconfig-android.yml'
         toolchain-artifact: public/build/android-gradle-dependencies.tar.zst
         toolchain-alias: android-gradle-dependencies
     fetches:
@@ -283,41 +289,7 @@ linux64-android-gradle-dependencies:
             - linux64-android-sdk-linux-repack
             - linux64-jdk-repack
             - linux64-node
-
-linux64-android-gradle-dependencies-lite:
-    description: "Android Lite Gradle dependencies toolchain task"
-    treeherder:
-        symbol: TL(gradle-dependencies-lite)
-    worker:
-        env:
-            GRADLE_USER_HOME: "/builds/worker/workspace/build/src/mobile/android/gradle/dotgradle-online"
-    run:
-        script: android-gradle-dependencies-lite.sh
-        sparse-profile: null
-        resources:
-            - '*.gradle'
-            - 'gradle.properties'
-            - 'gradle/**'
-            - 'mobile/android/**/*.gradle'
-            - 'mobile/android/**/gradle.properties'
-            - 'mobile/android/android-components/plugins/dependencies/src/main/java/ApplicationServices.kt'
-            - 'mobile/android/android-components/plugins/dependencies/src/main/java/DependenciesPlugin.kt'
-            - 'mobile/android/config/mozconfigs/android-arm-gradle-dependencies/**'
-            - 'mobile/android/config/mozconfigs/common*'
-            - 'mobile/android/gradle.configure'
-            - 'taskcluster/scripts/misc/android-gradle-dependencies/**'
-        toolchain-artifact: public/build/android-gradle-dependencies.tar.zst
-        toolchain-alias: android-gradle-dependencies-lite
-    fetches:
-        fetch:
-            - sonatype-nexus
-            # Nexus needs Java 8
-            - jdk-8-linux64
-        toolchain:
-            # Aliases aren't allowed for toolchains depending on toolchains.
-            - linux64-android-sdk-linux-repack
-            - linux64-jdk-repack
-            - linux64-node
+            - terser
 
 linux64-android-xmlstarlet:
     description: "Tool for finding xml paths on Android"

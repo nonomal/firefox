@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -121,16 +119,23 @@ void BrotliCompressionStreamAlgorithms::BrotliDeleter::operator()(
 }
 
 Result<already_AddRefed<BrotliDecompressionStreamAlgorithms>, nsresult>
-BrotliDecompressionStreamAlgorithms::Create() {
+BrotliDecompressionStreamAlgorithms::Create(bool aEnableLargeWindow) {
   RefPtr<BrotliDecompressionStreamAlgorithms> alg =
       new BrotliDecompressionStreamAlgorithms();
-  MOZ_TRY(alg->Init());
+  MOZ_TRY(alg->Init(aEnableLargeWindow));
   return alg.forget();
 }
 
-[[nodiscard]] nsresult BrotliDecompressionStreamAlgorithms::Init() {
+[[nodiscard]] nsresult BrotliDecompressionStreamAlgorithms::Init(
+    bool aEnableLargeWindow) {
   mState = std::unique_ptr<BrotliDecoderStateStruct, BrotliDeleter>(
       BrotliDecoderCreateInstance(nullptr, nullptr, nullptr));
+  if (aEnableLargeWindow) {
+    // We cannot expose this to web as the spec requires RFC 7932 compliance.
+    // See https://github.com/whatwg/compression/issues/84.
+    BrotliDecoderSetParameter(mState.get(), BROTLI_DECODER_PARAM_LARGE_WINDOW,
+                              1);
+  }
   if (!mState) {
     return NS_ERROR_OUT_OF_MEMORY;
   }

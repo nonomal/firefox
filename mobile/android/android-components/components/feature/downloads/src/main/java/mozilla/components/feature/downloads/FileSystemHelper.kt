@@ -8,8 +8,8 @@ import android.os.StatFs
 import java.io.File
 
 /**
- * Interface for abstracting file system operations.
- * This allows for easier testing by providing a way to mock file system interactions.
+ * Interface for abstracting file system operations. This allows for easier testing by providing a way to mock file
+ * system interactions.
  */
 interface FileSystemHelper {
 
@@ -36,29 +36,18 @@ interface FileSystemHelper {
      * @return The number of available bytes, or 0 if the path does not exist or is not a directory.
      */
     fun availableBytesInDirectory(path: String): Long
-
-    /**
-     * Checks if the given file path exists.
-     *
-     * @param filePath the path of the file to check
-     * @return <code>true</code> if and only if the file denoted by this abstract pathname exists;
-     *          <code>false</code> otherwise
-     */
-    fun fileExists(filePath: String): Boolean
 }
 
-/**
- * Default implementation of [FileSystemHelper].
- */
+/** Default implementation of [FileSystemHelper]. */
 class DefaultFileSystemHelper : FileSystemHelper {
 
     /**
-     * Creates a directory at the specified path if it does not already exist.
-     * It uses [File.mkdirs] which creates parent directories if necessary.
+     * Creates a directory at the specified path if it does not already exist. It uses [File.mkdirs] which creates
+     * parent directories if necessary.
      *
      * @param path The absolute path of the directory to create.
-     * @return `true` if the directory was created (or any necessary parent directories),
-     *         `false` if the directory already existed.
+     * @return `true` if the directory was created (or any necessary parent directories), `false` if the directory
+     *   already existed.
      */
     override fun createDirectoryIfNotExists(path: String): Boolean {
         val directory = File(path)
@@ -69,8 +58,8 @@ class DefaultFileSystemHelper : FileSystemHelper {
     }
 
     /**
-     * Returns the number of available bytes in the file system directory specified by the path.
-     * Uses [StatFs] to retrieve this information.
+     * Returns the number of available bytes in the file system directory specified by the path. Uses [StatFs] to
+     * retrieve this information.
      *
      * @param path The absolute path of the directory.
      * @return The number of available bytes.
@@ -88,14 +77,4 @@ class DefaultFileSystemHelper : FileSystemHelper {
         val file = File(path)
         return file.exists() && file.isDirectory
     }
-
-    /**
-     * Checks if the given file path exists.
-     *
-     * @param filePath the path of the file to check
-     * @return <code>true</code> if and only if the file denoted by this abstract pathname exists;
-     *          <code>false</code> otherwise
-     */
-    override fun fileExists(filePath: String) =
-        File(filePath).exists()
 }

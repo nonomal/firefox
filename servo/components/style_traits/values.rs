@@ -6,7 +6,7 @@
 
 use app_units::Au;
 use cssparser::ToCss as CssparserToCss;
-use cssparser::{serialize_string, ParseError, Parser, Token, UnicodeRange};
+use cssparser::{serialize_string, ParseError, Parser, UnicodeRange};
 use servo_arc::Arc;
 use std::fmt::{self, Write};
 
@@ -29,9 +29,6 @@ use std::fmt::{self, Write};
 ///   iterable will be serialized as the arguments for the function;
 /// * an iterable field can also be annotated with `#[css(if_empty = "foo")]`
 ///   to print `"foo"` if the iterator is empty;
-/// * if `#[css(dimension)]` is found on a variant, that variant needs
-///   to have a single member. The variant would be serialized as a CSS
-///   dimension token, like: <member><identifier>;
 /// * if `#[css(skip)]` is found on a field, the `ToCss` call for that field
 ///   is skipped;
 /// * if `#[css(skip_if = "function")]` is found on a field, the `ToCss` call
@@ -257,6 +254,12 @@ impl<'a, 'b, W> SequenceWriter<'a, 'b, W>
 where
     W: Write + 'b,
 {
+    /// Returns whether this writer has written any item.
+    pub fn has_written(&self) -> bool {
+        // See comment in item()
+        self.inner.prefix.is_none()
+    }
+
     /// Create a new sequence writer.
     #[inline]
     pub fn new(inner: &'a mut CssWriter<'b, W>, separator: &'static str) -> Self {
@@ -374,12 +377,9 @@ pub trait Separator {
     ///
     /// This method returns `Err(_)` the first time a closure does or if
     /// the separators aren't correct.
-    fn parse<'i, 't, F, T, E>(
-        parser: &mut Parser<'i, 't>,
-        parse_one: F,
-    ) -> Result<Vec<T>, ParseError<'i, E>>
+    fn parse<'i, F, T, E>(parser: &mut Parser<'i>, parse_one: F) -> Result<Vec<T>, ParseError<E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>;
+        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>;
 }
 
 impl Separator for Comma {
@@ -387,12 +387,9 @@ impl Separator for Comma {
         ", "
     }
 
-    fn parse<'i, 't, F, T, E>(
-        input: &mut Parser<'i, 't>,
-        parse_one: F,
-    ) -> Result<Vec<T>, ParseError<'i, E>>
+    fn parse<'i, F, T, E>(input: &mut Parser<'i>, parse_one: F) -> Result<Vec<T>, ParseError<E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
+        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
     {
         input.parse_comma_separated(parse_one)
     }
@@ -403,12 +400,9 @@ impl Separator for Space {
         " "
     }
 
-    fn parse<'i, 't, F, T, E>(
-        input: &mut Parser<'i, 't>,
-        mut parse_one: F,
-    ) -> Result<Vec<T>, ParseError<'i, E>>
+    fn parse<'i, F, T, E>(input: &mut Parser<'i>, mut parse_one: F) -> Result<Vec<T>, ParseError<E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
+        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
     {
         input.skip_whitespace(); // Unnecessary for correctness, but may help try_parse() rewind less.
         let mut results = vec![parse_one(input)?];
@@ -428,24 +422,20 @@ impl Separator for CommaWithSpace {
         ", "
     }
 
-    fn parse<'i, 't, F, T, E>(
-        input: &mut Parser<'i, 't>,
-        mut parse_one: F,
-    ) -> Result<Vec<T>, ParseError<'i, E>>
+    fn parse<'i, F, T, E>(input: &mut Parser<'i>, mut parse_one: F) -> Result<Vec<T>, ParseError<E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
+        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
     {
         input.skip_whitespace(); // Unnecessary for correctness, but may help try_parse() rewind less.
         let mut results = vec![parse_one(input)?];
         loop {
             input.skip_whitespace(); // Unnecessary for correctness, but may help try_parse() rewind less.
-            let comma_location = input.current_source_location();
             let comma = input.try_parse(|i| i.expect_comma()).is_ok();
             input.skip_whitespace(); // Unnecessary for correctness, but may help try_parse() rewind less.
             if let Ok(item) = input.try_parse(&mut parse_one) {
                 results.push(item);
             } else if comma {
-                return Err(comma_location.new_unexpected_token_error(Token::Comma));
+                return Err(ParseError::unexpected_token());
             } else {
                 break;
             }
@@ -593,93 +583,3 @@ pub mod specified {
         }
     }
 }
-
-/// A property-agnostic representation of a value, used by Typed OM.
-///
-/// `TypedValue` is the internal counterpart of the various `CSSStyleValue`
-/// subclasses defined by the Typed OM specification. It captures values that
-/// can be represented independently of any particular property.
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub enum TypedValue {
-    /// A keyword value (e.g. `"block"`, `"none"`, `"thin"`).
-    ///
-    /// Keywords are stored as a `CssString` so they can be represented and
-    /// transferred independently of any specific property. This corresponds
-    /// to `CSSKeywordValue` in the Typed OM specification.
-    Keyword(CssString),
-}
-
-/// Reifies a value into its Typed OM representation.
-///
-/// This trait is the Typed OM analogue of [`ToCss`]. Instead of serializing
-/// values into CSS syntax, it converts them into [`TypedValue`]s that can be
-/// exposed to the DOM as `CSSStyleValue` subclasses.
-///
-/// This trait is derivable with `#[derive(ToTyped)]`. The derived
-/// implementation currently supports:
-///
-/// * Keyword enums: Enums whose variants are all unit variants are
-///   automatically reified as [`TypedValue::Keyword`], using the same
-///   serialization logic as [`ToCss`].
-///
-/// * Structs and data-carrying variants: When the
-///   `#[typed_value(derive_fields)]` attribute is present, the derive attempts
-///   to call `.to_typed()` recursively on inner fields or variant payloads,
-///   producing a nested [`TypedValue`] representation when possible.
-///
-/// * Other cases: If no automatic mapping is defined or recursion is not
-///   enabled, the derived implementation falls back to the default method,
-///   returning `None`.
-///
-/// The `derive_fields` attribute is intentionally opt-in for now to avoid
-/// forcing types that do not participate in reification to implement
-/// [`ToTyped`]. Once Typed OM coverage stabilizes, this behavior is expected
-/// to become the default (see the corresponding follow-up bug).
-///
-/// Over time, the derive may be extended to handle additional CSS value
-/// categories such as numeric, color, and transform types.
-pub trait ToTyped {
-    /// Attempt to convert `self` into a [`TypedValue`].
-    ///
-    /// Returns `Some(TypedValue)` if the value can be reified into a
-    /// property-agnostic CSSStyleValue subclass. Returns `None` if the value
-    /// is unrepresentable, in which case reification produces a property-tied
-    /// CSSStyleValue instead.
-    fn to_typed(&self) -> Option<TypedValue> {
-        None
-    }
-}
-
-impl<T> ToTyped for Box<T>
-where
-    T: ?Sized + ToTyped,
-{
-    fn to_typed(&self) -> Option<TypedValue> {
-        (**self).to_typed()
-    }
-}
-
-impl ToTyped for Au {
-    fn to_typed(&self) -> Option<TypedValue> {
-        // XXX Should return TypedValue::Numeric in px units once that variant
-        // is available. Tracked in bug 1990419.
-        None
-    }
-}
-
-macro_rules! impl_to_typed_for_predefined_type {
-    ($name: ty) => {
-        impl<'a> ToTyped for $name {
-            fn to_typed(&self) -> Option<TypedValue> {
-                // XXX Should return TypedValue::Numeric with unit "number"
-                // once that variant is available. Tracked in bug 1990419.
-                None
-            }
-        }
-    };
-}
-
-impl_to_typed_for_predefined_type!(f32);
-impl_to_typed_for_predefined_type!(i8);
-impl_to_typed_for_predefined_type!(i32);

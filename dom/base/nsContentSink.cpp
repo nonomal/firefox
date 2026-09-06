@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -20,16 +18,20 @@
 #include "mozilla/Components.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/PresShellWidgetListener.h"
 #include "mozilla/ProfilerLabels.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_content.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/StoragePrincipalHelper.h"
 #include "mozilla/css/Loader.h"
+#include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/HTMLDNSPrefetch.h"
 #include "mozilla/dom/LinkStyle.h"
+#include "mozilla/dom/ModuleLoader.h"
 #include "mozilla/dom/MutationObservers.h"
 #include "mozilla/dom/ReferrerInfo.h"
 #include "mozilla/dom/SRILogHelper.h"
@@ -66,7 +68,6 @@
 #include "nsSandboxFlags.h"
 #include "nsString.h"
 #include "nsStringFwd.h"
-#include "nsViewManager.h"
 #include "nsWidgetsCID.h"
 using namespace mozilla;
 using namespace mozilla::css;
@@ -219,7 +220,8 @@ nsContentSink::StyleSheetLoaded(StyleSheet* aSheet, bool aWasDeferred,
 
     if (loadedAllSheets &&
         mDocument->GetReadyStateEnum() >= Document::READYSTATE_INTERACTIVE) {
-      mScriptLoader->DeferCheckpointReached();
+      const RefPtr<ScriptLoader> scriptLoader = mScriptLoader;
+      scriptLoader->DeferCheckpointReached();
     }
   }
 
@@ -452,8 +454,10 @@ void nsContentSink::PreloadHref(
   nsCOMPtr<nsIURI> uri;
   NS_NewURI(getter_AddRefs(uri), aHref, encoding, mDocument->GetDocBaseURI());
   if (!uri) {
-    // URL parsing failed.
-    return;
+    if (!aAs.LowerCaseEqualsASCII("image") || aSrcset.IsEmpty()) {
+      // URL parsing failed.
+      return;
+    }
   }
 
   nsAttrValue asAttr;
@@ -467,7 +471,7 @@ void nsContentSink::PreloadHref(
   if (policyType == nsIContentPolicy::TYPE_INVALID ||
       !mozilla::net::CheckPreloadAttrs(asAttr, mimeType, aMedia, mDocument)) {
     // Ignore preload wrong or empty attributes.
-    mozilla::net::WarnIgnoredPreload(*mDocument, *uri);
+    mozilla::net::WarnIgnoredPreload(*mDocument, uri, aSrcset);
     return;
   }
 
@@ -487,7 +491,8 @@ void nsContentSink::PreloadModule(
   }
   ModuleLoader* moduleLoader = scriptLoader->GetModuleLoader();
 
-  if (!StaticPrefs::network_modulepreload()) {
+  if (!StaticPrefs::network_modulepreload() &&
+      !StaticPrefs::dom_multiple_import_maps_enabled()) {
     // Keep behavior from https://phabricator.services.mozilla.com/D149371,
     // prior to main implementation of modulepreload
     moduleLoader->DisallowImportMaps();
@@ -515,7 +520,9 @@ void nsContentSink::PreloadModule(
     return;
   }
 
-  moduleLoader->DisallowImportMaps();
+  if (!StaticPrefs::dom_multiple_import_maps_enabled()) {
+    moduleLoader->DisallowImportMaps();
+  }
 
   mDocument->Preloads().PreloadLinkHeader(
       uri, aHref, nsIContentPolicy::TYPE_SCRIPT, u"script"_ns,
@@ -597,7 +604,7 @@ void nsContentSink::StartLayout(bool aIgnorePendingSheets) {
   if (aIgnorePendingSheets) {
     nsContentUtils::ReportToConsole(
         nsIScriptError::warningFlag, "Layout"_ns, mDocument,
-        nsContentUtils::eLAYOUT_PROPERTIES, "ForcedLayoutStart");
+        PropertiesFile::LAYOUT_PROPERTIES, "ForcedLayoutStart");
   }
 
   // Notify on all our content.  If none of our presshells have started layout
@@ -842,10 +849,10 @@ void nsContentSink::DidBuildModelImpl(bool aTerminated) {
              "Bad readyState");
   mDocument->SetReadyStateInternal(Document::READYSTATE_INTERACTIVE);
 
-  if (mScriptLoader) {
-    mScriptLoader->ParsingComplete(aTerminated);
+  if (const RefPtr<ScriptLoader> scriptLoader = mScriptLoader) {
+    scriptLoader->ParsingComplete(aTerminated);
     if (!mPendingSheetCount) {
-      mScriptLoader->DeferCheckpointReached();
+      scriptLoader->DeferCheckpointReached();
     }
   }
 
@@ -914,7 +921,7 @@ nsresult nsContentSink::WillParseImpl(void) {
   uint32_t currentTime = PR_IntervalToMicroseconds(PR_IntervalNow());
 
   if (StaticPrefs::content_sink_enable_perf_mode() == 0) {
-    uint32_t lastEventTime = nsViewManager::GetLastUserEventTime();
+    uint32_t lastEventTime = PresShellWidgetListener::GetLastUserEventTime();
     bool newDynLower = mDocument->IsInBackgroundWindow() ||
                        ((currentTime - mBeginLoadTime) >
                             StaticPrefs::content_sink_initial_perf_time() &&
@@ -957,6 +964,18 @@ void nsContentSink::WillBuildModelImpl() {
 /* static */
 void nsContentSink::NotifyDocElementCreated(Document* aDoc) {
   MOZ_ASSERT(nsContentUtils::IsSafeToRunScript());
+
+  // This process just created a document. Ensure it's been marked as untrusted.
+  mozilla::dom::ContentChild::MaybeBecomeUntrusted();
+
+  // Data documents with a content principal (DOMParser, XHR responseXML,
+  // createDocument) are never displayed, cannot run scripts and have no
+  // window. None of the observers of these notifications act on them, so
+  // skip the notification overhead. Only CustomElementListener with
+  // SystemPrincipals actually make use of this.
+  if (aDoc->IsLoadedAsData() && !aDoc->NodePrincipal()->IsSystemPrincipal()) {
+    return;
+  }
 
   nsCOMPtr<nsIObserverService> observerService =
       mozilla::services::GetObserverService();

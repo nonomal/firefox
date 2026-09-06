@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -216,7 +215,10 @@ class ProfileBuffer final {
 #endif
 
   // GetStreamingParametersForThreadCallback:
-  //   (ProfilerThreadId) -> Maybe<StreamingParametersForThread>
+  //   (ProfilerThreadId, uint64_t aEntryPosition)
+  //       -> Maybe<StreamingParametersForThread>
+  // aEntryPosition is the buffer position of the sample being dispatched, used
+  // to pick the right thread when OS thread ids have been recycled.
   template <typename GetStreamingParametersForThreadCallback>
   ProfilerThreadId DoStreamSamplesAndMarkersToJSON(
       mozilla::FailureLatch& aFailureLatch,
@@ -267,8 +269,9 @@ class ProfileBufferCollector final : public ProfilerStackCollector {
 
   virtual void CollectNativeLeafAddr(void* aAddr) override;
   virtual void CollectJitReturnAddr(void* aAddr) override;
-  virtual void CollectWasmFrame(JS::ProfilingCategoryPair aCategory,
-                                const char* aLabel) override;
+  virtual void CollectWasmOrSyncJITFrame(JS::ProfilingCategoryPair aCategory,
+                                         const char* aLabel,
+                                         uint32_t aSourceId) override;
   virtual void CollectProfilingStackFrame(
       const js::ProfilingStackFrame& aFrame) override;
 

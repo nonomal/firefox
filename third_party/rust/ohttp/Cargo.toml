@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.82.0"
+rust-version = "1.83.0"
 name = "ohttp"
-version = "0.6.1"
+version = "0.7.2"
 authors = ["Martin Thomson <mt@lowentropy.net>"]
 build = "build.rs"
 autolib = false
@@ -39,29 +39,37 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/martinthomson/ohttp"
 
 [features]
-app-svc = ["nss"]
+app-svc = [
+    "nss",
+    "dep:mozbuild",
+]
 client = []
 default = [
     "client",
     "server",
     "rust-hpke",
+    "stream",
 ]
 external-sqlite = []
 gecko = [
     "nss",
-    "mozbuild",
+    "dep:mozbuild",
 ]
-nss = ["bindgen"]
+nss = ["dep:bindgen"]
 rust-hpke = [
-    "rand",
-    "aead",
-    "aes-gcm",
-    "chacha20poly1305",
-    "hkdf",
-    "sha2",
-    "hpke",
+    "dep:rand",
+    "dep:aead",
+    "dep:aes-gcm",
+    "dep:chacha20poly1305",
+    "dep:hkdf",
+    "dep:sha2",
+    "dep:hpke",
 ]
 server = []
+stream = [
+    "dep:futures",
+    "dep:pin-project",
+]
 unsafe-print-secrets = []
 
 [lib]
@@ -71,27 +79,31 @@ path = "src/lib.rs"
 [dependencies]
 byteorder = "1.4"
 hex = "0.4"
-thiserror = "1"
+thiserror = "2"
 
 [dependencies.aead]
-version = "0.4"
+version = "0.5"
 features = ["std"]
 optional = true
 
 [dependencies.aes-gcm]
-version = "0.9"
+version = "0.10"
 optional = true
 
 [dependencies.chacha20poly1305]
-version = "0.8"
+version = "0.10"
+optional = true
+
+[dependencies.futures]
+version = "0.3"
 optional = true
 
 [dependencies.hkdf]
-version = "0.11"
+version = "0.12"
 optional = true
 
 [dependencies.hpke]
-version = "0.11.0"
+version = "0.13"
 features = [
     "std",
     "x25519",
@@ -103,8 +115,12 @@ default-features = false
 version = "0.4"
 default-features = false
 
+[dependencies.pin-project]
+version = "1.1"
+optional = true
+
 [dependencies.rand]
-version = "0.8"
+version = "0.9"
 optional = true
 
 [dependencies.regex]
@@ -112,17 +128,20 @@ version = "~1.11"
 optional = true
 
 [dependencies.sha2]
-version = "0.9"
+version = "0.10"
 optional = true
 
 [dev-dependencies.env_logger]
 version = "0.10"
 default-features = false
 
+[dev-dependencies.sync-async]
+path = "../sync-async"
+
 [build-dependencies]
 serde = "1.0"
 serde_derive = "1.0"
-toml = "0.5"
+toml = ">=0.5,<=0.9"
 
 [build-dependencies.bindgen]
 version = "0.72"

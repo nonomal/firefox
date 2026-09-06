@@ -196,12 +196,11 @@ function getOrderedResource(resource) {
     isThirdPartyTrackingResource: resource.isThirdPartyTrackingResource,
     referrerPolicy: resource.referrerPolicy,
     blockedReason: resource.blockedReason,
-    blockingExtension: resource.blockingExtension,
+    extension: resource.extension,
     channelId: resource.channelId,
     totalTime: resource.totalTime,
     securityState: resource.securityState,
     responseCache: resource.responseCache,
-    isRacing: resource.isRacing,
   };
 }
 

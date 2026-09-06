@@ -106,6 +106,8 @@ var supported_properties = {
                              /* test_length_percent_pair_unclamped */ ],
     "background-size": [ test_background_size_transition,
                          test_length_percent_pair_clamped ],
+    "baseline-shift": [ test_length_transition, test_percent_transition,
+                        test_length_unclamped, test_percent_unclamped ],
     "border-bottom-color": [ test_color_transition,
                              test_currentcolor_transition ],
     "border-bottom-width": [ test_length_transition,
@@ -166,7 +168,7 @@ var supported_properties = {
                           test_float_aboveOne_transition,
                           /* FIXME: font-size-adjust treats zero specially */
                           /* test_float_zeroToOne_clamped */ ],
-    "font-stretch": [ test_percent_transition, test_percent_clamped ],
+    "font-width": [ test_percent_transition, test_percent_clamped ],
     "font-weight": [ test_font_weight ],
     "column-gap": [ test_grid_gap ],
     "row-gap": [ test_grid_gap ],
@@ -308,8 +310,6 @@ var supported_properties = {
     "rotate": [ test_rotate_transition ],
     "scale": [ test_scale_transition ],
     "translate": [ test_translate_transition ],
-    "vertical-align": [ test_length_transition, test_percent_transition,
-                        test_length_unclamped, test_percent_unclamped ],
     "visibility": [ test_visibility_transition ],
     "width": [ test_length_transition, test_percent_transition,
                test_length_percent_calc_transition,
@@ -321,7 +321,6 @@ var supported_properties = {
     "y": [ test_length_transition, test_percent_transition,
            test_length_unclamped, test_percent_unclamped ],
     "z-index": [ test_integer_transition, test_pos_integer_or_auto_transition ],
-    "-webkit-line-clamp": [ test_pos_integer_or_none_transition ],
     "-webkit-text-fill-color": [ test_color_transition,
                                  test_currentcolor_transition ],
     "-webkit-text-stroke-color": [ test_color_transition,
@@ -363,8 +362,10 @@ if (IsCSSPropertyPrefEnabled("layout.css.backdrop-filter.enabled")) {
   supported_properties["backdrop-filter"] = [ test_filter_transition ];
 }
 
-if (IsCSSPropertyPrefEnabled("layout.css.font-variations.enabled")) {
-  supported_properties["font-variation-settings"] = [ test_font_variations_transition ];
+supported_properties["font-variation-settings"] = [ test_font_variations_transition ];
+
+if (IsCSSPropertyPrefEnabled("layout.css.line-clamp.enabled")) {
+  supported_properties["line-clamp"] = [ test_pos_integer_or_none_transition ];
 }
 
 supported_properties["contain-intrinsic-width"] = [ test_length_transition, test_auto_with_length_transition ];
@@ -381,6 +382,12 @@ if (IsCSSPropertyPrefEnabled("layout.css.text-decoration-inset.enabled")) {
   Object.assign(supported_properties, {
     "text-decoration-inset": [ test_length_transition ],
   });
+
+  if (IsCSSPropertyPrefEnabled("layout.css.text-decoration-inset-percentage.enabled")) {
+    supported_properties["text-decoration-inset"].push(
+      test_percent_transition,
+    );
+  }
 }
 
 // For properties which are well-tested by web-platform-tests, we don't need to
@@ -950,7 +957,7 @@ const pathFunctionTests = [
   {
     start: "path('M 10 10 A 10 20 30 1 0 140 450')",
     end: "path('M 10 10 A 50 60 70 0 1 380 290')",
-    expected: ["path", '"M 10 10 A 20 30 40 1 0 200 410"']
+    expected: ["path", '"M 10 10 A 20 30 40 1 1 200 410"']
   },
   // mix relative and absolute coordinates
   {
@@ -2748,8 +2755,8 @@ function test_background_position_coord_transition(prop) {
  * Common tests for 'background-position', 'background-size', and other
  * properties that take CSS value-type 'position' or 'bg-size'.
  *
- *  @arg prop The name of the property
- *  @arg doesPropTakeListValues
+ *  @param prop The name of the property
+ *  @param doesPropTakeListValues
  *         If false, the property is assumed to just take a single 'position' or
  *         'bg-size' value. If true, the property is assumed to also accept
  *         comma-separated list of such values.

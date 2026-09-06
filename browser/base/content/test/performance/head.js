@@ -5,6 +5,7 @@ ChromeUtils.defineESModuleGetters(this, {
   PerfTestHelpers: "resource://testing-common/PerfTestHelpers.sys.mjs",
   PlacesTestUtils: "resource://testing-common/PlacesTestUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+  UrlbarUtils: "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
   UrlbarTestUtils: "resource://testing-common/UrlbarTestUtils.sys.mjs",
 });
 
@@ -289,6 +290,23 @@ function disableFxaBadge() {
   });
 }
 
+// Ensure updating Unified Search Button icon by user interaction before
+// tests. This prevents the search engine logo from appearing in the urlbar
+// during the test, which would cause unexpected visual changes.
+async function ensureSearchIconVisible() {
+  if (
+    Services.prefs.getBoolPref("browser.urlbar.scotchBonnet.enableOverride")
+  ) {
+    let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser);
+    BrowserTestUtils.removeTab(tab);
+    await TestUtils.waitForCondition(
+      () =>
+        UrlbarTestUtils.getSearchModeSwitcherIcon(window) !=
+        UrlbarShared.ICON.SEARCH_GLASS
+    );
+  }
+}
+
 function rectInBoundingClientRect(r, bcr) {
   return (
     bcr.x <= r.x1 &&
@@ -416,7 +434,7 @@ async function addDummyHistoryEntries(searchStr = "") {
 
   for (let i = 0; i < NUM_VISITS; ++i) {
     visits.push({
-      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+      // eslint-disable-next-line sdl/no-insecure-url
       uri: `http://example.com/urlbar-reflows-${i}`,
       title: `Reflow test for URL bar entry #${i} - ${searchStr}`,
     });
@@ -610,20 +628,249 @@ function compareFrames(frame, previousFrame) {
   return rects;
 }
 
-function dumpFrame({ data, width, height }) {
+let _artifactCounter = 0;
+
+/**
+ * Creates and uploads an animated PNG artifact showing flicker between two frames.
+ *
+ * The APNG contains three frames:
+ * - Previous frame with "Frame N" label
+ * - Current frame with "Frame N+1" label
+ * - Difference frame highlighting changed areas (orange for expected, red for unexpected)
+ *
+ * Uploads to MOZ_UPLOAD_DIR if set, otherwise logs as base64 data URI.
+ */
+async function reportFlickerWithAPNG(
+  previousFrame,
+  currentFrame,
+  frameIndex,
+  expectedRects
+) {
+  let apngBytes = createAnimatedPNG(
+    previousFrame,
+    currentFrame,
+    frameIndex,
+    expectedRects
+  );
+  if (apngBytes) {
+    _artifactCounter++;
+    let testName = "flicker_test";
+    if (typeof gTestPath === "string") {
+      testName = gTestPath.split("/").pop().replace(/\.js$/, "");
+    }
+    let filename = `${testName}_flicker_detected_${_artifactCounter}.png`;
+
+    let uploadDir = Services.env.get("MOZ_UPLOAD_DIR");
+    if (uploadDir) {
+      let file = PathUtils.join(uploadDir, filename);
+      await IOUtils.write(file, Uint8Array.from(apngBytes));
+      Assert.ok(false, `See the ${filename} APNG artifact`);
+    } else {
+      let binary = "";
+      for (let i = 0; i < apngBytes.length; i++) {
+        binary += String.fromCharCode(apngBytes[i]);
+      }
+      let base64 = btoa(binary);
+      info(`data:image/png;base64,${base64}`);
+      Assert.ok(
+        false,
+        "Set MOZ_UPLOAD_DIR environment variable to save APNG artifacts"
+      );
+    }
+  }
+}
+
+/**
+ * Helper function to add text overlay to a canvas
+ */
+function addTextOverlay(canvas, text) {
+  let ctx = canvas.getContext("2d");
+  ctx.font = "bold 32px Arial";
+  ctx.fillStyle = "yellow";
+  ctx.strokeStyle = "black";
+  ctx.lineWidth = 4;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  let x = canvas.width / 2;
+  let y = canvas.height / 2;
+
+  ctx.strokeText(text, x, y);
+  ctx.fillText(text, x, y);
+}
+
+/**
+ * Helper to create canvas frame with overlay text
+ */
+function createFrameWithOverlay(frameData, width, height, overlayText) {
   let canvas = document.createElementNS(
     "http://www.w3.org/1999/xhtml",
     "canvas"
   );
-  canvas.mozOpaque = true;
   canvas.width = width;
   canvas.height = height;
+  let ctx = canvas.getContext("2d");
+  ctx.putImageData(new ImageData(frameData, width, height), 0, 0);
+  addTextOverlay(canvas, overlayText);
+  return ctx.getImageData(0, 0, width, height).data;
+}
 
-  canvas
-    .getContext("2d", { alpha: false, willReadFrequently: true })
-    .putImageData(new ImageData(data, width, height), 0, 0);
+function createAnimatedPNG(
+  previousFrame,
+  currentFrame,
+  frameIndex,
+  expectedRects
+) {
+  const { width, height } = previousFrame;
 
-  info(canvas.toDataURL());
+  let apngFrames = [
+    {
+      data: createFrameWithOverlay(
+        previousFrame.data,
+        width,
+        height,
+        `Frame ${frameIndex}`
+      ),
+      delay: 1500,
+    },
+    {
+      data: createFrameWithOverlay(
+        currentFrame.data,
+        width,
+        height,
+        `Frame ${frameIndex + 1}`
+      ),
+      delay: 1500,
+    },
+    {
+      data: createDifferenceHighlight(
+        previousFrame,
+        currentFrame,
+        expectedRects
+      ),
+      delay: 2000,
+    },
+  ];
+  // Start APNG encoding
+  let encoder = Cc[
+    "@mozilla.org/image/encoder;2?type=image/png"
+  ].createInstance(Ci.imgIEncoder);
+  encoder.startImageEncode(
+    width,
+    height,
+    encoder.INPUT_FORMAT_RGBA,
+    `frames=${apngFrames.length};plays=0;skipfirstframe=no`
+  );
+  let stride = width * 4;
+  for (let frame of apngFrames) {
+    encoder.addImageFrame(
+      frame.data,
+      frame.data.length,
+      width,
+      height,
+      stride,
+      encoder.INPUT_FORMAT_RGBA,
+      `delay=${frame.delay}`
+    );
+  }
+  encoder.endImageEncode();
+
+  let rawStream = encoder.QueryInterface(Ci.nsIInputStream);
+  let binaryStream = Cc["@mozilla.org/binaryinputstream;1"].createInstance(
+    Ci.nsIBinaryInputStream
+  );
+  binaryStream.setInputStream(rawStream);
+  let available = binaryStream.available();
+  if (available === 0) {
+    return null;
+  }
+  return binaryStream.readByteArray(available);
+}
+
+function createDifferenceHighlight(frame1, frame2, expectedRects) {
+  const width = frame1.width;
+  const height = frame1.height;
+
+  // Validate dimensions
+  if (
+    width <= 0 ||
+    height <= 0 ||
+    !frame2.data ||
+    frame2.data.length !== width * height * 4
+  ) {
+    let canvas = document.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "canvas"
+    );
+    canvas.width = 1;
+    canvas.height = 1;
+    let ctx = canvas.getContext("2d");
+    return ctx.getImageData(0, 0, 1, 1).data;
+  }
+
+  let canvas = document.createElementNS(
+    "http://www.w3.org/1999/xhtml",
+    "canvas"
+  );
+  canvas.width = width;
+  canvas.height = height;
+  let ctx = canvas.getContext("2d");
+  let rects = [];
+
+  try {
+    ctx.putImageData(new ImageData(frame2.data, width, height), 0, 0);
+
+    rects = compareFrames(frame2, frame1);
+
+    const isExpected = rect =>
+      expectedRects.some(
+        exp =>
+          exp.x1 === rect.x1 &&
+          exp.y1 === rect.y1 &&
+          exp.w === rect.w &&
+          exp.h === rect.h
+      );
+
+    for (let rect of rects) {
+      // Use orange for expected changes, red for unexpected
+      const expected = isExpected(rect);
+      ctx.strokeStyle = expected ? "orange" : "red";
+      ctx.lineWidth = 2;
+      ctx.fillStyle = expected
+        ? "rgba(255, 165, 0, 0.2)"
+        : "rgba(255, 0, 0, 0.2)";
+
+      // Draw the red rectangle (same for all)
+      ctx.fillRect(rect.x1, rect.y1, rect.w, rect.h);
+      ctx.strokeRect(rect.x1, rect.y1, rect.w, rect.h);
+
+      // For small flicker, also draw a larger circle
+      let area = rect.w * rect.h;
+      let minDimension = Math.min(rect.w, rect.h);
+
+      if (area < 100 || minDimension < 10) {
+        let centerX = rect.x1 + rect.w / 2;
+        let centerY = rect.y1 + rect.h / 2;
+        let radius = Math.max(20, Math.max(rect.w, rect.h) / 2 + 10);
+
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+    }
+
+    let unexpectedCount = rects.filter(r => !isExpected(r)).length;
+    let expectedCount = expectedRects.length;
+    addTextOverlay(
+      canvas,
+      `${rects.length} changes (${unexpectedCount} unexpected, ${expectedCount} expected)`
+    );
+  } catch (e) {
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  return ctx.getImageData(0, 0, width, height).data;
 }
 
 /**
@@ -652,21 +899,24 @@ function dumpFrame({ data, width, height }) {
  *               {name: "bug ...
  *             ]
  */
-function reportUnexpectedFlicker(frames, expectations) {
+async function reportUnexpectedFlicker(frames, expectations) {
   info("comparing " + frames.length + " frames");
 
   let unexpectedRects = 0;
   for (let i = 1; i < frames.length; ++i) {
     let frame = frames[i],
       previousFrame = frames[i - 1];
-    let rects = compareFrames(frame, previousFrame);
+    let allRects = compareFrames(frame, previousFrame);
 
     let rectText = r => `${r.toSource()}, window width: ${frame.width}`;
 
-    rects = rects.filter(rect => {
+    // Track which rects are expected (caught by exceptions)
+    let expectedRects = [];
+    let rects = allRects.filter(rect => {
       for (let e of expectations.exceptions || []) {
         if (e.condition(rect)) {
           todo(false, e.name + ", " + rectText(rect));
+          expectedRects.push(rect);
           return false;
         }
       }
@@ -688,14 +938,8 @@ function reportUnexpectedFlicker(frames, expectations) {
         .join(", ")}`
     );
 
-    // Before dumping a frame with unexpected differences for the first time,
-    // ensure at least one previous frame has been logged so that it's possible
-    // to see the differences when examining the log.
-    if (!unexpectedRects) {
-      dumpFrame(previousFrame);
-    }
+    await reportFlickerWithAPNG(previousFrame, frame, i, expectedRects);
     unexpectedRects += rects.length;
-    dumpFrame(frame);
   }
   is(unexpectedRects, 0, "should have 0 unknown flickering areas");
 }
@@ -740,7 +984,7 @@ async function withPerfObserver(testFn, exceptions = {}, win = window) {
   reportUnexpectedReflows(reflows, exceptions.expectedReflows);
 
   let frames = await promiseFrames;
-  reportUnexpectedFlicker(frames, exceptions.frames);
+  await reportUnexpectedFlicker(frames, exceptions.frames);
 }
 
 /**
@@ -770,6 +1014,11 @@ async function runUrlbarTest(
 
   URLBar.focus();
   URLBar.value = SEARCH_TERM;
+
+  let BACKGROUND_LEFT, BACKGROUND_RIGHT;
+  let SHADOW_OVERFLOW_LEFT, SHADOW_OVERFLOW_RIGHT, SHADOW_OVERFLOW_TOP;
+  let VERTICAL_OFFSET;
+
   let testFn = async function () {
     let popup = URLBar.view;
     let oldOnQueryResults = popup.onQueryResults.bind(popup);
@@ -821,21 +1070,86 @@ async function runUrlbarTest(
     }
 
     await UrlbarTestUtils.promisePopupClose(win);
+    URLBar.value = "";
+  };
+
+  // Measure geometry once, outside of withPerfObserver, so the forced layout
+  // and style reads below aren't counted as unexpected reflows during the
+  // observed openings. This opens the panel, measures, then closes it.
+  let measureGeometry = async function () {
+    if (keyed) {
+      EventUtils.synthesizeKey("ows-10"[0], {}, win);
+    } else {
+      await UrlbarTestUtils.promiseAutocompleteResultPopup({
+        window: win,
+        waitForFocus: SimpleTest.waitForFocus,
+        value: URLBar.value,
+      });
+    }
+    await UrlbarTestUtils.promiseSearchComplete(win);
+
+    let shadowElem = win.document.querySelector("#urlbar > .urlbar-background");
+    let shadow = getComputedStyle(shadowElem).boxShadow;
+    let backgroundRect = shadowElem.getBoundingClientRect();
+
+    let offsetElem = win.document.querySelector("#urlbar-container");
+    let verticalOffset = getComputedStyle(offsetElem).paddingTop;
+
+    function extractPixelValue(value) {
+      if (value) {
+        return parseInt(value.replace("px", ""), 10);
+      }
+      return 0;
+    }
+
+    function calculateShadowOverflow(boxShadow) {
+      const regex = /-?\d+px/g;
+      const matches = boxShadow.match(regex);
+
+      if (matches && matches.length >= 2) {
+        // Parse shadow values, defaulting missing values to 0.
+        const [offsetX, offsetY, blurRadius = 0, spreadRadius = 0] =
+          matches.map(value => parseInt(value.replace("px", ""), 10));
+
+        const left = Math.max(0, -offsetX + blurRadius + spreadRadius);
+        const right = Math.max(0, offsetX + blurRadius + spreadRadius);
+        const top = Math.max(0, -offsetY + blurRadius + spreadRadius);
+        const bottom = Math.max(0, offsetY + blurRadius + spreadRadius);
+
+        return { left, right, top, bottom };
+      }
+
+      return { left: 0, right: 0, top: 0, bottom: 0 };
+    }
+
+    let overflow = calculateShadowOverflow(shadow);
+    const FUZZ_FACTOR = 4;
+    // The blur/spread/offset of the box shadow, plus fudge factors depending on platform.
+    SHADOW_OVERFLOW_LEFT = overflow.left + FUZZ_FACTOR;
+    SHADOW_OVERFLOW_RIGHT = overflow.right + FUZZ_FACTOR;
+    SHADOW_OVERFLOW_TOP = overflow.top + FUZZ_FACTOR;
+
+    // The popover positioning requires this offset
+    VERTICAL_OFFSET = -extractPixelValue(verticalOffset); // Flip symbol since this CSS value is positive.
+
+    BACKGROUND_LEFT = Math.floor(backgroundRect.left);
+    BACKGROUND_RIGHT = Math.ceil(backgroundRect.right);
+
+    await UrlbarTestUtils.promisePopupClose(win);
+    URLBar.value = SEARCH_TERM;
   };
 
   let urlbarRect = URLBar.getBoundingClientRect();
-  // To isolate unexpected repaints, we need to filter out the rectangle of
-  // pixels changed by showing the urlbar popover
-  const SHADOW_SIZE = 17; // The blur/spread of the box shadow, plus 1px fudge factor
-  const INLINE_MARGIN = 5; // Margin applied to the breakout-extend urlbar
-  const VERTICAL_OFFSET = -4; // The popover positioning requires this offset
+  await measureGeometry();
+  await testFn();
   let expectedRects = {
     filter: rects => {
       const referenceRect = {
-        x1: Math.floor(urlbarRect.left) - INLINE_MARGIN - SHADOW_SIZE,
-        x2: Math.ceil(urlbarRect.right) + INLINE_MARGIN + SHADOW_SIZE,
-        y1: Math.floor(urlbarRect.top) + VERTICAL_OFFSET - SHADOW_SIZE,
+        x1: BACKGROUND_LEFT - SHADOW_OVERFLOW_LEFT,
+        x2: BACKGROUND_RIGHT + SHADOW_OVERFLOW_RIGHT,
+        y1: Math.floor(urlbarRect.top) + VERTICAL_OFFSET - SHADOW_OVERFLOW_TOP,
       };
+
       // We put text into the urlbar so expect its textbox to change.
       // We expect many changes in the results view.
       // So we just allow changes anywhere in the urlbar. We don't check the
@@ -871,6 +1185,7 @@ async function runUrlbarTest(
   }
 
   await BrowserTestUtils.closeWindow(win);
+  await TestUtils.waitForTick();
 }
 
 /**
@@ -1016,8 +1331,8 @@ async function checkLoadedScripts({
 // window for some reason. See bug 1445161. This function allows to deal with
 // that in a central place.
 function isLikelyFocusChange(rects, frame) {
-  if (rects.length >= 3 && rects.every(r => r.y2 < 100)) {
-    // There are at least 4 areas that changed near the top of the screen.
+  if (rects.length >= 2 && rects.every(r => r.y2 < 100)) {
+    // There are at least 2 areas that changed near the top of the screen.
     // Note that we need a bit more leeway than the titlebar height, because on
     // OSX other toolbarbuttons in the navigation toolbar also get disabled
     // state.
@@ -1029,5 +1344,32 @@ function isLikelyFocusChange(rects, frame) {
     // Full-width rect in the top of the titlebar.
     return true;
   }
+  // Treat a full-window change as a likely focus change under nova.
+  // With the nova floating chrome, the window background is visible in the gaps
+  // around the toolbox and content areas. When the window's active state changes,
+  // we see a repaint across the whole window (not just the titlebar.)
+  if (
+    Services.prefs.getBoolPref("browser.nova.enabled", false) &&
+    rects.length &&
+    rects.every(
+      r => r.x1 == 0 && r.y1 == 0 && r.w >= frame.width && r.h >= frame.height
+    )
+  ) {
+    return true;
+  }
   return false;
+}
+
+// See if the rect might match the coordinates of the bottom-border of an element
+// given its DOMRect.
+function rectMatchesBottomBorder(r, domRect) {
+  return (
+    r.h <= 2 &&
+    r.x1 >= domRect.x &&
+    r.x1 < domRect.x + domRect.width &&
+    r.x2 > domRect.x &&
+    r.x2 <= domRect.x + domRect.width &&
+    r.y1 >= domRect.bottom - 1.5 &&
+    r.y2 <= domRect.bottom + 1.5
+  );
 }

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,9 +11,6 @@
 #include <schnlsp.h>
 #include <winternl.h>
 #include <processthreadsapi.h>
-
-#include <bcrypt.h>
-#pragma comment(lib, "bcrypt.lib")
 
 #include <oleauto.h>
 #pragma comment(lib, "oleaut32.lib")
@@ -836,6 +831,10 @@ MOZ_GLOBINIT struct TestCase {
     TestCase("IndirectCall", NoStubAddressCheck),
     TestCase("MovImm64", NoStubAddressCheck),
     TestCase("RexCmpRipRelativeBytePtr", NoStubAddressCheck),
+    TestCase("AndWithSib", NoStubAddressCheck),
+    TestCase("AndWithoutSib", NoStubAddressCheck),
+    TestCase("RexAndWithSib", NoStubAddressCheck),
+    TestCase("RexAndWithoutSib", NoStubAddressCheck),
     TestCase("JmpInsideEarlyBytes", ExpectedFail),
     TestCase("CallInsideEarlyBytes", ExpectedFail),
 #  elif defined(_M_IX86)
@@ -1522,9 +1521,9 @@ extern "C" int wmain(int argc, wchar_t* argv[]) {
                              ApiSetQueryApiSetPresence, Equals, FALSE,
                              &gEmptyUnicodeString, &gIsPresent) &&
       TEST_HOOK("kernelbase.dll", QueryDosDeviceW, Equals, 0) &&
+#if !defined(_M_ARM64)
       TEST_HOOK("kernel32.dll", GetFileAttributesW, Equals,
                 INVALID_FILE_ATTRIBUTES) &&
-#if !defined(_M_ARM64)
 #  ifndef MOZ_ASAN
       // Bug 733892: toolkit/crashreporter/nsExceptionHandler.cpp
       // This fails on ASan because the ASan runtime already hooked this
@@ -1554,9 +1553,9 @@ extern "C" int wmain(int argc, wchar_t* argv[]) {
       TEST_DETOUR("user32.dll", CreateWindowExW, Equals, nullptr) &&
       TEST_HOOK("user32.dll", InSendMessageEx, Equals, ISMEX_NOSEND) &&
       TEST_HOOK("user32.dll", SendMessageTimeoutW, Equals, 0) &&
+#if !defined(_M_ARM64)
       TEST_HOOK("user32.dll", SetCursorPos, NotEquals, FALSE) &&
-      TEST_HOOK("bcrypt.dll", BCryptGenRandom, Equals,
-                static_cast<NTSTATUS>(STATUS_INVALID_HANDLE)) &&
+#endif
       TEST_HOOK("advapi32.dll", RtlGenRandom, Equals, TRUE) &&
       TEST_HOOK_PARAMS("oleaut32.dll", VariantClear, Equals, S_OK, &var) &&
 #if !defined(_M_ARM64)

@@ -4,6 +4,7 @@
     grid-gap: var(--space-xxlarge);
     grid-template-columns: repeat(auto-fit, $card-width);
     margin: 0;
+    padding: 0;
 
     @media (max-width: $break-point-medium) {
       @include context-menu-open-left;
@@ -31,7 +32,7 @@
   }
 
   .section-empty-state {
-    border: $border-secondary;
+    border: 1px solid var(--border-color);
     border-radius: var(--border-radius-small);
     display: flex;
     height: $card-height;
@@ -64,13 +65,7 @@
 
   a {
     color: var(--newtab-primary-action-background);
-
-    /**
-     * @backward-compat { version 146 }
-     *
-     * Replace this with `--font-weight-semibold` once 146 hits release.
-     */
-    font-weight: var(--heading-font-weight);
+    font-weight: var(--font-weight-semibold);
 
     &.more-recommendations {
       font-weight: var(--font-weight);

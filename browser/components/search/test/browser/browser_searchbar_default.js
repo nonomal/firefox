@@ -43,24 +43,24 @@ add_setup(async function () {
     ],
   });
 
-  let originalEngine = await Services.search.getDefault();
-  let originalPrivateEngine = await Services.search.getDefaultPrivate();
+  let originalEngine = await SearchService.getDefault();
+  let originalPrivateEngine = await SearchService.getDefaultPrivate();
 
-  let engineDefault = Services.search.getEngineByName("MozSearch1");
-  await Services.search.setDefault(
+  let engineDefault = SearchService.getEngineByName("MozSearch1");
+  await SearchService.setDefault(
     engineDefault,
-    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
+    SearchService.CHANGE_REASON.UNKNOWN
   );
 
   registerCleanupFunction(async function () {
     gCUITestUtils.removeSearchBar();
-    await Services.search.setDefault(
+    await SearchService.setDefault(
       originalEngine,
-      Ci.nsISearchService.CHANGE_REASON_UNKNOWN
+      SearchService.CHANGE_REASON.UNKNOWN
     );
-    await Services.search.setDefaultPrivate(
+    await SearchService.setDefaultPrivate(
       originalPrivateEngine,
-      Ci.nsISearchService.CHANGE_REASON_UNKNOWN
+      SearchService.CHANGE_REASON.UNKNOWN
     );
   });
 });
@@ -114,9 +114,9 @@ add_task(async function test_default_search_private_no_separate() {
     set: [["browser.search.separatePrivateDefault", true]],
   });
 
-  await Services.search.setDefaultPrivate(
-    Services.search.getEngineByName("MozSearch2"),
-    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
+  await SearchService.setDefaultPrivate(
+    SearchService.getEngineByName("MozSearch2"),
+    SearchService.CHANGE_REASON.UNKNOWN
   );
 
   const win = await BrowserTestUtils.openNewBrowserWindow({ private: true });
@@ -198,7 +198,9 @@ add_task(async function test_form_history_delete() {
     "Should have selected the first entry"
   );
   Assert.equal(
-    searchPopup.children[2].selectedItems[0].getAttribute("ac-value"),
+    searchPopup.children[2].selectedItems[0].querySelector(
+      "autocomplete-row-item"
+    )?.value,
     "first",
     "Should have selected the expected first result"
   );
@@ -228,7 +230,9 @@ add_task(async function test_form_history_delete() {
     "Should have the second entry selected; now in the first index"
   );
   Assert.equal(
-    searchPopup.children[2].selectedItems[0].getAttribute("ac-value"),
+    searchPopup.children[2].selectedItems[0].querySelector(
+      "autocomplete-row-item"
+    )?.value,
     "second",
     "Should have selected the second item in the list"
   );

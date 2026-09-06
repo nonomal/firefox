@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -21,6 +19,7 @@
 #    define MOZ_USE_CHAR16_WRAPPER
 #    include <cstddef>
 #    include <cstdint>
+
 #    include "mozilla/Attributes.h"
 /**
  * Win32 API extensively uses wchar_t, which is represented by a separated
@@ -93,13 +92,8 @@ class char16ptr_t {
 
   /* Some operators used on pointers. */
   char16_t operator[](size_t aIndex) const { return mPtr[aIndex]; }
-  bool operator==(const char16ptr_t& aOther) const {
-    return mPtr == aOther.mPtr;
-  }
+  bool operator==(const char16ptr_t& aOther) const = default;
   bool operator==(std::nullptr_t) const { return mPtr == nullptr; }
-  bool operator!=(const char16ptr_t& aOther) const {
-    return mPtr != aOther.mPtr;
-  }
   bool operator!=(std::nullptr_t) const { return mPtr != nullptr; }
   char16ptr_t operator+(int aValue) const { return char16ptr_t(mPtr + aValue); }
   char16ptr_t operator+(unsigned int aValue) const {

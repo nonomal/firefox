@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -195,7 +193,7 @@ bool Box::Read(nsTArray<uint8_t>* aDest, const MediaByteRange& aRange) const {
   return true;
 }
 
-ByteSlice Box::ReadAsSlice() {
+ByteSlice Box::ReadAsSlice() const {
   if (!mContext || mRange.IsEmpty()) {
     return ByteSlice{nullptr, 0};
   }

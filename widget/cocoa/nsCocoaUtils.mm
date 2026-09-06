@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,39 +7,40 @@
 #include <cmath>
 
 #include "AppleUtils.h"
+#include "ImageRegion.h"
 #include "gfx2DGlue.h"
 #include "gfxContext.h"
 #include "gfxPlatform.h"
 #include "gfxUtils.h"
-#include "ImageRegion.h"
-#include "nsClipboard.h"
-#include "nsCocoaUtils.h"
-#include "nsChildView.h"
-#include "nsMenuBarX.h"
-#include "nsCocoaWindow.h"
-#include "nsCOMPtr.h"
-#include "nsIInterfaceRequestorUtils.h"
-#include "nsIAppShellService.h"
-#include "nsIOSPermissionRequest.h"
-#include "nsIRunnable.h"
-#include "nsIAppWindow.h"
-#include "nsIBaseWindow.h"
-#include "nsITransferable.h"
-#include "nsMenuUtilsX.h"
-#include "nsNetUtil.h"
-#include "nsPrimitiveHelpers.h"
-#include "nsToolkit.h"
-#include "nsCRT.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/Logging.h"
 #include "mozilla/MiscEvents.h"
 #include "mozilla/Preferences.h"
-#include "mozilla/TextEvents.h"
+#include "mozilla/SVGImageContext.h"
 #include "mozilla/StaticMutex.h"
 #include "mozilla/StaticPrefs_media.h"
-#include "mozilla/SVGImageContext.h"
+#include "mozilla/TextEvents.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/gfx/2D.h"
+#include "nsCOMPtr.h"
+#include "nsCRT.h"
+#include "nsChildView.h"
+#include "nsClipboard.h"
+#include "nsCocoaUtils.h"
+#include "nsCocoaWindow.h"
+#include "nsIAppShellService.h"
+#include "nsIAppWindow.h"
+#include "nsIBaseWindow.h"
+#include "nsIInterfaceRequestorUtils.h"
+#include "nsIOSPermissionRequest.h"
+#include "nsIRunnable.h"
+#include "nsITransferable.h"
+#include "nsMenuBarX.h"
+#include "nsMenuPopupFrame.h"
+#include "nsMenuUtilsX.h"
+#include "nsNetUtil.h"
+#include "nsPrimitiveHelpers.h"
+#include "nsToolkit.h"
 
 using namespace mozilla;
 using namespace mozilla::widget;
@@ -64,7 +64,7 @@ LazyLogModule gCocoaUtilsLog("nsCocoaUtils");
  * For each audio and video capture request, we hold an owning reference
  * to a promise to be resolved when the request's async callback is invoked.
  * sVideoCapturePromises and sAudioCapturePromises are arrays of video and
- * audio promises waiting for to be resolved. Each array is protected by a
+ * audio promises waiting to be resolved. Each array is protected by a
  * mutex.
  */
 nsCocoaUtils::PromiseArray nsCocoaUtils::sVideoCapturePromises;
@@ -81,6 +81,9 @@ NSString* const kUrlsWithTitlesPboardType = @"WebURLsWithTitlesPboardType";
 NSString* const kMozWildcardPboardType = @"org.mozilla.MozillaWildcard";
 NSString* const kMozCustomTypesPboardType = @"org.mozilla.custom-clipdata";
 NSString* const kMozFileUrlsPboardType = @"org.mozilla.file-urls";
+NSString* const kWebCustomFormatPboardTypePrefix =
+    @"org.w3.web-custom-format.type-";
+NSString* const kWebCustomFormatMapPboardType = @"org.w3.web-custom-format.map";
 
 @implementation UTIHelper
 
@@ -91,6 +94,8 @@ NSString* const kMozFileUrlsPboardType = @"org.mozilla.file-urls";
       [aType isEqualToString:kPublicUrlPboardType] ||
       [aType isEqualToString:kPublicUrlNamePboardType] ||
       [aType isEqualToString:kMozFileUrlsPboardType] ||
+      [aType isEqualToString:kWebCustomFormatPboardTypePrefix] ||
+      [aType isEqualToString:kWebCustomFormatMapPboardType] ||
       [aType isEqualToString:(NSString*)kPasteboardTypeFileURLPromise] ||
       [aType isEqualToString:(NSString*)kPasteboardTypeFilePromiseContent] ||
       [aType isEqualToString:(NSString*)kUTTypeFileURL] ||
@@ -181,7 +186,13 @@ NSPoint nsCocoaUtils::ScreenLocationForEvent(NSEvent* anEvent) {
   NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
 
   // Don't trust mouse locations of mouse move events, see bug 443178.
-  if (!anEvent || [anEvent type] == NSEventTypeMouseMoved)
+  // Likewise, on macOS 26 the locationInWindow of mouseEntered/mouseExited
+  // events can be reported relative to a wrong window origin, which puts the
+  // point off to the side by an amount that depends on the window's screen
+  // position (Bug 2043963). The live cursor location is reliable, so use it.
+  if (!anEvent || [anEvent type] == NSEventTypeMouseMoved ||
+      [anEvent type] == NSEventTypeMouseEntered ||
+      [anEvent type] == NSEventTypeMouseExited)
     return [NSEvent mouseLocation];
 
   // Pin momentum scroll events to the location of the last user-controlled
@@ -324,72 +335,6 @@ BOOL nsCocoaUtils::ShouldRestoreStateDueToLaunchAtLogin() {
   return NO;
 }
 
-void nsCocoaUtils::PrepareForNativeAppModalDialog() {
-  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
-
-  if (!NSApp.active) {
-    // Early exit if the app isn't active. This is because we can't safely
-    // set the NSApp.mainMenu property in such a case. We early exit so we
-    // also don't invoke any side effects.
-    return;
-  }
-
-  // Don't do anything if this is embedding. We'll assume that if there is no
-  // hidden window we shouldn't do anything, and that should cover the embedding
-  // case.
-  nsMenuBarX* hiddenWindowMenuBar = nsMenuUtilsX::GetHiddenWindowMenuBar();
-  if (!hiddenWindowMenuBar) return;
-
-  // First put up the hidden window menu bar so that app menu event handling is
-  // correct.
-  hiddenWindowMenuBar->Paint();
-
-  NSMenu* mainMenu = [NSApp mainMenu];
-  NS_ASSERTION(
-      [mainMenu numberOfItems] > 0,
-      "Main menu does not have any items, something is terribly wrong!");
-
-  // Create new menu bar for use with modal dialog
-  NSMenu* newMenuBar = [[GeckoNSMenu alloc] initWithTitle:@""];
-
-  // Swap in our app menu. Note that the event target is whatever window is up
-  // when the app modal dialog goes up.
-  NSMenuItem* firstMenuItem = [[mainMenu itemAtIndex:0] retain];
-  [mainMenu removeItemAtIndex:0];
-  [newMenuBar insertItem:firstMenuItem atIndex:0];
-  [firstMenuItem release];
-
-  // Add standard edit menu
-  [newMenuBar addItem:nsMenuUtilsX::GetStandardEditMenuItem()];
-
-  // Show the new menu bar
-  [NSApp setMainMenu:newMenuBar];
-  [newMenuBar release];
-
-  NS_OBJC_END_TRY_IGNORE_BLOCK;
-}
-
-void nsCocoaUtils::CleanUpAfterNativeAppModalDialog() {
-  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
-
-  // Don't do anything if this is embedding. We'll assume that if there is no
-  // hidden window we shouldn't do anything, and that should cover the embedding
-  // case.
-  nsMenuBarX* hiddenWindowMenuBar = nsMenuUtilsX::GetHiddenWindowMenuBar();
-  if (!hiddenWindowMenuBar) return;
-
-  NSWindow* mainWindow = [NSApp mainWindow];
-  if (!mainWindow) {
-    // We do an async paint in order to prevent crashes when macOS is actively
-    // enumerating the menu items in `NSApp.mainMenu`.
-    hiddenWindowMenuBar->PaintAsyncIfNeeded();
-  } else {
-    [WindowDelegate paintMenubarForWindow:mainWindow];
-  }
-
-  NS_OBJC_END_TRY_IGNORE_BLOCK;
-}
-
 static void data_ss_release_callback(void* aDataSourceSurface, const void* data,
                                      size_t size) {
   if (aDataSourceSurface) {
@@ -452,12 +397,11 @@ nsresult nsCocoaUtils::CreateCGImageFromSurface(SourceSurface* aSurface,
   CGDataProviderRef dataProvider = ::CGDataProviderCreateWithData(
       dataSurface.forget().take(), map.mData, map.mStride * height,
       data_ss_release_callback);
-  CGColorSpaceRef colorSpace =
-      ::CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
+  CGColorSpaceRef colorSpace = ::CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   *aResult = ::CGImageCreate(
       width, height, 8, 32, map.mStride, colorSpace,
       kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst, dataProvider,
-      NULL, 0, kCGRenderingIntentDefault);
+      nullptr, 0, kCGRenderingIntentDefault);
   ::CGColorSpaceRelease(colorSpace);
   ::CGDataProviderRelease(dataProvider);
   return *aResult ? NS_OK : NS_ERROR_FAILURE;
@@ -487,7 +431,7 @@ nsresult nsCocoaUtils::CreateNSImageFromCGImage(CGImageRef aInputImage,
   NSRect imageRect = ::NSMakeRect(0.0, 0.0, width, height);
 
   NSBitmapImageRep* offscreenRep = [[NSBitmapImageRep alloc]
-      initWithBitmapDataPlanes:NULL
+      initWithBitmapDataPlanes:nullptr
                     pixelsWide:width
                     pixelsHigh:height
                  bitsPerSample:8
@@ -563,10 +507,11 @@ nsresult nsCocoaUtils::CreateNSImageFromImageContainer(
       aSVGContext = svgContext.get();
     }
 
-    mozilla::image::ImgDrawResult res =
-        aImage->Draw(&context, scaledSize, ImageRegion::Create(scaledSize),
-                     aWhichFrame, SamplingFilter::POINT, *aSVGContext,
-                     imgIContainer::FLAG_SYNC_DECODE, 1.0);
+    mozilla::image::ImgDrawResult res = aImage->Draw(
+        &context, scaledSize, ImageRegion::Create(scaledSize), aWhichFrame,
+        SamplingFilter::POINT, *aSVGContext,
+        imgIContainer::FLAG_SYNC_DECODE | imgIContainer::FLAG_ASYNC_NOTIFY,
+        1.0);
 
     if (res != mozilla::image::ImgDrawResult::SUCCESS) {
       return NS_ERROR_FAILURE;
@@ -581,7 +526,7 @@ nsresult nsCocoaUtils::CreateNSImageFromImageContainer(
 
   NS_ENSURE_TRUE(surface, NS_ERROR_FAILURE);
 
-  CGImageRef imageRef = NULL;
+  CGImageRef imageRef = nullptr;
   nsresult rv = nsCocoaUtils::CreateCGImageFromSurface(surface, &imageRef,
                                                        aIsEntirelyBlack);
   if (NS_FAILED(rv) || !imageRef) {
@@ -589,10 +534,10 @@ nsresult nsCocoaUtils::CreateNSImageFromImageContainer(
   }
 
   rv = nsCocoaUtils::CreateNSImageFromCGImage(imageRef, aResult);
-  if (NS_FAILED(rv) || !aResult) {
+  ::CGImageRelease(imageRef);
+  if (NS_FAILED(rv) || !*aResult) {
     return NS_ERROR_FAILURE;
   }
-  ::CGImageRelease(imageRef);
 
   // Ensure the image will be rendered the correct size on a retina display
   NSSize size = NSMakeSize(width, height);
@@ -627,6 +572,8 @@ nsresult nsCocoaUtils::CreateDualRepresentationNSImageFromImageContainer(
                                        aPreferredSize, &newRepresentation, 2.0f,
                                        aIsEntirelyBlack);
   if (NS_FAILED(rv) || !newRepresentation) {
+    [*aResult release];
+    *aResult = nil;
     return NS_ERROR_FAILURE;
   }
 
@@ -696,7 +643,7 @@ NSEvent* nsCocoaUtils::MakeNewCocoaEventWithType(NSEventType aEventType,
 }
 
 // static
-NSEvent* nsCocoaUtils::MakeNewCococaEventFromWidgetEvent(
+NSEvent* nsCocoaUtils::MakeNewCocoaEventFromWidgetEvent(
     const WidgetKeyboardEvent& aKeyEvent, NSInteger aWindowNumber,
     NSGraphicsContext* aContext) {
   NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
@@ -1115,31 +1062,35 @@ uint32_t nsCocoaUtils::ConvertGeckoKeyCodeToMacCharCode(uint32_t aKeyCode) {
 }
 
 NSEventModifierFlags nsCocoaUtils::ConvertWidgetModifiersToMacModifierFlags(
-    nsIWidget::Modifiers aNativeModifiers) {
-  if (!aNativeModifiers) {
+    nsIWidget::NativeModifiers aNativeModifiers) {
+  if (aNativeModifiers == nsIWidget::NativeModifiers::NO_MODIFIERS) {
     return 0;
   }
   struct ModifierFlagMapEntry {
-    nsIWidget::Modifiers mWidgetModifier;
+    nsIWidget::NativeModifiers mWidgetModifier;
     NSEventModifierFlags mModifierFlags;
   };
   static constexpr ModifierFlagMapEntry sModifierFlagMap[] = {
-      {nsIWidget::CAPS_LOCK, NSEventModifierFlagCapsLock},
-      {nsIWidget::SHIFT_L, NSEventModifierFlagShift | 0x0002},
-      {nsIWidget::SHIFT_R, NSEventModifierFlagShift | 0x0004},
-      {nsIWidget::CTRL_L, NSEventModifierFlagControl | 0x0001},
-      {nsIWidget::CTRL_R, NSEventModifierFlagControl | 0x2000},
-      {nsIWidget::ALT_L, NSEventModifierFlagOption | 0x0020},
-      {nsIWidget::ALT_R, NSEventModifierFlagOption | 0x0040},
-      {nsIWidget::COMMAND_L, NSEventModifierFlagCommand | 0x0008},
-      {nsIWidget::COMMAND_R, NSEventModifierFlagCommand | 0x0010},
-      {nsIWidget::NUMERIC_KEY_PAD, NSEventModifierFlagNumericPad},
-      {nsIWidget::HELP, NSEventModifierFlagHelp},
-      {nsIWidget::FUNCTION, NSEventModifierFlagFunction}};
+      {nsIWidget::NativeModifiers::CAPS_LOCK, NSEventModifierFlagCapsLock},
+      {nsIWidget::NativeModifiers::SHIFT_L, NSEventModifierFlagShift | 0x0002},
+      {nsIWidget::NativeModifiers::SHIFT_R, NSEventModifierFlagShift | 0x0004},
+      {nsIWidget::NativeModifiers::CTRL_L, NSEventModifierFlagControl | 0x0001},
+      {nsIWidget::NativeModifiers::CTRL_R, NSEventModifierFlagControl | 0x2000},
+      {nsIWidget::NativeModifiers::ALT_L, NSEventModifierFlagOption | 0x0020},
+      {nsIWidget::NativeModifiers::ALT_R, NSEventModifierFlagOption | 0x0040},
+      {nsIWidget::NativeModifiers::COMMAND_L,
+       NSEventModifierFlagCommand | 0x0008},
+      {nsIWidget::NativeModifiers::COMMAND_R,
+       NSEventModifierFlagCommand | 0x0010},
+      {nsIWidget::NativeModifiers::NUMERIC_KEY_PAD,
+       NSEventModifierFlagNumericPad},
+      {nsIWidget::NativeModifiers::HELP, NSEventModifierFlagHelp},
+      {nsIWidget::NativeModifiers::FUNCTION, NSEventModifierFlagFunction}};
 
   NSEventModifierFlags modifierFlags = 0;
   for (const ModifierFlagMapEntry& entry : sModifierFlagMap) {
-    if (aNativeModifiers & entry.mWidgetModifier) {
+    if ((aNativeModifiers & entry.mWidgetModifier) !=
+        nsIWidget::NativeModifiers::NO_MODIFIERS) {
       modifierFlags |= entry.mModifierFlags;
     }
   }
@@ -1483,7 +1434,7 @@ nsresult nsCocoaUtils::RequestCapturePermission(
 
   sMediaCaptureMutex.Unlock();
 
-  LOG("RequestCapturePermission(%s): %ld promise(s) unresolved",
+  LOG("RequestCapturePermission(%s): %zu promise(s) unresolved",
       AVMediaTypeToString(aType), nPromises);
 
   // If we had one or more more existing promises waiting to be resolved
@@ -1664,6 +1615,9 @@ NSString* nsCocoaUtils::GetStringForTypeFromPasteboardItem(
       [aItem availableTypeFromArray:[NSArray arrayWithObjects:(id)aType, nil]];
   if (availableType && IsValidPasteboardType(availableType, aAllowFileURL)) {
     NSString* str = [aItem stringForType:(id)availableType];
+    if (!str) {
+      return nil;
+    }
     // Sanitize (remove NULs, etc) to align with other platforms.
     return [NSString stringWithCString:[str UTF8String]
                               encoding:NSUTF8StringEncoding];
@@ -1797,6 +1751,22 @@ already_AddRefed<nsISupports> nsCocoaUtils::GetDataFromPasteboardItem(
         title = pString;
       }
       pString = [NSString stringWithFormat:@"%@\n%@", pString, title];
+    } else {
+      // Try to convert file to file:// URL
+      nsCOMPtr<nsISupports> fileData =
+          GetDataFromPasteboardItem(nsDependentCString(kFileMime), aItem);
+      nsCOMPtr<nsIFile> file = do_QueryInterface(fileData);
+      if (file) {
+        nsAutoCString urlSpec;
+        if (NS_SUCCEEDED(NS_GetURLSpecFromFile(file, urlSpec))) {
+          nsAutoString leafName;
+          file->GetLeafName(leafName);
+
+          NSString* url = nsCocoaUtils::ToNSString(urlSpec);
+          NSString* title = nsCocoaUtils::ToNSString(leafName);
+          pString = [NSString stringWithFormat:@"%@\n%@", url, title];
+        }
+      }
     }
   } else if (aFlavor.EqualsLiteral(kURLDataMime)) {
     pString = nsCocoaUtils::GetStringForTypeFromPasteboardItem(
@@ -1845,7 +1815,7 @@ already_AddRefed<nsISupports> nsCocoaUtils::GetDataFromPasteboardItem(
     return genericDataWrapper.forget();
   }
 
-  // We have never supported this on Mac OS X, we should someday. Normally
+  // We have never supported this on macOS, we should someday. Normally
   // dragging images in is accomplished with a file path drag instead of the
   // image data itself.
   /*
@@ -1880,4 +1850,23 @@ void nsCocoaUtils::SetTransferDataForTypeFromPasteboardItem(
   }
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;
+}
+
+NSRectEdge nsCocoaUtils::PopupPositionToNSRectEdge(int8_t aPosition) {
+  // XUL accepts many more anchor popup alignments than Cocoa. Map to the best
+  // approximate edge setting. Due to Cocoa's flipped Y-axis, NSRectEdgeMinY
+  // represents the bottom edge.
+  switch (aPosition) {
+    case POPUPPOSITION_BEFORESTART:
+    case POPUPPOSITION_BEFOREEND:
+      return NSRectEdgeMaxY;
+    case POPUPPOSITION_STARTBEFORE:
+    case POPUPPOSITION_STARTAFTER:
+      return NSRectEdgeMinX;
+    case POPUPPOSITION_ENDBEFORE:
+    case POPUPPOSITION_ENDAFTER:
+      return NSRectEdgeMaxX;
+    default:
+      return NSRectEdgeMinY;
+  }
 }

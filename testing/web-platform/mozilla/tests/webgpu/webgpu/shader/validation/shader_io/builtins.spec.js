@@ -118,6 +118,20 @@ export const kBuiltins = [
   type: 'u32',
   enable: 'subgroups',
   requires: 'subgroup_id'
+},
+{
+  name: 'workgroup_index',
+  stage: 'compute',
+  io: 'in',
+  type: 'u32',
+  requires: 'linear_indexing'
+},
+{
+  name: 'global_invocation_index',
+  stage: 'compute',
+  io: 'in',
+  type: 'u32',
+  requires: 'linear_indexing'
 }];
 
 
@@ -409,9 +423,6 @@ combine('use', ['alias', 'struct', 'function', 'module-var', 'function-var'])
 ).
 fn((t) => {
   let code = '';
-  if (t.params.enable) {
-    code += `enable ${t.params.enable};\n`;
-  }
   if (t.params.use === 'alias') {
     code += `alias ${t.params.name} = i32;`;
   } else if (t.params.use === `struct`) {
@@ -423,11 +434,10 @@ fn((t) => {
   } else if (t.params.use === `function-var`) {
     code += `fn test() { let ${t.params.name} = 1; }`;
   }
-  const expect = t.params.requires === undefined || t.hasLanguageFeature(t.params.requires);
-  t.expectCompileResult(expect, code);
+  t.expectCompileResult(true, code);
 });
 
-const kTests = {
+const kBuiltinTests = {
   pos: {
     src: `@builtin(position)`,
     pass: true
@@ -486,17 +496,17 @@ const kTests = {
   }
 };
 
-g.test('parse').
+g.test('parse_builtin').
 desc(`Test that @builtin is parsed correctly.`).
-params((u) => u.combine('builtin', keysOf(kTests))).
+params((u) => u.combine('builtin', keysOf(kBuiltinTests))).
 fn((t) => {
-  const src = kTests[t.params.builtin].src;
+  const src = kBuiltinTests[t.params.builtin].src;
   const code = `
 @vertex
 fn main() -> ${src} vec4<f32> {
   return vec4<f32>(.4, .2, .3, .1);
 }`;
-  t.expectCompileResult(kTests[t.params.builtin].pass, code);
+  t.expectCompileResult(kBuiltinTests[t.params.builtin].pass, code);
 });
 
 g.test('placement').
@@ -566,4 +576,60 @@ fn((t) => {
     `;
 
   t.expectCompileResult(scope === undefined || t.params.attribute[scope], code);
+});
+
+const kFragDepthTests = {
+  unset: {
+    src: `@builtin(frag_depth)`,
+    pass: true,
+    requires_feature: false
+  },
+  less: {
+    src: `@builtin(frag_depth, less)`,
+    pass: true,
+    requires_feature: true
+  },
+  greater: {
+    src: `@builtin(frag_depth, greater)`,
+    pass: true,
+    requires_feature: true
+  },
+  trailing_comma: {
+    src: `@builtin(frag_depth, less,)`,
+    pass: true,
+    requires_feature: true
+  },
+  missing_enum: {
+    src: `@builtin(frag_depth,)`,
+    pass: true,
+    requires_feature: false
+  },
+  invalid_enum: {
+    src: `@builtin(frag_depth, any)`,
+    pass: false,
+    requires_feature: false
+  },
+  missing_comma: {
+    src: `@builtin(frag_depth greater)`,
+    pass: false,
+    requires_feature: false
+  }
+};
+
+g.test('parse_frag_depth').
+desc(`Test that @builtin is parsed correctly.`).
+params((u) => u.combine('builtin', keysOf(kFragDepthTests))).
+fn((t) => {
+  const data = kFragDepthTests[t.params.builtin];
+
+  if (data.requires_feature) {
+    t.skipIfLanguageFeatureNotSupported('fragment_depth');
+  }
+
+  const code = `
+@fragment
+fn main() -> ${data.src} f32 {
+  return .5;
+}`;
+  t.expectCompileResult(data.pass, code);
 });

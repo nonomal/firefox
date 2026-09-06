@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at http://mozilla.org/MPL/2.0/.
+-->
+
 <resources>
   <!-- Title of a dialog for a notification permission request. %1$s is the domain name of the website. -->
   <string name="mozac_feature_sitepermissions_notification_title">Dovolite %1$s pošiljanje obvestil?</string>
@@ -44,6 +51,8 @@
     this button will not give access to this permission
   -->
   <string name="mozac_feature_sitepermissions_block">Zavrni</string>
+  <!-- Message of a dialog offering more context about the app level notification permission request. %1$s will be replaced with the name of the app. -->
+  <string name="mozac_feature_sitepermissions_notification_permission_rationale_dialog_message">Za prejemanje obvestil tega spletnega mesta jih boste morali dovoliti v %1$su.</string>
   <!-- Button label in a notification permission request dialog to dismiss the dialog. -->
   <string name="mozac_feature_sitepermissions_notification_permission_rationale_dialog_dismiss_label">Prekliči</string>
   <!-- Button label in a notification permission request dialog. It will let the user go to Android Settings to grant the permission. -->

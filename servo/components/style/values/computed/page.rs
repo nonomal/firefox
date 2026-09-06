@@ -4,6 +4,7 @@
 
 //! Computed @page at-rule properties and named-page style properties
 
+use crate::derives::*;
 use crate::values::computed::length::NonNegativeLength;
 use crate::values::computed::{Context, ToComputedValue};
 use crate::values::generics;
@@ -23,6 +24,7 @@ pub use specified::PageName;
 /// the computed value of page-size.
 #[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToCss, ToResolvedValue, ToShmem, ToTyped)]
 #[repr(C, u8)]
+#[typed(todo_derive_fields)]
 pub enum PageSize {
     /// Specified size, paper size, or paper size and orientation.
     Size(Size2D<NonNegativeLength>),
@@ -36,7 +38,7 @@ impl ToComputedValue for specified::PageSize {
     type ComputedValue = PageSize;
 
     fn to_computed_value(&self, ctx: &Context) -> Self::ComputedValue {
-        match &*self {
+        match self {
             Self::Size(s) => PageSize::Size(s.to_computed_value(ctx)),
             Self::PaperSize(p, PageSizeOrientation::Landscape) => PageSize::Size(Size2D {
                 width: p.long_edge().to_computed_value(ctx),

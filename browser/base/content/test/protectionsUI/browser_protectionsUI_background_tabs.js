@@ -4,10 +4,10 @@
 "use strict";
 
 const TRACKING_PAGE =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://tracking.example.org/browser/browser/base/content/test/protectionsUI/trackingPage.html";
 const BENIGN_PAGE =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://tracking.example.org/browser/browser/base/content/test/protectionsUI/benignPage.html";
 
 const TP_PREF = "privacy.trackingprotection.enabled";
@@ -33,7 +33,10 @@ add_task(async function testBackgroundTabs() {
   let hasContentBlockingEvent = TestUtils.waitForCondition(
     () => browser.getContentBlockingEvents() != 0
   );
-  await promiseTabLoadEvent(backgroundTab, TRACKING_PAGE);
+  await BrowserTestUtils.loadURIString({
+    browser: backgroundTab.linkedBrowser,
+    uriString: TRACKING_PAGE,
+  });
   await hasContentBlockingEvent;
 
   is(

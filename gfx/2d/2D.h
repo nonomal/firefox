@@ -1,21 +1,20 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef _MOZILLA_GFX_2D_H
-#define _MOZILLA_GFX_2D_H
+#ifndef MOZILLA_GFX_2D_H
+#define MOZILLA_GFX_2D_H
 
-#include "Types.h"
-#include "Point.h"
-#include "Rect.h"
-#include "Matrix.h"
-#include "Quaternion.h"
-#include "UserData.h"
-#include "FontVariation.h"
 #include <functional>
 #include <vector>
+
+#include "FontVariation.h"
+#include "Matrix.h"
+#include "Point.h"
+#include "Quaternion.h"
+#include "Rect.h"
+#include "Types.h"
+#include "UserData.h"
 
 // GenericRefCountedBase allows us to hold on to refcounted objects of any type
 // (contrary to RefCounted<T> which requires knowing the type T) and, in
@@ -28,12 +27,12 @@
 // This RefPtr class isn't ideal for usage in Azure, as it doesn't allow T**
 // outparams using the &-operator. But it will have to do as there's no easy
 // solution.
+#include "mozilla/Atomics.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/StaticMutex.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/ThreadSafeWeakPtr.h"
-#include "mozilla/Atomics.h"
-
+#include "mozilla/gfx/FontData.h"
 #include "nsRegionFwd.h"
 
 #if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_GTK)
@@ -1088,6 +1087,20 @@ class Path : public external::AtomicRefCounted<Path> {
 
   virtual bool IsEmpty() const = 0;
 
+  struct Circle {
+    Point origin;
+    float radius;
+    bool closed = false;
+  };
+
+  struct Line {
+    Point origin;
+    Point destination;
+  };
+
+  virtual Maybe<Circle> AsCircle() const { return Nothing(); }
+  virtual Maybe<Line> AsLine() const { return Nothing(); }
+
  protected:
   Path();
   void EnsureFlattenedPath();
@@ -1109,6 +1122,9 @@ class PathBuilder : public PathSink {
   virtual BackendType GetBackendType() const = 0;
 
   virtual bool IsActive() const = 0;
+
+  virtual Maybe<Path::Circle> AsCircle() const { return Nothing(); }
+  virtual Maybe<Path::Line> AsLine() const { return Nothing(); }
 };
 
 inline void Path::Transform(RefPtr<Path>& aPath, const Matrix& aTransform) {
@@ -1190,25 +1206,22 @@ class FTUserFontData final
  public:
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(FTUserFontData)
 
-  FTUserFontData(const uint8_t* aData, uint32_t aLength)
-      : mFontData(aData), mLength(aLength) {}
+  explicit FTUserFontData(FontData* aFontData) : mFontData(aFontData) {}
   explicit FTUserFontData(const char* aFilename) : mFilename(aFilename) {}
 
-  const uint8_t* FontData() const { return mFontData; }
+  const uint8_t* GetData() const {
+    return mFontData ? mFontData->Data() : nullptr;
+  }
+  uint32_t Length() const { return mFontData ? mFontData->Length() : 0; }
 
   already_AddRefed<mozilla::gfx::SharedFTFace> CloneFace(
       int aFaceIndex = 0) override;
 
  private:
-  ~FTUserFontData() {
-    if (mFontData) {
-      free((void*)mFontData);
-    }
-  }
+  ~FTUserFontData() = default;
 
   std::string mFilename;
-  const uint8_t* mFontData = nullptr;
-  uint32_t mLength = 0;
+  RefPtr<FontData> mFontData;
 };
 
 /** SharedFTFace is a shared wrapper around an FT_Face. It is ref-counted,
@@ -1453,6 +1466,13 @@ class DrawTarget : public external::AtomicRefCounted<DrawTarget> {
   virtual void Destination(const char* aDestination, const Point& aPoint) {}
 
   /**
+   * Associate subsequent calls to other methods with a specific accessibility
+   * node. This is used to generate tagged PDF output. Specifying an id of (0,
+   * 0) disassociates subsequent calls from any accessibility node.
+   */
+  virtual void AccessibleId(uint64_t aInnerWindowId, uint64_t aAccId) {}
+
+  /**
    * Returns a SourceSurface which is a snapshot of the current contents of the
    * DrawTarget. Multiple calls to Snapshot() without any drawing operations in
    * between will normally return the same SourceSurface object.
@@ -1525,6 +1545,13 @@ class DrawTarget : public external::AtomicRefCounted<DrawTarget> {
       SurfaceFormat aFormat) {
     return nullptr;
   }
+
+  /**
+   * Try to replay a source surface into this draw target, returning `true` on
+   * success. Parameter coordinate spaces match DrawSurface().
+   */
+  bool TryToReplaySurface(SourceSurface* aSurface, const Rect& aDest,
+                          const Rect& aSource);
 
   /**
    * Draw a surface to the draw target, when the surface will be available
@@ -2158,9 +2185,6 @@ class GFX2D_API Factory {
   static void Init(const Config& aConfig);
   static void ShutDown();
 
-  static bool HasSSE2();
-  static bool HasSSE4();
-
   /**
    * Returns false if any of the following are true:
    *
@@ -2301,7 +2325,8 @@ class GFX2D_API Factory {
   static void CopyDataSourceSurface(DataSourceSurface* aSource,
                                     DataSourceSurface* aDest);
 
-  static uint32_t GetMaxSurfaceSize(BackendType aType);
+  static size_t GetMaxSurfaceSize(BackendType aType);
+  static size_t GetMaxSurfaceArea(BackendType aType);
 
   static LogForwarder* GetLogForwarder() {
     return sConfig ? sConfig->mLogForwarder : nullptr;
@@ -2343,10 +2368,10 @@ class GFX2D_API Factory {
                                                         const char* aFilename,
                                                         int aFaceIndex);
   static FT_Face NewFTFaceFromData(FT_Library aFTLibrary, const uint8_t* aData,
-                                   size_t aDataSize, int aFaceIndex);
+                                   uint32_t aLength, int aFaceIndex);
   static already_AddRefed<SharedFTFace> NewSharedFTFaceFromData(
-      FT_Library aFTLibrary, const uint8_t* aData, size_t aDataSize,
-      int aFaceIndex, SharedFTFaceData* aSharedData = nullptr);
+      FT_Library aFTLibrary, FontData* aFontData, int aFaceIndex,
+      SharedFTFaceData* aSharedData = nullptr);
   static void ReleaseFTFace(FT_Face aFace);
   static FT_Error LoadFTGlyph(FT_Face aFace, uint32_t aGlyphIndex,
                               int32_t aFlags);
@@ -2378,10 +2403,10 @@ class GFX2D_API Factory {
   static void SetSystemTextQuality(uint8_t aQuality);
 
   static already_AddRefed<DataSourceSurface>
-  CreateBGRA8DataSourceSurfaceForD3D11Texture(ID3D11Texture2D* aSrcTexture,
-                                              uint32_t aArrayIndex,
-                                              gfx::ColorSpace2 aColorSpace,
-                                              gfx::ColorRange aColorRange);
+  CreateBGRA8DataSourceSurfaceForD3D11Texture(
+      ID3D11Texture2D* aSrcTexture, uint32_t aArrayIndex,
+      gfx::ColorSpace2 aColorSpace, gfx::ColorRange aColorRange,
+      gfx::TransferFunction aTransferFunction);
 
   static nsresult CreateSdbForD3D11Texture(
       ID3D11Texture2D* aSrcTexture, const IntSize& aSrcSize,
@@ -2392,7 +2417,8 @@ class GFX2D_API Factory {
                               ID3D11Texture2D* aSrcTexture,
                               uint32_t aArrayIndex,
                               gfx::ColorSpace2 aColorSpace,
-                              gfx::ColorRange aColorRange);
+                              gfx::ColorRange aColorRange,
+                              gfx::TransferFunction aTransferFunction);
 
  private:
   static StaticRefPtr<ID3D11Device> mD3D11Device;
@@ -2404,11 +2430,10 @@ class GFX2D_API Factory {
                               ID3D11Texture2D* aSrcTexture);
 
   // DestTextureT can be TextureData or DataSourceSurface.
-  static bool ConvertSourceAndRetryReadback(DataSourceSurface* aDestCpuTexture,
-                                            ID3D11Texture2D* aSrcTexture,
-                                            uint32_t aArrayIndex,
-                                            gfx::ColorSpace2 aColorSpace,
-                                            gfx::ColorRange aColorRange);
+  static bool ConvertSourceAndRetryReadback(
+      DataSourceSurface* aDestCpuTexture, ID3D11Texture2D* aSrcTexture,
+      uint32_t aArrayIndex, gfx::ColorSpace2 aColorSpace,
+      gfx::ColorRange aColorRange, gfx::TransferFunction aTransferFunction);
 
  protected:
   // This guards access to the singleton devices above, as well as the
@@ -2420,4 +2445,4 @@ class GFX2D_API Factory {
 }  // namespace gfx
 }  // namespace mozilla
 
-#endif  // _MOZILLA_GFX_2D_H
+#endif  // MOZILLA_GFX_2D_H

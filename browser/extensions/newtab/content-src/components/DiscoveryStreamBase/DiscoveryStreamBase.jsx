@@ -5,10 +5,10 @@
 import { CardGrid } from "content-src/components/DiscoveryStreamComponents/CardGrid/CardGrid";
 import { CollapsibleSection } from "content-src/components/CollapsibleSection/CollapsibleSection";
 import { connect } from "react-redux";
-import { DSMessage } from "content-src/components/DiscoveryStreamComponents/DSMessage/DSMessage";
 import { ReportContent } from "../DiscoveryStreamComponents/ReportContent/ReportContent";
 import { Highlights } from "content-src/components/DiscoveryStreamComponents/Highlights/Highlights";
 import { HorizontalRule } from "content-src/components/DiscoveryStreamComponents/HorizontalRule/HorizontalRule";
+// eslint-disable-next-line no-shadow
 import { Navigation } from "content-src/components/DiscoveryStreamComponents/Navigation/Navigation";
 import { PrivacyLink } from "content-src/components/DiscoveryStreamComponents/PrivacyLink/PrivacyLink";
 import React from "react";
@@ -17,6 +17,22 @@ import { selectLayoutRender } from "content-src/lib/selectLayoutRender";
 import { TopSites } from "content-src/components/TopSites/TopSites";
 import { CardSections } from "../DiscoveryStreamComponents/CardSections/CardSections";
 import { Widgets } from "content-src/components/Widgets/Widgets";
+import { Spaces } from "content-src/components/Spaces/Spaces";
+import {
+  isSpacesActive,
+  resolvePopulatedSpaces,
+  SPACE_IDS,
+} from "common/PageLayoutVariants.mjs";
+import {
+  ASROUTER_NEWTAB_MESSAGE_POSITIONS,
+  shouldShowASRouterNewTabMessage,
+} from "../../lib/asrouter-message-utils.mjs";
+import { ErrorBoundary } from "content-src/components/ErrorBoundary/ErrorBoundary";
+import { MessageWrapper } from "content-src/components/MessageWrapper/MessageWrapper";
+import { ExternalComponentWrapper } from "content-src/components/ExternalComponentWrapper/ExternalComponentWrapper";
+
+// @nova-cleanup(remove-pref): Remove PREF_NOVA_ENABLED
+const PREF_NOVA_ENABLED = "nova.enabled";
 
 const ALLOWED_CSS_URL_PREFIXES = [
   "chrome://",
@@ -114,20 +130,15 @@ export class _DiscoveryStreamBase extends React.PureComponent {
       case "Highlights":
         return <Highlights />;
       case "TopSites":
+        // @nova-cleanup(remove-conditional): Remove this guard when DiscoveryStreamBase
+        // is no longer used in the Nova layout
+        if (this.props.Prefs.values[PREF_NOVA_ENABLED]) {
+          return null;
+        }
         return (
           <div className="ds-top-sites">
             <TopSites isFixed={true} title={component.header?.title} />
           </div>
-        );
-      case "Message":
-        return (
-          <DSMessage
-            title={component.header && component.header.title}
-            subtitle={component.header && component.header.subtitle}
-            link_text={component.header && component.header.link_text}
-            link_url={component.header && component.header.link_url}
-            icon={component.header && component.header.icon}
-          />
         );
       case "SectionTitle":
         return <SectionTitle header={component.header} />;
@@ -155,10 +166,9 @@ export class _DiscoveryStreamBase extends React.PureComponent {
               data={component.data}
               dispatch={this.props.dispatch}
               type={component.type}
-              firstVisibleTimestamp={this.props.firstVisibleTimestamp}
               ctaButtonSponsors={component.properties.ctaButtonSponsors}
               ctaButtonVariant={component.properties.ctaButtonVariant}
-              placeholder={this.props.placeholder}
+              spocsLoading={this.props.spocsLoading}
             />
           );
         }
@@ -178,9 +188,8 @@ export class _DiscoveryStreamBase extends React.PureComponent {
             ctaButtonSponsors={component.properties.ctaButtonSponsors}
             ctaButtonVariant={component.properties.ctaButtonVariant}
             hideDescriptions={this.props.DiscoveryStream.hideDescriptions}
-            firstVisibleTimestamp={this.props.firstVisibleTimestamp}
             spocPositions={component.spocs?.positions}
-            placeholder={this.props.placeholder}
+            placeholder={this.props.spocsLoading}
           />
         );
       }
@@ -215,19 +224,15 @@ export class _DiscoveryStreamBase extends React.PureComponent {
       prefs: this.props.Prefs.values,
       locale,
     });
+    // @nova-cleanup(remove-pref): Delete this line; remove all !novaEnabled guards on ASRouterNewTabMessage blocks below.
+    const novaEnabled = this.props.Prefs.values[PREF_NOVA_ENABLED];
     const sectionsEnabled =
       this.props.Prefs.values["discoverystream.sections.enabled"];
-    const { config } = this.props.DiscoveryStream;
     const topicSelectionEnabled =
       this.props.Prefs.values["discoverystream.topicSelection.enabled"];
     const reportAdsEnabled =
       this.props.Prefs.values["discoverystream.reportAds.enabled"];
     const spocsEnabled = this.props.Prefs.values["unifiedAds.spocs.enabled"];
-
-    // Allow rendering without extracting special components
-    if (!config.collapsible) {
-      return this.renderLayout(layoutRender);
-    }
 
     // Find the first component of a type and remove it from layout
     const extractComponent = type => {
@@ -279,6 +284,11 @@ export class _DiscoveryStreamBase extends React.PureComponent {
     };
 
     const privacyLinkComponent = extractComponent("PrivacyLink");
+    // renderLayout always returns a div, so gate on the same condition
+    // Highlights.jsx uses or the side-by-side panel frames an empty box.
+    const hasHighlights = Boolean(
+      this.props.Sections?.find(s => s.id === "highlights")?.enabled
+    );
     let learnMore = {
       link: {
         href: message.header.link_url,
@@ -290,29 +300,30 @@ export class _DiscoveryStreamBase extends React.PureComponent {
 
     const { DiscoveryStream } = this.props;
 
-    return (
-      <React.Fragment>
-        {/* Reporting stories/articles will only be available in sections, not the default card grid  */}
-        {((reportAdsEnabled && spocsEnabled) || sectionsEnabled) && (
-          <ReportContent spocs={DiscoveryStream.spocs} />
-        )}
+    // Widgets, the content feed and Highlights are already three separate boxes
+    // in this band, so spaces navigates between those rather than introducing a
+    // new grouping. Declared here so the flat band and Spaces can each place
+    // them.
+    const widgetsGroup =
+      widgets &&
+      this.renderLayout([
+        {
+          width: 12,
+          components: [{ type: "Widgets" }],
+          sectionType: "widgets",
+        },
+      ]);
 
-        {topSites &&
-          this.renderLayout([
-            {
-              width: 12,
-              components: [topSites],
-              sectionType: "topsites",
-            },
-          ])}
-        {widgets &&
-          this.renderLayout([
-            {
-              width: 12,
-              components: [{ type: "Widgets" }],
-              sectionType: "widgets",
-            },
-          ])}
+    const contentGroup = (
+      <div
+        className={`layout-content-column${
+          layoutRender.length ? " has-feed" : ""
+        }`}
+      >
+        {/* Nova only: the ABOVE_CONTENT_FEED message, built in Base.jsx. This is
+        the widgets/feed boundary, which only exists inside this component. */}
+        {this.props.aboveContentFeed}
+
         {!!layoutRender.length && (
           <CollapsibleSection
             className="ds-layout"
@@ -332,12 +343,6 @@ export class _DiscoveryStreamBase extends React.PureComponent {
             {this.renderLayout(layoutRender)}
           </CollapsibleSection>
         )}
-        {this.renderLayout([
-          {
-            width: 12,
-            components: [{ type: "Highlights" }],
-          },
-        ])}
         {privacyLinkComponent &&
           this.renderLayout([
             {
@@ -345,6 +350,111 @@ export class _DiscoveryStreamBase extends React.PureComponent {
               components: [privacyLinkComponent],
             },
           ])}
+      </div>
+    );
+
+    const highlightsGroup = hasHighlights && (
+      <div className="layout-highlights-column">
+        {this.renderLayout([
+          {
+            width: 12,
+            components: [{ type: "Highlights" }],
+          },
+        ])}
+      </div>
+    );
+
+    // Guarded so the ordinary layout does no spaces work at all: isSpacesActive
+    // reads prefs only. resolvePopulatedSpaces then decides which spaces exist
+    // and their tablist order, so the tabs follow the prefs rather than whatever
+    // the feeds have delivered so far.
+    let spaceEntries = [];
+    if (isSpacesActive(this.props.Prefs.values)) {
+      const spaceContent = {
+        [SPACE_IDS.STORIES]: contentGroup,
+        [SPACE_IDS.WIDGETS]: widgetsGroup,
+        [SPACE_IDS.ACTIVITY]: highlightsGroup,
+      };
+      spaceEntries = resolvePopulatedSpaces(this.props.Prefs.values)
+        .map(id => ({ id, content: spaceContent[id] }))
+        .filter(space => space.content);
+    }
+    const spacesActive = spaceEntries.length > 1;
+
+    return (
+      <React.Fragment>
+        {/* Reporting stories/articles will only be available in sections, not the default card grid  */}
+        {((reportAdsEnabled && spocsEnabled) || sectionsEnabled) && (
+          <ReportContent spocs={DiscoveryStream.spocs} />
+        )}
+
+        {/**
+         * The ABOVE_TOPSITES ASRouterNewTabMessage rendering actually occurs in Base.jsx
+         * for silly reasons. Essentially, it's easier for the browser_asrouter_newtab_message
+         * mochitest-browser test to render a test message if it doesn't have to rely on
+         * DiscoveryStreamBase being rendered. Thankfully, this can all be removed
+         * after Nova ships.
+         */}
+
+        {topSites &&
+          this.renderLayout([
+            {
+              width: 12,
+              components: [topSites],
+              sectionType: "topsites",
+            },
+          ])}
+
+        {
+          // @nova-cleanup(remove-conditional): Remove this entire block; Base.jsx handles ABOVE_WIDGETS in the Nova layout.
+        }
+        {!novaEnabled &&
+          shouldShowASRouterNewTabMessage(
+            this.props.Messages,
+            "ASRouterNewTabMessage",
+            ASROUTER_NEWTAB_MESSAGE_POSITIONS.ABOVE_WIDGETS
+          ) && (
+            <ErrorBoundary>
+              <MessageWrapper dispatch={this.props.dispatch}>
+                <ExternalComponentWrapper
+                  type="ASROUTER_NEWTAB_MESSAGE"
+                  messageData={this.props.Messages.messageData}
+                  className="asrouter-newtab-message-wrapper"
+                />
+              </MessageWrapper>
+            </ErrorBoundary>
+          )}
+
+        {spacesActive ? (
+          <Spaces spaces={spaceEntries} dispatch={this.props.dispatch} />
+        ) : (
+          <React.Fragment>
+            {widgetsGroup}
+
+            {
+              //@nova-cleanup(remove-conditional): Remove this entire block; in the Nova layout Base.jsx passes ABOVE_CONTENT_FEED in via the aboveContentFeed prop below. */
+            }
+            {!novaEnabled &&
+              shouldShowASRouterNewTabMessage(
+                this.props.Messages,
+                "ASRouterNewTabMessage",
+                ASROUTER_NEWTAB_MESSAGE_POSITIONS.ABOVE_CONTENT_FEED
+              ) && (
+                <ErrorBoundary>
+                  <MessageWrapper dispatch={this.props.dispatch}>
+                    <ExternalComponentWrapper
+                      type="ASROUTER_NEWTAB_MESSAGE"
+                      messageData={this.props.Messages.messageData}
+                      className="asrouter-newtab-message-wrapper"
+                    />
+                  </MessageWrapper>
+                </ErrorBoundary>
+              )}
+
+            {contentGroup}
+            {highlightsGroup}
+          </React.Fragment>
+        )}
       </React.Fragment>
     );
   }
@@ -390,6 +500,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
 
 export const DiscoveryStreamBase = connect(state => ({
   DiscoveryStream: state.DiscoveryStream,
+  Messages: state.Messages,
   Prefs: state.Prefs,
   Sections: state.Sections,
   document: globalThis.document,

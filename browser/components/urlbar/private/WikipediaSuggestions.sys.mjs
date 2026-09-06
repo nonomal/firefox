@@ -8,8 +8,8 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   QuickSuggest: "moz-src:///browser/components/urlbar/QuickSuggest.sys.mjs",
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
-  UrlbarUtils: "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 /**
@@ -48,23 +48,53 @@ export class WikipediaSuggestions extends SuggestProvider {
   }
 
   makeResult(queryContext, suggestion) {
+    // Note that Rust uses camelCase, Merino uses snake_case.
     return new lazy.UrlbarResult({
-      type: lazy.UrlbarUtils.RESULT_TYPE.URL,
-      source: lazy.UrlbarUtils.RESULT_SOURCE.SEARCH,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
+      isBottomUrlSuggestion: true,
+      richSuggestionIconSize: 16,
+      payload: {
         url: suggestion.url,
-        title: suggestion.title,
-        qsSuggestion: [
-          // Merino uses snake_case, so this will be `full_keyword` for it.
-          suggestion.fullKeyword ?? suggestion.full_keyword,
-          lazy.UrlbarUtils.HIGHLIGHT.SUGGESTED,
-        ],
-        isBlockable: true,
-        isManageable: true,
-      }),
+        title: suggestion.fullKeyword ?? suggestion.full_keyword,
+        subtitle: suggestion.title,
+        bottomTextL10n: {
+          id: "urlbar-result-suggestion-recommended",
+        },
+      },
     });
   }
 
+  /**
+   * Gets the list of commands that should be shown in the result menu for a
+   * given result from the provider. All commands returned by this method should
+   * be handled by implementing `onEngagement()` with the possible exception of
+   * commands automatically handled by the urlbar, like "help".
+   */
+  getResultCommands() {
+    return [
+      {
+        name: "dismiss",
+        l10n: {
+          id: "urlbar-result-menu-dismiss-suggestion2",
+        },
+      },
+      { name: "separator" },
+      {
+        name: "manage",
+        l10n: {
+          id: "urlbar-result-menu-manage-firefox-suggest2",
+        },
+      },
+    ];
+  }
+
+  /**
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   * @param {string} _searchString
+   */
   onEngagement(queryContext, controller, details, _searchString) {
     let { result } = details;
 

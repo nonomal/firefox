@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -8,11 +6,10 @@
 
 #include "mozilla/Casting.h"
 
-#include "jsmath.h"
-
 #include "jit/JitFrames.h"
 #include "jit/MacroAssembler.h"
 #include "js/ScalarType.h"  // js::Scalar::Type
+#include "util/PortableMath.h"
 
 #include "jit/MacroAssembler-inl.h"
 
@@ -704,8 +701,9 @@ CodeOffset MacroAssembler::call(Register reg) { return Assembler::call(reg); }
 
 CodeOffset MacroAssembler::call(Label* label) { return Assembler::call(label); }
 
-void MacroAssembler::call(const Address& addr) {
+CodeOffset MacroAssembler::call(const Address& addr) {
   Assembler::call(Operand(addr.base, addr.offset));
+  return CodeOffset(currentOffset());
 }
 
 CodeOffset MacroAssembler::call(wasm::SymbolicAddress target) {
@@ -785,8 +783,11 @@ uint32_t MacroAssembler::pushFakeReturnAddress(Register scratch) {
 // ===============================================================
 // WebAssembly
 
-FaultingCodeOffset MacroAssembler::wasmTrapInstruction() {
-  return FaultingCodeOffset(ud2().offset());
+FaultingCodeRange MacroAssembler::wasmTrapInstruction() {
+  auto before = currentOffset();
+  ud2();
+  auto after = currentOffset();
+  return FaultingCodeRange(before, after);
 }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
@@ -1177,10 +1178,7 @@ static void CompareExchange(MacroAssembler& masm,
     masm.movl(oldval, output);
   }
 
-  if (access) {
-    masm.append(*access, wasm::TrapMachineInsn::Atomic,
-                FaultingCodeOffset(masm.currentOffset()));
-  }
+  auto before = masm.currentOffset();
 
   // NOTE: the generated code must match the assembly code in gen_cmpxchg in
   // GenerateAtomicOperations.py
@@ -1197,6 +1195,12 @@ static void CompareExchange(MacroAssembler& masm,
       break;
     default:
       MOZ_CRASH("Invalid");
+  }
+
+  auto after = masm.currentOffset();
+  if (access) {
+    masm.appendAndVerify(*access, wasm::TrapMachineInsn::Atomic,
+                         FaultingCodeRange(before, after));
   }
 
   ExtendTo32(masm, type, output);
@@ -1238,10 +1242,7 @@ static void AtomicExchange(MacroAssembler& masm,
     masm.movl(value, output);
   }
 
-  if (access) {
-    masm.append(*access, wasm::TrapMachineInsn::Atomic,
-                FaultingCodeOffset(masm.currentOffset()));
-  }
+  auto before = masm.currentOffset();
 
   switch (Scalar::byteSize(type)) {
     case 1:
@@ -1257,6 +1258,13 @@ static void AtomicExchange(MacroAssembler& masm,
     default:
       MOZ_CRASH("Invalid");
   }
+
+  auto after = masm.currentOffset();
+  if (access) {
+    masm.appendAndVerify(*access, wasm::TrapMachineInsn::Atomic,
+                         FaultingCodeRange(before, after));
+  }
+
   ExtendTo32(masm, type, output);
 }
 
@@ -1438,16 +1446,15 @@ static void AtomicFetchOp(MacroAssembler& masm,
   };
 
   // Add trap instruction directly before the load.
-  if (access) {
-    masm.append(*access, WasmTrapMachineInsn(arrayType, op),
-                FaultingCodeOffset(masm.currentOffset()));
-  }
+  auto before = masm.currentOffset();
+  auto after = before;
 
   switch (op) {
     case AtomicOp::Add:
     case AtomicOp::Sub:
       // `add` and `sub` operations can be optimized with XADD.
       lock_xadd();
+      after = masm.currentOffset();
 
       ExtendTo32(masm, arrayType, output);
       break;
@@ -1459,6 +1466,7 @@ static void AtomicFetchOp(MacroAssembler& masm,
 
       // Load memory into eax.
       load();
+      after = masm.currentOffset();
 
       // Loop.
       Label again;
@@ -1483,6 +1491,12 @@ static void AtomicFetchOp(MacroAssembler& masm,
 
     default:
       MOZ_CRASH();
+  }
+
+  // Add trap instruction directly before the load.
+  if (access) {
+    masm.appendAndVerify(*access, WasmTrapMachineInsn(arrayType, op),
+                         FaultingCodeRange(before, after));
   }
 }
 
@@ -1546,10 +1560,7 @@ static void AtomicEffectOp(MacroAssembler& masm,
                            const wasm::MemoryAccessDesc* access,
                            Scalar::Type arrayType, AtomicOp op, V value,
                            const T& mem) {
-  if (access) {
-    masm.append(*access, wasm::TrapMachineInsn::Atomic,
-                FaultingCodeOffset(masm.currentOffset()));
-  }
+  auto before = masm.currentOffset();
 
   switch (Scalar::byteSize(arrayType)) {
     case 1:
@@ -1617,6 +1628,12 @@ static void AtomicEffectOp(MacroAssembler& masm,
       break;
     default:
       MOZ_CRASH();
+  }
+
+  auto after = masm.currentOffset();
+  if (access) {
+    masm.appendAndVerify(*access, wasm::TrapMachineInsn::Atomic,
+                         FaultingCodeRange(before, after));
   }
 }
 
@@ -1813,7 +1830,7 @@ void MacroAssembler::floorFloat32ToInt32(FloatRegister src, Register dest,
     // Round toward -Infinity.
     {
       ScratchFloat32Scope scratch(*this);
-      vroundss(X86Encoding::RoundDown, src, scratch);
+      roundFloat32WithMode(X86Encoding::RoundDown, src, scratch);
       truncateFloat32ToInt32(scratch, dest, fail);
     }
   } else {
@@ -1872,7 +1889,7 @@ void MacroAssembler::floorDoubleToInt32(FloatRegister src, Register dest,
     // Round toward -Infinity.
     {
       ScratchDoubleScope scratch(*this);
-      vroundsd(X86Encoding::RoundDown, src, scratch);
+      roundDoubleWithMode(X86Encoding::RoundDown, src, scratch);
       truncateDoubleToInt32(scratch, dest, fail);
     }
   } else {
@@ -1940,7 +1957,7 @@ void MacroAssembler::ceilFloat32ToInt32(FloatRegister src, Register dest,
     // x <= -1 or x > -0
     bind(&lessThanOrEqualMinusOne);
     // Round toward +Infinity.
-    vroundss(X86Encoding::RoundUp, src, scratch);
+    roundFloat32WithMode(X86Encoding::RoundUp, src, scratch);
     truncateFloat32ToInt32(scratch, dest, fail);
     return;
   }
@@ -1985,7 +2002,7 @@ void MacroAssembler::ceilDoubleToInt32(FloatRegister src, Register dest,
     // x <= -1 or x > -0
     bind(&lessThanOrEqualMinusOne);
     // Round toward +Infinity.
-    vroundsd(X86Encoding::RoundUp, src, scratch);
+    roundDoubleWithMode(X86Encoding::RoundUp, src, scratch);
     truncateDoubleToInt32(scratch, dest, fail);
     return;
   }
@@ -2104,7 +2121,7 @@ void MacroAssembler::roundFloat32ToInt32(FloatRegister src, Register dest,
 
     if (HasSSE41()) {
       // Round toward -Infinity.
-      vroundss(X86Encoding::RoundDown, temp, scratch);
+      roundFloat32WithMode(X86Encoding::RoundDown, temp, scratch);
 
       // Truncate.
       truncateFloat32ToInt32(scratch, dest, fail);
@@ -2183,7 +2200,7 @@ void MacroAssembler::roundDoubleToInt32(FloatRegister src, Register dest,
 
     if (HasSSE41()) {
       // Round toward -Infinity.
-      vroundsd(X86Encoding::RoundDown, temp, scratch);
+      roundDoubleWithMode(X86Encoding::RoundDown, temp, scratch);
 
       // Truncate.
       truncateDoubleToInt32(scratch, dest, fail);
@@ -2215,13 +2232,13 @@ void MacroAssembler::roundDoubleToInt32(FloatRegister src, Register dest,
 void MacroAssembler::nearbyIntDouble(RoundingMode mode, FloatRegister src,
                                      FloatRegister dest) {
   MOZ_ASSERT(HasRoundInstruction(mode));
-  vroundsd(Assembler::ToX86RoundingMode(mode), src, dest);
+  roundDoubleWithMode(Assembler::ToX86RoundingMode(mode), src, dest);
 }
 
 void MacroAssembler::nearbyIntFloat32(RoundingMode mode, FloatRegister src,
                                       FloatRegister dest) {
   MOZ_ASSERT(HasRoundInstruction(mode));
-  vroundss(Assembler::ToX86RoundingMode(mode), src, dest);
+  roundFloat32WithMode(Assembler::ToX86RoundingMode(mode), src, dest);
 }
 
 void MacroAssembler::copySignDouble(FloatRegister lhs, FloatRegister rhs,

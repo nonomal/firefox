@@ -1200,8 +1200,9 @@ SECU_PrintOidTag(FILE *out, SECOidTag tag, const char *m, int level)
         desc = SECOID_FindOIDTagDescription(SEC_OID_UNKNOWN);
     }
     SECU_Indent(out, level);
-    if (m != NULL)
-        fprintf(out, "%s\n", m);
+    if (m != NULL) {
+        fprintf(out, "%s: ", m);
+    }
     fprintf(out, "%s\n", desc);
 }
 
@@ -1534,6 +1535,47 @@ SECU_PrintMLDSAPublicKey(FILE *out, SECKEYPublicKey *pk, char *m, int level)
     SECU_PrintInteger(out, &pk->u.mldsa.publicValue, "PublicValue", level + 1);
 }
 
+void
+SECU_PrintMLKEMPublicKey(FILE *out, SECKEYPublicKey *pk, char *m, int level)
+{
+
+    SECU_Indent(out, level);
+    fprintf(out, "%s:\n", m);
+
+    switch (pk->u.kyber.params) {
+        case params_ml_kem512:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_512, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem512_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_512, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_ml_kem768:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_768, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem768_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_768, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_ml_kem1024:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_1024, "Parameter Set", level + 1);
+            break;
+        case params_ml_kem1024_test_mode:
+            SECU_PrintOidTag(out, SEC_OID_ML_KEM_1024, "Parameter Set (test mode)",
+                             level + 1);
+            break;
+        case params_kyber_invalid:
+            SECU_Indent(out, level);
+            fprintf(out, "Parameter Set: Invalid Params\n");
+            break;
+        default:
+            SECU_Indent(out, level);
+            fprintf(out, "Parameter Set: Invalid Params %d\n", pk->u.kyber.params);
+            break;
+    }
+    SECU_PrintInteger(out, &pk->u.kyber.publicValue, "PublicValue", level + 1);
+}
+
 static void
 secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                                CERTSubjectPublicKeyInfo *i, char *msg, int level)
@@ -1563,6 +1605,10 @@ secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                 SECU_PrintMLDSAPublicKey(out, pk, "ML-DSA Public Key", level + 1);
                 break;
 
+            case kyberKey:
+                SECU_PrintMLKEMPublicKey(out, pk, "ML-KEM Public Key", level + 1);
+                break;
+
             case dhKey:
             case fortezzaKey:
             case keaKey:
@@ -1571,7 +1617,7 @@ secu_PrintSubjectPublicKeyInfo(FILE *out, PLArenaPool *arena,
                 goto loser;
             default:
                 SECU_Indent(out, level);
-                fprintf(out, "unknown SPKI algorithm type\n");
+                fprintf(out, "unknown SPKI algorithm type %d\n", pk->keyType);
                 goto loser;
         }
         PORT_FreeArena(pk->arena, PR_FALSE);
@@ -4242,9 +4288,6 @@ static const struct SSLNamedGroupString {
     { NAME_AND_LEN("FF4096"), ssl_grp_ffdhe_4096 },
     { NAME_AND_LEN("FF6144"), ssl_grp_ffdhe_6144 },
     { NAME_AND_LEN("FF8192"), ssl_grp_ffdhe_8192 },
-#ifndef NSS_DISABLE_KYBER
-    { NAME_AND_LEN("xyber76800"), ssl_grp_kem_xyber768d00 },
-#endif
     { NAME_AND_LEN("x25519mlkem768"), ssl_grp_kem_mlkem768x25519 },
     { NAME_AND_LEN("secp256r1mlkem768"), ssl_grp_kem_secp256r1mlkem768 },
     { NAME_AND_LEN("secp384r1mlkem1024"), ssl_grp_kem_secp384r1mlkem1024 },
@@ -4393,6 +4436,9 @@ static const struct SSLSignatureSchemeString {
     MAKE_SCHEME(dsa_sha256),
     MAKE_SCHEME(dsa_sha384),
     MAKE_SCHEME(dsa_sha512),
+    MAKE_SCHEME(mldsa44),
+    MAKE_SCHEME(mldsa65),
+    MAKE_SCHEME(mldsa87),
 };
 
 static const size_t sslSignatureSchemeStringLen =

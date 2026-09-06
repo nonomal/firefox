@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -81,8 +79,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(DOMIntersectionObserver)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 DOMIntersectionObserver::DOMIntersectionObserver(
-    already_AddRefed<nsPIDOMWindowInner>&& aOwner,
-    dom::IntersectionCallback& aCb)
+    already_AddRefed<nsPIDOMWindowInner> aOwner, dom::IntersectionCallback& aCb)
     : mOwner(aOwner),
       mDocument(mOwner->GetExtantDoc()),
       mCallback(RefPtr<dom::IntersectionCallback>(&aCb)) {}
@@ -194,9 +191,9 @@ static void LazyLoadCallback(
     Element* target = entry->Target();
     if (entry->IsIntersecting()) {
       if (auto* image = HTMLImageElement::FromNode(target)) {
-        image->StopLazyLoading();
+        image->StopLazyLoading(HTMLImageElement::StartLoad::Yes);
       } else if (auto* iframe = HTMLIFrameElement::FromNode(target)) {
-        iframe->StopLazyLoading();
+        iframe->StopLazyLoading(HTMLIFrameElement::TriggerLoad::Yes);
       } else {
         MOZ_ASSERT_UNREACHABLE(
             "Only <img> and <iframe> should be observed by lazy load observer");
@@ -210,13 +207,12 @@ static LengthPercentage PrefMargin(float aValue, bool aIsPercentage) {
                        : LengthPercentage::FromPixels(aValue);
 }
 
-IntersectionObserverMargin DOMIntersectionObserver::LazyLoadingRootMargin() {
+static IntersectionObserverMargin LazyLoadingMargin() {
   IntersectionObserverMargin margin;
-#define SET_MARGIN(side_, side_lower_)                                 \
-  margin.Get(eSide##side_) = PrefMargin(                               \
-      StaticPrefs::dom_image_lazy_loading_root_margin_##side_lower_(), \
-      StaticPrefs::                                                    \
-          dom_image_lazy_loading_root_margin_##side_lower_##_percentage());
+#define SET_MARGIN(side_, side_lower_)                      \
+  margin.Get(eSide##side_) = PrefMargin(                    \
+      StaticPrefs::dom_lazy_loading_margin_##side_lower_(), \
+      StaticPrefs::dom_lazy_loading_margin_##side_lower_##_percentage());
   SET_MARGIN(Top, top);
   SET_MARGIN(Right, right);
   SET_MARGIN(Bottom, bottom);
@@ -236,7 +232,10 @@ DOMIntersectionObserver::CreateLazyLoadObserver(Document& aDocument) {
   RefPtr<DOMIntersectionObserver> observer =
       new DOMIntersectionObserver(aDocument, LazyLoadCallback);
   observer->mThresholds.AppendElement(0.0f);
-  observer->mRootMargin = LazyLoadingRootMargin();
+  auto* margin = StaticPrefs::dom_lazy_loading_margin_is_scroll()
+                     ? &observer->mScrollMargin
+                     : &observer->mRootMargin;
+  *margin = LazyLoadingMargin();
   return observer.forget();
 }
 
@@ -260,6 +259,10 @@ void DOMIntersectionObserver::GetScrollMargin(nsACString& aRetVal) {
 
 void DOMIntersectionObserver::GetThresholds(nsTArray<double>& aRetVal) {
   aRetVal = mThresholds.Clone();
+}
+
+bool DOMIntersectionObserver::Observes(Element& aTarget) const {
+  return mObservationTargetMap.Contains(&aTarget);
 }
 
 // https://w3c.github.io/IntersectionObserver/#observe-target-element
@@ -659,6 +662,16 @@ static Maybe<OopIframeMetrics> GetOopIframeMetrics(
   });
 }
 
+IntersectionInput DOMIntersectionObserver::ComputeInputForIframeThrottling(
+    const Document& aEmbedderDocument) {
+  auto margin = LazyLoadingMargin();
+  // TODO: Consider not using exactly the same parameters as lazy-load?
+  const bool useScroll = StaticPrefs::dom_lazy_loading_margin_is_scroll();
+  return ComputeInput(aEmbedderDocument, /* aRoot = */ nullptr,
+                      /* aRootMargin = */ useScroll ? nullptr : &margin,
+                      /* aScrollMargin = */ useScroll ? &margin : nullptr);
+}
+
 // https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo
 // step 2.1
 IntersectionInput DOMIntersectionObserver::ComputeInput(
@@ -679,21 +692,23 @@ IntersectionInput DOMIntersectionObserver::ComputeInput(
   if (aRoot && aRoot->IsElement()) {
     if ((rootFrame = aRoot->AsElement()->GetPrimaryFrame())) {
       nsRect rootRectRelativeToRootFrame;
-      if (ScrollContainerFrame* scrollContainerFrame =
-              do_QueryFrame(rootFrame)) {
-        // rootRectRelativeToRootFrame should be the content rect of rootFrame,
-        // not including the scrollbars.
-        rootRectRelativeToRootFrame =
-            scrollContainerFrame
-                ->GetScrollPortRectAccountingForDynamicToolbar();
-      } else {
-        // rootRectRelativeToRootFrame should be the border rect of rootFrame.
-        rootRectRelativeToRootFrame = rootFrame->GetRectRelativeToSelf();
-      }
       nsIFrame* containingBlock =
           nsLayoutUtils::GetContainingBlockForClientRect(rootFrame);
-      rootRect = nsLayoutUtils::TransformFrameRectToAncestor(
-          rootFrame, rootRectRelativeToRootFrame, containingBlock);
+      if (ScrollContainerFrame* scrollContainerFrame =
+              do_QueryFrame(rootFrame)) {
+        // rootRect should be the content rect of rootFrame, not including the
+        // scrollbars.
+        rootRect = nsLayoutUtils::TransformFrameRectToAncestor(
+            rootFrame,
+            scrollContainerFrame
+                ->GetScrollPortRectAccountingForDynamicToolbar(),
+            containingBlock);
+      } else {
+        // rootRect should be the border rect of rootFrame.
+        rootRect = nsLayoutUtils::GetAllInFlowRectsUnion(
+            rootFrame, containingBlock,
+            nsLayoutUtils::GetAllInFlowRectsFlag::AccountForTransforms);
+      }
     }
   } else {
     MOZ_ASSERT(!aRoot || aRoot->IsDocument());
@@ -806,8 +821,8 @@ IntersectionOutput DOMIntersectionObserver::Intersect(
   // clarification in
   // https://github.com/w3c/IntersectionObserver/issues/456.
   if (aInput.mRootFrame == aTargetFrame ||
-      !nsLayoutUtils::IsAncestorFrameCrossDocInProcess(aInput.mRootFrame,
-                                                       aTargetFrame)) {
+      !nsLayoutUtils::IsAncestorFrameCrossDocInProcessConsideringContinuations(
+          aInput.mRootFrame, aTargetFrame)) {
     return {isSimilarOrigin};
   }
 
@@ -839,7 +854,8 @@ IntersectionOutput DOMIntersectionObserver::Intersect(
     if (!clipAxes.isEmpty()) {
       targetRectRelativeToTarget = OverflowAreas::GetOverflowClipRect(
           targetRectRelativeToTarget, targetRectRelativeToTarget, clipAxes,
-          aTargetFrame->OverflowClipMargin(clipAxes));
+          aTargetFrame->OverflowClipMargin(clipAxes,
+                                           /* aAllowNegative = */ false));
     }
   }
 

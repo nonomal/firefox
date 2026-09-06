@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,9 +8,9 @@
 #include "mozilla/EventDispatcher.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/StaticPrefs_dom.h"
+#include "mozilla/dom/ContentList.h"
 #include "mozilla/dom/CustomElementRegistry.h"
 #include "mozilla/dom/HTMLFieldSetElementBinding.h"
-#include "nsContentList.h"
 #include "nsQueryObject.h"
 
 NS_IMPL_NS_NEW_HTML_ELEMENT(FieldSet)
@@ -20,11 +18,10 @@ NS_IMPL_NS_NEW_HTML_ELEMENT(FieldSet)
 namespace mozilla::dom {
 
 HTMLFieldSetElement::HTMLFieldSetElement(
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : nsGenericHTMLFormControlElement(std::move(aNodeInfo),
                                       FormControlType::Fieldset),
       mElements(nullptr),
-      mFirstLegend(nullptr),
       mInvalidElementsCount(0) {
   // <fieldset> is always barred from constraint validation.
   SetBarredFromConstraintValidation(true);
@@ -42,7 +39,7 @@ HTMLFieldSetElement::~HTMLFieldSetElement() {
 
 NS_IMPL_CYCLE_COLLECTION_INHERITED(HTMLFieldSetElement,
                                    nsGenericHTMLFormControlElement, mValidity,
-                                   mElements)
+                                   mElements, mFirstLegend)
 
 NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED(HTMLFieldSetElement,
                                              nsGenericHTMLFormControlElement,
@@ -91,13 +88,14 @@ void HTMLFieldSetElement::GetType(nsAString& aType) const {
 bool HTMLFieldSetElement::MatchListedElements(Element* aElement,
                                               int32_t aNamespaceID,
                                               nsAtom* aAtom, void* aData) {
-  return nsIFormControl::FromNodeOrNull(aElement) != nullptr;
+  auto* control = nsIFormControl::FromNodeOrNull(aElement);
+  return control && !!control->GetFieldSet();
 }
 
-nsIHTMLCollection* HTMLFieldSetElement::Elements() {
+HTMLCollection* HTMLFieldSetElement::Elements() {
   if (!mElements) {
     mElements =
-        new nsContentList(this, MatchListedElements, nullptr, nullptr, true);
+        new ContentList(this, MatchListedElements, nullptr, nullptr, true);
   }
 
   return mElements;
@@ -111,6 +109,7 @@ void HTMLFieldSetElement::InsertChildBefore(
     nsIContent* aChild, nsIContent* aBeforeThis, bool aNotify, ErrorResult& aRv,
     nsINode* aOldParent, MutationEffectOnScript aMutationEffectOnScript) {
   bool firstLegendHasChanged = false;
+  RefPtr<nsIContent> oldFirstLegend = mFirstLegend;
 
   if (aChild->IsHTMLElement(nsGkAtoms::legend)) {
     if (!mFirstLegend) {
@@ -135,6 +134,7 @@ void HTMLFieldSetElement::InsertChildBefore(
   nsGenericHTMLFormControlElement::InsertChildBefore(
       aChild, aBeforeThis, aNotify, aRv, aOldParent, aMutationEffectOnScript);
   if (aRv.Failed()) {
+    mFirstLegend = oldFirstLegend;
     return;
   }
 
@@ -186,9 +186,13 @@ void HTMLFieldSetElement::AddElement(nsGenericHTMLFormElement* aElement) {
   // If the element is a form-associated custom element, adding element might be
   // caused by FACE upgrade which won't trigger mutation observer, so mark
   // mElements dirty manually here.
-  CustomElementData* data = aElement->GetCustomElementData();
-  if (data && data->IsFormAssociated() && mElements) {
-    mElements->SetDirty();
+  if (CustomElementData* data = aElement->GetCustomElementData();
+      data && data->IsFormAssociated()) {
+    for (auto* fs = this; fs; fs = fs->GetFieldSet()) {
+      if (fs->mElements) {
+        fs->mElements->SetDirty();
+      }
+    }
   }
 
   // We need to update the validity of the fieldset.
@@ -273,7 +277,7 @@ void HTMLFieldSetElement::NotifyElementsForFirstLegendChange(bool aNotify) {
    */
   if (!mElements) {
     mElements =
-        new nsContentList(this, MatchListedElements, nullptr, nullptr, true);
+        new ContentList(this, MatchListedElements, nullptr, nullptr, true);
   }
 
   uint32_t length = mElements->Length(true);

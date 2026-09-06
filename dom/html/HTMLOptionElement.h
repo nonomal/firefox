@@ -1,23 +1,22 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef mozilla_dom_HTMLOptionElement_h__
-#define mozilla_dom_HTMLOptionElement_h__
+#ifndef mozilla_dom_HTMLOptionElement_h_
+#define mozilla_dom_HTMLOptionElement_h_
 
 #include "mozilla/dom/HTMLFormElement.h"
 #include "nsGenericHTMLElement.h"
 
 namespace mozilla::dom {
 
+class HTMLOptGroupElement;
 class HTMLSelectElement;
 
 class HTMLOptionElement final : public nsGenericHTMLElement {
  public:
   explicit HTMLOptionElement(
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
   static already_AddRefed<HTMLOptionElement> Option(
       const GlobalObject& aGlobal, const nsAString& aText,
@@ -73,7 +72,8 @@ class HTMLOptionElement final : public nsGenericHTMLElement {
     SetHTMLBoolAttr(nsGkAtoms::disabled, aValue, aRv);
   }
 
-  HTMLFormElement* GetForm();
+  Element* GetFormForBindings();
+  HTMLFormElement* GetFormInternal();
 
   void GetRenderedLabel(nsAString& aLabel) {
     if (!GetAttr(nsGkAtoms::label, aLabel) || aLabel.IsEmpty()) {
@@ -115,6 +115,11 @@ class HTMLOptionElement final : public nsGenericHTMLElement {
    */
   HTMLSelectElement* GetSelect() const;
 
+  // https://html.spec.whatwg.org/#update-an-options-nearest-ancestor-select
+  // NOTE: PR https://github.com/whatwg/html/pull/12263 modifies this algorithm
+  // to also update descendant selectedcontent elements.
+  void UpdateNearestAncestorSelect();
+
  protected:
   virtual ~HTMLOptionElement();
 
@@ -122,11 +127,12 @@ class HTMLOptionElement final : public nsGenericHTMLElement {
 
   bool mSelectedChanged = false;
 
-  // True only while we're under the SetOptionsSelectedByIndex call when our
-  // "selected" attribute is changing and mSelectedChanged is false.
-  bool mIsInSetDefaultSelected = false;
+  // https://html.spec.whatwg.org/#concept-option-cached-nearest-ancestor-select
+  // Safe as a raw pointer: the option is always unbound from the tree before
+  // its ancestor select is destroyed, and UnbindFromTree clears this to null.
+  HTMLSelectElement* mCachedNearestAncestorSelect = nullptr;
 };
 
 }  // namespace mozilla::dom
 
-#endif  // mozilla_dom_HTMLOptionElement_h__
+#endif  // mozilla_dom_HTMLOptionElement_h_

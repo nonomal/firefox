@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,6 +11,7 @@
 #include "VideoUtils.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/gtest/WaitFor.h"
 #include "nsThreadUtils.h"
 
@@ -30,7 +29,7 @@ constexpr uint32_t kChannels = 2;
 class MockTestGraph : public MediaTrackGraphImpl {
  public:
   explicit MockTestGraph(TrackRate aRate)
-      : MediaTrackGraphImpl(0, aRate, nullptr, NS_GetCurrentThread()) {
+      : MediaTrackGraphImpl(0, aRate, nullptr, AbstractThread::GetCurrent()) {
     ON_CALL(*this, OnGraphThread).WillByDefault(Return(true));
   }
 
@@ -79,10 +78,9 @@ AudioDecoderInputTrack* CreateTrack(MediaTrackGraph* aGraph,
                                     nsISerialEventTarget* aThread,
                                     const AudioInfo& aInfo,
                                     float aPlaybackRate = 1.0,
-                                    float aVolume = 1.0,
                                     bool aPreservesPitch = true) {
   return AudioDecoderInputTrack::Create(aGraph, aThread, aInfo, aPlaybackRate,
-                                        aVolume, aPreservesPitch);
+                                        aPreservesPitch);
 }
 
 class TestAudioDecoderInputTrack : public testing::Test {
@@ -102,9 +100,7 @@ class TestAudioDecoderInputTrack : public testing::Test {
     // before the `Destroy()`.
     mTrack->Close();
     mTrack->Destroy();
-    // Remove the reference of the track from the mock graph, and then release
-    // the self-reference of mock graph.
-    mGraph->RemoveTrackGraphThread(mTrack);
+    // Release the self-reference of mock graph.
     mGraph->Destroy();
   }
 
@@ -249,6 +245,24 @@ TEST_F(TestAudioDecoderInputTrack, ClearFuture) {
             (audio1->Frames() - 10 /* got clear */) + audio2->Frames());
 }
 
+TEST_F(TestAudioDecoderInputTrack, ClearFutureTimeStretched) {
+  RefPtr<AudioDecoderInputTrack> track =
+      CreateTrack(mGraph, NS_GetCurrentThread(), mInfo, 0.5, false);
+  RefPtr<AudioData> audio = CreateAudioData(4096);
+  track->AppendData(audio, nullptr);
+  track->ProcessInput(0, 10, kNoFlags);
+
+  track->ClearFutureData();
+  track->ProcessInput(10, 20, kNoFlags);
+
+  AudioSegment output;
+  output.AppendSlice(*track->GetData(), 10, 20);
+  EXPECT_TRUE(output.IsNull());
+
+  track->Close();
+  track->Destroy();
+}
+
 TEST_F(TestAudioDecoderInputTrack, InputRateChange) {
   // Start from [0:10] and each time we move the time by 10ms.
   // Expected: appended=10, expected duration=10
@@ -316,39 +330,6 @@ TEST_F(TestAudioDecoderInputTrack, ChannelChange) {
   EXPECT_EQ(mTrack->NumberOfChannels(), audioWithFiveChannels->mChannels);
   EXPECT_EQ(mTrack->WrittenFrames(),
             audioMono->Frames() + audioWithFiveChannels->Frames());
-}
-
-TEST_F(TestAudioDecoderInputTrack, VolumeChange) {
-  // In order to run the volume change directly without using a real graph.
-  // one for setting the track's volume, another for the track destruction.
-  EXPECT_CALL(*mGraph, AppendMessage)
-      .Times(2)
-      .WillOnce(
-          [](UniquePtr<ControlMessageInterface> aMessage) { aMessage->Run(); })
-      .WillOnce([](UniquePtr<ControlMessageInterface> aMessage) {});
-
-  // The default volume is 1.0.
-  float expectedVolume = 1.0;
-  RefPtr<AudioData> audio = CreateAudioData(20);
-  TrackTime start = 0;
-  TrackTime end = 10;
-  mTrack->AppendData(audio, nullptr);
-  mTrack->ProcessInput(start, end, kNoFlags);
-  EXPECT_PRED_FORMAT2(ExpectSegmentNonSilence, start, end);
-  EXPECT_TRUE(GetTrackSegment()->GetLastChunk()->mVolume == expectedVolume);
-
-  // After setting volume on the track, the data in the output chunk should be
-  // changed as well.
-  expectedVolume = 0.1;
-  mTrack->SetVolume(expectedVolume);
-  SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
-      "TEST_F(TestAudioDecoderInputTrack, VolumeChange)"_ns,
-      [&] { return mTrack->Volume() == expectedVolume; });
-  start = end;
-  end += 10;
-  mTrack->ProcessInput(start, end, kNoFlags);
-  EXPECT_PRED_FORMAT2(ExpectSegmentNonSilence, start, end);
-  EXPECT_TRUE(GetTrackSegment()->GetLastChunk()->mVolume == expectedVolume);
 }
 
 TEST_F(TestAudioDecoderInputTrack, BatchedData) {
@@ -444,3 +425,39 @@ TEST_F(TestAudioDecoderInputTrack, PlaybackRateChange) {
   EXPECT_PRED_FORMAT2(ExpectSegmentNonSilence, start, audio->Frames() / 2);
   EXPECT_PRED_FORMAT2(ExpectSegmentSilence, start + audio->Frames() / 2, end);
 }
+
+// The transpose this exercises asks SoundTouch for millions of samples, which
+// a wasm32 sandbox cannot grow to hold on 32-bit builds.
+#ifdef HAVE_64BIT_BUILD
+TEST(AudioDecoderInputTrack, LimitsLargeRateTransposeOutput)
+{
+  constexpr TrackRate graphRate = 48000;
+  constexpr uint32_t inputFrames = 700000;
+  // The MAX_DEST_LIMIT defined in libsoundtouch's TransposerBase::transpose
+  constexpr uint32_t maxDestLimit = 10240000;
+
+  RefPtr<MockTestGraph> graph = MakeRefPtr<NiceMock<MockTestGraph>>(graphRate);
+  graph->Init(1);
+
+  AudioInfo info;
+  info.mRate = graphRate;
+  info.mChannels = 1;
+  RefPtr<AudioDecoderInputTrack> track =
+      CreateTrack(graph, NS_GetCurrentThread(), info, 0.0625, false);
+  RefPtr<AudioData> audio = CreateAudioDataFromInfo(inputFrames, info);
+  track->AppendData(audio, nullptr);
+
+  // Tear the graph down even if an assertion below returns early, so a failure
+  // here cannot leave the MediaTrackGraph running into later tests.
+  auto cleanup = MakeScopeExit([&] {
+    track->Close();
+    track->Destroy();
+    graph->Destroy();
+  });
+
+  track->ProcessInput(0, 1, kNoFlags);
+  const uint32_t timeStretcherSamples = track->TimeStretcherSamplesForTesting();
+  ASSERT_GT(timeStretcherSamples, 0u);
+  EXPECT_LT(timeStretcherSamples, maxDestLimit);
+}
+#endif

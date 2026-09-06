@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -156,6 +154,42 @@ __declspec(dllexport) MOZ_NAKED void MovImm64() {
   asm volatile(
       "mov $0x1234567812345678, %r10;"
       "nop;nop;nop");
+}
+
+__declspec(dllexport) MOZ_NAKED void AndWithSib() {
+  asm volatile(
+      "andl $15, (%%rax,%%rax,1);"  // AND r/m32, imm32;
+      "nop;nop;nop;nop;nop;nop;nop;nop;nop;"
+      :
+      :
+      : "memory", "cc");
+}
+
+__declspec(dllexport) MOZ_NAKED void AndWithoutSib() {
+  asm volatile(
+      "andl $16, (%%rax);"  // AND r/m32, imm32;
+      "nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;"
+      :
+      :
+      : "memory", "cc");
+}
+
+__declspec(dllexport) MOZ_NAKED void RexAndWithSib() {
+  asm volatile(
+      "andq $17, (%%r10,%%rcx,1);"  // AND r/m64, imm8;
+      "nop;nop;nop;nop;nop;nop;nop;nop;"
+      :
+      :
+      : "memory", "cc");
+}
+
+__declspec(dllexport) MOZ_NAKED void RexAndWithoutSib() {
+  asm volatile(
+      "andq $18, (%%r10);"  // AND r/m64, imm8
+      "nop;nop;nop;nop;nop;nop;nop;nop;nop;"
+      :
+      :
+      : "memory", "cc");
 }
 
 static unsigned char __attribute__((used)) gGlobalValue = 0;

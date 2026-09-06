@@ -2,8 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
+plugins {
+    id 'com.android.library'
+    alias(libs.plugins.dependency.analysis)
+}
 
 android {
     namespace = 'mozilla.components.support.test.fakes'
@@ -14,6 +16,8 @@ dependencies {
 
     implementation libs.androidx.test.junit
     implementation libs.kotlinx.coroutines
+    implementation libs.androidx.datastore
+    implementation libs.androidx.datastore.preferences
 }
 
 apply from: '../../../common-config.gradle'

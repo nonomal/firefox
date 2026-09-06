@@ -96,9 +96,11 @@ LoginManager.prototype = {
   },
 
   _initStorage() {
-    this.initializationPromise = new Promise(resolve => {
-      this._storage = LoginManagerStorage.create(() => {
-        resolve();
+    const result = LoginManagerStorage.create();
+    if (result instanceof Promise) {
+      // Desktop: create() returns a promise resolving to the active store
+      this.initializationPromise = result.then(store => {
+        this._storage = store;
 
         lazy.log.debug(
           "initializationPromise is resolved, updating isPrimaryPasswordSet in sharedData"
@@ -108,7 +110,21 @@ LoginManager.prototype = {
           lazy.LoginHelper.isPrimaryPasswordSet()
         );
       });
-    });
+    } else {
+      // GeckoView: create() is sync
+      this._storage = result;
+      this.initializationPromise = Promise.resolve();
+    }
+  },
+
+  /**
+   * Awaits storage initialization and returns the active storage backend.
+   * Async callers must obtain `_storage` through this so they never access it
+   * before `initializationPromise` has resolved.
+   */
+  async _getStorage() {
+    await this.initializationPromise;
+    return this._storage;
   },
 
   /* ---------- Utility objects ---------- */
@@ -221,6 +237,8 @@ LoginManager.prototype = {
         throw new Error("Can't add a login with invalid date properties.");
       }
     }
+
+    lazy.LoginHelper.checkLoginValues(login);
   },
 
   /* ---------- Primary Public interfaces ---------- */
@@ -236,10 +254,11 @@ LoginManager.prototype = {
    * Add a new login to login storage.
    */
   async addLoginAsync(login) {
+    const storage = await this._getStorage();
     this._checkLogin(login);
 
     lazy.log.debug("Adding login");
-    const [resultLogin] = await this._storage.addLoginsAsync([login]);
+    const [resultLogin] = await storage.addLoginsAsync([login]);
     return resultLogin;
   },
 
@@ -248,6 +267,7 @@ LoginManager.prototype = {
    * TODO: rename to `addLoginsAsync` https://bugzilla.mozilla.org/show_bug.cgi?id=1832757
    */
   async addLogins(logins) {
+    const storage = await this._getStorage();
     if (logins.length === 0) {
       return logins;
     }
@@ -262,40 +282,40 @@ LoginManager.prototype = {
       }
     });
     lazy.log.debug("Adding logins");
-    return this._storage.addLoginsAsync(validLogins, true);
+    return storage.addLoginsAsync(validLogins, true);
   },
 
   /**
    * Remove the specified login from the stored logins.
    */
-  removeLogin(login) {
+  async removeLoginAsync(login) {
+    const storage = await this._getStorage();
     lazy.log.debug(
       "Removing login",
       login.QueryInterface(Ci.nsILoginMetaInfo).guid
     );
-    return this._storage.removeLogin(login);
+    return storage.removeLoginAsync(login);
   },
 
   /**
-   * Change the specified login to match the new login or new properties.
+   * Async: Change the specified login to match the new login or new properties.
    */
-  modifyLogin(oldLogin, newLogin) {
+  async modifyLoginAsync(oldLogin, newLogin) {
+    const storage = await this._getStorage();
     lazy.log.debug(
       "Modifying login",
       oldLogin.QueryInterface(Ci.nsILoginMetaInfo).guid
     );
-    return this._storage.modifyLogin(oldLogin, newLogin);
+    await storage.modifyLoginAsync(oldLogin, newLogin);
   },
 
-  /**
-   * Record that the password of a saved login was used (e.g. submitted or copied).
-   */
-  recordPasswordUse(
+  async recordPasswordUseAsync(
     login,
     privateContextWithoutExplicitConsent,
     loginType,
     filled
   ) {
+    const storage = await this._getStorage();
     lazy.log.debug(
       "Recording password use",
       loginType,
@@ -303,7 +323,7 @@ LoginManager.prototype = {
     );
     if (!privateContextWithoutExplicitConsent) {
       // don't record non-interactive use in private browsing
-      this._storage.recordPasswordUse(login);
+      await storage.recordPasswordUseAsync(login);
     }
 
     Glean.pwmgr["savedLoginUsed" + loginType].record({ filled });
@@ -315,8 +335,9 @@ LoginManager.prototype = {
    * @return {nsILoginInfo[]} - If there are no logins, the array is empty.
    */
   async getAllLogins() {
+    const storage = await this._getStorage();
     lazy.log.debug("Getting a list of all logins asynchronously.");
-    return this._storage.getAllLogins();
+    return storage.getAllLogins();
   },
 
   /**
@@ -324,9 +345,11 @@ LoginManager.prototype = {
    */
   getAllLoginsWithCallback(aCallback) {
     lazy.log.debug("Searching a list of all logins asynchronously.");
-    this._storage.getAllLogins().then(logins => {
-      aCallback.onSearchComplete(logins);
-    });
+    this._getStorage()
+      .then(storage => storage.getAllLogins())
+      .then(logins => {
+        aCallback.onSearchComplete(logins);
+      });
   },
 
   /**
@@ -334,21 +357,23 @@ LoginManager.prototype = {
    *
    * This will not remove the FxA Sync key, which is stored with the rest of a user's logins.
    */
-  removeAllUserFacingLogins() {
+  async removeAllUserFacingLoginsAsync() {
+    const storage = await this._getStorage();
     lazy.log.debug("Removing all user facing logins.");
-    this._storage.removeAllUserFacingLogins();
+    await storage.removeAllUserFacingLoginsAsync();
   },
 
   /**
    * Remove all logins from data store, including the FxA Sync key.
    *
-   * NOTE: You probably want `removeAllUserFacingLogins()` instead of this function.
+   * NOTE: You probably want `removeAllUserFacingLoginsAsync()` instead of this function.
    * This function will remove the FxA Sync key, which will break syncing of saved user data
    * e.g. bookmarks, history, open tabs, logins and passwords, add-ons, and options
    */
-  removeAllLogins() {
+  async removeAllLoginsAsync() {
+    const storage = await this._getStorage();
     lazy.log.debug("Removing all logins from local store, including FxA key.");
-    this._storage.removeAllLogins();
+    await storage.removeAllLoginsAsync();
   },
 
   /**
@@ -379,55 +404,31 @@ LoginManager.prototype = {
   /**
    * Search for the known logins for entries matching the specified criteria.
    */
-  findLogins(origin, formActionOrigin, httpRealm) {
-    lazy.log.debug(
-      "Searching for logins matching origin:",
-      origin,
-      "formActionOrigin:",
-      formActionOrigin,
-      "httpRealm:",
-      httpRealm
+  findLogins() {
+    throw new Components.Exception(
+      "LoginManager.findLogins() was removed. Use searchLoginsAsync() instead.",
+      Cr.NS_ERROR_NOT_IMPLEMENTED
     );
-
-    return this._storage.findLogins(origin, formActionOrigin, httpRealm);
   },
 
   async searchLoginsAsync(matchData) {
+    const storage = await this._getStorage();
     lazy.log.debug(
       `Searching for matching logins for origin: ${matchData.origin}`
     );
 
-    if (!matchData.origin) {
-      throw new Error("searchLoginsAsync: An `origin` is required");
+    if (!matchData.guid && !matchData.origin) {
+      lazy.log.warn(
+        "A `guid` or `origin` field is recommended for searchLoginsAsync matchData."
+      );
     }
 
-    return this._storage.searchLoginsAsync(matchData);
+    return storage.searchLoginsAsync(matchData);
   },
 
-  /**
-   * @return {nsILoginInfo[]} which are decrypted.
-   */
-  searchLogins(matchData) {
-    lazy.log.debug(
-      `Searching for matching logins for origin: ${matchData.origin}`
-    );
-
-    matchData.QueryInterface(Ci.nsIPropertyBag2);
-    if (!matchData.hasKey("guid")) {
-      if (!matchData.hasKey("origin")) {
-        lazy.log.warn("An `origin` field is recommended.");
-      }
-    }
-
-    return this._storage.searchLogins(matchData);
-  },
-
-  /**
-   * Search for the known logins for entries matching the specified criteria,
-   * returns only the count.
-   */
-  countLogins(origin, formActionOrigin, httpRealm) {
-    const loginsCount = this._storage.countLogins(
+  async countLoginsAsync(origin, formActionOrigin, httpRealm) {
+    const storage = await this._getStorage();
+    const loginsCount = await storage.countLoginsAsync(
       origin,
       formActionOrigin,
       httpRealm
@@ -442,19 +443,23 @@ LoginManager.prototype = {
 
   /* Sync metadata functions */
   async getSyncID() {
-    return this._storage.getSyncID();
+    const storage = await this._getStorage();
+    return storage.getSyncID();
   },
 
   async setSyncID(id) {
-    await this._storage.setSyncID(id);
+    const storage = await this._getStorage();
+    await storage.setSyncID(id);
   },
 
   async getLastSync() {
-    return this._storage.getLastSync();
+    const storage = await this._getStorage();
+    return storage.getLastSync();
   },
 
   async setLastSync(timestamp) {
-    await this._storage.setLastSync(timestamp);
+    const storage = await this._getStorage();
+    await storage.setLastSync(timestamp);
   },
 
   async ensureCurrentSyncID(newSyncID) {
@@ -471,12 +476,42 @@ LoginManager.prototype = {
     return newSyncID;
   },
 
+  async addPotentiallyVulnerablePassword(login) {
+    const storage = await this._getStorage();
+    return storage.addPotentiallyVulnerablePassword(login);
+  },
+
+  async isPotentiallyVulnerablePassword(login) {
+    const storage = await this._getStorage();
+    return storage.isPotentiallyVulnerablePassword(login);
+  },
+
+  async recordBreachAlertDismissal(loginGUID) {
+    const storage = await this._getStorage();
+    return storage.recordBreachAlertDismissal(loginGUID);
+  },
+
+  async getBreachAlertDismissalsByLoginGUID() {
+    const storage = await this._getStorage();
+    return storage.getBreachAlertDismissalsByLoginGUID();
+  },
+
+  async arePotentiallyVulnerablePasswords(logins) {
+    const storage = await this._getStorage();
+    return storage.arePotentiallyVulnerablePasswords(logins);
+  },
+
+  async clearAllPotentiallyVulnerablePasswords() {
+    const storage = await this._getStorage();
+    return storage.clearAllPotentiallyVulnerablePasswords();
+  },
+
   get uiBusy() {
-    return this._storage.uiBusy;
+    return this._storage?.uiBusy ?? false;
   },
 
   get isLoggedIn() {
-    return this._storage.isLoggedIn;
+    return this._storage?.isLoggedIn ?? false;
   },
 
   /**
@@ -543,7 +578,32 @@ LoginManager.prototype = {
    * For migration purposes, asynchronously reencrypt all logins in the
    * background.
    */
-  reencryptAllLogins() {
-    return this._storage.reencryptAllLogins();
+  async reencryptAllLogins() {
+    const storage = await this._getStorage();
+    return storage.reencryptAllLogins();
+  },
+
+  /**
+   * Debug helper to identify logins with invalid origin/formActionOrigin URLs.
+   * Used to diagnose login storage incompatibilities with the Application Services
+   * Rust component, which has stricter URL validation requirements.
+   *
+   * @return {Promise<Array<object>>} Array of objects containing origin,
+   * timeCreated, and timeLastUsed for logins that failed URL validation.
+   */
+  async listInvalidOrigins() {
+    const logins = await this.getAllLogins();
+    const invalidOrigins = [];
+    for (const login of logins) {
+      const origin = login.origin || login.formActionOrigin;
+      if (!URL.canParse(origin)) {
+        invalidOrigins.push({
+          origin,
+          timeCreated: new Date(login.timeCreated),
+          timeLastUsed: new Date(login.timeLastUsed),
+        });
+      }
+    }
+    return invalidOrigins;
   },
 }; // end of LoginManager implementation

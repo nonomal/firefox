@@ -38,8 +38,17 @@ export interface TokenizerJSON {
   version: string; // "1.0"
 }
 
+export interface EmbeddingMetrics {
+  runTimestamps: Array<{ name: string; when: number }>;
+  inputChars: number;
+  inputTokens: number;
+  inferenceTime: number;
+  tokensPerSecond?: number;
+  charsPerSecond?: number;
+}
+
 export interface EmbeddingResponse {
-  metrics: Array<{ name: string; when: number }>;
+  metrics: EmbeddingMetrics;
   output: Array<Float32Array>;
 }
 
@@ -78,9 +87,9 @@ export interface StaticEmbeddingsOptions {
   compression: boolean;
 
   /**
-   * Mock the engine for tests.
+   * Mock the buffer data for a url for tests.
    */
-  mockedValues?: {};
+  mockedValues?: Record<string, Iterable<number>>;
 }
 
 /**
@@ -89,6 +98,6 @@ export interface StaticEmbeddingsOptions {
  * @see https://huggingface.co/docs/transformers.js/api/tokenizers#module_tokenizers.PreTrainedTokenizer
  */
 interface PreTrainedTokenizer {
-  model: { vocab: list[any] };
+  model: { vocab: Array<any> };
   encode(text: string): number[];
 }

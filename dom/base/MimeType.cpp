@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -112,8 +110,10 @@ template <typename char_type>
       ++pos;
     }
 
-    // Might as well check for base64 now
-    if (*pos != '=') {
+    // Might as well check for base64 now. Note that the loop above may have
+    // stopped because it reached the end of the input, in which case there is
+    // no code point to look at.
+    if (pos == end || *pos != '=') {
       // trim leading and trailing spaces
       while (namePos < pos && NS_IsHTTPWhitespace(*namePos)) {
         ++namePos;
@@ -254,7 +254,13 @@ TMimeType<char_type>::SplitMimetype(const nsTSubstring<char_type>& aMimeType) {
   for (size_t i = 0; i < aMimeType.Length(); i++) {
     char_type c = aMimeType[i];
 
-    if (c == '\"' && (i == 0 || aMimeType[i - 1] != '\\')) {
+    // https://fetch.spec.whatwg.org/#collect-an-http-quoted-string : a
+    // backslash only escapes inside a quoted string, and it consumes the code
+    // point that follows it, so an escaped backslash does not escape the next
+    // character.
+    if (inQuotes && c == '\\') {
+      ++i;
+    } else if (c == '"') {
       inQuotes = !inQuotes;
     } else if (c == ',' && !inQuotes) {
       mimeTypeParts.AppendElement(Substring(aMimeType, start, i - start));
@@ -272,6 +278,7 @@ template <typename char_type>
     const nsTSubstring<char_type>& aMimeType,
     nsTSubstring<char_type>& aOutEssence,
     nsTSubstring<char_type>& aOutCharset) {
+  // https://fetch.spec.whatwg.org/#concept-header-extract-mime-type
   static char_type kCHARSET[] = {'c', 'h', 'a', 'r', 's', 'e', 't'};
   static nsTDependentSubstring<char_type> kCharset(kCHARSET, 7);
 
@@ -279,8 +286,8 @@ template <typename char_type>
   nsTAutoString<char_type> prevContentType;
   nsTAutoString<char_type> prevCharset;
 
-  prevContentType.Assign(aOutEssence);
-  prevCharset.Assign(aOutCharset);
+  aOutEssence.Truncate();
+  aOutCharset.Truncate();
 
   nsTArray<nsTDependentSubstring<char_type>> mimeTypeParts =
       SplitMimetype(aMimeType);
@@ -293,9 +300,7 @@ template <typename char_type>
     parsed = Parse(mimeTypeString);
 
     if (!parsed) {
-      aOutEssence.Truncate();
-      aOutCharset.Truncate();
-      return false;
+      continue;
     }
 
     parsed->GetEssence(aOutEssence);
@@ -321,6 +326,10 @@ template <typename char_type>
     if ((!eq && !prevCharset.IsEmpty()) || typeHasCharset) {
       prevCharset.Assign(aOutCharset);
     }
+  }
+
+  if (aOutEssence.IsEmpty()) {
+    return false;
   }
 
   return true;

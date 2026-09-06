@@ -25,10 +25,6 @@
 #include "rtc_base/ssl_fingerprint.h"
 #include "rtc_base/strings/string_builder.h"
 
-using webrtc::RTCError;
-using webrtc::RTCErrorOr;
-using webrtc::RTCErrorType;
-
 namespace webrtc {
 namespace {
 
@@ -37,7 +33,7 @@ bool IsIceChar(char c) {
   // permitted in order to allow external software to upgrade.
   if (c == '-' || c == '=' || c == '#' || c == '_') {
     RTC_LOG(LS_WARNING)
-        << "'-', '=', '#' and '-' are not valid ice-char and thus not "
+        << "'-', '=', '#' and '_' are not valid ice-char and thus not "
         << "permitted in ufrag or pwd. This is a protocol violation that "
         << "is permitted to allow upgrading but will be rejected in "
         << "the future. See https://crbug.com/1053756";
@@ -151,7 +147,9 @@ bool ConnectionRoleToString(const ConnectionRole& role, std::string* role_str) {
 }
 
 TransportDescription::TransportDescription()
-    : ice_mode(ICEMODE_FULL), connection_role(CONNECTIONROLE_NONE) {}
+    : ice_mode(ICEMODE_FULL),
+      connection_role(CONNECTIONROLE_NONE),
+      cryptex(false) {}
 
 TransportDescription::TransportDescription(
     const std::vector<std::string>& transport_options,
@@ -165,14 +163,16 @@ TransportDescription::TransportDescription(
       ice_pwd(ice_pwd),
       ice_mode(ice_mode),
       connection_role(role),
-      identity_fingerprint(CopyFingerprint(identity_fingerprint)) {}
+      identity_fingerprint(CopyFingerprint(identity_fingerprint)),
+      cryptex(false) {}
 
 TransportDescription::TransportDescription(absl::string_view ice_ufrag,
                                            absl::string_view ice_pwd)
     : ice_ufrag(ice_ufrag),
       ice_pwd(ice_pwd),
       ice_mode(ICEMODE_FULL),
-      connection_role(CONNECTIONROLE_NONE) {}
+      connection_role(CONNECTIONROLE_NONE),
+      cryptex(false) {}
 
 TransportDescription::TransportDescription(const TransportDescription& from)
     : transport_options(from.transport_options),
@@ -180,7 +180,8 @@ TransportDescription::TransportDescription(const TransportDescription& from)
       ice_pwd(from.ice_pwd),
       ice_mode(from.ice_mode),
       connection_role(from.connection_role),
-      identity_fingerprint(CopyFingerprint(from.identity_fingerprint.get())) {}
+      identity_fingerprint(CopyFingerprint(from.identity_fingerprint.get())),
+      cryptex(from.cryptex) {}
 
 TransportDescription::~TransportDescription() = default;
 
@@ -197,6 +198,7 @@ TransportDescription& TransportDescription::operator=(
   connection_role = from.connection_role;
 
   identity_fingerprint.reset(CopyFingerprint(from.identity_fingerprint.get()));
+  cryptex = from.cryptex;
   return *this;
 }
 

@@ -113,12 +113,13 @@ const GLEAN_COUNTER_NAMES = {
 /**
  * HighlightersOverlay manages the visibility of highlighters in the Inspector.
  */
-class HighlightersOverlay {
+class HighlightersOverlay extends EventEmitter {
   /**
    * @param  {Inspector} inspector
    *         Inspector toolbox panel.
    */
   constructor(inspector) {
+    super();
     this.inspector = inspector;
     this.store = this.inspector.store;
 
@@ -200,7 +201,7 @@ class HighlightersOverlay {
     // Add inspector events, not specific to a given view.
     this.inspector.on("markupmutation", this.onMarkupMutation);
 
-    this.resourceCommand = this.inspector.toolbox.resourceCommand;
+    this.resourceCommand = this.inspector.commands.resourceCommand;
     this.resourceCommand.watchResources(
       [this.resourceCommand.TYPES.ROOT_NODE],
       { onAvailable: this.#onResourceAvailable }
@@ -213,8 +214,6 @@ class HighlightersOverlay {
     if (this.toolbox.win.matchMedia("(prefers-reduced-motion)").matches) {
       this.#showSimpleHighlightersMessage();
     }
-
-    EventEmitter.decorate(this);
   }
 
   // Map of active highlighter types to objects with the highlighted nodeFront and the
@@ -442,7 +441,7 @@ class HighlightersOverlay {
     if (max === 1) {
       highlighter = await inspectorFront.getOrCreateHighlighterByType(type);
     } else {
-      highlighter = await inspectorFront.getHighlighterByType(type);
+      highlighter = await inspectorFront.getHighlighterByType(type, true);
     }
 
     return highlighter;
@@ -848,7 +847,7 @@ class HighlightersOverlay {
    *
    * @param  {NodeFront} node
    *         The NodeFront of the flexbox container element to highlight.
-   * @param. {string} trigger
+   * @param {string} trigger
    *         String name matching "layout", "markup" or "rule" to indicate where the
    *         flexbox highlighter was toggled on from. "layout" represents the layout view.
    *         "markup" represents the markup view. "rule" represents the rule view.
@@ -870,7 +869,7 @@ class HighlightersOverlay {
    *         The NodeFront of the flexbox container element to highlight.
    * @param  {object} options
    *         Object used for passing options to the flexbox highlighter.
-   * @param. {string} trigger
+   * @param {string} trigger
    *         String name matching "layout", "markup" or "rule" to indicate where the
    *         flexbox highlighter was toggled on from. "layout" represents the layout view.
    *         "markup" represents the markup view. "rule" represents the rule view.
@@ -936,7 +935,7 @@ class HighlightersOverlay {
    *
    * @param  {NodeFront} node
    *         The NodeFront of the grid container element to highlight.
-   * @param. {string} trigger
+   * @param {string} trigger
    *         String name matching "grid", "markup" or "rule" to indicate where the
    *         grid highlighter was toggled on from. "grid" represents the grid view.
    *         "markup" represents the markup view. "rule" represents the rule view.
@@ -1951,7 +1950,7 @@ class HighlightersOverlay {
 
     for (const type in this.highlighters) {
       if (this.highlighters[type]) {
-        this.highlighters[type].finalize();
+        this.highlighters[type].destroy();
         this.highlighters[type] = null;
       }
     }

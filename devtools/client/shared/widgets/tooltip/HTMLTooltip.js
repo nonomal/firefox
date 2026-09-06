@@ -278,10 +278,7 @@ const calculateHorizontalPosition = (
  * is always the element's ownerDocument).
  */
 const getRelativeRect = function (node, relativeTo) {
-  // getBoxQuads is a non-standard WebAPI which will not work on non-firefox
-  // browser when running launchpad on Chrome.
   if (
-    !node.getBoxQuads ||
     !node.getBoxQuads({
       relativeTo,
       createFramesForSuppressedWhitespace: false,
@@ -311,109 +308,108 @@ const getRelativeRect = function (node, relativeTo) {
 
 /**
  * The HTMLTooltip can display HTML content in a tooltip popup.
- *
- * @param {Document} toolboxDoc
- *        The toolbox document to attach the HTMLTooltip popup.
- * @param {object}
- *        - {String} className
- *          A string separated list of classes to add to the tooltip container
- *          element.
- *        - {Boolean} consumeOutsideClicks
- *          Defaults to true. The tooltip is closed when clicking outside.
- *          Should this event be stopped and consumed or not.
- *        - {String} id
- *          The ID to assign to the tooltip container element.
- *        - {Boolean} isMenuTooltip
- *          Defaults to false. If the tooltip is a menu then this should be set
- *          to true.
- *        - {String} type
- *          Display type of the tooltip. Possible values: "normal", "arrow", and
- *          "doorhanger".
- *        - {Boolean} useXulWrapper
- *          Defaults to false. If the tooltip is hosted in a XUL document, use a
- *          XUL panel in order to use all the screen viewport available.
- *        - {Boolean} noAutoHide
- *          Defaults to false. If this property is set to false or omitted, the
- *          tooltip will automatically disappear after a few seconds. If this
- *          attribute is set to true, this will not happen and the tooltip will
- *          only hide when the user moves the mouse to another element.
  */
-function HTMLTooltip(
-  toolboxDoc,
-  {
-    className = "",
-    consumeOutsideClicks = true,
-    id = "",
-    isMenuTooltip = false,
-    type = "normal",
-    useXulWrapper = false,
-    noAutoHide = false,
-  } = {}
-) {
-  EventEmitter.decorate(this);
+class HTMLTooltip extends EventEmitter {
+  /**
+   * @param {Document} toolboxDoc
+   *        The toolbox document to attach the HTMLTooltip popup.
+   * @param {object} [options={}]
+   * @param {string} [options.className=""]
+   *          A string separated list of classes to add to the tooltip container
+   *          element.
+   * @param {boolean} [options.consumeOutsideClicks=true]
+   *          Defaults to true. The tooltip is closed when clicking outside.
+   *          Should this event be stopped and consumed or not.
+   * @param {string} [options.id=""]
+   *          The ID to assign to the tooltip container element.
+   * @param {boolean} [options.isMenuTooltip=false]
+   *          Defaults to false. If the tooltip is a menu then this should be set
+   *          to true.
+   * @param {string} [options.type="normal"]
+   *          Display type of the tooltip. Possible values: "normal", "arrow", and
+   *          "doorhanger".
+   * @param {boolean} [options.useXulWrapper=false]
+   *          Defaults to false. If the tooltip is hosted in a XUL document, use a
+   *          XUL panel in order to use all the screen viewport available.
+   * @param {boolean} [options.noAutoHide=false]
+   *          Defaults to false. If this property is set to false or omitted, the
+   *          tooltip will automatically disappear after a few seconds. If this
+   *          attribute is set to true, this will not happen and the tooltip will
+   *          only hide when the user moves the mouse to another element.
+   */
+  constructor(
+    toolboxDoc,
+    {
+      className = "",
+      consumeOutsideClicks = true,
+      id = "",
+      isMenuTooltip = false,
+      type = "normal",
+      useXulWrapper = false,
+      noAutoHide = false,
+    } = {}
+  ) {
+    super();
 
-  this.doc = toolboxDoc;
-  this.id = id;
-  this.className = className;
-  this.type = type;
-  this.noAutoHide = noAutoHide;
-  // consumeOutsideClicks cannot be used if the tooltip is not closed on click
-  this.consumeOutsideClicks = this.noAutoHide ? false : consumeOutsideClicks;
-  this.isMenuTooltip = isMenuTooltip;
-  this.useXulWrapper = this._isXULPopupAvailable() && useXulWrapper;
-  this.preferredWidth = "auto";
-  this.preferredHeight = "auto";
+    this.doc = toolboxDoc;
+    this.id = id;
+    this.className = className;
+    this.type = type;
+    this.noAutoHide = noAutoHide;
+    // consumeOutsideClicks cannot be used if the tooltip is not closed on click
+    this.consumeOutsideClicks = this.noAutoHide ? false : consumeOutsideClicks;
+    this.isMenuTooltip = isMenuTooltip;
+    this.useXulWrapper = this._isXULPopupAvailable() && useXulWrapper;
+    this.preferredWidth = "auto";
+    this.preferredHeight = "auto";
 
-  // The top window is used to attach click event listeners to close the tooltip if the
-  // user clicks on the content page.
-  this.topWindow = this._getTopWindow();
+    // The top window is used to attach click event listeners to close the tooltip if the
+    // user clicks on the content page.
+    this.topWindow = this._getTopWindow();
 
-  this._position = null;
+    this._position = null;
 
-  this._onClick = this._onClick.bind(this);
-  this._onMouseup = this._onMouseup.bind(this);
-  this._onXulPanelHidden = this._onXulPanelHidden.bind(this);
+    this._onClick = this._onClick.bind(this);
+    this._onMouseup = this._onMouseup.bind(this);
+    this._onXulPanelHidden = this._onXulPanelHidden.bind(this);
 
-  this.container = this._createContainer();
-  if (this.useXulWrapper) {
-    // When using a XUL panel as the wrapper, the actual markup for the tooltip is as
-    // follows :
-    // <panel> <!-- XUL panel used to position the tooltip anywhere on screen -->
-    //   <div> <! the actual tooltip-container element -->
-    this.xulPanelWrapper = this._createXulPanelWrapper();
-    this.doc.documentElement.appendChild(this.xulPanelWrapper);
-    this.xulPanelWrapper.appendChild(this.container);
-  } else if (this._hasXULRootElement()) {
-    this.doc.documentElement.appendChild(this.container);
-  } else {
-    // In non-XUL context the container is ready to use as is.
-    this.doc.body.appendChild(this.container);
+    this.container = this._createContainer();
+    if (this.useXulWrapper) {
+      // When using a XUL panel as the wrapper, the actual markup for the tooltip is as
+      // follows :
+      // <panel> <!-- XUL panel used to position the tooltip anywhere on screen -->
+      //   <div> <! the actual tooltip-container element -->
+      this.xulPanelWrapper = this._createXulPanelWrapper();
+      this.doc.documentElement.appendChild(this.xulPanelWrapper);
+      this.xulPanelWrapper.appendChild(this.container);
+    } else if (this._hasXULRootElement()) {
+      this.doc.documentElement.appendChild(this.container);
+    } else {
+      // In non-XUL context the container is ready to use as is.
+      this.doc.body.appendChild(this.container);
+    }
   }
-}
 
-module.exports.HTMLTooltip = HTMLTooltip;
-
-HTMLTooltip.prototype = {
   /**
    * The tooltip panel is the parentNode of the tooltip content.
    */
   get panel() {
     return this.container.querySelector(".tooltip-panel");
-  },
+  }
 
   /**
    * The arrow element. Might be null depending on the tooltip type.
    */
   get arrow() {
     return this.container.querySelector(".tooltip-arrow");
-  },
+  }
 
   /**
    * Retrieve the displayed position used for the tooltip. Null if the tooltip is hidden.
    */
   get position() {
     return this.isVisible() ? this._position : null;
-  },
+  }
 
   get toggle() {
     if (!this._toggle) {
@@ -421,7 +417,7 @@ HTMLTooltip.prototype = {
     }
 
     return this._toggle;
-  },
+  }
 
   /**
    * Set the preferred width/height of the panel content.
@@ -447,7 +443,7 @@ HTMLTooltip.prototype = {
   setContentSize({ width = "auto", height = "auto" } = {}) {
     this.preferredWidth = width;
     this.preferredHeight = height;
-  },
+  }
 
   /**
    * Update the HTMLTooltip content with a HTMLFragment using fluent for
@@ -471,7 +467,28 @@ HTMLTooltip.prototype = {
     this.doc.l10n.resumeObserving();
 
     this.setContentSize(contentSizeOptions);
-  },
+  }
+
+  /**
+   * Update the HTMLTooltip content with an Element, using fluent for localization purposes.
+   * Force translation early before measuring the tooltip dimensions.
+   *
+   * @param {Element} element
+   *        The Element to use as tooltip content
+   * @param {object} contentSizeOptions
+   *        See setContentSize().
+   */
+  async replaceChildrenLocalized(element, contentSizeOptions) {
+    // Because Fluent is async we need to manually translate the element and
+    // then insert it into the tooltip. This is needed in order for the tooltip
+    // to size to the contents properly and for tests.
+    await this.doc.l10n.translateElements([element]);
+    this.doc.l10n.pauseObserving();
+    this.panel.replaceChildren(element);
+    this.doc.l10n.resumeObserving();
+
+    this.setContentSize(contentSizeOptions);
+  }
 
   /**
    * Show the tooltip next to the provided anchor element, or update the tooltip position
@@ -512,9 +529,11 @@ HTMLTooltip.prototype = {
     }
 
     this.container.classList.add("tooltip-visible");
+    anchor.classList.add("tooltip-anchor");
 
     // Keep a pointer on the focused element to refocus it when hiding the tooltip.
     this._focusedElement = anchor.ownerDocument.activeElement;
+    this._anchor = anchor;
 
     if (this.doc.defaultView) {
       if (!this._pendingEventListenerPromise) {
@@ -545,15 +564,15 @@ HTMLTooltip.prototype = {
     this.container.classList.add("tooltip-shown");
 
     this.emit("shown");
-  },
+  }
 
   startTogglingOnHover(baseNode, targetNodeCb, options) {
     this.toggle.start(baseNode, targetNodeCb, options);
-  },
+  }
 
   stopTogglingOnHover() {
     this.toggle.stop();
-  },
+  }
 
   _updateContainerBounds(anchor, { position, x = 0, y = 0 } = {}) {
     // Get anchor geometry
@@ -672,7 +691,7 @@ HTMLTooltip.prototype = {
     this.panel.scrollTop = currentScrollTop;
 
     return { left, top };
-  },
+  }
 
   /**
    * Calculate the following boundary rectangles:
@@ -761,7 +780,7 @@ HTMLTooltip.prototype = {
     }
 
     return { viewportRect, windowRect };
-  },
+  }
 
   _measureContainerSize() {
     const xulParent = this.container.parentNode;
@@ -784,7 +803,7 @@ HTMLTooltip.prototype = {
     }
 
     return { width, height };
-  },
+  }
 
   /**
    * Hide the current tooltip. The event "hidden" will be fired when the tooltip
@@ -830,12 +849,17 @@ HTMLTooltip.prototype = {
       this._focusedElement.focus();
       this._focusedElement = null;
     }
-  },
+
+    if (this._anchor) {
+      this._anchor.classList.remove("tooltip-anchor");
+      this._anchor = null;
+    }
+  }
 
   removeEventListeners() {
     this.topWindow.removeEventListener("click", this._onClick, true);
     this.topWindow.removeEventListener("mouseup", this._onMouseup, true);
-  },
+  }
 
   /**
    * Check if the tooltip is currently displayed.
@@ -844,7 +868,7 @@ HTMLTooltip.prototype = {
    */
   isVisible() {
     return this.container.classList.contains("tooltip-visible");
-  },
+  }
 
   /**
    * Destroy the tooltip instance. Hide the tooltip if displayed, remove the
@@ -861,7 +885,7 @@ HTMLTooltip.prototype = {
       this._toggle.destroy();
       this._toggle = null;
     }
-  },
+  }
 
   _createContainer() {
     const container = this.doc.createElementNS(XHTML_NS, "div");
@@ -890,7 +914,7 @@ HTMLTooltip.prototype = {
       container.appendChild(arrow);
     }
     return container;
-  },
+  }
 
   _onClick(e) {
     if (this._isInTooltipContainer(e.target)) {
@@ -902,7 +926,7 @@ HTMLTooltip.prototype = {
       e.preventDefault();
       e.stopPropagation();
     }
-  },
+  }
 
   /**
    * Hide the tooltip on mouseup rather than on click because the surrounding markup
@@ -916,7 +940,7 @@ HTMLTooltip.prototype = {
     }
 
     this.hide({ fromMouseup: true });
-  },
+  }
 
   _isInTooltipContainer(node) {
     // Check if the target is the tooltip arrow.
@@ -950,13 +974,13 @@ HTMLTooltip.prototype = {
     }
 
     return false;
-  },
+  }
 
   _onXulPanelHidden() {
     if (this.isVisible()) {
       this.hide();
     }
-  },
+  }
 
   /**
    * Focus on the first focusable item in the tooltip.
@@ -969,7 +993,7 @@ HTMLTooltip.prototype = {
       focusableElement.focus();
     }
     return !!focusableElement;
-  },
+  }
 
   /**
    * Focus on the last focusable item in the tooltip.
@@ -984,22 +1008,22 @@ HTMLTooltip.prototype = {
       focusableElements[focusableElements.length - 1].focus();
     }
     return focusableElements.length !== 0;
-  },
+  }
 
   _getTopWindow() {
     return DevToolsUtils.getTopWindow(this.doc.defaultView);
-  },
+  }
 
   /**
    * Check if the tooltip's owner document has XUL root element.
    */
   _hasXULRootElement() {
     return this.doc.documentElement.namespaceURI === XUL_NS;
-  },
+  }
 
   _isXULPopupAvailable() {
     return this.doc.nodePrincipal.isSystemPrincipal;
-  },
+  }
 
   _createXulPanelWrapper() {
     const panel = this.doc.createXULElement("panel");
@@ -1008,9 +1032,9 @@ HTMLTooltip.prototype = {
     // so disable all features that impact the behavior.
     panel.setAttribute("animate", false);
     panel.setAttribute("consumeoutsideclicks", false);
-    panel.setAttribute("incontentshell", false);
+    panel.setAttribute("escapecontentshell", true);
     panel.setAttribute("noautofocus", true);
-    panel.setAttribute("noautohide", this.noAutoHide);
+    panel.toggleAttribute("noautohide", this.noAutoHide);
 
     panel.setAttribute("ignorekeys", true);
     panel.setAttribute("tooltip", "aHTMLTooltip");
@@ -1028,7 +1052,7 @@ HTMLTooltip.prototype = {
     panel.setAttribute("role", "presentation");
 
     return panel;
-  },
+  }
 
   _showXulWrapperAt(left, top) {
     this.xulPanelWrapper.addEventListener(
@@ -1038,18 +1062,18 @@ HTMLTooltip.prototype = {
     const onPanelShown = listenOnce(this.xulPanelWrapper, "popupshown");
     this.xulPanelWrapper.openPopupAtScreen(left, top, false);
     return onPanelShown;
-  },
+  }
 
   _moveXulWrapperTo(left, top) {
     // FIXME: moveTo should probably account for margins when called from
     // script. Our current shadow set-up only supports one margin, so it's fine
     // to use the margin top in both directions.
     const margin = parseFloat(
-      this.xulPanelWrapper.ownerGlobal.getComputedStyle(this.xulPanelWrapper)
+      this.xulPanelWrapper.documentGlobal.getComputedStyle(this.xulPanelWrapper)
         .marginTop
     );
     this.xulPanelWrapper.moveTo(left + margin, top + margin);
-  },
+  }
 
   _hideXulWrapper() {
     this.xulPanelWrapper.removeEventListener(
@@ -1065,7 +1089,7 @@ HTMLTooltip.prototype = {
     const onPanelHidden = listenOnce(this.xulPanelWrapper, "popuphidden");
     this.xulPanelWrapper.hidePopup();
     return onPanelHidden;
-  },
+  }
 
   /**
    * Convert from coordinates relative to the tooltip's document, to coordinates relative
@@ -1085,5 +1109,7 @@ HTMLTooltip.prototype = {
       width,
       height,
     };
-  },
-};
+  }
+}
+
+module.exports.HTMLTooltip = HTMLTooltip;

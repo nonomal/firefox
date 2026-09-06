@@ -4,76 +4,78 @@
 
 package org.mozilla.fenix.nimbus
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.mozilla.experiments.nimbus.NimbusEventStore
+import org.mozilla.fenix.nimbus.RecordEventMode.Cancel
+import org.mozilla.fenix.nimbus.RecordEventMode.CompleteSuccessfully
+import org.mozilla.fenix.nimbus.RecordEventMode.ThrowException
 
-/**
- * A [NimbusEventStore] implementation for unit test. Allows asserting conditions on recorded events.
- */
+enum class RecordEventMode {
+    CompleteSuccessfully,
+    ThrowException,
+    Cancel,
+}
+
+/** A [NimbusEventStore] implementation for unit test. Allows asserting conditions on recorded events. */
 class FakeNimbusEventStore : NimbusEventStore {
+    var recordEventMode = CompleteSuccessfully
     private val recordedEvents = mutableListOf<String>()
     private val pastEvents = mutableListOf<PastEvent>()
 
-    /**
-     * @see [NimbusEventStore.recordEvent]
-     */
+    /** @see [NimbusEventStore.recordEvent] */
     override fun recordEvent(count: Long, eventId: String) {
-        repeat(count) {
-            recordedEvents += eventId
+        if (recordEventMode == CompleteSuccessfully) {
+            repeat(count) {
+                recordedEvents += eventId
+            }
+        } else {
+            // [NimbusEventStore.recordEvent] catches all errors and swallows them.
         }
     }
 
-    /**
-     * Asserts that recorded events are exactly equal to [events] (including order).
-     */
-    fun assertEventsEqual(events: List<String>) {
-        assertEquals(events, recordedEvents)
+    override fun recordEventOrThrow(count: Long, eventId: String): Deferred<Unit> {
+        recordEvent(count, eventId)
+        return when (recordEventMode) {
+            CompleteSuccessfully -> CompletableDeferred(Unit)
+            ThrowException -> CompletableDeferred<Unit>().apply { completeExceptionally(RuntimeException()) }
+            Cancel -> CompletableDeferred<Unit>().apply { cancel() }
+        }
     }
 
-    /**
-     * Asserts that there was only a single event recorded and it's equal to [eventId].
-     */
-    fun assertSingleEventEquals(eventId: String) {
-        assertEquals(eventId, recordedEvents.single())
+    /** Asserts that recorded events are exactly equal to [events] (including order). */
+    fun assertRecorded(vararg events: String) {
+        assertEquals(events.asList(), recordedEvents)
     }
 
-    /**
-     * @see [NimbusEventStore.recordPastEvent]
-     */
+    /** @see [NimbusEventStore.recordPastEvent] */
     override fun recordPastEvent(count: Long, eventId: String, secondsAgo: Long) {
         repeat(count) {
             pastEvents += PastEvent(eventId, secondsAgo)
         }
     }
 
-    /**
-     * Asserts that there were no recorded past events.
-     */
+    /** Asserts that there were no recorded past events. */
     fun assertNoPastEvents() {
         assertTrue(pastEvents.isEmpty())
     }
 
-    /**
-     * Records that there was only a single recorded past event and it matches [eventId] and [secondsAgo].
-     */
+    /** Records that there was only a single recorded past event and it matches [eventId] and [secondsAgo]. */
     fun assertSinglePastEventEquals(eventId: String, secondsAgo: Long) {
         val event = pastEvents.single()
         assertEquals(eventId, event.eventId)
         assertEquals(secondsAgo, event.secondsAgo)
     }
 
-    /**
-     * Represents an event recorded with [recordPastEvent].
-     */
+    /** Represents an event recorded with [recordPastEvent]. */
     data class PastEvent(
         val eventId: String,
         val secondsAgo: Long,
     )
 
-    /**
-     * Like [kotlin.repeat], but accepts [Long].
-     */
+    /** Like [kotlin.repeat], but accepts [Long]. */
     private inline fun repeat(times: Long, action: (Long) -> Unit) {
         for (index in 0 until times) {
             action(index)

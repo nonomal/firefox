@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,16 +14,16 @@
 #include "mozilla/ComputedStyleInlines.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ProfilerLabels.h"
+#include "mozilla/ReflowInput.h"
 #include "mozilla/RestyleManager.h"
 #include "mozilla/ScrollContainerFrame.h"
+#include "mozilla/ServoStyleSet.h"
 #include "mozilla/dom/ViewTransition.h"
 #include "nsCanvasFrame.h"
 #include "nsGkAtoms.h"
 #include "nsLayoutUtils.h"
 #include "nsPlaceholderFrame.h"
 #include "nsSubDocumentFrame.h"
-#include "nsView.h"
-#include "nsViewManager.h"
 
 using namespace mozilla;
 
@@ -261,15 +259,8 @@ nsDisplayWrapList* ViewportFrame::BuildDisplayListForContentTopLayer(
                  "layer");
       continue;
     }
-    if (nsIFrame* backdropPh =
-            frame->GetChildList(FrameChildListID::Backdrop).FirstChild()) {
-      MOZ_ASSERT(!backdropPh->GetNextSibling(), "more than one ::backdrop?");
-      MOZ_ASSERT(backdropPh->HasAnyStateBits(NS_FRAME_FIRST_REFLOW),
-                 "did you intend to reflow ::backdrop placeholders?");
-      nsIFrame* backdropFrame =
-          nsPlaceholderFrame::GetRealFrameForPlaceholder(backdropPh);
+    if (auto* backdropFrame = nsLayoutUtils::GetBackdropFrame(elem)) {
       BuildDisplayListForTopLayerFrame(aBuilder, backdropFrame, &topLayerList);
-
       if (aIsOpaque) {
         *aIsOpaque = BackdropListIsOpaque(this, aBuilder, &topLayerList);
       }
@@ -338,11 +329,6 @@ void ViewportFrame::RemoveFrame(DestroyContext& aContext, ChildListID aListID,
   nsContainerFrame::RemoveFrame(aContext, aListID, aOldFrame);
 }
 #endif
-
-void ViewportFrame::SetView(nsView* aView) {
-  MOZ_ASSERT(!mView, "Should not swap views");
-  mView = aView;
-}
 
 void ViewportFrame::Destroy(DestroyContext& aContext) {
   if (PresShell()->IsDestroying()) {
@@ -484,9 +470,11 @@ void ViewportFrame::Reflow(nsPresContext* aPresContext,
     // height actually changes.
     AbsPosReflowFlags flags{AbsPosReflowFlag::CBWidthChanged,
                             AbsPosReflowFlag::CBHeightChanged};
+    nsReflowStatus absposStatus;
     GetAbsoluteContainingBlock()->Reflow(this, aPresContext, reflowInput,
-                                         aStatus, cb, flags,
+                                         absposStatus, cb, flags,
                                          /* aOverflowAreas = */ nullptr);
+    aStatus.MergeCompletionStatusFrom(absposStatus);
   }
 
   if (mFrames.NotEmpty()) {
@@ -502,22 +490,7 @@ void ViewportFrame::Reflow(nsPresContext* aPresContext,
   // so we don't need to change our overflow areas.
   FinishAndStoreOverflow(&aDesiredSize);
 
-  if (mView) {
-    mView->GetViewManager()->ResizeView(mView, aDesiredSize.PhysicalSize());
-  }
-
   NS_FRAME_TRACE_REFLOW_OUT("ViewportFrame::Reflow", aStatus);
-}
-
-void ViewportFrame::UpdateStyle(ServoRestyleState& aRestyleState) {
-  RefPtr<ComputedStyle> newStyle =
-      aRestyleState.StyleSet().ResolveInheritingAnonymousBoxStyle(
-          Style()->GetPseudoType(), nullptr);
-
-  MOZ_ASSERT(!GetNextContinuation(), "Viewport has continuations?");
-  SetComputedStyle(newStyle);
-
-  UpdateStyleOfOwnedAnonBoxes(aRestyleState);
 }
 
 void ViewportFrame::AppendDirectlyOwnedAnonBoxes(
@@ -532,23 +505,9 @@ nsSize ViewportFrame::AdjustViewportSizeForFixedPosition(
   nsSize result = aViewportRect.Size();
 
   mozilla::PresShell* presShell = PresShell();
-  // Layout fixed position elements to the visual viewport size if and only if
-  // it has been set and it is larger than the computed size, otherwise use the
-  // computed size.
-  if (presShell->IsVisualViewportSizeSet()) {
-    if (presShell->GetDynamicToolbarState() == DynamicToolbarState::Collapsed &&
-        result < presShell->GetVisualViewportSizeUpdatedByDynamicToolbar()) {
-      // We need to use the viewport size updated by the dynamic toolbar in the
-      // case where the dynamic toolbar is completely hidden.
-      result = presShell->GetVisualViewportSizeUpdatedByDynamicToolbar();
-    } else if (result < presShell->GetVisualViewportSize()) {
-      result = presShell->GetVisualViewportSize();
-    }
-  }
-  // Expand the size to the layout viewport size if necessary.
-  const nsSize layoutViewportSize = presShell->GetLayoutViewportSize();
-  if (result < layoutViewportSize) {
-    result = layoutViewportSize;
+  const nsSize fixedViewportSize = presShell->GetFixedViewportSize();
+  if (result < fixedViewportSize) {
+    result = fixedViewportSize;
   }
 
   return result;

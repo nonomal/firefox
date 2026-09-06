@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -94,22 +92,13 @@ class ViewportFrame : public nsContainerFrame {
   virtual nsresult GetFrameName(nsAString& aResult) const override;
 #endif
 
-  nsView* GetViewportFrameView() const { return mView; }
-  void SetView(nsView*);
-
  protected:
   ViewportFrame(ComputedStyle* aStyle, nsPresContext* aPresContext, ClassID aID)
-      : nsContainerFrame(aStyle, aPresContext, aID), mView(nullptr) {}
+      : nsContainerFrame(aStyle, aPresContext, aID) {}
 
  private:
   nsDisplayWrapList* MaybeWrapTopLayerList(nsDisplayListBuilder*,
                                            uint16_t aIndex, nsDisplayList&);
-
-  mozilla::FrameChildListID GetAbsoluteListID() const override {
-    return FrameChildListID::Fixed;
-  }
-
-  nsView* mView;
 };
 
 }  // namespace mozilla

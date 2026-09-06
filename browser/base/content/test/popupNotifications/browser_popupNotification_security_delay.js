@@ -40,10 +40,7 @@ add_setup(async function () {
   // Set a longer security delay for PopupNotification actions so we can test
   // the delay even if the test runs slowly.
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["test.wait300msAfterTabSwitch", true],
-      ["security.notification_enable_delay", TEST_SECURITY_DELAY],
-    ],
+    set: [["security.notification_enable_delay", TEST_SECURITY_DELAY]],
   });
 });
 
@@ -310,6 +307,15 @@ add_task(async function test_notificationReshowTabSwitch() {
  * the PopupNotifications panel position is updated.
  */
 add_task(async function test_notificationWindowMove() {
+  // Wayland clients can't position their own toplevel windows, so
+  // gtk_window_move() is a no-op there: the panel is never repositioned and
+  // the "popuppositioned" this test waits on never fires. See
+  // browser_popup_linux_move.js for the same limitation.
+  if (Services.appinfo.isWayland) {
+    ok(true, "Skipping test on Wayland because windows can't be moved.");
+    return;
+  }
+
   let screenX, screenY;
 
   await runPopupNotificationSecurityDelayTest({

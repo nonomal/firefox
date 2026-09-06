@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,7 +10,7 @@
 namespace mozilla {
 namespace dom {
 
-NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(IdentityProvider, mOwner)
+NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(IdentityProvider, mGlobal)
 
 IdentityProvider::~IdentityProvider() = default;
 
@@ -21,8 +19,9 @@ JSObject* IdentityProvider::WrapObject(JSContext* aCx,
   return IdentityProvider_Binding::Wrap(aCx, this, aGivenProto);
 }
 
-IdentityProvider::IdentityProvider(nsIGlobalObject* aGlobal) : mOwner(aGlobal) {
-  MOZ_ASSERT(mOwner);
+IdentityProvider::IdentityProvider(nsIGlobalObject* aGlobal)
+    : mGlobal(aGlobal) {
+  MOZ_ASSERT(mGlobal);
 }
 
 // static
@@ -59,11 +58,12 @@ already_AddRefed<Promise> IdentityProvider::Resolve(
   identityHandler->ResolveContinuationWindow(aToken, aOptions)
       ->Then(
           GetCurrentSerialEventTarget(), __func__,
-          [promise, window](nsresult aSuccess) {
-            MOZ_ASSERT(NS_SUCCEEDED(aSuccess));
-            promise->MaybeResolveWithUndefined();
-            window->Close();
-          },
+          [promise, window](nsresult aSuccess)
+              MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA {
+                MOZ_ASSERT(NS_SUCCEEDED(aSuccess));
+                promise->MaybeResolveWithUndefined();
+                window->Close();
+              },
           [promise](nsresult aFailure) {
             promise->MaybeRejectWithNotAllowedError(
                 "IdentityProvider.resolve could not find a pending request to "

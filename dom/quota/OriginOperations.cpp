@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,7 +8,6 @@
 #include <cstdint>
 #include <utility>
 
-#include "DirectoryMetadata.h"
 #include "ErrorList.h"
 #include "FileUtils.h"
 #include "GroupInfo.h"
@@ -29,7 +26,9 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/Result.h"
 #include "mozilla/ResultExtensions.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/dom/Nullable.h"
+#include "mozilla/dom/quota/AssertionsImpl.h"
 #include "mozilla/dom/quota/Client.h"
 #include "mozilla/dom/quota/CommonMetadata.h"
 #include "mozilla/dom/quota/Constants.h"
@@ -52,6 +51,7 @@
 #include "mozilla/dom/quota/UniversalDirectoryLock.h"
 #include "mozilla/dom/quota/UsageInfo.h"
 #include "mozilla/fallible.h"
+#include "mozilla/glean/DomQuotaMetrics.h"
 #include "mozilla/ipc/BackgroundParent.h"
 #include "mozilla/ipc/PBackgroundSharedTypes.h"
 #include "nsCOMPtr.h"
@@ -71,6 +71,16 @@
 #include "prtime.h"
 
 namespace mozilla::dom::quota {
+
+namespace {
+void RecordCorruptionUnrecovered(const nsresult aRv,
+                                 const nsLiteralCString& aContext) {
+  if (IsDatabaseCorruptionError(aRv)) {
+    glean::quotamanager::storage_sqlite_corruption_unrecovered.Get(aContext)
+        .Add();
+  }
+}
+}  // namespace
 
 using namespace mozilla::ipc;
 
@@ -252,7 +262,7 @@ class GetUsageOp final
                              const PersistenceType aPersistenceType,
                              const nsACString& aOrigin,
                              const int64_t aTimestamp, const bool aPersisted,
-                             const uint64_t aUsage);
+                             const int64_t aUsage);
 
   RefPtr<BoolPromise> OpenDirectory() override;
 
@@ -743,6 +753,52 @@ class ClearRequestBase
                  IntToCString(static_cast<uint64_t>(mIterations)) +
                  //
                  kStringifyEndInstance);
+  }
+
+  inline bool UseCachedTemporaryOrigins(
+      const PersistenceType aPersistenceType,
+      const QuotaManager& aQuotaManager) const {
+    return StaticPrefs::
+               dom_quotaManager_temporaryStorage_clearTemporaryOriginsUsingOriginCache() &&
+           aQuotaManager.IsTemporaryStorageInitializedInternal() &&
+           IsTemporaryPersistenceType(aPersistenceType);
+  }
+
+  inline bool IsNonActionableFileError(const nsresult& aRv) {
+    if (NS_SUCCEEDED(aRv)) {
+      return false;
+    }
+
+    // Only care about file-related errors here.
+    if (NS_ERROR_GET_MODULE(aRv) != NS_ERROR_MODULE_FILES) {
+      return false;
+    }
+
+    switch (aRv) {
+      case NS_ERROR_FILE_UNRECOGNIZED_PATH:
+        [[fallthrough]];
+      case NS_ERROR_FILE_UNRESOLVABLE_SYMLINK:
+        [[fallthrough]];
+      case NS_ERROR_FILE_UNKNOWN_TYPE:
+        [[fallthrough]];
+      case NS_ERROR_FILE_DESTINATION_NOT_DIR:
+        [[fallthrough]];
+      case NS_ERROR_FILE_INVALID_PATH:
+        [[fallthrough]];
+      case NS_ERROR_FILE_NOT_DIRECTORY:
+        [[fallthrough]];
+      case NS_ERROR_FILE_TOO_BIG:
+        [[fallthrough]];
+      case NS_ERROR_FILE_NAME_TOO_LONG:
+        [[fallthrough]];
+      case NS_ERROR_FILE_NOT_FOUND:
+        [[fallthrough]];
+      case NS_ERROR_FILE_DIR_NOT_EMPTY:
+        return true;
+      default:
+        break;
+    }
+    return false;
   }
 };
 
@@ -1288,6 +1344,7 @@ nsresult FinalizeOriginEvictionOp::DoDirectoryWork(
   for (const auto& lock : mLocks) {
     aQuotaManager.OriginClearCompleted(lock->OriginMetadata(),
                                        ClientStorageScope::CreateFromNull());
+    aQuotaManager.RemoveOriginFromCacheForEviction(lock->OriginMetadata());
   }
 
   return NS_OK;
@@ -1337,13 +1394,17 @@ nsresult SaveOriginAccessTimeOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
       OkIf(aQuotaManager.IsTemporaryOriginInitializedInternal(mOriginMetadata)),
       NS_ERROR_NOT_INITIALIZED);
 
-  auto maybeOriginStateMetadata =
-      aQuotaManager.GetOriginStateMetadata(mOriginMetadata);
+  auto maybeFullOriginMetadata =
+      aQuotaManager.GetFullOriginMetadata(mOriginMetadata);
 
-  auto originStateMetadata = maybeOriginStateMetadata.extract();
+  auto fullOriginMetadata = maybeFullOriginMetadata.extract();
 
-  originStateMetadata.mLastAccessTime = PR_Now();
-  originStateMetadata.mAccessed = true;
+  // See the documentation for this pref in StaticPrefList.yaml
+  if (StaticPrefs::dom_quotaManager_temporaryStorage_updateOriginAccessTime()) {
+    fullOriginMetadata.mLastAccessTime = PR_Now();
+  }
+
+  fullOriginMetadata.mAccessed = true;
 
   QM_TRY_INSPECT(const auto& file,
                  aQuotaManager.GetOriginDirectory(mOriginMetadata));
@@ -1354,16 +1415,15 @@ nsresult SaveOriginAccessTimeOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
   QM_TRY_INSPECT(const bool& exists, MOZ_TO_RESULT_INVOKE_MEMBER(file, Exists));
 
   if (exists) {
-    QM_TRY(
-        MOZ_TO_RESULT(SaveDirectoryMetadataHeader(*file, originStateMetadata)));
-
+    QM_TRY(MOZ_TO_RESULT(
+        aQuotaManager.CreateDirectoryMetadata2(*file, fullOriginMetadata)));
     mSaved = true;
 
     aQuotaManager.IncreaseSaveOriginAccessTimeCountInternal();
   }
 
   aQuotaManager.UpdateOriginAccessTime(mOriginMetadata,
-                                       originStateMetadata.mLastAccessTime);
+                                       fullOriginMetadata.mLastAccessTime);
 
   return NS_OK;
 }
@@ -1628,7 +1688,7 @@ void GetUsageOp::ProcessOriginInternal(QuotaManager* aQuotaManager,
                                        const nsACString& aOrigin,
                                        const int64_t aTimestamp,
                                        const bool aPersisted,
-                                       const uint64_t aUsage) {
+                                       const int64_t aUsage) {
   if (!mGetAll && aQuotaManager->IsOriginInternal(aOrigin)) {
     return;
   }
@@ -1663,7 +1723,7 @@ void GetUsageOp::ProcessOriginInternal(QuotaManager* aQuotaManager,
     originUsage->mPersisted = aPersisted;
   }
 
-  originUsage->mUsage = originUsage->mUsage + aUsage;
+  originUsage->mUsage += QM_CLAMP_TO_ZERO(aUsage);
 
   originUsage->mLastAccessTime =
       std::max<int64_t>(originUsage->mLastAccessTime, aTimestamp);
@@ -2071,7 +2131,10 @@ nsresult InitOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
 
   AUTO_PROFILER_LABEL("InitOp::DoDirectoryWork", OTHER);
 
-  QM_TRY(MOZ_TO_RESULT(aQuotaManager.EnsureStorageIsInitializedInternal()));
+  QM_TRY(MOZ_TO_RESULT(aQuotaManager.EnsureStorageIsInitializedInternal()),
+         QM_PROPAGATE,
+         std::bind(RecordCorruptionUnrecovered, std::placeholders::_1,
+                   "storage"_ns));
 
   return NS_OK;
 }
@@ -2110,7 +2173,10 @@ nsresult InitializePersistentStorageOp::DoDirectoryWork(
          NS_ERROR_NOT_INITIALIZED);
 
   QM_TRY(MOZ_TO_RESULT(
-      aQuotaManager.EnsurePersistentStorageIsInitializedInternal()));
+             aQuotaManager.EnsurePersistentStorageIsInitializedInternal()),
+         QM_PROPAGATE,
+         std::bind(RecordCorruptionUnrecovered, std::placeholders::_1,
+                   "persistent_storage"_ns));
 
   return NS_OK;
 }
@@ -2156,7 +2222,10 @@ nsresult InitTemporaryStorageOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
 
   if (!wasInitialized) {
     QM_TRY(MOZ_TO_RESULT(
-        aQuotaManager.EnsureTemporaryStorageIsInitializedInternal()));
+               aQuotaManager.EnsureTemporaryStorageIsInitializedInternal()),
+           QM_PROPAGATE,
+           std::bind(RecordCorruptionUnrecovered, std::placeholders::_1,
+                     "temporary_storage"_ns));
 
     mAllTemporaryGroups = Some(aQuotaManager.GetAllTemporaryGroups());
   }
@@ -2710,17 +2779,14 @@ void ClearRequestBase::DeleteFiles(QuotaManager& aQuotaManager,
   DeleteFilesInternal(
       aQuotaManager, aOriginMetadata.mPersistenceType,
       OriginScope::FromOrigin(aOriginMetadata),
-      [&aQuotaManager, &aOriginMetadata](
-          const std::function<Result<Ok, nsresult>(nsCOMPtr<nsIFile>)>& aBody)
-          -> Result<Ok, nsresult> {
+      [&aQuotaManager, &aOriginMetadata](auto&& aBody) -> Result<Ok, nsresult> {
         QM_TRY_UNWRAP(auto directory,
                       aQuotaManager.GetOriginDirectory(aOriginMetadata));
 
         // We're not checking if the origin directory actualy exists because
         // it can be a pending origin (OriginInfo does exist but the origin
         // directory hasn't been created yet).
-
-        QM_TRY_RETURN(aBody(std::move(directory)));
+        QM_TRY_RETURN(aBody(directory, Some(aOriginMetadata)));
       });
 }
 
@@ -2731,9 +2797,8 @@ void ClearRequestBase::DeleteFiles(QuotaManager& aQuotaManager,
 
   DeleteFilesInternal(
       aQuotaManager, aPersistenceType, aOriginScope,
-      [&aQuotaManager, &aPersistenceType](
-          const std::function<Result<Ok, nsresult>(nsCOMPtr<nsIFile>)>& aBody)
-          -> Result<Ok, nsresult> {
+      [this, &aQuotaManager, &aPersistenceType,
+       aOriginScope](auto&& aBody) -> Result<Ok, nsresult> {
         QM_TRY_INSPECT(
             const auto& directory,
             QM_NewLocalFile(aQuotaManager.GetStoragePath(aPersistenceType)));
@@ -2745,7 +2810,23 @@ void ClearRequestBase::DeleteFiles(QuotaManager& aQuotaManager,
           return Ok{};
         }
 
-        QM_TRY(CollectEachFile(*directory, aBody));
+        if (UseCachedTemporaryOrigins(aPersistenceType, aQuotaManager)) {
+          // These are the origins that actually exist on disk and does not
+          // capture pending origins and hence, we still need to iterate over
+          // pending origins below.
+          const auto& correspondingMetadataList =
+              aQuotaManager.GetTemporaryOrigins(aPersistenceType);
+
+          for (const auto& metadata : correspondingMetadataList) {
+            QM_TRY_UNWRAP(auto originDirectory,
+                          aQuotaManager.GetOriginDirectory(metadata));
+
+            QM_WARNONLY_TRY(aBody(originDirectory, Some(metadata),
+                                  Some(nsIFileKind::ExistsAsDirectory)));
+          }
+        } else {
+          QM_TRY(CollectEachFile(*directory, aBody));
+        }
 
         // CollectEachFile above only consulted the file-system to get a list of
         // known origins, but we also need to include origins that have pending
@@ -2799,29 +2880,47 @@ void ClearRequestBase::DeleteFilesInternal(
   QM_TRY(
       aFileCollector([&originScope = aOriginScope, aPersistenceType,
                       &aQuotaManager, &directoriesForRemovalRetry,
-                      this](nsCOMPtr<nsIFile> file)
-                         -> mozilla::Result<Ok, nsresult> {
-        QM_TRY_INSPECT(const auto& dirEntryKind, GetDirEntryKind(*file));
+                      this](nsCOMPtr<nsIFile> file,
+                            Maybe<OriginMetadata> maybeMetadata = Nothing(),
+                            Maybe<nsIFileKind> maybeDirEntryKind =
+                                Nothing()) -> mozilla::Result<Ok, nsresult> {
+        if (!maybeDirEntryKind) {
+          QM_TRY_UNWRAP(maybeDirEntryKind,
+                        QM_OR_ELSE_WARN_IF(
+                            // Expression
+                            GetDirEntryKind(*file).map([](auto dirEntryKind) {
+                              return Some(dirEntryKind);
+                            }),
+                            // Predicate.
+                            IsSpecificError<NS_ERROR_FILE_UNKNOWN_TYPE>,
+                            // Fallback.
+                            ErrToDefaultOk<Maybe<nsIFileKind>>)
 
-        QM_TRY_INSPECT(
-            const auto& leafName,
-            MOZ_TO_RESULT_INVOKE_MEMBER_TYPED(nsAutoString, file, GetLeafName));
+          );
+        }
 
-        switch (dirEntryKind) {
+        MOZ_ASSERT(maybeDirEntryKind);
+        switch (*maybeDirEntryKind) {
           case nsIFileKind::ExistsAsDirectory: {
-            QM_TRY_UNWRAP(auto maybeMetadata,
-                          QM_OR_ELSE_WARN_IF(
-                              // Expression
-                              aQuotaManager.GetOriginMetadata(file).map(
-                                  [](auto metadata) -> Maybe<OriginMetadata> {
-                                    return Some(std::move(metadata));
-                                  }),
-                              // Predicate.
-                              IsSpecificError<NS_ERROR_MALFORMED_URI>,
-                              // Fallback.
-                              ErrToDefaultOk<Maybe<OriginMetadata>>));
+            if (maybeMetadata.isNothing()) {
+              QM_TRY_UNWRAP(maybeMetadata,
+                            QM_OR_ELSE_WARN_IF(
+                                // Expression
+                                aQuotaManager.GetOriginMetadata(file).map(
+                                    [](auto metadata) -> Maybe<OriginMetadata> {
+                                      return Some(std::move(metadata));
+                                    }),
+                                // Predicate.
+                                IsSpecificError<NS_ERROR_MALFORMED_URI>,
+                                // Fallback.
+                                ErrToDefaultOk<Maybe<OriginMetadata>>));
+            }
 
             if (!maybeMetadata) {
+              QM_TRY_INSPECT(const auto& leafName,
+                             MOZ_TO_RESULT_INVOKE_MEMBER_TYPED(
+                                 nsAutoString, file, GetLeafName));
+
               // Unknown directories during clearing are allowed. Just
               // warn if we find them.
               UNKNOWN_FILE_WARNING(leafName);
@@ -2837,11 +2936,13 @@ void ClearRequestBase::DeleteFilesInternal(
               break;
             }
 
-            // We can't guarantee that this will always succeed on
-            // Windows...
+            // We can't guarantee that this will always succeed on Windows...
             QM_WARNONLY_TRY(
-                aQuotaManager.RemoveOriginDirectory(*file), [&](const auto&) {
-                  directoriesForRemovalRetry.AppendElement(std::move(file));
+                aQuotaManager.RemoveOriginDirectory(*file),
+                [&](const auto& aRv) {
+                  if (!NS_WARN_IF(IsNonActionableFileError(aRv))) {
+                    directoriesForRemovalRetry.AppendElement(std::move(file));
+                  }
                 });
 
             mOriginMetadataArray.AppendElement(metadata);
@@ -2867,10 +2968,16 @@ void ClearRequestBase::DeleteFilesInternal(
             aQuotaManager.OriginClearCompleted(
                 metadata, ClientStorageScope::CreateFromNull());
 
+            aQuotaManager.RemoveOriginFromCacheForEviction(metadata);
+
             break;
           }
 
           case nsIFileKind::ExistsAsFile: {
+            QM_TRY_INSPECT(const auto& leafName,
+                           MOZ_TO_RESULT_INVOKE_MEMBER_TYPED(nsAutoString, file,
+                                                             GetLeafName));
+
             // Unknown files during clearing are allowed. Just warn if we
             // find them.
             if (!IsOSMetadata(leafName)) {
@@ -2904,6 +3011,8 @@ void ClearRequestBase::DeleteFilesInternal(
 
             aQuotaManager.OriginClearCompleted(
                 metadata, ClientStorageScope::CreateFromNull());
+
+            aQuotaManager.RemoveOriginFromCacheForEviction(metadata);
 
             break;
           }
@@ -3560,8 +3669,8 @@ nsresult PersistOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
   if (created) {
     // A new origin directory has been created.
 
-    const auto [timestamp, maintenanceDate, accessed] = [&aQuotaManager,
-                                                         &originMetadata]() {
+    FullOriginMetadata fullOriginMetadata =
+        [&aQuotaManager, &originMetadata]() -> FullOriginMetadata {
       // Update OriginInfo too if temporary origin was already initialized.
       if (aQuotaManager.IsTemporaryStorageInitializedInternal()) {
         if (aQuotaManager.IsTemporaryOriginInitializedInternal(
@@ -3571,33 +3680,28 @@ nsresult PersistOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
           // and it needs to be updated because the origin directory has been
           // just created.
 
-          return aQuotaManager.WithOriginInfo(
+          auto metadata = aQuotaManager.WithOriginInfo(
               originMetadata, [](const auto& originInfo) {
-                const int64_t timestamp = originInfo->LockedAccessTime();
-                const int32_t maintenanceDate =
-                    originInfo->LockedMaintenanceDate();
-                const bool accessed = originInfo->LockedAccessed();
-
+                auto metadata = originInfo->LockedFlattenToFullOriginMetadata();
                 originInfo->LockedDirectoryCreated();
-
-                return std::make_tuple(timestamp, maintenanceDate, accessed);
+                return metadata;
               });
+
+          metadata.mPersisted = true;
+          return metadata;
         }
       }
 
       const int64_t timestamp = PR_Now();
 
-      return std::make_tuple(
-          /* timestamp */ timestamp,
-          /* maintenanceDate */ Date::FromTimestamp(timestamp).ToDays(),
-          /* accessed */ false);
+      return FullOriginMetadata{
+          originMetadata,
+          OriginStateMetadata{timestamp,
+                              Date::FromTimestamp(timestamp).ToDays(),
+                              /* aAccessed */ false, /* aPersisted */ true,
+                              /* aDirty */ false},
+          ClientUsageArray(), /* aUsage */ 0, kCurrentQuotaVersion};
     }();
-
-    FullOriginMetadata fullOriginMetadata = FullOriginMetadata{
-        originMetadata,
-        OriginStateMetadata{timestamp, maintenanceDate, accessed,
-                            /* aPersisted */ true},
-        ClientUsageArray(), /* aUsage */ 0, kCurrentQuotaVersion};
 
     if (aQuotaManager.IsTemporaryStorageInitializedInternal()) {
       // Usually, infallible operations are placed after fallible ones.
@@ -3607,7 +3711,7 @@ nsresult PersistOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
       aQuotaManager.AddTemporaryOrigin(fullOriginMetadata);
     }
 
-    QM_TRY(MOZ_TO_RESULT(QuotaManager::CreateDirectoryMetadata2(
+    QM_TRY(MOZ_TO_RESULT(aQuotaManager.CreateDirectoryMetadata2(
         *directory, fullOriginMetadata)));
 
     // Update or create OriginInfo too if temporary storage was already
@@ -3630,44 +3734,40 @@ nsresult PersistOp::DoDirectoryWork(QuotaManager& aQuotaManager) {
     }
   } else {
     QM_TRY_UNWRAP(
-        OriginStateMetadata originStateMetadata,
+        FullOriginMetadata fullOriginMetadata,
         ([&aQuotaManager, &originMetadata,
-          &directory]() -> mozilla::Result<OriginStateMetadata, nsresult> {
-          Maybe<OriginStateMetadata> maybeOriginStateMetadata =
-              aQuotaManager.IsTemporaryStorageInitializedInternal()
-                  ? aQuotaManager.GetOriginStateMetadata(originMetadata)
-                  : Nothing();
-
-          if (maybeOriginStateMetadata) {
-            return maybeOriginStateMetadata.extract();
+          &directory]() -> mozilla::Result<FullOriginMetadata, nsresult> {
+          if (aQuotaManager.IsTemporaryStorageInitializedInternal()) {
+            auto maybeFullOriginMetadata =
+                aQuotaManager.GetFullOriginMetadata(originMetadata);
+            if (maybeFullOriginMetadata) {
+              return maybeFullOriginMetadata.extract();
+            }
           }
 
-          // Get the metadata (restore the metadata file if necessary). We only
-          // use the origin state metadata.
-          QM_TRY_INSPECT(
-              const auto& metadata,
+          QM_TRY_RETURN(
               aQuotaManager.LoadFullOriginMetadataWithRestore(directory));
-
-          return metadata;
         }()));
 
-    if (!originStateMetadata.mPersisted) {
+    if (!fullOriginMetadata.mPersisted) {
       // Set the persisted flag to true and also update origin access time
       // while we are here.
 
-      originStateMetadata.mLastAccessTime = PR_Now();
-      originStateMetadata.mPersisted = true;
+      // See the documentation for this pref in StaticPrefList.yaml
+      if (StaticPrefs::
+              dom_quotaManager_temporaryStorage_updateOriginAccessTime()) {
+        fullOriginMetadata.mLastAccessTime = PR_Now();
+      }
 
-      QM_TRY(MOZ_TO_RESULT(
-          SaveDirectoryMetadataHeader(*directory, originStateMetadata)));
+      fullOriginMetadata.mPersisted = true;
+
+      QM_TRY(MOZ_TO_RESULT(aQuotaManager.CreateDirectoryMetadata2(
+          *directory, fullOriginMetadata)));
 
       // Directory metadata has been successfully updated.
       // Update OriginInfo too if temporary storage was already initialized.
       if (aQuotaManager.IsTemporaryStorageInitializedInternal()) {
         aQuotaManager.PersistOrigin(originMetadata);
-
-        // XXX The origin access time should be updated too (but not the
-        // accessed flag).
       }
     }
   }

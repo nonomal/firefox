@@ -19,7 +19,6 @@
 #include <vector>
 
 #include "api/adaptation/resource.h"
-#include "api/candidate.h"
 #include "api/data_channel_event_observer_interface.h"
 #include "api/data_channel_interface.h"
 #include "api/dtls_transport_interface.h"
@@ -40,8 +39,8 @@
 #include "api/stats/rtc_stats_collector_callback.h"
 #include "api/transport/bandwidth_estimation_settings.h"
 #include "api/transport/bitrate_settings.h"
-#include "api/transport/network_control.h"
 #include "pc/proxy.h"
+#include "rtc_base/system/plan_b_only.h"
 #include "rtc_base/thread.h"
 
 namespace webrtc {
@@ -51,12 +50,17 @@ namespace webrtc {
 // and support for a secondary thread is provided via 'SECONDARY' macros.
 // TODO(deadbeef): Move this to .cc file. What threads methods are called on is
 // an implementation detail.
+
+// The use of multiple macros here means that clang-format does badly.
+// clang-format off
 BEGIN_PROXY_MAP(PeerConnection)
 PROXY_PRIMARY_THREAD_DESTRUCTOR()
-PROXY_METHOD0(scoped_refptr<StreamCollectionInterface>, local_streams)
-PROXY_METHOD0(scoped_refptr<StreamCollectionInterface>, remote_streams)
-PROXY_METHOD1(bool, AddStream, MediaStreamInterface*)
-PROXY_METHOD1(void, RemoveStream, MediaStreamInterface*)
+PLAN_B_ONLY PROXY_METHOD0(scoped_refptr<StreamCollectionInterface>,
+                          local_streams)
+PLAN_B_ONLY PROXY_METHOD0(scoped_refptr<StreamCollectionInterface>,
+                          remote_streams)
+PLAN_B_ONLY PROXY_METHOD1(bool, AddStream, MediaStreamInterface*)
+PLAN_B_ONLY PROXY_METHOD1(void, RemoveStream, MediaStreamInterface*)
 PROXY_METHOD2(RTCErrorOr<scoped_refptr<RtpSenderInterface>>,
               AddTrack,
               scoped_refptr<MediaStreamTrackInterface>,
@@ -81,20 +85,23 @@ PROXY_METHOD2(RTCErrorOr<scoped_refptr<RtpTransceiverInterface>>,
               AddTransceiver,
               webrtc::MediaType,
               const RtpTransceiverInit&)
-PROXY_METHOD2(scoped_refptr<RtpSenderInterface>,
-              CreateSender,
-              const std::string&,
-              const std::string&)
+PLAN_B_ONLY PROXY_METHOD2(scoped_refptr<RtpSenderInterface>,
+                          CreateSender,
+                          const std::string&,
+                          const std::string&)
 PROXY_CONSTMETHOD0(std::vector<scoped_refptr<RtpSenderInterface>>, GetSenders)
 PROXY_CONSTMETHOD0(std::vector<scoped_refptr<RtpReceiverInterface>>,
                    GetReceivers)
 PROXY_CONSTMETHOD0(std::vector<scoped_refptr<RtpTransceiverInterface>>,
                    GetTransceivers)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PROXY_METHOD3(bool,
               GetStats,
               StatsObserver*,
               MediaStreamTrackInterface*,
               StatsOutputLevel)
+#pragma clang diagnostic pop
 PROXY_METHOD1(void, GetStats, RTCStatsCollectorCallback*)
 PROXY_METHOD2(void,
               GetStats,
@@ -109,16 +116,17 @@ PROXY_METHOD2(RTCErrorOr<scoped_refptr<DataChannelInterface>>,
               CreateDataChannelOrError,
               const std::string&,
               const DataChannelInit*)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*, local_description)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*, remote_description)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
-                   current_local_description)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
-                   current_remote_description)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
-                   pending_local_description)
-PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
-                   pending_remote_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*, local_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
+                          remote_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
+                          current_local_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
+                          current_remote_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
+                          pending_local_description)
+BYPASS_PROXY_CONSTMETHOD0(const SessionDescriptionInterface*,
+                          pending_remote_description)
 PROXY_METHOD0(void, RestartIce)
 PROXY_METHOD2(void,
               CreateOffer,
@@ -128,26 +136,26 @@ PROXY_METHOD2(void,
               CreateAnswer,
               CreateSessionDescriptionObserver*,
               const RTCOfferAnswerOptions&)
-PROXY_METHOD2(void,
-              SetLocalDescription,
-              std::unique_ptr<SessionDescriptionInterface>,
-              scoped_refptr<SetLocalDescriptionObserverInterface>)
+BYPASS_PROXY_METHOD2(void,
+                     SetLocalDescription,
+                     std::unique_ptr<SessionDescriptionInterface>,
+                     scoped_refptr<SetLocalDescriptionObserverInterface>)
 PROXY_METHOD1(void,
               SetLocalDescription,
               scoped_refptr<SetLocalDescriptionObserverInterface>)
-PROXY_METHOD2(void,
-              SetLocalDescription,
-              SetSessionDescriptionObserver*,
-              SessionDescriptionInterface*)
+BYPASS_PROXY_METHOD2(void,
+                     SetLocalDescription,
+                     SetSessionDescriptionObserver*,
+                     SessionDescriptionInterface*)
 PROXY_METHOD1(void, SetLocalDescription, SetSessionDescriptionObserver*)
-PROXY_METHOD2(void,
-              SetRemoteDescription,
-              std::unique_ptr<SessionDescriptionInterface>,
-              scoped_refptr<SetRemoteDescriptionObserverInterface>)
-PROXY_METHOD2(void,
-              SetRemoteDescription,
-              SetSessionDescriptionObserver*,
-              SessionDescriptionInterface*)
+BYPASS_PROXY_METHOD2(void,
+                     SetRemoteDescription,
+                     std::unique_ptr<SessionDescriptionInterface>,
+                     scoped_refptr<SetRemoteDescriptionObserverInterface>)
+BYPASS_PROXY_METHOD2(void,
+                     SetRemoteDescription,
+                     SetSessionDescriptionObserver*,
+                     SessionDescriptionInterface*)
 PROXY_METHOD1(bool, ShouldFireNegotiationNeededEvent, uint32_t)
 PROXY_METHOD0(PeerConnectionInterface::RTCConfiguration, GetConfiguration)
 PROXY_METHOD1(RTCError,
@@ -159,10 +167,6 @@ PROXY_METHOD2(void,
               std::unique_ptr<IceCandidate>,
               std::function<void(RTCError)>)
 PROXY_METHOD1(bool, RemoveIceCandidate, const IceCandidate*)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-PROXY_METHOD1(bool, RemoveIceCandidates, const std::vector<Candidate>&)
-#pragma clang diagnostic pop
 PROXY_METHOD1(RTCError, SetBitrate, const BitrateSettings&)
 PROXY_METHOD1(void,
               ReconfigureBandwidthEstimation,
@@ -195,9 +199,10 @@ PROXY_METHOD1(void,
               SetDataChannelEventObserver,
               std::unique_ptr<DataChannelEventObserverInterface>)
 PROXY_METHOD0(void, Close)
-PROXY_METHOD0(NetworkControllerInterface*, GetNetworkController)
+
 BYPASS_PROXY_CONSTMETHOD0(Thread*, signaling_thread)
 END_PROXY_MAP(PeerConnection)
+// clang-format on
 
 }  // namespace webrtc
 

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -37,6 +35,18 @@ nsChangeHint XULTextElement::GetAttributeChangeHint(
     return nsChangeHint_ReconstructFrame;
   }
   return nsXULElement::GetAttributeChangeHint(aAttribute, aModType);
+}
+
+void XULTextElement::AfterSetAttr(int32_t aNamespaceID, nsAtom* aName,
+                                  const nsAttrValue* aValue,
+                                  const nsAttrValue* aOldValue,
+                                  nsIPrincipal* aSubjectPrincipal,
+                                  bool aNotify) {
+  nsXULElement::AfterSetAttr(aNamespaceID, aName, aValue, aOldValue,
+                             aSubjectPrincipal, aNotify);
+  if (aNamespaceID == kNameSpaceID_None && aName == nsGkAtoms::disabled) {
+    SetStates(ElementState::DISABLED, !!aValue, aNotify);
+  }
 }
 
 JSObject* XULTextElement::WrapNode(JSContext* aCx,

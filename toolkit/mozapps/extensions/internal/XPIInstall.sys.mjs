@@ -935,16 +935,24 @@ function shouldVerifySignedState(aAddonType, aLocation) {
  *        or undefined if the file wasn't signed.
  */
 export var verifyBundleSignedState = async function (aBundle, aAddon) {
-  let pkg = Package.get(aBundle);
   try {
-    let { signedState, signedTypes } = await pkg.verifySignedState(
-      aAddon.id,
-      aAddon.type,
-      aAddon.location
-    );
-    return { signedState, signedTypes };
-  } finally {
-    pkg.close();
+    let pkg = Package.get(aBundle);
+    try {
+      let { signedState, signedTypes } = await pkg.verifySignedState(
+        aAddon.id,
+        aAddon.type,
+        aAddon.location
+      );
+      return { signedState, signedTypes };
+    } finally {
+      pkg.close();
+    }
+  } catch (e) {
+    logger.warn(`verifyBundleSignedState failed for ${aAddon.id}`, e);
+    if (!shouldVerifySignedState(aAddon.type, aAddon.location)) {
+      return { signedState: AddonManager.SIGNEDSTATE_NOT_REQUIRED };
+    }
+    return { signedState: AddonManager.SIGNEDSTATE_BROKEN };
   }
 };
 
@@ -1123,12 +1131,10 @@ function writeStringToFile(file, string) {
  */
 function SafeInstallOperation() {
   this._installedFiles = [];
-  this._createdDirs = [];
 }
 
 SafeInstallOperation.prototype = {
   _installedFiles: null,
-  _createdDirs: null,
 
   _installFile(aFile, aTargetDirectory, aCopy) {
     let oldFile = aCopy ? null : aFile.clone();
@@ -1240,10 +1246,6 @@ SafeInstallOperation.prototype = {
       } else {
         move.newFile.moveTo(move.oldFile.parent, null);
       }
-    }
-
-    while (this._createdDirs.length) {
-      recursiveRemove(this._createdDirs.pop());
     }
   },
 };
@@ -1468,9 +1470,18 @@ class AddonInstall {
         );
         this.removeTemporaryFile();
 
+        const stagedInstall = AppUpdate._stagedLangpacks.get(this.addon.id);
+        if (stagedInstall && stagedInstall !== this) {
+          // File path is owned by another AddonInstall (langpack). To avoid
+          // removing the wrong file or database entry, skip unstage.
+          logger.debug(`Skipping unstageInstall for obsolete AddonInstall`);
+          return;
+        }
+
         let stagingDir = this.location.installer.getStagingDir();
         let stagedAddon = stagingDir.clone();
 
+        // Note: unstageInstall is async!
         this.unstageInstall(stagedAddon);
         break;
       }
@@ -1674,7 +1685,7 @@ class AddonInstall {
 
         if (
           this.addon.adminInstallOnly &&
-          !this.addon.wrapper.isInstalledByEnterprisePolicy
+          !Services.policies?.isAddonRequiredByPolicy(this.addon.id)
         ) {
           return Promise.reject([
             AddonManager.ERROR_ADMIN_INSTALL_ONLY,
@@ -1917,15 +1928,15 @@ class AddonInstall {
       false
     );
 
-    let stagedAddon = this.location.installer.getStagingDir();
+    const stagingDir = this.location.installer.getStagingDir();
+    const stagedAddon = stagingDir.clone();
+    stagedAddon.append(`${this.addon.id}.xpi`);
 
     try {
       await this.location.installer.requestStagingDir();
 
       // remove any previously staged files
-      await this.unstageInstall(stagedAddon);
-
-      stagedAddon.append(`${this.addon.id}.xpi`);
+      await this.unstageInstall(stagingDir);
 
       await this.stageInstall(false, stagedAddon, isSameLocation);
 
@@ -2108,9 +2119,82 @@ class AddonInstall {
   async unstageInstall(stagingDir) {
     this.location.unstageAddon(this.addon.id);
 
+    // We do not create this directory, but we used to. This is only kept
+    // around to make sure that the directory is eventually cleaned up of stale
+    // entries. See https://bugzilla.mozilla.org/show_bug.cgi?id=2006512#c4
+    // TODO bug 2010271: Remove this in favor of an infrequent cleanup task.
     await removeAsync(getFile(this.addon.id, stagingDir));
 
     await removeAsync(getFile(`${this.addon.id}.xpi`, stagingDir));
+  }
+
+  /**
+   * Rename the staged XPI associated with this install, to prevent another
+   * installation from overwriting it (see bug 2006489).
+   *
+   * @see restoreStagedInstall
+   */
+  backupStagedInstall() {
+    if (this._backupStagedAddon) {
+      logger.warn(
+        `Unexpected double attempt to back up staged langpack ${this.addon.id}`
+      );
+      return;
+    }
+    const stagedAddon = this.location.installer.getStagingDir();
+    stagedAddon.append(`${this.addon.id}.xpi`);
+    try {
+      // Rename file. This will be restored when the install completes. If for
+      // some reason the application crashes or quits before we get there, this
+      // file will be left behind.
+      //
+      // TODO bug 2010271: Periodically remove stale addonid~bak.xpi files.
+      //
+      // "~" as separator because it is never a part of an addon ID.
+      stagedAddon.moveTo(null, `${this.addon.id}~bak.xpi`);
+      this._backupStagedAddon = stagedAddon;
+    } catch (e) {
+      logger.warn(`Failed to rename staged langpack ${this.addon.id}`, e);
+    }
+  }
+
+  /**
+   * Undo the rename of backupStagedInstall(). This should be called when there
+   * are no other uses of the original file name.
+   *
+   * @see backupStagedInstall
+   * @see stageInstall
+   */
+  restoreStagedInstall() {
+    if (this._backupStagedAddon) {
+      try {
+        // Restore file and metadata, matching the logic from stageInstall().
+        this._backupStagedAddon.moveTo(null, `${this.addon.id}.xpi`);
+        this._backupStagedAddon = null;
+        this.location.stageAddon(this.addon.id, this.addon.toJSON());
+      } catch (e) {
+        logger.warn(`Failed to restore staged langpack ${this.addon.id}`, e);
+        this._backupStagedAddon = null;
+      }
+    }
+  }
+
+  /**
+   * Remove the staged file without restoring it. This should be called when
+   * the file has become obsolete, e.g. due to a newer version of the XPI.
+   *
+   * @see backupStagedInstall
+   * @see restoreStagedInstall
+   */
+  deleteBackupStagedInstall() {
+    if (this._backupStagedAddon) {
+      try {
+        this._backupStagedAddon.remove(false);
+      } catch (e) {
+        logger.warn(`Failed to delete staged langpack ${this.addon.id}`, e);
+      }
+      this._backupStagedAddon = null;
+    }
   }
 
   /**
@@ -2818,7 +2902,7 @@ var DownloadAddonInstall = class extends AddonInstall {
     if (iid.equals(Ci.nsIAuthPrompt2)) {
       let win = null;
       if (this.browser) {
-        win = this.browser.contentWindow || this.browser.ownerGlobal;
+        win = this.browser.contentWindow || this.browser.documentGlobal;
       }
 
       let factory = Cc["@mozilla.org/prompter;1"].getService(
@@ -3060,7 +3144,10 @@ export var UpdateChecker = function (
     aReason == AddonManager.UPDATE_WHEN_NEW_APP_INSTALLED;
   this.isUserRequested = aReason == AddonManager.UPDATE_WHEN_USER_REQUESTED;
 
-  let updateURL = aAddon.updateURL;
+  // If bug 2032469 changes the policy behavior, this will need to be updated.
+  let updateURL =
+    Services.policies?.getExtensionSettings(aAddon.id)?.update_url?.href ||
+    aAddon.updateURL;
   if (!updateURL) {
     if (
       aReason == AddonManager.UPDATE_WHEN_PERIODIC_UPDATE &&
@@ -3498,6 +3585,8 @@ class DirectoryInstaller {
     let transaction = new SafeInstallOperation();
 
     let moveOldAddon = aId => {
+      // We do not create unpacked directories any more since bug 1457072. This
+      // `aId` removal logic could be removed or replaced (bug 2010271).
       let file = getFile(aId, this.dir);
       if (file.exists()) {
         transaction.moveUnder(file, trashDir);
@@ -3565,6 +3654,11 @@ class DirectoryInstaller {
   uninstallAddon(aId) {
     let file = getFile(aId, this.dir);
     if (!file.exists()) {
+      // TODO: We should unconditionally look at `${aId}.xpi` without first
+      // checking the directory without suffix, because support for unpacked
+      // installs was removd a long time ago (bug 1457072). If there is any
+      // concern about directories left behind, the removal could be added
+      // elsewhere (bug 2010271).
       file.leafName += ".xpi";
     }
 
@@ -4073,10 +4167,59 @@ var AppUpdate = {
     });
   },
 
-  stageInstall(installer) {
+  // Map from addon ID to AddonInstall of langpacks staged for next startup.
+  _stagedLangpacks: new Map(),
+  _conflictingInstalls: null,
+  _ensurePersistentStagedLangpack() {
+    // stageLangpacksForAppUpdate may stage a langpack for the next application
+    // update, because langpacks are compatible with specific major versions
+    // only. But if an update check finds another langpack compatible with the
+    // current version, the previously staged langpack would be overwritten,
+    // because AddonInstall instances with the same ID share the same file path.
+    // To avoid the loss of langpacks, temporarily rename the file, then restore
+    // it upon completion of the installation (bug 2006489).
+    if (this._conflictingInstalls) {
+      return;
+    }
+    this._conflictingInstalls = new Set();
+    const restoreStagedIfNeeded = install => {
+      if (this._conflictingInstalls.delete(install)) {
+        const stagedInstall = this._stagedLangpacks.get(install.addon.id);
+        stagedInstall.restoreStagedInstall();
+      }
+    };
+    const globalInstallListener = {
+      onInstallStarted: install => {
+        const stagedInstall = this._stagedLangpacks.get(install.addon.id);
+        if (stagedInstall && stagedInstall !== install) {
+          this._conflictingInstalls.add(install);
+          stagedInstall.backupStagedInstall();
+        }
+      },
+      onInstallCancelled: install => {
+        restoreStagedIfNeeded(install);
+      },
+      onInstallFailed: install => {
+        restoreStagedIfNeeded(install);
+      },
+      onInstallEnded: install => {
+        restoreStagedIfNeeded(install);
+      },
+    };
+    AddonManager.addInstallListener(globalInstallListener);
+  },
+
+  stageLangpackInstall(installer) {
     return new Promise((resolve, reject) => {
       let listener = {
         onDownloadEnded: install => {
+          const stagedInstall = this._stagedLangpacks.get(install.addon.id);
+          if (stagedInstall) {
+            // Found a new version of a previously staged langpack. We don't
+            // care about the previous one any more.
+            stagedInstall.deleteBackupStagedInstall();
+            this._stagedLangpacks.delete(install.addon.id);
+          }
           install.postpone();
         },
         onInstallFailed: install => {
@@ -4092,6 +4235,10 @@ var AppUpdate = {
         onInstallPostponed: install => {
           // At this point the addon is staged for restart.
           install.removeListener(listener);
+
+          this._stagedLangpacks.set(install.addon.id, installFor(install));
+          this._ensurePersistentStagedLangpack();
+
           resolve();
         },
       };
@@ -4112,7 +4259,7 @@ var AppUpdate = {
           nextVersion,
           nextPlatformVersion
         )
-          .then(update => update && this.stageInstall(update))
+          .then(update => update && this.stageLangpackInstall(update))
           .catch(e => {
             logger.debug(`addon.findUpdate error: ${e}`);
           })
@@ -4173,13 +4320,10 @@ export var XPIInstall = {
    *        The XPI file to install the add-on from.
    * @param {XPIStateLocation} location
    *        The install location to install the add-on to.
-   * @param {string?} [oldAppVersion]
-   *        The version of the application last run with this profile or null
-   *        if it is a new profile or the version is unknown
    * @returns {AddonInternal}
    *        The installed Addon object, upon success.
    */
-  async installDistributionAddon(id, file, location, oldAppVersion) {
+  async installDistributionAddon(id, file, location) {
     let addon = await loadManifestFromFile(file, location);
     addon.installTelemetryInfo = { source: "distribution" };
 
@@ -4207,16 +4351,6 @@ export var XPIInstall = {
         );
       }
     } else if (
-      addon.type === "locale" &&
-      oldAppVersion &&
-      Services.vc.compare(oldAppVersion, "67") < 0
-    ) {
-      /* Distribution language packs didn't get installed due to the signing
-           issues so we need to force them to be reinstalled. */
-      Services.prefs.clearUserPref(
-        XPIExports.XPIInternal.PREF_BRANCH_INSTALLED_ADDON + id
-      );
-    } else if (
       Services.prefs.getBoolPref(
         XPIExports.XPIInternal.PREF_BRANCH_INSTALLED_ADDON + id,
         false
@@ -4239,6 +4373,16 @@ export var XPIInstall = {
       XPIExports.XPIInternal.PREF_BRANCH_INSTALLED_ADDON + id,
       true
     );
+
+    // Distribution installs don't go through AddonInstall, so the metadata
+    // fetch in AddonInstall.loadManifest() never runs for them. Fetch it here
+    // (if not already cached) so themes get their preview image. This is
+    // fire-and-forget: a failure shouldn't block the install.
+    if (!(await lazy.AddonRepository.getCachedAddonByID(id))) {
+      lazy.AddonRepository.cacheAddons([id]).catch(err => {
+        logger.debug(`Error getting metadata for ${id}: ${err.message}`);
+      });
+    }
 
     return addon;
   },
@@ -4908,23 +5052,6 @@ export var XPIInstall = {
     let wasPending = aAddon.pendingUninstall;
 
     if (aForcePending) {
-      // We create an empty directory in the staging directory to indicate
-      // that an uninstall is necessary on next startup. Temporary add-ons are
-      // automatically uninstalled on shutdown anyway so there is no need to
-      // do this for them.
-      if (!aAddon.location.isTemporary && aAddon.location.installer) {
-        let stage = getFile(
-          aAddon.id,
-          aAddon.location.installer.getStagingDir()
-        );
-        if (!stage.exists()) {
-          stage.create(
-            Ci.nsIFile.DIRECTORY_TYPE,
-            lazy.FileUtils.PERMS_DIRECTORY
-          );
-        }
-      }
-
       XPIExports.XPIDatabase.setAddonProperties(aAddon, {
         pendingUninstall: true,
       });
@@ -5031,10 +5158,6 @@ export var XPIInstall = {
     }
     if (!aAddon.pendingUninstall) {
       throw new Error("Add-on is not marked to be uninstalled");
-    }
-
-    if (!aAddon.location.isTemporary && aAddon.location.installer) {
-      aAddon.location.installer.cleanStagingDir([aAddon.id]);
     }
 
     XPIExports.XPIDatabase.setAddonProperties(aAddon, {

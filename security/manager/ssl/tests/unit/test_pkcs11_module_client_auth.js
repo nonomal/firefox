@@ -1,4 +1,3 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 // Any copyright is dedicated to the Public Domain.
 // http://creativecommons.org/publicdomain/zero/1.0/
 "use strict";
@@ -15,26 +14,14 @@ const gCertDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
 var gPrompt = {
   QueryInterface: ChromeUtils.generateQI(["nsIPrompt"]),
 
-  // This intentionally does not use arrow function syntax to avoid an issue
-  // where in the context of the arrow function, |this != gPrompt| due to
-  // how objects get wrapped when going across xpcom boundaries.
-  alert(_title, text) {
-    const EXPECTED_PROMPT_TEXT =
-      "Please authenticate to the token “Test PKCS11 Tokeñ 2 Label”. How to do so depends on the token (for example, using a fingerprint reader or entering a code with a keypad).";
-    equal(text, EXPECTED_PROMPT_TEXT, "expecting alert() to be called");
-  },
-
-  promptPassword() {
-    ok(false, "not expecting promptPassword() to be called");
+  promptPassword(_dialogTitle, _text, password, _checkMsg) {
+    // The first token in the test module has a blank password by default.
+    password.value = "";
+    return true;
   },
 };
 
-const gPromptFactory = {
-  QueryInterface: ChromeUtils.generateQI(["nsIPromptFactory"]),
-  getPrompt: () => gPrompt,
-};
-
-MockRegistrar.register("@mozilla.org/prompter;1", gPromptFactory);
+var gWindowWatcher = installWindowWatcherForProtectedAuth(gPrompt);
 
 // Replace the UI dialog that prompts the user to pick a client certificate.
 const gClientAuthDialogService = {
@@ -60,28 +47,16 @@ MockRegistrar.register(
   gClientAuthDialogService
 );
 
-function run_test() {
+add_task(async function run_test() {
   let libraryFile = Services.dirsvc.get("CurWorkD", Ci.nsIFile);
   libraryFile.append("pkcs11testmodule");
   libraryFile.append(ctypes.libraryName("pkcs11testmodule"));
-  loadPKCS11Module(libraryFile, "PKCS11 Test Module", true);
+  await loadPKCS11Module(libraryFile, "PKCS11 Test Module", false);
 
   Services.prefs.setCharPref(
     "network.dns.localDomains",
     "requireclientauth.example.com"
   );
-
-  add_tls_server_setup("BadCertAndPinningServer", "bad_certs");
-  add_test(function set_up_rsa_client_certificate() {
-    gClientAuthDialogService.certificateNameToUse = "CN=client cert rsa";
-    run_next_test();
-  });
-  add_connection_test("requireclientauth.example.com", PRErrorCodeSuccess);
-  add_test(function set_up_ecdsa_client_certificate() {
-    gClientAuthDialogService.certificateNameToUse = "CN=client cert ecdsa";
-    run_next_test();
-  });
-  add_connection_test("requireclientauth.example.com", PRErrorCodeSuccess);
 
   // The test module currently has a slot that uses a protected authentication
   // path (i.e., when Firefox wants to authenticate to it, it opens a dialog
@@ -95,9 +70,24 @@ function run_test() {
   // tends to cause problems like this).
   // Since this is an uncommon configuration and since this issue hasn't been
   // reproduced outside of this test infrastructure, this works around it for
-  // the time being by authenticating to all tokens on the main thread so that
-  // the socket thread doesn't have to.
-  gCertDB.getCerts();
+  // the time being by authenticating to all tokens beforehand so that the
+  // socket thread doesn't have to.
+  await gCertDB.getCerts();
 
-  run_next_test();
-}
+  await asyncStartTLSTestServer("BadCertAndPinningServer", "bad_certs");
+  gClientAuthDialogService.certificateNameToUse = "CN=client cert rsa";
+  await asyncConnectTo("requireclientauth.example.com", PRErrorCodeSuccess);
+  equal(
+    gWindowWatcher.protectedAuthPromptsSeen,
+    1,
+    "should have seen one protected auth prompt"
+  );
+
+  gClientAuthDialogService.certificateNameToUse = "CN=client cert ecdsa";
+  await asyncConnectTo("requireclientauth.example.com", PRErrorCodeSuccess);
+  equal(
+    gWindowWatcher.protectedAuthPromptsSeen,
+    1,
+    "should have still seen only one protected auth prompt"
+  );
+});

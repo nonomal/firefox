@@ -11,9 +11,9 @@
 #ifndef P2P_TEST_MOCK_ICE_AGENT_H_
 #define P2P_TEST_MOCK_ICE_AGENT_H_
 
-#include <cstdint>
+#include <span>
 
-#include "api/array_view.h"
+#include "api/units/timestamp.h"
 #include "p2p/base/connection.h"
 #include "p2p/base/ice_agent_interface.h"
 #include "p2p/base/ice_switch_reason.h"
@@ -26,14 +26,14 @@ class MockIceAgent : public IceAgentInterface {
  public:
   ~MockIceAgent() override = default;
 
-  MOCK_METHOD(int64_t, GetLastPingSentMs, (), (override, const));
+  MOCK_METHOD(Timestamp, GetLastPingSent, (), (override, const));
   MOCK_METHOD(IceRole, GetIceRole, (), (override, const));
   MOCK_METHOD(void, OnStartedPinging, (), (override));
   MOCK_METHOD(void, UpdateConnectionStates, (), (override));
   MOCK_METHOD(void, UpdateState, (), (override));
   MOCK_METHOD(void,
               ForgetLearnedStateForConnections,
-              (ArrayView<const Connection* const>),
+              (std::span<const Connection* const>),
               (override));
   MOCK_METHOD(void, SendPingRequest, (const Connection*), (override));
   MOCK_METHOD(void,
@@ -42,7 +42,7 @@ class MockIceAgent : public IceAgentInterface {
               (override));
   MOCK_METHOD(bool,
               PruneConnections,
-              (ArrayView<const Connection* const>),
+              (std::span<const Connection* const>),
               (override));
 };
 

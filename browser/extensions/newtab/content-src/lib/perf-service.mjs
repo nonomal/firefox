@@ -24,7 +24,9 @@ _PerfService.prototype = {
    * @return {void}
    */
   mark: function mark(str) {
-    this._perf.mark(str);
+    if (typeof this._perf.mark === "function") {
+      this._perf.mark(str);
+    }
   },
 
   /**
@@ -36,7 +38,10 @@ _PerfService.prototype = {
    * @return {Array}       Performance* objects
    */
   getEntriesByName: function getEntriesByName(entryName, type) {
-    return this._perf.getEntriesByName(entryName, type);
+    if (typeof this._perf.getEntriesByName === "function") {
+      return this._perf.getEntriesByName(entryName, type);
+    }
+    return [];
   },
 
   /**
@@ -44,7 +49,7 @@ _PerfService.prototype = {
    * Used to ensure that timestamps from the add-on code and the content code
    * are comparable.
    *
-   * @note If this is called from a context without a window
+   * Note: If this is called from a context without a window
    * (eg a JSM in chrome), it will return the timeOrigin of the XUL hidden
    * window, which appears to be the first created window (and thus
    * timeOrigin) in the browser.  Note also, however, there is also a private
@@ -79,7 +84,7 @@ _PerfService.prototype = {
    *
    * @throws {Error}        "No Marks with the name ..." if none are available
    *
-   * @note Always surround calls to this by try/catch.  Otherwise your code
+   * Note: Always surround calls to this by try/catch.  Otherwise your code
    * may fail when the `privacy.resistFingerprinting` pref is true.  When
    * this pref is set, all attempts to get marks will likely fail, which will
    * cause this method to throw.

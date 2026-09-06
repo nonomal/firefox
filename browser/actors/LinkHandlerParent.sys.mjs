@@ -3,11 +3,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import {
-  TYPE_SVG,
   TYPE_ICO,
+  SVG_DATA_URI_PREFIX,
   TRUSTED_FAVICON_SCHEMES,
   blobAsDataURL,
-} from "moz-src:///browser/modules/FaviconUtils.sys.mjs";
+} from "moz-src:///toolkit/modules/FaviconUtils.sys.mjs";
 
 const lazy = {};
 
@@ -91,7 +91,7 @@ export class LinkHandlerParent extends JSWindowActorParent {
       return;
     }
 
-    let win = browser.ownerGlobal;
+    let win = browser.documentGlobal;
 
     let gBrowser = win.gBrowser;
 
@@ -109,6 +109,12 @@ export class LinkHandlerParent extends JSWindowActorParent {
         }
 
         this.notifyTestListeners("LoadingIcon", aMsg.data);
+        break;
+
+      case "Link:ExpireFavicons":
+        lazy.PlacesUtils.favicons
+          .expireFaviconsForPage(this.manager.documentURI)
+          .catch(console.error);
         break;
 
       case "Link:SetIcon":
@@ -164,7 +170,6 @@ export class LinkHandlerParent extends JSWindowActorParent {
     gBrowser,
     browser,
     {
-      pageURL,
       originalURL,
       expiration,
       iconURL,
@@ -224,7 +229,7 @@ export class LinkHandlerParent extends JSWindowActorParent {
     if (
       !images &&
       !TRUSTED_FAVICON_SCHEMES.includes(iconURI.scheme) &&
-      !iconURL.startsWith(`data:${TYPE_SVG};base64,`)
+      !iconURL.startsWith(SVG_DATA_URI_PREFIX)
     ) {
       console.error(
         `Not allowed to set favicon "${iconURL}" with that scheme!`
@@ -247,7 +252,7 @@ export class LinkHandlerParent extends JSWindowActorParent {
       try {
         lazy.PlacesUtils.favicons
           .setFaviconForPage(
-            Services.io.newURI(pageURL),
+            this.manager.documentURI,
             Services.io.newURI(originalURL),
             iconURI,
             expiration && lazy.PlacesUtils.toPRTime(expiration),

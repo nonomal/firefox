@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -15,11 +13,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "jsnum.h"
 #include "jspubtd.h"
 #include "NamespaceImports.h"
 
 #include "builtin/intl/DateTimeFormat.h"
+#include "builtin/Number.h"
 #include "builtin/temporal/Calendar.h"
 #include "builtin/temporal/Duration.h"
 #include "builtin/temporal/Int96.h"
@@ -83,9 +81,10 @@ static bool AbsoluteValueIsLessOrEqual(const BigInt* bigInt) {
   }
 
   // Compare each digit when the input has the same number of digits.
+  auto bigIntDigits = bigInt->digits();
   size_t index = std::size(digits);
   for (auto digit : digits) {
-    auto d = bigInt->digit(--index);
+    auto d = bigIntDigits[--index];
     if (d < digit) {
       return true;
     }
@@ -232,11 +231,11 @@ static BigInt* CreateBigInt(JSContext* cx,
     if (!result) {
       return nullptr;
     }
-    if (y) {
-      result->setDigit(1, y);
+    if (length > 1) {
+      result->setIndividualDigit(1, y);
     }
-    if (x) {
-      result->setDigit(0, x);
+    if (length > 0) {
+      result->setIndividualDigit(0, x);
     }
     return result;
   } else {
@@ -245,8 +244,9 @@ static BigInt* CreateBigInt(JSContext* cx,
     if (!result) {
       return nullptr;
     }
+    auto resultDigits = result->digits();
     while (length--) {
-      result->setDigit(length, digits[length]);
+      resultDigits[length] = digits[length];
     }
     return result;
   }
@@ -315,7 +315,7 @@ BigInt* js::temporal::ToBigInt(JSContext* cx,
  */
 EpochNanoseconds js::temporal::GetUTCEpochNanoseconds(
     const ISODateTime& isoDateTime) {
-  MOZ_ASSERT(ISODateTimeWithinLimits(isoDateTime));
+  MOZ_ASSERT(IsValidISODateTime(isoDateTime));
 
   const auto& [date, time] = isoDateTime;
 
@@ -368,10 +368,10 @@ InstantObject* js::temporal::CreateTemporalInstant(
   }
 
   // Step 4.
-  object->setFixedSlot(InstantObject::SECONDS_SLOT,
-                       NumberValue(epochNanoseconds.seconds));
-  object->setFixedSlot(InstantObject::NANOSECONDS_SLOT,
-                       Int32Value(epochNanoseconds.nanoseconds));
+  object->initFixedSlotTyped(InstantObject::SECONDS_SLOT,
+                             NumberValue(epochNanoseconds.seconds));
+  object->initFixedSlotTyped(InstantObject::NANOSECONDS_SLOT,
+                             Int32Value(epochNanoseconds.nanoseconds));
 
   // Step 5.
   return object;
@@ -398,10 +398,10 @@ static InstantObject* CreateTemporalInstant(JSContext* cx, const CallArgs& args,
 
   // Step 4.
   auto epochNs = ToEpochNanoseconds(epochNanoseconds);
-  object->setFixedSlot(InstantObject::SECONDS_SLOT,
-                       NumberValue(epochNs.seconds));
-  object->setFixedSlot(InstantObject::NANOSECONDS_SLOT,
-                       Int32Value(epochNs.nanoseconds));
+  object->initFixedSlotTyped(InstantObject::SECONDS_SLOT,
+                             NumberValue(epochNs.seconds));
+  object->initFixedSlotTyped(InstantObject::NANOSECONDS_SLOT,
+                             Int32Value(epochNs.nanoseconds));
 
   // Step 5.
   return object;
@@ -951,8 +951,8 @@ static bool Instant_since(JSContext* cx, unsigned argc, Value* vp) {
 static bool Instant_round(JSContext* cx, const CallArgs& args) {
   auto epochNs = args.thisv().toObject().as<InstantObject>().epochNanoseconds();
 
-  // Steps 3-16.
-  auto smallestUnit = TemporalUnit::Auto;
+  // Steps 3-17.
+  auto smallestUnit = TemporalUnit::Unset;
   auto roundingMode = TemporalRoundingMode::HalfExpand;
   auto roundingIncrement = Increment{1};
   if (args.get(0).isString()) {
@@ -960,13 +960,18 @@ static bool Instant_round(JSContext* cx, const CallArgs& args) {
 
     // Step 9.
     Rooted<JSString*> paramString(cx, args[0].toString());
-    if (!GetTemporalUnitValuedOption(cx, paramString,
-                                     TemporalUnitKey::SmallestUnit,
-                                     TemporalUnitGroup::Time, &smallestUnit)) {
+    if (!GetTemporalUnitValuedOption(
+            cx, paramString, TemporalUnitKey::SmallestUnit, &smallestUnit)) {
       return false;
     }
 
-    // Steps 10-16. (Not applicable in our implementation.)
+    // Step 10.
+    if (!ValidateTemporalUnitValue(cx, TemporalUnitKey::SmallestUnit,
+                                   smallestUnit, TemporalUnitGroup::Time)) {
+      return false;
+    }
+
+    // Steps 11-17. (Not applicable in our implementation.)
   } else {
     // Steps 3 and 5.
     Rooted<JSObject*> options(
@@ -987,30 +992,37 @@ static bool Instant_round(JSContext* cx, const CallArgs& args) {
 
     // Step 9.
     if (!GetTemporalUnitValuedOption(cx, options, TemporalUnitKey::SmallestUnit,
-                                     TemporalUnitGroup::Time, &smallestUnit)) {
+                                     &smallestUnit)) {
       return false;
     }
-    if (smallestUnit == TemporalUnit::Auto) {
+
+    if (smallestUnit == TemporalUnit::Unset) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                                 JSMSG_TEMPORAL_MISSING_OPTION, "smallestUnit");
       return false;
     }
 
-    // Steps 10-15.
+    // Step 10.
+    if (!ValidateTemporalUnitValue(cx, TemporalUnitKey::SmallestUnit,
+                                   smallestUnit, TemporalUnitGroup::Time)) {
+      return false;
+    }
+
+    // Steps 11-16.
     int64_t maximum = UnitsPerDay(smallestUnit);
 
-    // Step 16.
+    // Step 17.
     if (!ValidateTemporalRoundingIncrement(cx, roundingIncrement, maximum,
                                            true)) {
       return false;
     }
   }
 
-  // Step 17.
+  // Step 18.
   auto roundedNs = RoundTemporalInstant(epochNs, roundingIncrement,
                                         smallestUnit, roundingMode);
 
-  // Step 18.
+  // Step 19.
   auto* result = CreateTemporalInstant(cx, roundedNs);
   if (!result) {
     return false;
@@ -1084,13 +1096,26 @@ static bool Instant_toString(JSContext* cx, const CallArgs& args) {
     }
 
     // Step 7.
-    auto smallestUnit = TemporalUnit::Auto;
+    auto smallestUnit = TemporalUnit::Unset;
     if (!GetTemporalUnitValuedOption(cx, options, TemporalUnitKey::SmallestUnit,
-                                     TemporalUnitGroup::Time, &smallestUnit)) {
+                                     &smallestUnit)) {
       return false;
     }
 
     // Step 8.
+    Rooted<Value> timeZoneValue(cx);
+    if (!GetProperty(cx, options, options, cx->names().timeZone,
+                     &timeZoneValue)) {
+      return false;
+    }
+
+    // Step 9.
+    if (!ValidateTemporalUnitValue(cx, TemporalUnitKey::SmallestUnit,
+                                   smallestUnit, TemporalUnitGroup::Time)) {
+      return false;
+    }
+
+    // Step 10.
     if (smallestUnit == TemporalUnit::Hour) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                                 JSMSG_TEMPORAL_INVALID_UNIT_OPTION, "hour",
@@ -1098,28 +1123,22 @@ static bool Instant_toString(JSContext* cx, const CallArgs& args) {
       return false;
     }
 
-    // Step 9.
-    Rooted<Value> value(cx);
-    if (!GetProperty(cx, options, options, cx->names().timeZone, &value)) {
-      return false;
-    }
-
-    // Step 10.
-    if (!value.isUndefined()) {
-      if (!ToTemporalTimeZone(cx, value, &timeZone)) {
+    // Step 11.
+    if (!timeZoneValue.isUndefined()) {
+      if (!ToTemporalTimeZone(cx, timeZoneValue, &timeZone)) {
         return false;
       }
     }
 
-    // Step 11.
+    // Step 12.
     precision = ToSecondsStringPrecision(smallestUnit, digits);
   }
 
-  // Steps 12-13.
+  // Steps 13-14.
   auto roundedNs = RoundTemporalInstant(epochNs, precision.increment,
                                         precision.unit, roundingMode);
 
-  // Step 14.
+  // Step 15.
   JSString* str =
       TemporalInstantToString(cx, roundedNs, timeZone, precision.precision);
   if (!str) {

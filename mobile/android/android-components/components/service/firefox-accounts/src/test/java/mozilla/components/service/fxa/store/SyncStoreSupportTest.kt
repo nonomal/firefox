@@ -5,6 +5,7 @@
 package mozilla.components.service.fxa.store
 
 import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import mozilla.components.concept.sync.AuthFlowError
 import mozilla.components.concept.sync.AuthType
@@ -20,21 +21,16 @@ import mozilla.components.support.test.any
 import mozilla.components.support.test.coMock
 import mozilla.components.support.test.eq
 import mozilla.components.support.test.mock
-import mozilla.components.support.test.rule.MainCoroutineRule
 import mozilla.components.support.test.whenever
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 
 class SyncStoreSupportTest {
-
-    @get:Rule
-    val mainCoroutineRule = MainCoroutineRule()
-
+    private val testDispatcher = StandardTestDispatcher()
     private val accountManager = mock<FxaAccountManager>()
     private val lifecycleOwner = mock<LifecycleOwner>()
     private val autoPause = false
@@ -50,21 +46,25 @@ class SyncStoreSupportTest {
         store = SyncStore()
         syncObserver = AccountSyncObserver(store)
         constellationObserver = ConstellationObserver(store)
-        accountObserver = FxaAccountObserver(
-            store = store,
-            deviceConstellationObserver = constellationObserver,
-            lifecycleOwner = lifecycleOwner,
-            autoPause = autoPause,
-            coroutineScope = mainCoroutineRule.scope,
-        )
+        accountObserver =
+            FxaAccountObserver(
+                store = store,
+                deviceConstellationObserver = constellationObserver,
+                lifecycleOwner = lifecycleOwner,
+                autoPause = autoPause,
+                ioDispatcher = testDispatcher,
+                mainDispatcher = testDispatcher,
+            )
 
-        integration = SyncStoreSupport(
-            store = store,
-            fxaAccountManager = lazyOf(accountManager),
-            lifecycleOwner = lifecycleOwner,
-            autoPause = autoPause,
-            coroutineScope = mainCoroutineRule.scope,
-        )
+        integration =
+            SyncStoreSupport(
+                store = store,
+                fxaAccountManager = lazyOf(accountManager),
+                lifecycleOwner = lifecycleOwner,
+                autoPause = autoPause,
+                ioDispatcher = testDispatcher,
+                mainDispatcher = testDispatcher,
+            )
     }
 
     @Test
@@ -97,76 +97,84 @@ class SyncStoreSupportTest {
     }
 
     @Test
-    fun `GIVEN account observer WHEN onAuthenticated observed THEN device observer registered`() = runTest {
-        val constellation = mock<DeviceConstellation>()
-        val account = mock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(constellation)
+    fun `GIVEN account observer WHEN onAuthenticated observed THEN device observer registered`() =
+        runTest(testDispatcher) {
+            val constellation = mock<DeviceConstellation>()
+            val account =
+                mock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(constellation)
+                }
+
+            accountObserver.onAuthenticated(account, mock<AuthType.Existing>())
+
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            verify(constellation).registerDeviceObserver(constellationObserver, lifecycleOwner, autoPause)
         }
 
-        accountObserver.onAuthenticated(account, mock<AuthType.Existing>())
-
-        verify(constellation).registerDeviceObserver(constellationObserver, lifecycleOwner, autoPause)
-    }
-
     @Test
-    fun `GIVEN account observer WHEN onAuthenticated observed with profile THEN account and account state are updated`() = runTest {
-        val profile = generateProfile()
-        val constellation = mock<DeviceConstellation>()
-        val account = coMock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(constellation)
-            whenever(getCurrentDeviceId()).thenReturn("id")
-            whenever(getSessionToken()).thenReturn("token")
-            whenever(getProfile(eq(false))).thenReturn(profile)
+    fun `GIVEN account observer WHEN onAuthenticated observed with profile THEN account and account state are updated`() =
+        runTest(testDispatcher) {
+            val profile = generateProfile()
+            val constellation = mock<DeviceConstellation>()
+            val account =
+                coMock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(constellation)
+                    whenever(getProfile(eq(false))).thenReturn(profile)
+                }
+
+            assertEquals(AccountState.Unknown, store.state.accountState)
+
+            accountObserver.onAuthenticated(account, AuthType.Existing)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val expected =
+                Account(
+                    profile.uid,
+                    profile.email,
+                    profile.avatar,
+                    profile.displayName,
+                )
+            assertEquals(expected, store.state.account)
+            assertEquals(AccountState.Authenticated, store.state.accountState)
         }
 
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-
-        accountObserver.onAuthenticated(account, AuthType.Existing)
-
-        val expected = Account(
-            profile.uid,
-            profile.email,
-            profile.avatar,
-            profile.displayName,
-            "id",
-            "token",
-        )
-        assertEquals(expected, store.state.account)
-        assertEquals(AccountState.Authenticated, store.state.accountState)
-    }
-
     @Test
-    fun `GIVEN account observer WHEN onAuthenticated observed without profile THEN account and account state are not updated`() = runTest {
-        val constellation = mock<DeviceConstellation>()
-        val account = coMock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(constellation)
-            whenever(getProfile(eq(false))).thenReturn(null)
+    fun `GIVEN account observer WHEN onAuthenticated observed without profile THEN account and account state are not updated`() =
+        runTest(testDispatcher) {
+            val constellation = mock<DeviceConstellation>()
+            val account =
+                coMock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(constellation)
+                    whenever(getProfile(eq(false))).thenReturn(null)
+                }
+
+            accountObserver.onAuthenticated(account, AuthType.Existing)
+
+            assertNull(store.state.account)
+            assertEquals(AccountState.Unknown, store.state.accountState)
         }
 
-        accountObserver.onAuthenticated(account, AuthType.Existing)
-
-        assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-    }
-
     @Test
-    fun `GIVEN user is logged in WHEN onLoggedOut observed THEN sync status and account states are updated`() = runTest {
-        val account = coMock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(mock())
-            whenever(getProfile()).thenReturn(null)
+    fun `GIVEN user is logged in WHEN onLoggedOut observed THEN sync status and account states are updated`() =
+        runTest(testDispatcher) {
+            val account =
+                coMock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(mock())
+                    whenever(getProfile()).thenReturn(null)
+                }
+            accountObserver.onAuthenticated(account, AuthType.Existing)
+
+            accountObserver.onLoggedOut()
+
+            assertEquals(SyncStatus.LoggedOut, store.state.status)
+            assertNull(store.state.account)
+            assertEquals(AccountState.NotAuthenticated, store.state.accountState)
         }
-        accountObserver.onAuthenticated(account, AuthType.Existing)
-
-        accountObserver.onLoggedOut()
-
-        assertEquals(SyncStatus.LoggedOut, store.state.status)
-        assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-    }
 
     @Test
-    fun `GIVEN account observer WHEN onAuthenticationProblems observed THEN account state is updated`() = runTest {
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
+    fun `GIVEN account observer WHEN onAuthenticationProblems observed THEN account state is updated`() {
+        assertEquals(AccountState.Unknown, store.state.accountState)
 
         accountObserver.onAuthenticationProblems()
 
@@ -174,9 +182,9 @@ class SyncStoreSupportTest {
     }
 
     @Test
-    fun `GIVEN account observer WHEN onFlowError observed THEN account state is updated`() = runTest {
+    fun `GIVEN account observer WHEN onFlowError observed THEN account state is updated`() {
         assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
+        assertEquals(AccountState.Unknown, store.state.accountState)
 
         accountObserver.onFlowError(AuthFlowError.FailedToBeginAuth)
 
@@ -185,9 +193,9 @@ class SyncStoreSupportTest {
     }
 
     @Test
-    fun `GIVEN account observer WHEN onProfileUpdated then update the account state`() = runTest {
+    fun `GIVEN account observer WHEN onProfileUpdated then update the account state`() {
         // Prerequisite is having a non-null account already.
-        store.dispatch(SyncAction.UpdateAccount(Account(null, null, null, null, null, null)))
+        store.dispatch(SyncAction.UpdateAccount(Account(null, null, null, null)))
 
         val profile = generateProfile()
         accountObserver.onProfileUpdated(profile)
@@ -199,51 +207,51 @@ class SyncStoreSupportTest {
     }
 
     @Test
-    fun `GIVEN account observer WHEN onReady is triggered THEN do nothing`() = runTest {
-        // `onReady` is too early for us (today) to try and get the auth status from the cached value.
-        // See: https://bugzilla.mozilla.org/show_bug.cgi?id=1909779
-        val currentDeviceId = "id"
-        val sessionToken = "token"
-        val constellation = mock<DeviceConstellation>()
-        val authenticatedAccount = coMock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(constellation)
-            whenever(getCurrentDeviceId()).thenReturn(currentDeviceId)
-            whenever(getSessionToken()).thenReturn(sessionToken)
+    fun `GIVEN account observer WHEN onReady is triggered THEN do nothing`() =
+        runTest(testDispatcher) {
+            // `onReady` is too early for us (today) to try and get the auth status from the cached value.
+            // See: https://bugzilla.mozilla.org/show_bug.cgi?id=1909779
+            val constellation = mock<DeviceConstellation>()
+            val authenticatedAccount =
+                coMock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(constellation)
+                }
+            val initialState = store.state.copy()
+
+            assertNull(store.state.account)
+            assertEquals(AccountState.Unknown, store.state.accountState)
+
+            `when`(authenticatedAccount.checkAuthorizationStatus(eq(SCOPE_PROFILE))).thenReturn(false)
+
+            accountObserver.onReady(authenticatedAccount = authenticatedAccount)
+
+            assertEquals(initialState, store.state)
+
+            `when`(authenticatedAccount.checkAuthorizationStatus(eq(SCOPE_PROFILE))).thenReturn(true)
+
+            accountObserver.onReady(authenticatedAccount = authenticatedAccount)
+
+            assertEquals(initialState, store.state)
         }
-        val initialState = store.state.copy()
-
-        assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-
-        `when`(authenticatedAccount.checkAuthorizationStatus(eq(SCOPE_PROFILE))).thenReturn(false)
-
-        accountObserver.onReady(authenticatedAccount = authenticatedAccount)
-
-        assertEquals(initialState, store.state)
-
-        `when`(authenticatedAccount.checkAuthorizationStatus(eq(SCOPE_PROFILE))).thenReturn(true)
-
-        accountObserver.onReady(authenticatedAccount = authenticatedAccount)
-
-        assertEquals(initialState, store.state)
-    }
 
     @Test
-    fun `GIVEN account observer WHEN onReady observed without profile THEN account states are not updated`() = runTest {
-        val constellation = mock<DeviceConstellation>()
-        val account = coMock<OAuthAccount> {
-            whenever(deviceConstellation()).thenReturn(constellation)
-            whenever(getProfile()).thenReturn(null)
+    fun `GIVEN account observer WHEN onReady observed without profile THEN account states are not updated`() =
+        runTest(testDispatcher) {
+            val constellation = mock<DeviceConstellation>()
+            val account =
+                coMock<OAuthAccount> {
+                    whenever(deviceConstellation()).thenReturn(constellation)
+                    whenever(getProfile()).thenReturn(null)
+                }
+
+            assertNull(store.state.account)
+            assertEquals(AccountState.Unknown, store.state.accountState)
+
+            accountObserver.onReady(account)
+
+            assertNull(store.state.account)
+            assertEquals(AccountState.Unknown, store.state.accountState)
         }
-
-        assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-
-        accountObserver.onReady(account)
-
-        assertNull(store.state.account)
-        assertEquals(AccountState.NotAuthenticated, store.state.accountState)
-    }
 
     @Test
     fun `GIVEN device observer WHEN onDevicesUpdate observed THEN constellation state updated`() {

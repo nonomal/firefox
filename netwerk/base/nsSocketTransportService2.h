@@ -1,10 +1,9 @@
-/* vim:set ts=4 sw=2 sts=2 ci et: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsSocketTransportService2_h__
-#define nsSocketTransportService2_h__
+#ifndef nsSocketTransportService2_h_
+#define nsSocketTransportService2_h_
 
 #include "PollableEvent.h"
 #include "mozilla/Atomics.h"
@@ -12,12 +11,13 @@
 #include "mozilla/Logging.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Mutex.h"
+#include "mozilla/Queue.h"
+#include "mozilla/RWLock.h"
 #include "mozilla/TimeStamp.h"
-
 #include "mozilla/UniquePtr.h"
 #include "mozilla/net/DashboardTypes.h"
-#include "nsCOMPtr.h"
 #include "nsASocketHandler.h"
+#include "nsCOMPtr.h"
 #include "nsIDirectTaskDispatcher.h"
 #include "nsIObserver.h"
 #include "nsIRunnable.h"
@@ -153,6 +153,12 @@ class nsSocketTransportService final : public nsPISocketTransportService,
   // Same as above, but return mThread as a nsIDirectTaskDispatcher
   already_AddRefed<nsIDirectTaskDispatcher> GetDirectTaskDispatcherSafely();
 
+ public:
+  // Public accessor for the socket thread. Returns the socket thread in a
+  // thread-safe manner.
+  already_AddRefed<nsIThread> GetSocketThread() { return GetThreadSafely(); }
+
+ private:
   //-------------------------------------------------------------------------
   // initialization and shutdown (any thread)
   //-------------------------------------------------------------------------
@@ -194,8 +200,7 @@ class nsSocketTransportService final : public nsPISocketTransportService,
 
   class SocketContext {
    public:
-    SocketContext(PRFileDesc* aFD,
-                  already_AddRefed<nsASocketHandler>&& aHandler,
+    SocketContext(PRFileDesc* aFD, already_AddRefed<nsASocketHandler> aHandler,
                   PRIntervalTime aPollStartEpoch)
         : mFD(aFD), mHandler(aHandler), mPollStartEpoch(aPollStartEpoch) {}
     SocketContext(PRFileDesc* aFD, nsASocketHandler* aHandler,
@@ -267,6 +272,12 @@ class nsSocketTransportService final : public nsPISocketTransportService,
   //-------------------------------------------------------------------------
   AutoCleanLinkedList<LinkedRunnableEvent> mPendingSocketQueue;
 
+  //-------------------------------------------------------------------------
+  // priority event queue - processed before normal event queue
+  //-------------------------------------------------------------------------
+  Queue<RefPtr<nsIRunnable>> mPriorityEventQueue MOZ_GUARDED_BY(mQueueLock);
+  RWLock mQueueLock{"nsSocketTransportService::mQueueLock"};
+
   // Preference Monitor for SendBufferSize and Keepalive prefs.
   nsresult UpdatePrefs();
   static void UpdatePrefs(const char* aPref, void* aSelf);
@@ -279,7 +290,7 @@ class nsSocketTransportService final : public nsPISocketTransportService,
   // Number of keepalive probes to send.
   int32_t mKeepaliveProbeCount{kDefaultTCPKeepCount};
   // True if TCP keepalive is enabled globally.
-  bool mKeepaliveEnabledPref{false};
+  Atomic<bool, Relaxed> mKeepaliveEnabledPref{false};
   // Timeout of pollable event signalling.
   TimeDuration mPollableEventTimeout MOZ_GUARDED_BY(mLock);
 
@@ -344,6 +355,12 @@ class nsSocketTransportService final : public nsPISocketTransportService,
 
 extern nsSocketTransportService* gSocketTransportService;
 bool OnSocketThread();
+
+// Unlike NS_DispatchToCurrentThread, this function tries to dispatch
+// to the currentSerialEventTarget, so the prioritization logic in
+// nsSocketTransportService::Dispatch gets to run.
+nsresult DispatchToCurrent(already_AddRefed<nsIRunnable> aEvent);
+nsresult DispatchToCurrent(nsIRunnable* aEvent);
 
 }  // namespace net
 }  // namespace mozilla

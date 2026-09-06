@@ -6,9 +6,7 @@
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   _ExperimentFeature: "resource://nimbus/ExperimentAPI.sys.mjs",
   ASRouterTargeting:
     // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
@@ -25,26 +23,38 @@ ChromeUtils.defineESModuleGetters(lazy, {
   TargetingContext: "resource://messaging-system/targeting/Targeting.sys.mjs",
   recordTargetingContext:
     "resource://nimbus/lib/TargetingContextRecorder.sys.mjs",
+
+  log: () => {
+    const { Logger } = ChromeUtils.importESModule(
+      "resource://messaging-system/lib/Logger.sys.mjs"
+    );
+    return new Logger("RSLoader");
+  },
+
+  timerManager: {
+    service: "@mozilla.org/updates/timer-manager;1",
+    iid: Ci.nsIUpdateTimerManager,
+  },
+
+  COLLECTION_ID: {
+    pref: "messaging-system.rsexperimentloader.collection_id",
+    default: "nimbus-desktop-experiments",
+  },
+
+  NIMBUS_DEBUG: {
+    pref: "nimbus.debug",
+    default: false,
+  },
+
+  APP_ID: {
+    pref: "nimbus.appId",
+    default: "firefox-desktop",
+  },
+
+  TARGETING_CONTEXT_TELEMETRY_ENABLED: {
+    pref: "nimbus.telemetry.targetingContextEnabled",
+  },
 });
-
-ChromeUtils.defineLazyGetter(lazy, "log", () => {
-  const { Logger } = ChromeUtils.importESModule(
-    "resource://messaging-system/lib/Logger.sys.mjs"
-  );
-  return new Logger("RSLoader");
-});
-
-XPCOMUtils.defineLazyServiceGetter(
-  lazy,
-  "timerManager",
-  "@mozilla.org/updates/timer-manager;1",
-  Ci.nsIUpdateTimerManager
-);
-
-const COLLECTION_ID_PREF = "messaging-system.rsexperimentloader.collection_id";
-const COLLECTION_ID_FALLBACK = "nimbus-desktop-experiments";
-const TARGETING_CONTEXT_TELEMETRY_ENABLED_PREF =
-  "nimbus.telemetry.targetingContextEnabled";
 
 const TIMER_NAME = "rs-experiment-loader-timer";
 const TIMER_LAST_UPDATE_PREF = `app.update.lastUpdateTime.${TIMER_NAME}`;
@@ -52,7 +62,6 @@ const TIMER_LAST_UPDATE_PREF = `app.update.lastUpdateTime.${TIMER_NAME}`;
 const RUN_INTERVAL_PREF = "app.normandy.run_interval_seconds";
 const NIMBUS_DEBUG_PREF = "nimbus.debug";
 const NIMBUS_VALIDATION_PREF = "nimbus.validation.enabled";
-const NIMBUS_APPID_PREF = "nimbus.appId";
 
 const SECURE_EXPERIMENTS_COLLECTION_ID = "nimbus-secure-experiments";
 
@@ -62,7 +71,18 @@ const SECURE_EXPERIMENTS_COLLECTION = "secureExperiments";
 const IS_MAIN_PROCESS =
   Services.appinfo.processType === Services.appinfo.PROCESS_TYPE_DEFAULT;
 
-const SECURE_FEATURE_IDS = new Set(["prefFlips", "newtabTrainhopAddon"]);
+// IMPORTANT: This list of feature IDs will *only* be accepted if they come from
+// the secure collection (nimbus-secure-experiments).
+//
+// All new features to this list *must* be added to the corresponding list in
+// Experimenter:
+// https://github.com/mozilla/experimenter/blob/cca860ba06f07874800423bed616b9f51166d9e0/experimenter/experimenter/experiments/constants.py#L280-L283
+const SECURE_FEATURE_IDS = new Set([
+  "prefFlips",
+  "newtabTrainhopAddon",
+  "newtabTrainhopAddonDeployment",
+]);
+
 const RS_COLLECTION_OPTIONS = {
   [EXPERIMENTS_COLLECTION]: {
     // None of these features can be present to accept an experiment from the
@@ -76,30 +96,6 @@ const RS_COLLECTION_OPTIONS = {
     requiredFeatureIds: SECURE_FEATURE_IDS,
   },
 };
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "COLLECTION_ID",
-  COLLECTION_ID_PREF,
-  COLLECTION_ID_FALLBACK
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "NIMBUS_DEBUG",
-  NIMBUS_DEBUG_PREF,
-  false
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "APP_ID",
-  NIMBUS_APPID_PREF,
-  "firefox-desktop"
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "TARGETING_CONTEXT_TELEMETRY_ENABLED",
-  TARGETING_CONTEXT_TELEMETRY_ENABLED_PREF
-);
 
 const SCHEMAS = {
   get NimbusExperiment() {
@@ -118,6 +114,27 @@ export const MatchStatus = Object.freeze({
   UNENROLLED_IN_ANOTHER_PROFILE: "UNENROLLED_IN_ANOTHER_PROFILE",
   DISABLED: "DISABLED",
 });
+
+const DeliveryKind = Object.freeze({
+  FIREFOX_LABS_OPT_IN: "firefox-labs-opt-in",
+  ROLLOUT: "rollout",
+  STUDY: "study",
+});
+
+/**
+ * @returns {DeliveryKind}
+ */
+function getDeliveryKind(recipe) {
+  if (recipe.isFirefoxLabsOptIn) {
+    return DeliveryKind.FIREFOX_LABS_OPT_IN;
+  }
+
+  if (recipe.isRollout) {
+    return DeliveryKind.ROLLOUT;
+  }
+
+  return DeliveryKind.STUDY;
+}
 
 export const CheckRecipeResult = {
   Ok(status) {
@@ -192,6 +209,11 @@ export class RemoteSettingsExperimentLoader {
    */
   #shutdownBlocker;
 
+  /**
+   * An AbortController that will be signalled when shutdown is confirmed.
+   */
+  #abortController;
+
   get LOCK_ID() {
     return "remote-settings-experiment-loader:update";
   }
@@ -211,6 +233,8 @@ export class RemoteSettingsExperimentLoader {
     this._hasUpdatedOnce = false;
     // deferred promise object that resolves after recipes are updated
     this._updatingDeferred = Promise.withResolvers();
+
+    this.#abortController = new AbortController();
 
     this.remoteSettingsClients = {};
     ChromeUtils.defineLazyGetter(
@@ -280,6 +304,7 @@ export class RemoteSettingsExperimentLoader {
       }
 
       this.#shutdownBlocker = async () => {
+        this.#abortController.abort();
         await this.finishedUpdating();
         this.disable();
       };
@@ -289,9 +314,10 @@ export class RemoteSettingsExperimentLoader {
         this.#shutdownBlocker
       );
 
-      this.setTimer();
-
       this._enabled = true;
+
+      // The timer must be set *after* we are enabled, otherwise it is a no-op.
+      this.setTimer();
     }
 
     await this.updateRecipes("enabled", { forceSync });
@@ -319,13 +345,52 @@ export class RemoteSettingsExperimentLoader {
    *
    * This will prevent recipe updates from starting until after the callback finishes.
    *
-   * @param {Function} fn The callback to call
-   * @param {object} options Options to pass to the WebLocks request API.
+   * @template T
+   * @template {() => T} F
    *
-   * @returns {any} The return value of fn.
+   * @param {F} fn
+   * The callback to call
+   *
+   * @param {LockOptions} options
+   * Options to pass to the WebLocks request API.
+   *
+   * @returns {Promise<T>}
+   * The return value of `fn`.
+   *
+   * @throws {AbortError}
+   * If the provided signal exists and was aborted.
+   *
+   * @throws {ShutdownStartedError}
+   * If shutdown begins before the lock is acquired.
+   *
+   * @throws
+   * Any exception thrown by `fn`.
    */
-  async withUpdateLock(fn, options) {
-    return await locks.request(this.LOCK_ID, options, fn);
+  async withUpdateLock(fn, options = {}) {
+    try {
+      return await locks.request(
+        this.LOCK_ID,
+        {
+          ...options,
+          signal: options.signal
+            ? AbortSignal.any([options.signal, this.#abortController.signal])
+            : this.#abortController.signal,
+        },
+        fn
+      );
+    } catch (e) {
+      if (
+        DOMException.isInstance(e) &&
+        e.name === "AbortError" &&
+        Services.startup.isInOrBeyondShutdownPhase(
+          Ci.nsIAppStartup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
+        )
+      ) {
+        throw new ShutdownStartedError();
+      }
+
+      throw e;
+    }
   }
 
   /**
@@ -344,14 +409,12 @@ export class RemoteSettingsExperimentLoader {
    *                 options.
    */
   async updateRecipes(trigger, options) {
-    if (this._updating || !this._enabled) {
-      return;
-    }
-
-    // If we've started shutting down, prevent an update from being triggered,
-    // which we might not complete in time and could result in partial state
-    // written to the database.
+    // Prevent an update from starting if we're shutting down as it might not
+    // complete in time and could result in partial state written to the
+    // database or inconsistency between pref state and database state.
     if (
+      this._updating ||
+      !this._enabled ||
       Services.startup.isInOrBeyondShutdownPhase(
         Ci.nsIAppStartup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
       )
@@ -368,12 +431,40 @@ export class RemoteSettingsExperimentLoader {
       this._updatingDeferred = Promise.withResolvers();
     }
 
-    await this.withUpdateLock(() => this.#updateImpl(trigger, options));
+    try {
+      await this.withUpdateLock(() => this.#updateImpl(trigger, options));
+    } catch (e) {
+      let error;
+      if (DOMException.isInstance(e)) {
+        error = `DOMException:${e.name}`;
+      } else if (e instanceof Ci.nsIException) {
+        error = ChromeUtils.getXPCOMErrorName(e.result);
+      } else if (Error.isError(e)) {
+        try {
+          error = e.constructor.name;
+        } catch {}
+      }
 
-    this._hasUpdatedOnce = true;
-    this._updating = false;
-    this._updatingDeferred.resolve();
+      if (!error) {
+        error = "(unknown)";
+      }
 
+      Glean.nimbusEvents.updateError.record({
+        error,
+        trigger,
+        during_shutdown: Services.startup.isInOrBeyondShutdownPhase(
+          Ci.nsIAppStartup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
+        ),
+      });
+
+      throw e;
+    } finally {
+      this._hasUpdatedOnce = true;
+      this._updating = false;
+      this._updatingDeferred.resolve();
+    }
+
+    Services.prefs.setBoolPref("nimbus.firstUpdateComplete", true);
     this.recordIsReady();
   }
 
@@ -386,92 +477,127 @@ export class RemoteSettingsExperimentLoader {
    * @param {boolean} options.forceSync
    *                  Force a Remote Settings client to sync records before
    *                  updating. Otherwise locally cached records will be used.
+   * @param {Set<string> | undefined} options.onlyFeatureIds
+   * Only consider experiments that contain one of the given feature IDs when
+   * updating.
+   *
+   * Existing enrollments will only be affected if their feature IDs
+   * are in this set.
    */
-  async #updateImpl(trigger, { forceSync = false } = {}) {
+  async #updateImpl(
+    trigger,
+    { forceSync = false, onlyFeatureIds = undefined } = {}
+  ) {
     lazy.log.debug(`Updating recipes with trigger "${trigger ?? ""}"`);
 
-    this.manager.optInRecipes = [];
+    this.manager._clearOptIns(this.SOURCE, { onlyFeatureIds });
 
     // The targeting context metrics do not work in artifact builds.
     // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936317
     // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936319
     if (lazy.TARGETING_CONTEXT_TELEMETRY_ENABLED) {
-      lazy.recordTargetingContext();
+      await lazy.recordTargetingContext();
     }
 
-    // Since this method is async, the enabled pref could change between await
-    // points. We don't want to half validate experiments, so we cache this to
-    // keep it consistent throughout updating.
-    const validationEnabled = this.validationEnabled;
-
-    let recipeValidator;
-
-    if (validationEnabled) {
-      recipeValidator = new lazy.JsonSchema.Validator(
-        await SCHEMAS.NimbusExperiment
-      );
-    }
-
-    let allRecipes = null;
     try {
-      allRecipes = await this.getRecipesFromAllCollections({
-        forceSync,
-        trigger,
-      });
-    } catch (e) {
-      lazy.log.debug("Failed to update", e);
-    }
+      // Since this method is async, the enabled pref could change between await
+      // points. We don't want to half validate experiments, so we cache this to
+      // keep it consistent throughout updating.
+      const validationEnabled = this.validationEnabled;
 
-    if (allRecipes !== null) {
-      const unenrolledExperimentSlugs = lazy.NimbusEnrollments
-        .syncEnrollmentsEnabled
-        ? await lazy.NimbusEnrollments.loadUnenrolledExperimentSlugsFromOtherProfiles()
-        : undefined;
+      let recipeValidator;
 
-      const enrollmentsCtx = new EnrollmentsContext(
-        this.manager,
-        recipeValidator,
-        {
-          validationEnabled,
-          labsEnabled: lazy.ExperimentAPI.labsEnabled,
-          studiesEnabled: lazy.ExperimentAPI.studiesEnabled,
-          shouldCheckTargeting: true,
-          unenrolledExperimentSlugs,
-        }
-      );
-
-      const { existingEnrollments, recipes } =
-        this._partitionRecipes(allRecipes);
-
-      for (const { enrollment, recipe } of existingEnrollments) {
-        const result = recipe
-          ? await enrollmentsCtx.checkRecipe(recipe)
-          : CheckRecipeResult.Ok(MatchStatus.NOT_SEEN);
-
-        await this.manager.updateEnrollment(
-          enrollment,
-          recipe,
-          this.SOURCE,
-          result
+      if (validationEnabled) {
+        recipeValidator = new lazy.JsonSchema.Validator(
+          await SCHEMAS.NimbusExperiment
         );
       }
 
-      for (const recipe of recipes) {
-        const result = await enrollmentsCtx.checkRecipe(recipe);
-        await this.manager.onRecipe(recipe, this.SOURCE, result);
+      let allRecipes = null;
+      try {
+        allRecipes = await this.getRecipesFromAllCollections({
+          forceSync,
+          trigger,
+          onlyFeatureIds,
+        });
+      } catch (e) {
+        if (e instanceof ShutdownStartedError) {
+          // Re-throw this error so that we correctly abort the update.
+          throw e;
+        }
+
+        lazy.log.debug("Failed to update", e);
       }
 
-      lazy.log.debug(`${enrollmentsCtx.matches} recipes matched.`);
-    }
+      if (allRecipes !== null) {
+        let unenrolledExperimentSlugs = undefined;
 
-    if (trigger !== "timer") {
-      const lastUpdateTime = Math.round(Date.now() / 1000);
-      Services.prefs.setIntPref(TIMER_LAST_UPDATE_PREF, lastUpdateTime);
-    }
+        // We are about to attempt to do disk IO. We have not yet made any
+        // irreversible changes, so we can attempt to abort the update if shutdown
+        // has begun.
+        if (lazy.NimbusEnrollments.syncEnrollmentsEnabled) {
+          unenrolledExperimentSlugs = await this.#raceShutdown(() =>
+            lazy.NimbusEnrollments.loadUnenrolledExperimentSlugsFromOtherProfiles()
+          );
+        } else {
+          this.#throwDuringShutdown();
+        }
 
-    if (allRecipes !== null) {
-      // Enrollments have not changed, so we don't need to notify.
-      Services.obs.notifyObservers(null, "nimbus:enrollments-updated");
+        const enrollmentsCtx = new EnrollmentsContext(
+          this.manager,
+          recipeValidator,
+          {
+            validationEnabled,
+            labsEnabled: lazy.ExperimentAPI.labsEnabled,
+            rolloutsEnabled: lazy.ExperimentAPI.rolloutsEnabled,
+            studiesEnabled: lazy.ExperimentAPI.studiesEnabled,
+            shouldCheckTargeting: true,
+            unenrolledExperimentSlugs,
+          }
+        );
+
+        const { existingEnrollments, recipes } = this._partitionRecipes(
+          allRecipes,
+          { onlyFeatureIds }
+        );
+
+        // This is the last possible moment we can abort without making any
+        // irreversible state changes that require disk IO to persist.
+        this.#throwDuringShutdown("before-process-enrollments");
+
+        for (const { enrollment, recipe } of existingEnrollments) {
+          const result = recipe
+            ? await enrollmentsCtx.checkRecipe(recipe)
+            : CheckRecipeResult.Ok(MatchStatus.NOT_SEEN);
+
+          await this.manager.updateEnrollment(
+            enrollment,
+            recipe,
+            this.SOURCE,
+            result
+          );
+        }
+
+        for (const recipe of recipes) {
+          const result = await enrollmentsCtx.checkRecipe(recipe);
+          await this.manager.onRecipe(recipe, this.SOURCE, result);
+        }
+
+        lazy.log.debug(`${enrollmentsCtx.matches} recipes matched.`);
+      }
+
+      if (trigger !== "timer") {
+        const lastUpdateTime = Math.round(Date.now() / 1000);
+        Services.prefs.setIntPref(TIMER_LAST_UPDATE_PREF, lastUpdateTime);
+      }
+
+      if (allRecipes !== null) {
+        // Enrollments have not changed, so we don't need to notify.
+        Services.obs.notifyObservers(null, "nimbus:enrollments-updated");
+      }
+    } finally {
+      // Submit targeting context ping after all enrollment status events should be generated
+      GleanPings.nimbusTargetingContext.submit();
     }
   }
 
@@ -488,12 +614,18 @@ export class RemoteSettingsExperimentLoader {
    * fetching recipes.
    * @param {string} options.trigger The name of the event that triggered the
    * update.
+   * @param {string[] | undefined } options.onlyFeatureIds Only include recipes
+   * that have at least one of the listed feature IDs.
    *
    * @returns {Promise<object[]>} The recipes from Remote Settings.
    *
    * @throws {RemoteSettingsSyncError}
    */
-  async getRecipesFromAllCollections({ forceSync = false, trigger } = {}) {
+  async getRecipesFromAllCollections({
+    forceSync = false,
+    trigger,
+    onlyFeatureIds,
+  } = {}) {
     try {
       const recipes = [];
 
@@ -516,6 +648,7 @@ export class RemoteSettingsExperimentLoader {
         const collection = await this.getRecipesFromCollection({
           forceSync,
           client,
+          onlyFeatureIds,
           ...collectionOptions,
         });
 
@@ -534,7 +667,15 @@ export class RemoteSettingsExperimentLoader {
 
         timestamps?.set(client.collectionName, collection.lastModified);
 
-        recipes.push(...collection.recipes);
+        if (Array.isArray(onlyFeatureIds)) {
+          recipes.push(
+            ...collection.recipes.filter(({ featureIds }) =>
+              featureIds.some(featureId => onlyFeatureIds.includes(featureId))
+            )
+          );
+        } else {
+          recipes.push(...collection.recipes);
+        }
       }
 
       if (timestamps) {
@@ -543,7 +684,7 @@ export class RemoteSettingsExperimentLoader {
         //
         // TODO(bug 1967779): require the ProfilesDatastoreService to be initialized
         // and remove this check.
-        await this.manager.store._db.updateSyncTimestamps(timestamps);
+        this.manager.store._db.updateSyncTimestamps(timestamps);
       }
 
       return recipes;
@@ -577,6 +718,41 @@ export class RemoteSettingsExperimentLoader {
   }
 
   /**
+   * Race the promise returned by `f` with shutdown.
+   *
+   * If shutdown has begun, `f` will not be invoked and this function will throw
+   * immediately.
+   *
+   * @template T
+   * @template {() => Promise<T>} F
+   *
+   * @param {F} f The function to call.
+   *
+   * @returns {Promise<T>}
+   * A promise that will either resolve/reject to the same value as the promise
+   * returned by `f()`, or a rejection containing a {@link ShutdownStartedError}
+   * if shutdown occurs before `f()` completes.
+   *
+   * @throws {ShutdownStartedError}
+   * Thrown when shutdown has started.
+   */
+  async #raceShutdown(f) {
+    this.#throwDuringShutdown();
+
+    const signal = this.#abortController.signal;
+    const { promise, reject } = Promise.withResolvers();
+    const listener = () => reject(new ShutdownStartedError());
+
+    signal.addEventListener("abort", listener, { once: true });
+
+    try {
+      return await Promise.race([f(), promise]);
+    } finally {
+      signal.removeEventListener("abort", listener);
+    }
+  }
+
+  /**
    * Return the recipes from a given collection.
    *
    * @param {object} options
@@ -589,6 +765,10 @@ export class RemoteSettingsExperimentLoader {
    *        or it will be rejected.
    * @param {Set<string> | undefined} options.disallowedFeatureIds
    *        If a recipe uses any features in this list, it will be rejected.
+   * @param {Set<string> | undefined} options.onlyFeatureIds Limit the recipes
+   * returned to only those that contain at least one of these featureIds.
+   * Unlike `options.requiredFeatureIds`, it is not an error for a recipe to be
+   * present in the collection without one of these feature IDs.
    *
    * @returns {Promise<RecipeCollection>} The recipes and last modified
    * timestamp from the collection, filtered based on `requiredFeatureIds` and
@@ -602,18 +782,36 @@ export class RemoteSettingsExperimentLoader {
     forceSync = false,
     requiredFeatureIds = undefined,
     disallowedFeatureIds = undefined,
+    onlyFeatureIds = undefined,
   } = {}) {
     let recipes;
+
     try {
-      recipes = await client.get({
-        forceSync,
-        emptyListFallback: false, // Throw instead of returning an empty list.
-      });
+      // We are about to potentially do disk IO or even network IO. If the browser
+      // has started to shutdown, we should abort the current update.
+      recipes = await this.#raceShutdown(() =>
+        client.get({
+          forceSync,
+          emptyListFallback: false, // Throw instead of returning an empty list.
+          verifySignature: true,
+        })
+      );
     } catch (e) {
-      const reason =
-        e instanceof lazy.RemoteSettingsClient.EmptyDatabaseError
-          ? lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason.NOT_YET_SYNCED
-          : lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason.GET_EXCEPTION;
+      if (e instanceof ShutdownStartedError) {
+        // Re-throw this error so that we correctly abort the update.
+        throw e;
+      }
+
+      const { RemoteSettingsSyncErrorReason } = lazy.NimbusTelemetry;
+      let reason;
+
+      if (e instanceof lazy.RemoteSettingsClient.EmptyDatabaseError) {
+        reason = RemoteSettingsSyncErrorReason.NOT_YET_SYNCED;
+      } else if (e instanceof lazy.RemoteSettingsClient.MissingSignatureError) {
+        reason = RemoteSettingsSyncErrorReason.MISSING_SIGNATURE;
+      } else {
+        reason = RemoteSettingsSyncErrorReason.GET_EXCEPTION;
+      }
 
       throw new RemoteSettingsSyncError(client.collectionName, reason, {
         cause: e,
@@ -633,7 +831,8 @@ export class RemoteSettingsExperimentLoader {
     } catch (e) {
       throw new RemoteSettingsSyncError(
         client.collectionName,
-        lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason.LAST_MODIFIED_EXCEPTION,
+        lazy.NimbusTelemetry.RemoteSettingsSyncErrorReason
+          .LAST_MODIFIED_EXCEPTION,
         { cause: e }
       );
     }
@@ -657,6 +856,13 @@ export class RemoteSettingsExperimentLoader {
         lazy.log.warn(
           `Recipe ${recipe.slug} not returned from collection ${client.collectionName} because it does not contain at least one required feature ID.`
         );
+        return false;
+      }
+
+      if (
+        onlyFeatureIds &&
+        !recipe.featureIds.some(featureId => onlyFeatureIds.has(featureId))
+      ) {
         return false;
       }
 
@@ -778,12 +984,7 @@ export class RemoteSettingsExperimentLoader {
       throw new Error(`Recipe ${recipe.slug} did not match targeting`);
     }
 
-    const branch = recipe.branches.find(b => b.slug === branchSlug);
-    if (!branch) {
-      throw new Error(`Could not find branch slug ${branchSlug} in ${slug}`);
-    }
-
-    await this.manager.forceEnroll(recipe, branch);
+    this.manager.forceEnroll(recipe, branchSlug);
   }
 
   /**
@@ -791,9 +992,9 @@ export class RemoteSettingsExperimentLoader {
    * and vice versa.
    */
   async onEnabledPrefChange() {
-    if (lazy.ExperimentAPI.enabled) {
+    if (!this._enabled && lazy.ExperimentAPI.enabled) {
       await this.enable();
-    } else {
+    } else if (this._enabled && !lazy.ExperimentAPI.enabled) {
       this.disable();
     }
   }
@@ -814,7 +1015,12 @@ export class RemoteSettingsExperimentLoader {
     // The callbacks will be called soon after the timer is registered
     lazy.timerManager.registerTimer(
       TIMER_NAME,
-      () => this.updateRecipes("timer"),
+      () =>
+        this.updateRecipes("timer").catch(e => {
+          if (!(e instanceof ShutdownStartedError)) {
+            throw e;
+          }
+        }),
       this.intervalInSeconds
     );
     lazy.log.debug("Registered update timer");
@@ -851,6 +1057,9 @@ export class RemoteSettingsExperimentLoader {
    * @param {object[]} recipes
    *        The recipes returned from Remote Settings.
    *
+   * @param {object} options
+   * @param {Set<string> | undefined} options.onlyFeatureIds
+   *
    * @returns {object}
    *          An object containing:
    *
@@ -861,7 +1070,7 @@ export class RemoteSettingsExperimentLoader {
    *          - `recipes`, the remaining recipes which do not have currently
    *            active enrollments.
    */
-  _partitionRecipes(recipes) {
+  _partitionRecipes(recipes, { onlyFeatureIds }) {
     const rollouts = [];
     const experiments = [];
 
@@ -869,6 +1078,13 @@ export class RemoteSettingsExperimentLoader {
 
     for (const enrollment of this.manager.store.getAll()) {
       if (!enrollment.active || enrollment.source !== this.SOURCE) {
+        continue;
+      }
+
+      if (
+        onlyFeatureIds &&
+        enrollment.featureIds.some(featureId => !onlyFeatureIds.has(featureId))
+      ) {
         continue;
       }
 
@@ -916,6 +1132,19 @@ export class RemoteSettingsExperimentLoader {
       recipes: remaining,
     };
   }
+
+  /**
+   * Attempt to abort an in-process update during shutdown.
+   */
+  #throwDuringShutdown() {
+    if (
+      Services.startup.isInOrBeyondShutdownPhase(
+        Ci.nsIAppStartup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
+      )
+    ) {
+      throw new ShutdownStartedError();
+    }
+  }
 }
 
 export class EnrollmentsContext {
@@ -926,16 +1155,18 @@ export class EnrollmentsContext {
       validationEnabled = true,
       shouldCheckTargeting = true,
       unenrolledExperimentSlugs,
-      studiesEnabled = true,
       labsEnabled = true,
+      rolloutsEnabled = true,
+      studiesEnabled = true,
     } = {}
   ) {
     this.manager = manager;
     this.recipeValidator = recipeValidator;
 
     this.validationEnabled = validationEnabled;
-    this.studiesEnabled = studiesEnabled;
     this.labsEnabled = labsEnabled;
+    this.rolloutsEnabled = rolloutsEnabled;
+    this.studiesEnabled = studiesEnabled;
 
     this.validatorCache = {};
     this.shouldCheckTargeting = shouldCheckTargeting;
@@ -970,9 +1201,12 @@ export class EnrollmentsContext {
       }
     }
 
+    const deliveryKind = getDeliveryKind(recipe);
     if (
-      (recipe.isFirefoxLabsOptIn && !this.labsEnabled) ||
-      (!recipe.isFirefoxLabsOptIn && !this.studiesEnabled)
+      (deliveryKind === DeliveryKind.FIREFOX_LABS_OPT_IN &&
+        !this.labsEnabled) ||
+      (deliveryKind === DeliveryKind.ROLLOUT && !this.rolloutsEnabled) ||
+      (deliveryKind === DeliveryKind.STUDY && !this.studiesEnabled)
     ) {
       return CheckRecipeResult.Ok(MatchStatus.DISABLED);
     }
@@ -1329,5 +1563,14 @@ export class RemoteSettingsSyncError extends Error {
 
     this.collectionName = collectionName;
     this.reason = reason;
+  }
+}
+
+/**
+ * An error thrown when an operation is interrupted by shutdown.
+ */
+export class ShutdownStartedError extends Error {
+  constructor() {
+    super("Shutdown started");
   }
 }

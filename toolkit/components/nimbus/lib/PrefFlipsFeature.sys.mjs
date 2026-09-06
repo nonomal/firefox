@@ -4,9 +4,9 @@
 
 /** @import { ExperimentManager } from "./ExperimentManager.sys.mjs" */
 
-const lazy = {};
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   ExperimentManager: "resource://nimbus/lib/ExperimentManager.sys.mjs",
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   PrefUtils: "moz-src:///toolkit/modules/PrefUtils.sys.mjs",
@@ -165,11 +165,11 @@ export class PrefFlipsFeature {
    * Return the orginal value of the pref on the specific branch if it is set by
    * this feature.
    *
-   * @params {string} pref
-   *         The pref to get the original value of.
+   * @param {string} pref
+   *        The pref to get the original value of.
    *
-   * @params {PrefBranch} branch
-   *         The requested branch for the pref.
+   * @param {PrefBranch} branch
+   *        The requested branch for the pref.
    *
    * @returns {PrefValue | undefined}
    *          The original value of the pref on the specified branch. If the
@@ -279,7 +279,7 @@ export class PrefFlipsFeature {
     }
   }
 
-  async _annotateEnrollment(enrollment) {
+  _annotateEnrollment(enrollment) {
     const { featureIds } = enrollment;
     if (!featureIds.includes(FEATURE_ID)) {
       return;
@@ -302,7 +302,7 @@ export class PrefFlipsFeature {
       } else {
         originalValues[pref] = Object.hasOwn(originalValues, pref)
           ? originalValues[pref]
-          : lazy.PrefUtils.getPref(pref, { branch });
+          : lazy.PrefUtils.getPrefStrict(pref, branch);
       }
     }
 
@@ -671,7 +671,7 @@ export class PrefFlipsFeature {
       // branch.
       return "user";
     } else if (expectedBranch === "default") {
-      const value = lazy.PrefUtils.getPref(pref, { branch: "default" });
+      const value = lazy.PrefUtils.getPrefStrict(pref, "default");
       if (value === expectedValue) {
         // The pref we control was set on the default branch and still matches
         // the expected value. Therefore, the user branch must have been

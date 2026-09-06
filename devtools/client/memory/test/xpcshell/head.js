@@ -3,14 +3,16 @@
 
 "use strict";
 
-// via xpcshell.ini
+// via xpcshell.toml
 /* import-globals-from ../../../shared/test/shared-head.js */
 
 Services.prefs.setBoolPref("devtools.testing", true);
 Services.prefs.setBoolPref("devtools.debugger.log", true);
+Services.prefs.setIntPref("logging.devtools_rdp", 5);
 registerCleanupFunction(() => {
   Services.prefs.clearUserPref("devtools.testing");
   Services.prefs.clearUserPref("devtools.debugger.log");
+  Services.prefs.clearUserPref("logging.devtools_rdp");
 });
 
 var { FileUtils } = ChromeUtils.importESModule(

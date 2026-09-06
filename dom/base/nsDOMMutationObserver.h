@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,20 +8,18 @@
 #include <utility>
 
 #include "mozilla/Attributes.h"
-#include "mozilla/dom/Animation.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/MutationObserverBinding.h"
 #include "mozilla/dom/Nullable.h"
 #include "nsCOMArray.h"
 #include "nsClassHashtable.h"
-#include "nsContentList.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsGlobalWindowInner.h"
-#include "nsIAnimationObserver.h"
 #include "nsIMutationObserver.h"
 #include "nsPIDOMWindow.h"
 #include "nsStubAnimationObserver.h"
 #include "nsTArray.h"
+#include "nsTHashMap.h"
 #include "nsWrapperCache.h"
 
 class nsIPrincipal;
@@ -32,29 +28,29 @@ class nsDOMMutationObserver;
 using mozilla::dom::MutationObservingInfo;
 
 namespace mozilla::dom {
+class Animation;
 class Element;
-}
+class NodeList;
+class SimpleContentList;
+}  // namespace mozilla::dom
 
 class nsDOMMutationRecord final : public nsISupports, public nsWrapperCache {
-  virtual ~nsDOMMutationRecord() = default;
+  ~nsDOMMutationRecord();
 
  public:
   using AnimationArray = nsTArray<RefPtr<mozilla::dom::Animation>>;
+  using NodeList = mozilla::dom::NodeList;
 
-  nsDOMMutationRecord(nsAtom* aType, nsISupports* aOwner)
-      : mType(aType),
-        mAttrNamespace(VoidString()),
-        mPrevValue(VoidString()),
-        mOwner(aOwner) {}
+  nsDOMMutationRecord(nsAtom* aType, nsISupports* aOwner);
 
   nsISupports* GetParentObject() const { return mOwner; }
 
-  virtual JSObject* WrapObject(JSContext* aCx,
-                               JS::Handle<JSObject*> aGivenProto) override {
+  JSObject* WrapObject(JSContext* aCx,
+                       JS::Handle<JSObject*> aGivenProto) override {
     return mozilla::dom::MutationRecord_Binding::Wrap(aCx, this, aGivenProto);
   }
 
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(nsDOMMutationRecord)
 
   void GetType(mozilla::dom::DOMString& aRetVal) const {
@@ -63,9 +59,9 @@ class nsDOMMutationRecord final : public nsISupports, public nsWrapperCache {
 
   nsINode* GetTarget() const { return mTarget; }
 
-  nsINodeList* AddedNodes();
+  NodeList* AddedNodes();
 
-  nsINodeList* RemovedNodes();
+  NodeList* RemovedNodes();
 
   nsINode* GetPreviousSibling() const { return mPreviousSibling; }
 
@@ -84,25 +80,17 @@ class nsDOMMutationRecord final : public nsISupports, public nsWrapperCache {
     aRetVal.SetKnownLiveString(mPrevValue);
   }
 
-  void GetAddedAnimations(AnimationArray& aRetVal) const {
-    aRetVal = mAddedAnimations.Clone();
-  }
-
-  void GetRemovedAnimations(AnimationArray& aRetVal) const {
-    aRetVal = mRemovedAnimations.Clone();
-  }
-
-  void GetChangedAnimations(AnimationArray& aRetVal) const {
-    aRetVal = mChangedAnimations.Clone();
-  }
+  void GetAddedAnimations(AnimationArray&) const;
+  void GetRemovedAnimations(AnimationArray&) const;
+  void GetChangedAnimations(AnimationArray&) const;
 
   nsCOMPtr<nsINode> mTarget;
   RefPtr<nsAtom> mType;
   RefPtr<nsAtom> mAttrName;
   nsString mAttrNamespace;
   nsString mPrevValue;
-  RefPtr<nsSimpleContentList> mAddedNodes;
-  RefPtr<nsSimpleContentList> mRemovedNodes;
+  RefPtr<mozilla::dom::SimpleContentList> mAddedNodes;
+  RefPtr<mozilla::dom::SimpleContentList> mRemovedNodes;
   nsCOMPtr<nsINode> mPreviousSibling;
   nsCOMPtr<nsINode> mNextSibling;
   AnimationArray mAddedAnimations;
@@ -280,7 +268,7 @@ class nsMutationReceiverBase : public nsStubAnimationObserver {
 
 class nsMutationReceiver : public nsMutationReceiverBase {
  protected:
-  virtual ~nsMutationReceiver() { Disconnect(false); }
+  ~nsMutationReceiver() { Disconnect(false); }
 
  public:
   static nsMutationReceiver* Create(nsINode* aTarget,
@@ -416,7 +404,7 @@ class nsDOMMutationObserver final : public nsISupports, public nsWrapperCache {
         mWaitingForRun(false),
         mMergeAttributeRecords(false),
         mId(++sCount) {}
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(nsDOMMutationObserver)
   NS_INLINE_DECL_STATIC_IID(NS_DOM_MUTATION_OBSERVER_IID)
 
@@ -518,7 +506,7 @@ class nsDOMMutationObserver final : public nsISupports, public nsWrapperCache {
   friend class nsAutoAnimationMutationBatch;
   nsMutationReceiver* GetReceiverFor(nsINode* aNode, bool aMayCreate,
                                      bool aWantsAnimations);
-  void RemoveReceiver(nsMutationReceiver* aReceiver);
+  void RemoveReceiver(nsINode* aTarget, nsMutationReceiver* aReceiver);
 
   void GetAllSubtreeObserversFor(nsINode* aNode,
                                  nsTArray<nsMutationReceiver*>& aObservers);
@@ -541,6 +529,9 @@ class nsDOMMutationObserver final : public nsISupports, public nsWrapperCache {
   nsCOMPtr<nsPIDOMWindowInner> mOwner;
 
   nsCOMArray<nsMutationReceiver> mReceivers;
+  // Fast lookup index for mReceivers. Values are weak pointers; mReceivers
+  // retains ownership.
+  nsTHashMap<nsINode*, nsMutationReceiver*> mReceiverMap;
   nsClassHashtable<nsISupportsHashKey, nsCOMArray<nsMutationReceiver>>
       mTransientReceivers;
   // MutationRecords which are being constructed.
@@ -679,21 +670,11 @@ class nsAutoAnimationMutationBatch {
   struct Entry;
 
  public:
-  explicit nsAutoAnimationMutationBatch(mozilla::dom::Document* aDocument) {
-    Init(aDocument);
-  }
+  explicit nsAutoAnimationMutationBatch(mozilla::dom::Document* aDocument);
 
-  void Init(mozilla::dom::Document* aDocument) {
-    if (!aDocument || !aDocument->MayHaveDOMMutationObservers() ||
-        sCurrentBatch) {
-      return;
-    }
+  void Init(mozilla::dom::Document* aDocument);
 
-    sCurrentBatch = this;
-    nsDOMMutationObserver::EnterMutationHandling();
-  }
-
-  ~nsAutoAnimationMutationBatch() { Done(); }
+  ~nsAutoAnimationMutationBatch();
 
   void Done();
 
@@ -711,105 +692,15 @@ class nsAutoAnimationMutationBatch {
   }
 
   static void AnimationAdded(mozilla::dom::Animation* aAnimation,
-                             nsINode* aTarget) {
-    if (!IsBatching()) {
-      return;
-    }
-
-    Entry* entry = sCurrentBatch->FindEntry(aAnimation, aTarget);
-    if (entry) {
-      switch (entry->mState) {
-        case eState_RemainedAbsent:
-          entry->mState = eState_Added;
-          break;
-        case eState_Removed:
-          entry->mState = eState_RemainedPresent;
-          break;
-        case eState_Added:
-          // FIXME bug 1189015
-          NS_ERROR("shouldn't have observed an animation being added twice");
-          break;
-        case eState_RemainedPresent:
-          MOZ_ASSERT_UNREACHABLE(
-              "shouldn't have observed an animation "
-              "remaining present");
-          break;
-      }
-    } else {
-      entry = sCurrentBatch->AddEntry(aAnimation, aTarget);
-      entry->mState = eState_Added;
-      entry->mChanged = false;
-    }
-  }
-
+                             nsINode* aTarget);
   static void AnimationChanged(mozilla::dom::Animation* aAnimation,
-                               nsINode* aTarget) {
-    Entry* entry = sCurrentBatch->FindEntry(aAnimation, aTarget);
-    if (entry) {
-      NS_ASSERTION(entry->mState == eState_RemainedPresent ||
-                       entry->mState == eState_Added,
-                   "shouldn't have observed an animation being changed after "
-                   "being removed");
-      entry->mChanged = true;
-    } else {
-      entry = sCurrentBatch->AddEntry(aAnimation, aTarget);
-      entry->mState = eState_RemainedPresent;
-      entry->mChanged = true;
-    }
-  }
-
+                               nsINode* aTarget);
   static void AnimationRemoved(mozilla::dom::Animation* aAnimation,
-                               nsINode* aTarget) {
-    Entry* entry = sCurrentBatch->FindEntry(aAnimation, aTarget);
-    if (entry) {
-      switch (entry->mState) {
-        case eState_RemainedPresent:
-          entry->mState = eState_Removed;
-          break;
-        case eState_Added:
-          entry->mState = eState_RemainedAbsent;
-          break;
-        case eState_RemainedAbsent:
-          MOZ_ASSERT_UNREACHABLE(
-              "shouldn't have observed an animation "
-              "remaining absent");
-          break;
-        case eState_Removed:
-          // FIXME bug 1189015
-          NS_ERROR("shouldn't have observed an animation being removed twice");
-          break;
-      }
-    } else {
-      entry = sCurrentBatch->AddEntry(aAnimation, aTarget);
-      entry->mState = eState_Removed;
-      entry->mChanged = false;
-    }
-  }
+                               nsINode* aTarget);
 
  private:
-  Entry* FindEntry(mozilla::dom::Animation* aAnimation, nsINode* aTarget) {
-    EntryArray* entries = mEntryTable.Get(aTarget);
-    if (!entries) {
-      return nullptr;
-    }
-
-    for (Entry& e : *entries) {
-      if (e.mAnimation == aAnimation) {
-        return &e;
-      }
-    }
-    return nullptr;
-  }
-
-  Entry* AddEntry(mozilla::dom::Animation* aAnimation, nsINode* aTarget) {
-    EntryArray* entries = sCurrentBatch->mEntryTable.GetOrInsertNew(aTarget);
-    if (entries->IsEmpty()) {
-      sCurrentBatch->mBatchTargets.AppendElement(aTarget);
-    }
-    Entry* entry = entries->AppendElement();
-    entry->mAnimation = aAnimation;
-    return entry;
-  }
+  Entry* FindEntry(mozilla::dom::Animation* aAnimation, nsINode* aTarget);
+  Entry* AddEntry(mozilla::dom::Animation* aAnimation, nsINode* aTarget);
 
   enum State {
     eState_RemainedPresent,

@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -38,11 +36,6 @@ class TrampolineNativeFrameLayout;
 
 class TypedArrayObject : public ArrayBufferViewObject {
  public:
-  static_assert(js::detail::TypedArrayLengthSlot == LENGTH_SLOT,
-                "bad inlined constant in TypedData.h");
-  static_assert(js::detail::TypedArrayDataSlot == DATA_SLOT,
-                "bad inlined constant in TypedData.h");
-
   static bool sameBuffer(const TypedArrayObject* a, const TypedArrayObject* b) {
     // Inline buffers.
     if (!a->hasBuffer() || !b->hasBuffer()) {
@@ -269,7 +262,7 @@ Scalar::Type TypedArrayConstructorType(const JSFunction* fun);
 //   or growable array buffer.
 bool IsBufferSource(JSContext* cx, JSObject* object, bool allowShared,
                     bool allowResizable, SharedMem<uint8_t*>* dataPointer,
-                    size_t* byteLength);
+                    size_t* byteLength, bool* isShared = nullptr);
 
 inline Scalar::Type TypedArrayObject::type() const {
   return GetTypedArrayClassType(getClass());
@@ -299,9 +292,7 @@ inline bool CanStartTypedArrayIndex(CharT ch) {
 
 [[nodiscard]] inline mozilla::Maybe<uint64_t> ToTypedArrayIndex(jsid id) {
   if (id.isInt()) {
-    int32_t i = id.toInt();
-    MOZ_ASSERT(i >= 0);
-    return mozilla::Some(i);
+    return mozilla::Some(id.toInt());
   }
 
   if (MOZ_UNLIKELY(!id.isString())) {

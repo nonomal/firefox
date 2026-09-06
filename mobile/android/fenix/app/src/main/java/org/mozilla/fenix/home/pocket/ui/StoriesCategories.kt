@@ -7,6 +7,8 @@ package org.mozilla.fenix.home.pocket.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.SelectableChipColors
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
@@ -14,7 +16,6 @@ import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import mozilla.components.compose.base.SelectableChip
-import mozilla.components.compose.base.SelectableChipColors
 import org.mozilla.fenix.home.pocket.POCKET_STORIES_DEFAULT_CATEGORY_NAME
 import org.mozilla.fenix.home.pocket.PocketRecommendedStoriesCategory
 import org.mozilla.fenix.home.pocket.PocketRecommendedStoriesSelectedCategory
@@ -33,25 +34,27 @@ fun StoriesCategories(
     categories: List<PocketRecommendedStoriesCategory>,
     selections: List<PocketRecommendedStoriesSelectedCategory>,
     modifier: Modifier = Modifier,
-    categoryColors: SelectableChipColors = SelectableChipColors.buildColors(),
+    categoryColors: SelectableChipColors = FilterChipDefaults.filterChipColors(),
     onCategoryClick: (PocketRecommendedStoriesCategory) -> Unit,
 ) {
     Box(
-        modifier = modifier.semantics {
-            testTagsAsResourceId = true
-            testTag = "pocket.categories"
-        },
+        modifier =
+            modifier.semantics {
+                testTagsAsResourceId = true
+                testTag = "pocket.categories"
+            }
     ) {
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            categories.filter { it.name != POCKET_STORIES_DEFAULT_CATEGORY_NAME }
+            categories
+                .filter { it.name != POCKET_STORIES_DEFAULT_CATEGORY_NAME }
                 .forEach { category ->
                     SelectableChip(
                         text = category.name,
-                        isSelected = selections.map { it.name }.contains(category.name),
-                        selectableChipColors = categoryColors,
+                        selected = selections.map { it.name }.contains(category.name),
+                        colors = categoryColors,
                     ) {
                         onCategoryClick(category)
                     }

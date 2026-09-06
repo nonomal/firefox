@@ -5,7 +5,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 with Files('**'):
-    BUG_COMPONENT = ('Core', 'Machine Learning')
+    BUG_COMPONENT = ("Core", "Machine Learning: General")
 
 AllowCompilerWarnings()
 
@@ -59,6 +59,7 @@ LOCAL_INCLUDES += [
   'ggml/src/',
   'ggml/src/ggml-cpu/',
   'include/',
+  'src/',
 ]
 
 EXPORTS += [
@@ -67,6 +68,7 @@ EXPORTS += [
   "ggml/include/ggml-cpu.h",
   "ggml/include/ggml-opt.h",
   "ggml/include/ggml.h",
+  "ggml/include/gguf.h",
 ]
 
 DEFINES["_GNU_SOURCE"] = 1
@@ -127,6 +129,40 @@ if CONFIG['OS_TARGET'] == 'Darwin':
   DEFINES["GGML_USE_ACCELERATE"] = 1
   OS_LIBS += [
       "-framework Accelerate"
+  ]
+
+  # Metal backend support
+  DEFINES["GGML_USE_METAL"] = 1
+  DEFINES["GGML_METAL_EMBED_LIBRARY"] = 1
+
+  # Generate assembly file with embedded Metal shader source
+  GeneratedFile(
+      'ggml-metal-embed.s',
+      'ggml-metal-embed.metal',
+      script='generate_metal_embed.py',
+      inputs=[
+          'ggml/src/ggml-common.h',
+          'ggml/src/ggml-metal/ggml-metal-impl.h',
+          'ggml/src/ggml-metal/ggml-metal.metal',
+      ]
+  )
+
+  # Add Metal backend sources
+  SOURCES += [
+      '!ggml-metal-embed.s',
+      'ggml/src/ggml-metal/ggml-metal.m',
+  ]
+
+  # Export Metal header
+  EXPORTS += [
+      'ggml/include/ggml-metal.h',
+  ]
+
+  # Link Metal frameworks
+  OS_LIBS += [
+      '-framework Foundation',
+      '-framework Metal',
+      '-framework MetalKit',
   ]
 
 if CONFIG["OS_TARGET"] == "Linux":

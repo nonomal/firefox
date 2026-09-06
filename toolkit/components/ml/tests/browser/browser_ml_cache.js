@@ -47,26 +47,6 @@ const FAKE_ONNX_MODEL_ARGS = {
   taskName: "task_onnx",
 };
 
-function createRandomBlob(blockSize = 8, count = 1) {
-  const blocks = Array.from({ length: count }, () =>
-    Uint32Array.from(
-      { length: blockSize / 4 },
-      () => Math.random() * 4294967296
-    )
-  );
-  return new Blob(blocks, { type: "application/octet-stream" });
-}
-
-function createBlob(size = 8) {
-  return createRandomBlob(size);
-}
-
-function stripLastUsed(data) {
-  return data.map(({ lastUsed: _unusedLastUsed, ...rest }) => {
-    return rest;
-  });
-}
-
 /**
  * Test the MOZ_ALLOW_EXTERNAL_ML_HUB environment variable
  */
@@ -602,29 +582,6 @@ add_task(async function testTooFewParts() {
 });
 
 // IndexedDB tests
-
-/**
- * Helper function to initialize the cache
- */
-async function initializeCache() {
-  const dbName = `modelFiles-${crypto.randomUUID()}`;
-  await TestIndexedDBCache.deleteDatabaseAndWait(dbName).catch(() => {});
-  await OPFS.getDirectoryHandle(dbName, { create: true });
-  return await IndexedDBCache.init({ dbName });
-}
-
-/**
- * Helper function to delete the cache database
- */
-async function deleteCache(cache) {
-  await cache.dispose();
-  await TestIndexedDBCache.deleteDatabaseAndWait(cache.dbName).catch(() => {});
-  try {
-    await OPFS.remove(cache.dbName, { recursive: true });
-  } catch (e) {
-    // can be empty
-  }
-}
 
 /**
  * Test the initialization and creation of the IndexedDBCache instance.
@@ -1643,6 +1600,91 @@ add_task(async function test_getting_file_disallowed_custom_hub() {
 });
 
 /**
+ * isModelAvailable should resolve from the cache instead of hitting the
+ * network when the file is already present locally.
+ */
+add_task(async function test_isModelAvailable_cached_skips_network() {
+  const hub = new ModelHub({
+    rootUrl: "https://example.com",
+    urlTemplate: "{model}/{revision}",
+    allowDenyList: [{ filter: "ALLOW", urlPrefix: "https://example.com" }],
+  });
+  hub.cache = await initializeCache();
+
+  const model = "acme/bert";
+  const revision = "main";
+  const file = "config.json";
+
+  await hub.cache.put({
+    taskName: "task_model",
+    model: "example.com/acme/bert",
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+
+  const fetchStub = sinon.stub(MLUtils, "fetchUrl");
+
+  const isAvailable = await hub.isModelAvailable(model, revision, { file });
+
+  Assert.ok(isAvailable, "Cached model should be reported as available.");
+  Assert.ok(
+    fetchStub.notCalled,
+    "isModelAvailable should not hit the network for a cached file."
+  );
+
+  fetchStub.restore();
+  await deleteCache(hub.cache);
+});
+
+/**
+ * isModelAvailable should not trust a cached file whose hub has since been
+ * denylisted: it must delete the cached model and report unavailable.
+ */
+add_task(async function test_isModelAvailable_cached_denylisted() {
+  const hub = new ModelHub({
+    rootUrl: "https://forbidden.com",
+    urlTemplate: "{model}/{revision}",
+    allowDenyList: [{ filter: "DENY", urlPrefix: "https://forbidden.com" }],
+  });
+  hub.cache = await initializeCache();
+
+  const model = "acme/bert";
+  const revision = "main";
+  const file = "config.json";
+
+  await hub.cache.put({
+    taskName: "task_model",
+    model: "forbidden.com/acme/bert",
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+
+  const isAvailable = await hub.isModelAvailable(model, revision, { file });
+
+  Assert.ok(
+    !isAvailable,
+    "Cached model on a denylisted hub should be reported unavailable."
+  );
+
+  const dataAfterDenylist = await hub.cache.getFile({
+    model: "forbidden.com/acme/bert",
+    revision,
+    file,
+  });
+  Assert.equal(
+    dataAfterDenylist,
+    null,
+    "The denylisted cached model should be deleted."
+  );
+
+  await deleteCache(hub.cache);
+});
+
+/**
  * Test deleting files used by several engines
  */
 add_task(async function test_DeleteFileByEngines() {
@@ -1650,6 +1692,8 @@ add_task(async function test_DeleteFileByEngines() {
   const testData = createBlob();
   const engineOne = "engine-1";
   const engineTwo = "engine-2";
+  const model = "org/model";
+  const revision = "v1";
 
   // a file is stored by engineOne
   await cache.put({
@@ -1676,6 +1720,10 @@ add_task(async function test_DeleteFileByEngines() {
     "The retrieved data should match the stored data."
   );
 
+  // We should have two engines associated with the model file
+  let retrievedFiles = await cache.listFiles({ model, revision });
+  Assert.equal(retrievedFiles.metadata.engineIds.length, 2);
+
   // if we delete the model by engineOne, it will still be around for engineTwo
   await cache.deleteFilesByEngine({ engineId: engineOne });
 
@@ -1690,6 +1738,11 @@ add_task(async function test_DeleteFileByEngines() {
     testData,
     "The retrieved data should match the stored data."
   );
+
+  // We should now have one engine associated with the model file
+  retrievedFiles = await cache.listFiles({ model, revision });
+  Assert.equal(retrievedFiles.metadata.engineIds.length, 1);
+  Assert.equal(retrievedFiles.metadata.engineIds[0], engineTwo);
 
   // now deleting via engineTwo
   await cache.deleteFilesByEngine({ engineId: engineTwo });
@@ -1706,6 +1759,10 @@ add_task(async function test_DeleteFileByEngines() {
     null,
     "The data for the deleted model should not exist."
   );
+
+  // Now we should have no more engine
+  Assert.equal(await cache._testGetData(cache.enginesStoreName), null);
+
   await deleteCache(cache);
 });
 
@@ -1734,6 +1791,18 @@ add_task(async function test_ModelHub_DeleteFileByEngines() {
     headers: null,
   });
 
+  // We should have at least one file
+  const dataBeforeDelete = await cache.getFile({
+    engineId: engineOne,
+    model: "org/model",
+    revision: "v1",
+    file: "file.txt",
+  });
+  Assert.notEqual(dataBeforeDelete, null, "The data should exist");
+
+  // We should have at least one engine
+  Assert.notEqual(await cache._testGetData(cache.enginesStoreName), null);
+
   await hub.deleteFilesByEngine({ engineId: engineOne });
 
   // at this point we should not have anymore files
@@ -1748,6 +1817,11 @@ add_task(async function test_ModelHub_DeleteFileByEngines() {
     null,
     "The data for the deleted model should not exist."
   );
+
+  // The engine should be removed from the model/revision/file engine list.
+  // In our case, this means we should have no entry in the engine list since it is
+  // the last
+  Assert.equal(await cache._testGetData(cache.enginesStoreName), null);
 
   await deleteCache(cache);
 });
@@ -2040,4 +2114,163 @@ add_task(async function test_download_cancellation_after_fetch() {
     await deleteCache(cache);
     fetchUrlStub.restore();
   }
+});
+
+/**
+ * Bug 1967279: Verify the 6 -> 7 schema migration rewrites a row tagged with
+ * the old "wllamapreview" engineId to "link-preview" without dropping the
+ * underlying OPFS model file, so the renamed feature can still uninstall it.
+ */
+add_task(async function test_migrateStore_renamesWllamapreviewEngineId() {
+  const dbName = `modelFiles-${crypto.randomUUID()}`;
+  await TestIndexedDBCache.deleteDatabaseAndWait(dbName).catch(() => {});
+
+  const model = "org/link-preview";
+  const revision = "v1";
+  const file = "weights.bin";
+
+  // Seed a row under the pre-migration schema with the obsolete engineId.
+  let cache = await IndexedDBCache.init({ dbName, version: 6 });
+  await cache.put({
+    engineId: "wllamapreview",
+    taskName: "wllama-text-generation",
+    model,
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+
+  let listed = await cache.listFiles({ model, revision });
+  Assert.deepEqual(
+    listed.metadata.engineIds,
+    ["wllamapreview"],
+    "Row should be seeded with the legacy engineId."
+  );
+  cache.db.close();
+
+  // Reopen at the current schema version and confirm the rename happened.
+  cache = await IndexedDBCache.init({ dbName });
+
+  listed = await cache.listFiles({ model, revision });
+  Assert.deepEqual(
+    listed.metadata.engineIds,
+    ["link-preview"],
+    "Migration should rewrite the legacy engineId to its replacement."
+  );
+  Assert.equal(
+    listed.files.length,
+    1,
+    "Migration must not drop the OPFS model file."
+  );
+
+  // The uninstall path used by LinkPreview should now find and remove the row.
+  await cache.deleteFilesByEngine({ engineId: "link-preview" });
+  listed = await cache.listFiles({ model, revision });
+  Assert.deepEqual(
+    listed.files,
+    [],
+    "Uninstall via the new engineId should physically delete the file."
+  );
+
+  await deleteCache(cache);
+});
+
+/**
+ * Bug 1967279: If a row already carries both the legacy and the new engineId
+ * (e.g. a re-download happened before the migration), the rewrite must
+ * de-duplicate rather than leaving the stale id behind.
+ */
+add_task(async function test_migrateStore_dedupsLegacyAndNewEngineIds() {
+  const dbName = `modelFiles-${crypto.randomUUID()}`;
+  await TestIndexedDBCache.deleteDatabaseAndWait(dbName).catch(() => {});
+
+  const model = "org/link-preview";
+  const revision = "v1";
+  const file = "weights.bin";
+
+  let cache = await IndexedDBCache.init({ dbName, version: 6 });
+  await cache.put({
+    engineId: "wllamapreview",
+    taskName: "wllama-text-generation",
+    model,
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+  await cache.put({
+    engineId: "link-preview",
+    taskName: "wllama-text-generation",
+    model,
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+  cache.db.close();
+
+  cache = await IndexedDBCache.init({ dbName });
+  const listed = await cache.listFiles({ model, revision });
+  Assert.deepEqual(
+    listed.metadata.engineIds,
+    ["link-preview"],
+    "Migration should collapse duplicate ids to the new engineId only."
+  );
+
+  await deleteCache(cache);
+});
+
+/**
+ * Verify the 7 -> 8 schema migration re-keys task rows whose taskName was
+ * renamed, so already-downloaded model files keep hitting the cache instead
+ * of being downloaded again.
+ */
+add_task(async function test_migrateStore_renamesWllamaTaskName() {
+  const dbName = `modelFiles-${crypto.randomUUID()}`;
+  await TestIndexedDBCache.deleteDatabaseAndWait(dbName).catch(() => {});
+
+  const model = "org/link-preview";
+  const revision = "v1";
+  const file = "weights.bin";
+
+  // Seed a row under the pre-migration schema with the obsolete taskName.
+  let cache = await IndexedDBCache.init({ dbName, version: 7 });
+  await cache.put({
+    engineId: "link-preview",
+    taskName: "wllama-text-generation",
+    model,
+    revision,
+    file,
+    data: createBlob(),
+    headers: null,
+  });
+  cache.db.close();
+
+  // Reopen at the current schema version and confirm the row was re-keyed.
+  cache = await IndexedDBCache.init({ dbName });
+
+  let listed = await cache.listFiles({
+    taskName: "llama-text-generation",
+    model,
+    revision,
+  });
+  Assert.equal(
+    listed.files.length,
+    1,
+    "Migration should re-key the row to the new taskName."
+  );
+
+  listed = await cache.listFiles({
+    taskName: "wllama-text-generation",
+    model,
+    revision,
+  });
+  Assert.deepEqual(
+    listed.files,
+    [],
+    "No row should remain under the old taskName."
+  );
+
+  await deleteCache(cache);
 });

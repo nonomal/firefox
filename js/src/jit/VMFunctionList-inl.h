@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -50,10 +48,8 @@ namespace jit {
 // non-argument Values the VM wrapper should pop from the stack. This is used
 // for tail calls for Baseline ICs. This list must be sorted on the name field.
 #define VMFUNCTION_LIST(_)                                                     \
-  IF_EXPLICIT_RESOURCE_MANAGEMENT(_(AddDisposableResourceToCapability,         \
-                                    js::AddDisposableResourceToCapability))    \
+  _(AddDisposableResourceToCapability, js::AddDisposableResourceToCapability)  \
   _(AddOrUpdateSparseElementHelper, js::AddOrUpdateSparseElementHelper)        \
-  _(AddSlotAndCallAddPropHook, js::AddSlotAndCallAddPropHook)                  \
   _(ArgumentsObjectCreateForInlinedIon,                                        \
     js::ArgumentsObject::createForInlinedIon)                                  \
   _(ArgumentsObjectCreateForIon, js::ArgumentsObject::createForIon)            \
@@ -123,6 +119,8 @@ namespace jit {
   _(CheckClassHeritageOperation, js::CheckClassHeritageOperation)              \
   _(CheckOverRecursed, js::jit::CheckOverRecursed)                             \
   _(CheckOverRecursedBaseline, js::jit::CheckOverRecursedBaseline)             \
+  _(CheckOverRecursedResumingGenerator,                                        \
+    js::jit::CheckOverRecursedResumingGenerator)                               \
   _(CheckPrivateFieldOperation, js::CheckPrivateFieldOperation)                \
   _(CheckProxyGetByValueResult, js::jit::CheckProxyGetByValueResult)           \
   _(ClassBodyLexicalEnvironmentObjectCreateWithoutEnclosing,                   \
@@ -137,9 +135,9 @@ namespace jit {
   _(CreateBigIntFromUint64, js::jit::CreateBigIntFromUint64)                   \
   _(CreateGenerator, js::jit::CreateGenerator)                                 \
   _(CreateGeneratorFromFrame, js::jit::CreateGeneratorFromFrame)               \
-  IF_EXPLICIT_RESOURCE_MANAGEMENT(                                             \
-      _(CreateSuppressedError, js::CreateSuppressedError))                     \
+  _(CreateSuppressedError, js::CreateSuppressedError)                          \
   _(CreateThisFromIC, js::jit::CreateThisFromIC)                               \
+  _(CreateThisFromICWithAllocSite, js::jit::CreateThisFromICWithAllocSite)     \
   _(CreateThisFromIon, js::jit::CreateThisFromIon)                             \
   _(DebugAfterYield, js::jit::DebugAfterYield)                                 \
   _(DebugEpilogueOnBaselineReturn, js::jit::DebugEpilogueOnBaselineReturn)     \
@@ -198,17 +196,16 @@ namespace jit {
   _(FunctionBindSpecializedBaseline,                                           \
     js::BoundFunctionObject::functionBindSpecializedBaseline)                  \
   VMFUNCTION_FUZZILLI_LIST(_)                                                  \
-  _(GeneratorThrowOrReturn, js::jit::GeneratorThrowOrReturn)                   \
   _(GetAndClearException, js::GetAndClearException)                            \
   _(GetElemMaybeCached, js::jit::GetElemMaybeCached)                           \
   _(GetFirstDollarIndexRaw, js::GetFirstDollarIndexRaw)                        \
   _(GetImportOperation, js::GetImportOperation)                                \
   _(GetIntrinsicValue, js::jit::GetIntrinsicValue)                             \
   _(GetIterator, js::GetIterator)                                              \
-  _(GetIteratorUnregistered, js::GetIteratorUnregistered)                      \
+  _(GetIteratorForObjectKeys, js::GetIteratorForObjectKeys)                    \
   _(GetIteratorWithIndices, js::GetIteratorWithIndices)                        \
-  _(GetIteratorWithIndicesUnregistered,                                        \
-    js::GetIteratorWithIndicesUnregistered)                                    \
+  _(GetIteratorWithIndicesForObjectKeys,                                       \
+    js::GetIteratorWithIndicesForObjectKeys)                                   \
   _(GetNonSyntacticGlobalThis, js::GetNonSyntacticGlobalThis)                  \
   _(GetOrCreateModuleMetaObject, js::GetOrCreateModuleMetaObject)              \
   _(GetPendingExceptionStack, js::GetPendingExceptionStack)                    \
@@ -226,7 +223,6 @@ namespace jit {
   _(InitRestParameter, js::jit::InitRestParameter)                             \
   _(Int32ToString, js::Int32ToString<js::CanGC>)                               \
   _(Int32ToStringWithBase, js::Int32ToStringWithBase<js::CanGC>)               \
-  _(InterpretResume, js::jit::InterpretResume)                                 \
   _(InterruptCheck, js::jit::InterruptCheck)                                   \
   _(InvokeFunction, js::jit::InvokeFunction)                                   \
   _(IonBinaryArithICUpdate, js::jit::IonBinaryArithIC::update)                 \
@@ -276,6 +272,7 @@ namespace jit {
   _(NewArrayObjectOptimzedFallback, js::NewArrayObjectOptimizedFallback)       \
   _(NewArrayOperation, js::NewArrayOperation)                                  \
   _(NewArrayWithShape, js::NewArrayWithShape)                                  \
+  _(NewDateObject, js::jit::NewDateObject)                                     \
   _(NewObjectOperation, js::NewObjectOperation)                                \
   _(NewPlainObjectBaselineFallback, js::NewPlainObjectBaselineFallback)        \
   _(NewPlainObjectOptimizedFallback, js::NewPlainObjectOptimizedFallback)      \
@@ -293,7 +290,6 @@ namespace jit {
   _(NumberToString, js::NumberToString<js::CanGC>)                             \
   _(ObjectCreateWithTemplate, js::ObjectCreateWithTemplate)                    \
   _(ObjectKeys, js::jit::ObjectKeys)                                           \
-  _(ObjectKeysLength, js::jit::ObjectKeysLength)                               \
   _(ObjectWithProtoOperation, js::ObjectWithProtoOperation)                    \
   _(OnDebuggerStatement, js::jit::OnDebuggerStatement)                         \
   _(ProxyGetProperty, js::ProxyGetProperty)                                    \

@@ -4,7 +4,6 @@
 ---
 task-defaults:
     description: 'Run detekt over all modules'
-    run-on-repo-type: [hg]
     run:
         using: gradlew
         gradlew: ['detekt']
@@ -17,6 +16,8 @@ task-defaults:
     fetches:
         toolchain:
             - android-sdk-linux
+            - linux64-embedded-uniffi-bindgen
+            - linux64-nimbus-fml
             - android-gradle-dependencies
             - linux64-jdk-repack
     platform: 'lint/opt'

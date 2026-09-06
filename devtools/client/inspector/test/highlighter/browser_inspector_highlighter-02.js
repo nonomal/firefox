@@ -9,6 +9,8 @@
 const TEST_URI = URL_ROOT + "doc_inspector_highlighter.html";
 
 add_task(async function () {
+  await pushPref("dom.select.customizable_select.enabled", true);
+
   const { inspector, highlighterTestFront } =
     await openInspectorForURL(TEST_URI);
   const { waitForHighlighterTypeShown } = getHighlighterTestHelpers(inspector);
@@ -91,6 +93,57 @@ add_task(async function () {
     // the expected text
     (await getHighlighterInfobarText()).startsWith("ul#pseudo::before::marker"),
     `::before::marker is properly displayed (${await getHighlighterInfobarText()})`
+  );
+
+  info("Highlighting the dialog::backdrop node");
+  const dialogNodeFront = await getNodeFront("dialog", inspector);
+  const { nodes: dialogChildren } =
+    await inspector.walker.children(dialogNodeFront);
+  const dialogBackdropNodeFront = dialogChildren[0];
+  onHighlighterShown = waitForHighlighterTypeShown(
+    inspector.highlighters.TYPES.BOXMODEL
+  );
+  await selectNode(dialogBackdropNodeFront, inspector, "test-highlight");
+  await onHighlighterShown;
+  is(
+    await getHighlighterInfobarText(),
+    "dialog::backdrop85 × 333",
+    `::backdrop is properly displayed`
+  );
+
+  info("Highlighting the select::picker-icon node");
+  const selectNodeFront = await getNodeFront("select", inspector);
+  const { nodes: selectChildren } =
+    await inspector.walker.children(selectNodeFront);
+  const selectPickerIconNodeFront = selectChildren[3];
+  onHighlighterShown = waitForHighlighterTypeShown(
+    inspector.highlighters.TYPES.BOXMODEL
+  );
+  await selectNode(selectPickerIconNodeFront, inspector, "test-highlight");
+  await onHighlighterShown;
+  is(
+    await getHighlighterInfobarText(),
+    "select::picker-icon20 × 20",
+    `::picker-icon is properly displayed`
+  );
+
+  info("Highlighting the option::checkmark node");
+  // The ::checkmark pseudo element only exists when the select is opened, so show the
+  // picker so we can see them
+  await showCustomizableSelectPicker(inspector, "select");
+  const optionNodeFront = await getNodeFront("option", inspector);
+  const { nodes: optionChildren } =
+    await inspector.walker.children(optionNodeFront);
+  const optionCheckmarkNodeFront = optionChildren[0];
+  onHighlighterShown = waitForHighlighterTypeShown(
+    inspector.highlighters.TYPES.BOXMODEL
+  );
+  await selectNode(optionCheckmarkNodeFront, inspector, "test-highlight");
+  await onHighlighterShown;
+  is(
+    await getHighlighterInfobarText(),
+    "option::checkmark16 × 16",
+    `::checkmark is properly displayed`
   );
 
   info("Check highlighting for ::view-transition pseudo elements");

@@ -1,23 +1,23 @@
 From: Michael Froman <mfroman@mozilla.com>
-Date: Wed, 8 Oct 2025 16:39:00 -0500
-Subject: Bug 1993083 - (fix-032f8c223e) add missing stub implementation for
- SSLStreamAdapter static method.
+Date: Mon, 6 Apr 2026 18:41:00 -0500
+Subject: Bug 2029247 - (fix-4520c7897c) fix new usage of GetRealTimeClock in
+ bitrate_adjuster.h
 
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/293f1877fead30723696b8f5cb354bdf819af5d3
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/a88b1959591bc4ddbf6deb88ff76dcc24fd8ae5d
 ---
- rtc_base/ssl_stream_adapter.h | 2 +-
+ common_video/include/bitrate_adjuster.h | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
-diff --git a/rtc_base/ssl_stream_adapter.h b/rtc_base/ssl_stream_adapter.h
-index 24fc299b82..ec16887eac 100644
---- a/rtc_base/ssl_stream_adapter.h
-+++ b/rtc_base/ssl_stream_adapter.h
-@@ -247,7 +247,7 @@ class SSLStreamAdapter : public StreamInterface {
-   static std::set<uint16_t> GetSupportedEphemeralKeyExchangeCipherGroups()
-       { return {}; }
-   static std::optional<std::string> GetEphemeralKeyExchangeCipherGroupName(
--      uint16_t group_id);
-+      uint16_t group_id) { return std::nullopt; }
-   static std::vector<uint16_t> GetDefaultEphemeralKeyExchangeCipherGroups(
-       const FieldTrialsView* field_trials) { return {}; }
- 
+diff --git a/common_video/include/bitrate_adjuster.h b/common_video/include/bitrate_adjuster.h
+index 6cd92b7deb..d414fb7e25 100644
+--- a/common_video/include/bitrate_adjuster.h
++++ b/common_video/include/bitrate_adjuster.h
+@@ -40,7 +40,7 @@ class RTC_EXPORT BitrateAdjuster {
+   ABSL_DEPRECATE_AND_INLINE()
+   BitrateAdjuster(float min_adjusted_bitrate_pct,
+                   float max_adjusted_bitrate_pct)
+-      : BitrateAdjuster(Clock::GetRealTimeClock(),
++      : BitrateAdjuster(Clock::GetRealTimeClockRaw(),
+                         min_adjusted_bitrate_pct,
+                         max_adjusted_bitrate_pct) {}
+   virtual ~BitrateAdjuster() = default;

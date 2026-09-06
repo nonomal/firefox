@@ -1,10 +1,16 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 package mozilla.components.browser.engine.gecko.preferences
 
 import mozilla.components.concept.engine.Engine
+import mozilla.components.concept.engine.preferences.BrowserPrefType
 import mozilla.components.concept.engine.preferences.BrowserPreference
 import mozilla.components.support.test.any
 import mozilla.components.support.test.mock
 import org.junit.Test
+import org.mockito.ArgumentMatchers.anyList
 import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.verify
 
@@ -43,8 +49,23 @@ class BrowserPrefObserverIntegrationTest {
             onError,
         )
 
-        verify(engine)
-            .registerPrefForObservation(anyString(), any(), any())
+        verify(engine).registerPrefForObservation(anyString(), any(), any())
+    }
+
+    @Test
+    fun `WHEN registerPrefsForObservation THEN the engine method is invoked`() {
+        val engine = mock<Engine>()
+        val feature = BrowserPrefObserverIntegration(engine)
+
+        val onSuccess: () -> Unit = {}
+        val onError: (Throwable) -> Unit = {}
+        feature.registerPrefsForObservation(
+            listOf("test.item"),
+            onSuccess,
+            onError,
+        )
+
+        verify(engine).registerPrefsForObservation(anyList<String>(), any(), any())
     }
 
     @Test
@@ -60,12 +81,27 @@ class BrowserPrefObserverIntegrationTest {
             onError,
         )
 
-        verify(engine)
-            .unregisterPrefForObservation(anyString(), any(), any())
+        verify(engine).unregisterPrefForObservation(anyString(), any(), any())
     }
 
     @Test
-    fun `WHEN onOfferTranslate is called THEN notify onTranslateOffer`() {
+    fun `WHEN unregisterPrefsForObservation THEN the engine method is invoked`() {
+        val engine = mock<Engine>()
+        val feature = BrowserPrefObserverIntegration(engine)
+
+        val onSuccess: () -> Unit = {}
+        val onError: (Throwable) -> Unit = {}
+        feature.unregisterPrefsForObservation(
+            listOf("test.item"),
+            onSuccess,
+            onError,
+        )
+
+        verify(engine).unregisterPrefsForObservation(anyList<String>(), any(), any())
+    }
+
+    @Test
+    fun `WHEN onPreferenceChange is called THEN notify observer`() {
         var onPreferenceChangeWasCalled = false
         val engine = mock<Engine>()
         val feature = BrowserPrefObserverIntegration(engine)
@@ -76,16 +112,18 @@ class BrowserPrefObserverIntegrationTest {
                 override fun onPreferenceChange(observedPreference: BrowserPreference<*>) {
                     onPreferenceChangeWasCalled = true
                 }
-            },
+            }
         )
 
-        val pref = BrowserPreference(
-            "hello-world",
-            value = true,
-            defaultValue = false,
-            userValue = true,
-            hasUserChangedValue = true,
-        )
+        val pref =
+            BrowserPreference(
+                "hello-world",
+                value = true,
+                defaultValue = false,
+                userValue = true,
+                hasUserChangedValue = true,
+                prefType = BrowserPrefType.STRING,
+            )
         feature.onPreferenceChange(pref)
         assert(onPreferenceChangeWasCalled)
     }

@@ -14,13 +14,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ClipRectangleType:
     "chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs",
   error: "chrome://remote/content/shared/webdriver/Errors.sys.mjs",
+  EventPromise: "chrome://remote/content/shared/Sync.sys.mjs",
   LoadListener: "chrome://remote/content/shared/listeners/LoadListener.sys.mjs",
   LocatorType:
     "chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs",
   OriginType:
     "chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs",
   OwnershipModel: "chrome://remote/content/webdriver-bidi/RemoteValue.sys.mjs",
-  PollPromise: "chrome://remote/content/shared/Sync.sys.mjs",
   pprint: "chrome://remote/content/shared/Format.sys.mjs",
 });
 
@@ -45,7 +45,7 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
 
     // Set of event names which have active subscriptions.
     this.#subscribedEvents = new Set();
-    this.contextCreatedHandled = false;
+    this.#contextCreatedHandled = false;
   }
 
   destroy() {
@@ -136,8 +136,10 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
       return new DOMRect(
         viewport.pageLeft,
         viewport.pageTop,
-        win.innerWidth,
-        win.innerHeight
+        // Bug 2055445 made system calls to innerWidth/innerHeight return non-rounded
+        // values. So round them up again to keep the behavior the same as it was before.
+        Math.round(win.innerWidth),
+        Math.round(win.innerHeight)
       );
     }
 
@@ -306,7 +308,10 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
       });
     }
 
-    if (this.#subscribedEvents.has("browsingContext.domContentLoaded")) {
+    if (
+      this.#subscribedEvents.has("browsingContext.domContentLoaded") &&
+      this.#shouldSendLoadEvents(data.target)
+    ) {
       this.emitEvent(
         "browsingContext.domContentLoaded",
         this.#getNavigationInfo(data)
@@ -315,7 +320,10 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
   };
 
   #onLoad = (eventName, data) => {
-    if (this.#subscribedEvents.has("browsingContext.load")) {
+    if (
+      this.#subscribedEvents.has("browsingContext.load") &&
+      this.#shouldSendLoadEvents(data.target)
+    ) {
       this.emitEvent("browsingContext.load", this.#getNavigationInfo(data));
     }
   };
@@ -347,6 +355,11 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
     const height = Math.max(y_max - y_min, 0);
 
     return new DOMRect(x_min, y_min, width, height);
+  }
+
+  #shouldSendLoadEvents(target) {
+    // Do not emit the load events for the initial "about:blank" in top-level browsing contexts.
+    return !target.isInitialDocument || this.messageHandler.context.parent;
   }
 
   #startListening() {
@@ -434,6 +447,13 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
             this.emitEvent("browsingContext.contextCreated", {
               context: this.messageHandler.context,
             });
+
+            // This is an internal event used by the script module
+            // to ensure that "script.realmCreated" event is emitted
+            // after "browsingContext.contextCreated".
+            this.emitEvent("browsingContext._contextCreatedEmitted", {
+              browsingContext: this.messageHandler.context,
+            });
           }
 
           this.#contextCreatedHandled = true;
@@ -489,23 +509,38 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
    * Waits until the visibility state of the document has the expected value.
    *
    * @param {object} options
+   * @param {number=} options.timeout
+   *     Timeout in ms. Optional, if not provided, the command will only resolve
+   *     when the expected state is met.
    * @param {number} options.value
    *     Expected value of the visibility state.
    *
    * @returns {Promise}
-   *     Promise that resolves when the visibility state has the expected value.
+   *     Promise that resolves when the visibility state has the expected value,
+   *     or the timeout has been reached.
    */
   async _awaitVisibilityState(options) {
-    const { value } = options;
+    const { timeout = null, value } = options;
     const win = this.messageHandler.window;
 
-    await lazy.PollPromise((resolve, reject) => {
-      if (win.document.visibilityState === value) {
-        resolve();
-      } else {
-        reject();
+    if (win.document.visibilityState === value) {
+      // If the document visibilityState already has the expected value, resolve
+      // immediately.
+      return;
+    }
+
+    try {
+      // Otherwise, wait for the next visibilitychange event.
+      await new lazy.EventPromise(win, "visibilitychange", { timeout });
+    } catch (e) {
+      if (e instanceof lazy.error.TimeoutError) {
+        // Swallow the exception thrown by the EventPromise if we simply
+        // reached the timeout. Here the timeout is meant as an escape hatch,
+        // but we should still resolve
+        return;
       }
-    });
+      throw e;
+    }
   }
 
   _getBaseURL() {
@@ -559,7 +594,7 @@ class BrowsingContextModule extends WindowGlobalBiDiModule {
 
     const contextNodes = [];
     if (startNodes === null) {
-      contextNodes.push(this.messageHandler.window.document.documentElement);
+      contextNodes.push(this.messageHandler.window.document);
     } else {
       for (const serializedStartNode of startNodes) {
         const startNode = this.deserialize(serializedStartNode, realm);

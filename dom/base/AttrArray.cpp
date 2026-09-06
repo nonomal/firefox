@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -35,12 +33,12 @@ AttrArray::Impl::~Impl() {
 void AttrArray::SetMappedDeclarationBlock(
     already_AddRefed<mozilla::StyleLockedDeclarationBlock> aBlock) {
   MOZ_ASSERT(NS_IsMainThread());
-  MOZ_ASSERT(mImpl);
+  MOZ_ASSERT(HasImpl());
   MOZ_ASSERT(IsPendingMappedAttributeEvaluation());
   if (auto* decl = GetMappedDeclarationBlock()) {
     Servo_DeclarationBlock_Release(decl);
   }
-  mImpl->mMappedAttributeBits = reinterpret_cast<uintptr_t>(aBlock.take());
+  GetImpl()->mMappedAttributeBits = reinterpret_cast<uintptr_t>(aBlock.take());
   MOZ_ASSERT(!IsPendingMappedAttributeEvaluation());
 }
 
@@ -103,13 +101,13 @@ const nsAttrValue* AttrArray::GetAttr(const nsAString& aName,
 
 const nsAttrValue* AttrArray::AttrAt(uint32_t aPos) const {
   NS_ASSERTION(aPos < AttrCount(), "out-of-bounds access in AttrArray");
-  return &mImpl->Attrs()[aPos].mValue;
+  return &GetImpl()->Attrs()[aPos].mValue;
 }
 
 template <typename Name>
 inline nsresult AttrArray::AddNewAttribute(Name* aName, nsAttrValue& aValue) {
-  MOZ_ASSERT(!mImpl || mImpl->mCapacity >= mImpl->mAttrCount);
-  if (!mImpl || mImpl->mCapacity == mImpl->mAttrCount) {
+  MOZ_ASSERT(!HasImpl() || GetImpl()->mCapacity >= GetImpl()->mAttrCount);
+  if (!HasImpl() || GetImpl()->mCapacity == GetImpl()->mAttrCount) {
     if (!GrowBy(1)) {
       return NS_ERROR_OUT_OF_MEMORY;
     }
@@ -122,37 +120,60 @@ inline nsresult AttrArray::AddNewAttribute(Name* aName, nsAttrValue& aValue) {
   return NS_OK;
 }
 
+const nsAttrValue* AttrArray::AddNewAttributeAssumeAvailableSlot(
+    RefPtr<nsAtom>& aName, nsAttrValue& aValue) {
+  MOZ_ASSERT(HasImpl());
+  MOZ_ASSERT(GetImpl()->mAttrCount < GetImpl()->mCapacity);
+  InternalAttr& attr = mImpl->mBuffer[mImpl->mAttrCount++];
+  new (&attr.mName) nsAttrName(aName.forget());
+  new (&attr.mValue) nsAttrValue();
+  attr.mValue.SwapValueWith(aValue);
+  return &attr.mValue;
+}
+
 nsresult AttrArray::SetAndSwapAttr(nsAtom* aLocalName, nsAttrValue& aValue,
-                                   bool* aHadValue) {
+                                   bool* aHadValue,
+                                   mozilla::dom::IsKnownNewAttr aIsKnownNew) {
   *aHadValue = false;
 
-  for (InternalAttr& attr : Attrs()) {
-    if (attr.mName.Equals(aLocalName)) {
-      attr.mValue.SwapValueWith(aValue);
-      *aHadValue = true;
-      return NS_OK;
+  if (aIsKnownNew == mozilla::dom::IsKnownNewAttr::No) {
+    for (InternalAttr& attr : Attrs()) {
+      if (attr.mName.Equals(aLocalName)) {
+        attr.mValue.SwapValueWith(aValue);
+        *aHadValue = true;
+        return NS_OK;
+      }
     }
+  } else {
+    MOZ_ASSERT(IndexOfAttr(aLocalName) == -1,
+               "Caller asserted attribute is new but it already exists");
   }
 
   return AddNewAttribute(aLocalName, aValue);
 }
 
 nsresult AttrArray::SetAndSwapAttr(mozilla::dom::NodeInfo* aName,
-                                   nsAttrValue& aValue, bool* aHadValue) {
+                                   nsAttrValue& aValue, bool* aHadValue,
+                                   mozilla::dom::IsKnownNewAttr aIsKnownNew) {
   int32_t namespaceID = aName->NamespaceID();
   nsAtom* localName = aName->NameAtom();
   if (namespaceID == kNameSpaceID_None) {
-    return SetAndSwapAttr(localName, aValue, aHadValue);
+    return SetAndSwapAttr(localName, aValue, aHadValue, aIsKnownNew);
   }
 
   *aHadValue = false;
-  for (InternalAttr& attr : Attrs()) {
-    if (attr.mName.Equals(localName, namespaceID)) {
-      attr.mName.SetTo(aName);
-      attr.mValue.SwapValueWith(aValue);
-      *aHadValue = true;
-      return NS_OK;
+  if (aIsKnownNew == mozilla::dom::IsKnownNewAttr::No) {
+    for (InternalAttr& attr : Attrs()) {
+      if (attr.mName.Equals(localName, namespaceID)) {
+        attr.mName.SetTo(aName);
+        attr.mValue.SwapValueWith(aValue);
+        *aHadValue = true;
+        return NS_OK;
+      }
     }
+  } else {
+    MOZ_ASSERT(IndexOfAttr(localName, namespaceID) == -1,
+               "Caller asserted attribute is new but it already exists");
   }
 
   return AddNewAttribute(aName, aValue);
@@ -161,27 +182,29 @@ nsresult AttrArray::SetAndSwapAttr(mozilla::dom::NodeInfo* aName,
 nsresult AttrArray::RemoveAttrAt(uint32_t aPos, nsAttrValue& aValue) {
   NS_ASSERTION(aPos < AttrCount(), "out-of-bounds");
 
-  mImpl->mBuffer[aPos].mValue.SwapValueWith(aValue);
-  mImpl->mBuffer[aPos].~InternalAttr();
+  Impl* impl = GetImpl();
+  impl->mBuffer[aPos].mValue.SwapValueWith(aValue);
+  impl->mBuffer[aPos].~InternalAttr();
 
   // InternalAttr are not trivially copyable *but* we manually called the
   // destructor so the memmove should be ok.
-  memmove((void*)(mImpl->mBuffer + aPos), mImpl->mBuffer + aPos + 1,
-          (mImpl->mAttrCount - aPos - 1) * sizeof(InternalAttr));
+  memmove((void*)(impl->mBuffer + aPos), impl->mBuffer + aPos + 1,
+          (impl->mAttrCount - aPos - 1) * sizeof(InternalAttr));
 
-  --mImpl->mAttrCount;
+  --impl->mAttrCount;
   return NS_OK;
 }
 
 mozilla::dom::BorrowedAttrInfo AttrArray::AttrInfoAt(uint32_t aPos) const {
   NS_ASSERTION(aPos < AttrCount(), "out-of-bounds access in AttrArray");
-  InternalAttr& attr = mImpl->mBuffer[aPos];
-  return BorrowedAttrInfo(&attr.mName, &attr.mValue);
+  const Impl* impl = GetImpl();
+  return BorrowedAttrInfo(&impl->mBuffer[aPos].mName,
+                          &impl->mBuffer[aPos].mValue);
 }
 
 const nsAttrName* AttrArray::AttrNameAt(uint32_t aPos) const {
   NS_ASSERTION(aPos < AttrCount(), "out-of-bounds access in AttrArray");
-  return &mImpl->mBuffer[aPos].mName;
+  return &GetImpl()->mBuffer[aPos].mName;
 }
 
 [[nodiscard]] bool AttrArray::GetSafeAttrNameAt(
@@ -189,7 +212,7 @@ const nsAttrName* AttrArray::AttrNameAt(uint32_t aPos) const {
   if (aPos >= AttrCount()) {
     return false;
   }
-  *aResult = &mImpl->mBuffer[aPos].mName;
+  *aResult = &GetImpl()->mBuffer[aPos].mName;
   return true;
 }
 
@@ -202,11 +225,27 @@ const nsAttrName* AttrArray::GetSafeAttrNameAt(uint32_t aPos) const {
 }
 
 const nsAttrName* AttrArray::GetExistingAttrNameFromQName(
-    const nsAString& aName) const {
+    const nsAString& aName, RefPtr<nsAtom>* aOutAtom) const {
+  if (aOutAtom) {
+    *aOutAtom = nullptr;
+  }
+  if (!HasAttrs()) {
+    return nullptr;
+  }
+  RefPtr<nsAtom> nameAtom = NS_AtomizeMainThread(aName);
   for (const InternalAttr& attr : Attrs()) {
-    if (attr.mName.QualifiedNameEquals(aName)) {
+    // Equals(nsAtom*) compares mBits; for NodeInfo-typed entries mBits has the
+    // tag bit set and can never equal a clean atom pointer, so this is safe
+    // for both kinds without branching on IsAtom().
+    if (attr.mName.Equals(nameAtom.get())) {
       return &attr.mName;
     }
+    if (!attr.mName.IsAtom() && attr.mName.QualifiedNameEquals(aName)) {
+      return &attr.mName;
+    }
+  }
+  if (aOutAtom) {
+    *aOutAtom = nameAtom.forget();
   }
   return nullptr;
 }
@@ -239,33 +278,36 @@ int32_t AttrArray::IndexOfAttr(const nsAtom* aLocalName,
 }
 
 void AttrArray::Compact() {
-  if (!mImpl) {
+  if (!HasImpl()) {
     return;
   }
 
-  if (!mImpl->mAttrCount && !mImpl->mMappedAttributeBits) {
-    mImpl.reset();
+  Impl* impl = GetImpl();
+  if (!impl->mAttrCount && !impl->mMappedAttributeBits) {
+    Clear();
     return;
   }
 
   // Nothing to do.
-  if (mImpl->mAttrCount == mImpl->mCapacity) {
+  if (impl->mAttrCount == impl->mCapacity) {
     return;
   }
 
+  // Extract the real pointer for realloc
   Impl* oldImpl = mImpl.release();
-  Impl* impl = static_cast<Impl*>(
+
+  Impl* newImpl = static_cast<Impl*>(
       realloc(oldImpl, Impl::AllocationSizeForAttributes(oldImpl->mAttrCount)));
-  if (!impl) {
-    mImpl.reset(oldImpl);
+  if (!newImpl) {
+    SetImpl(oldImpl);
     return;
   }
-  impl->mCapacity = impl->mAttrCount;
-  mImpl.reset(impl);
+  newImpl->mCapacity = newImpl->mAttrCount;
+  SetImpl(newImpl);
 }
 
 nsresult AttrArray::EnsureCapacityToClone(const AttrArray& aOther) {
-  MOZ_ASSERT(!mImpl,
+  MOZ_ASSERT(!HasImpl(),
              "AttrArray::EnsureCapacityToClone requires the array be empty "
              "when called");
 
@@ -276,13 +318,15 @@ nsresult AttrArray::EnsureCapacityToClone(const AttrArray& aOther) {
 
   // No need to use a CheckedUint32 because we are cloning. We know that we
   // have already allocated an AttrArray of this size.
-  mImpl.reset(
-      static_cast<Impl*>(malloc(Impl::AllocationSizeForAttributes(attrCount))));
-  NS_ENSURE_TRUE(mImpl, NS_ERROR_OUT_OF_MEMORY);
+  Impl* impl =
+      static_cast<Impl*>(malloc(Impl::AllocationSizeForAttributes(attrCount)));
+  NS_ENSURE_TRUE(impl, NS_ERROR_OUT_OF_MEMORY);
 
-  mImpl->mMappedAttributeBits = 0;
-  mImpl->mCapacity = attrCount;
-  mImpl->mAttrCount = 0;
+  impl->mMappedAttributeBits = 0;
+  impl->mCapacity = attrCount;
+  impl->mAttrCount = 0;
+  impl->mSubtreeBloomFilter = aOther.GetSubtreeBloomFilter();
+  SetImpl(impl);
 
   return NS_OK;
 }
@@ -291,7 +335,7 @@ bool AttrArray::GrowBy(uint32_t aGrowSize) {
   const uint32_t kLinearThreshold = 16;
   const uint32_t kLinearGrowSize = 4;
 
-  CheckedUint32 capacity = mImpl ? mImpl->mCapacity : 0;
+  CheckedUint32 capacity = HasImpl() ? GetImpl()->mCapacity : 0;
   CheckedUint32 minCapacity = capacity;
   minCapacity += aGrowSize;
   if (!minCapacity.isValid()) {
@@ -317,7 +361,7 @@ bool AttrArray::GrowBy(uint32_t aGrowSize) {
 }
 
 bool AttrArray::GrowTo(uint32_t aCapacity) {
-  uint32_t oldCapacity = mImpl ? mImpl->mCapacity : 0;
+  uint32_t oldCapacity = HasImpl() ? GetImpl()->mCapacity : 0;
   if (aCapacity <= oldCapacity) {
     return true;
   }
@@ -336,32 +380,46 @@ bool AttrArray::GrowTo(uint32_t aCapacity) {
   MOZ_ASSERT(sizeInBytes.value() ==
              Impl::AllocationSizeForAttributes(aCapacity));
 
-  const bool needToInitialize = !mImpl;
-  Impl* oldImpl = mImpl.release();
+  const bool needToInitialize = !HasImpl();
+  uint64_t oldBloom = 0xFFFFFFFFFFFFFFFFULL;
+  Impl* oldImpl = nullptr;
+
+  if (HasImpl()) {
+    // We have a real Impl pointer, extract it for realloc
+    oldImpl = mImpl.release();
+  } else if (HasTaggedBloom()) {
+    // Preserve bloom filter from the tagged value
+    oldBloom = GetTaggedBloom();
+  }
+
   Impl* newImpl = static_cast<Impl*>(realloc(oldImpl, sizeInBytes.value()));
   if (!newImpl) {
-    mImpl.reset(oldImpl);
+    if (oldImpl) {
+      SetImpl(oldImpl);
+    } else if (HasTaggedBloom()) {
+      SetTaggedBloom(oldBloom);
+    }
     return false;
   }
 
-  mImpl.reset(newImpl);
-
   // Set initial counts if we didn't have a buffer before
   if (needToInitialize) {
-    mImpl->mMappedAttributeBits = 0;
-    mImpl->mAttrCount = 0;
+    newImpl->mMappedAttributeBits = 0;
+    newImpl->mAttrCount = 0;
+    newImpl->mSubtreeBloomFilter = oldBloom;
   }
 
-  mImpl->mCapacity = aCapacity;
+  newImpl->mCapacity = aCapacity;
+  SetImpl(newImpl);
   return true;
 }
 
 size_t AttrArray::SizeOfExcludingThis(
     mozilla::MallocSizeOf aMallocSizeOf) const {
-  if (!mImpl) {
+  if (!HasImpl()) {
     return 0;
   }
-  size_t n = aMallocSizeOf(mImpl.get());
+  size_t n = aMallocSizeOf(GetImpl());
   for (const InternalAttr& attr : Attrs()) {
     n += attr.mValue.SizeOfExcludingThis(aMallocSizeOf);
   }

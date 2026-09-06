@@ -30,17 +30,13 @@
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { FormAutofill } from "resource://autofill/FormAutofill.sys.mjs";
 import { FormAutofillUtils } from "resource://gre/modules/shared/FormAutofillUtils.sys.mjs";
+import { AutofillDataTypes } from "resource://gre/modules/shared/AutofillDataTypes.sys.mjs";
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   AddressComponent: "resource://gre/modules/shared/AddressComponent.sys.mjs",
-  // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
-  BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
-  FormAutofillAddressSection:
-    "resource://gre/modules/shared/FormAutofillSection.sys.mjs",
-  FormAutofillCreditCardSection:
-    "resource://gre/modules/shared/FormAutofillSection.sys.mjs",
+  FormAutofillML: "resource://gre/modules/shared/FormAutofillML.sys.mjs",
   FormAutofillHeuristics:
     "resource://gre/modules/shared/FormAutofillHeuristics.sys.mjs",
   FormAutofillSection:
@@ -48,10 +44,26 @@ ChromeUtils.defineESModuleGetters(lazy, {
   FormAutofillPreferences:
     "resource://autofill/FormAutofillPreferences.sys.mjs",
   FormAutofillPrompter: "resource://autofill/FormAutofillPrompter.sys.mjs",
+  PassportRecord: "resource://gre/modules/shared/PassportRecord.sys.mjs",
   FirefoxRelay: "resource://gre/modules/FirefoxRelay.sys.mjs",
   LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
-  NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
-  OSKeyStore: "resource://gre/modules/OSKeyStore.sys.mjs",
+});
+
+// TODO Bug 2064859 - refactor this out as external provider
+ChromeUtils.defineLazyGetter(lazy, "SmartFormFillAutocomplete", () => {
+  if (AppConstants.MOZ_BUILD_APP != "browser") {
+    return undefined;
+  }
+
+  try {
+    return ChromeUtils.importESModule(
+      // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
+      "moz-src:///browser/components/aiwindow/ui/modules/SmartFormFillAutocomplete.sys.mjs"
+    ).SmartFormFillAutocomplete;
+  } catch (error) {
+    console.error(`Unable to load SmartFormFillAutocomplete.sys.mjs: ${error}`);
+  }
+  return undefined;
 });
 
 ChromeUtils.defineLazyGetter(lazy, "log", () =>
@@ -65,6 +77,16 @@ const { ADDRESSES_COLLECTION_NAME, CREDITCARDS_COLLECTION_NAME, FIELD_STATES } =
   FormAutofillUtils;
 
 let gMessageObservers = new Set();
+
+const FORM_AUTOFILL_MESSAGES = new Set([
+  "FormAutofill:InitStorage",
+  "FormAutofill:OnFormSubmit",
+  "FormAutofill:FieldsIdentified",
+  "FormAutofill:OnFieldsDetected",
+  "FormAutofill:OnFieldsUpdated",
+  "FormAutofill:FieldFilledModified",
+  "FormAutofill:FieldsUpdatedDuringAutofill",
+]);
 
 export let FormAutofillStatus = {
   _initialized: false,
@@ -83,6 +105,7 @@ export let FormAutofillStatus = {
     }
     this._initialized = true;
 
+    Services.obs.addObserver(this, "passwordsAutofill-pane-loaded");
     Services.obs.addObserver(this, "privacy-pane-loaded");
 
     // Observing the pref and storage changes
@@ -90,7 +113,7 @@ export let FormAutofillStatus = {
     Services.obs.addObserver(this, "formautofill-storage-changed");
 
     // Only listen to credit card related preference if it is available
-    if (FormAutofill.isAutofillCreditCardsAvailable) {
+    if (FormAutofill.isAutofillTypeAvailable(AutofillDataTypes.CREDIT_CARD)) {
       Services.prefs.addObserver(ENABLED_AUTOFILL_CREDITCARDS_PREF, this);
     }
   },
@@ -111,11 +134,12 @@ export let FormAutofillStatus = {
     this._active = null;
 
     Services.obs.removeObserver(this, "privacy-pane-loaded");
+    Services.obs.removeObserver(this, "passwordsAutofill-pane-loaded");
     Services.prefs.removeObserver(ENABLED_AUTOFILL_ADDRESSES_PREF, this);
     Services.obs.removeObserver(this, "formautofill-storage-changed");
     Services.wm.removeListener(this);
 
-    if (FormAutofill.isAutofillCreditCardsAvailable) {
+    if (FormAutofill.isAutofillTypeAvailable(AutofillDataTypes.CREDIT_CARD)) {
       Services.prefs.removeObserver(ENABLED_AUTOFILL_CREDITCARDS_PREF, this);
     }
   },
@@ -169,17 +193,17 @@ export let FormAutofillStatus = {
   async updateSavedFieldNames() {
     lazy.log.debug("updateSavedFieldNames");
 
-    let savedFieldNames;
-    const addressNames =
-      await lazy.gFormAutofillStorage.addresses.getSavedFieldNames();
-
-    // Don't access the credit cards store unless it is enabled.
-    if (FormAutofill.isAutofillCreditCardsAvailable) {
-      const creditCardNames =
-        await lazy.gFormAutofillStorage.creditCards.getSavedFieldNames();
-      savedFieldNames = new Set([...addressNames, ...creditCardNames]);
-    } else {
-      savedFieldNames = addressNames;
+    const savedFieldNames = new Set();
+    for (const type of AutofillDataTypes.all) {
+      // Don't access a data type's store unless it is available.
+      if (!FormAutofill.isAutofillTypeAvailable(type.id)) {
+        continue;
+      }
+      const names =
+        await lazy.gFormAutofillStorage[
+          type.collectionName
+        ].getSavedFieldNames();
+      names.forEach(name => savedFieldNames.add(name));
     }
 
     Services.ppmm.sharedData.set(
@@ -194,18 +218,28 @@ export let FormAutofillStatus = {
   async observe(subject, topic, data) {
     lazy.log.debug("observe:", topic, "with data:", data);
 
-    if (
-      !FormAutofill.isAutofillCreditCardsAvailable &&
-      !FormAutofill.isAutofillAddressesAvailable
-    ) {
+    if (!FormAutofill.isAnyAutofillFeatureAvailable) {
       return;
     }
 
     switch (topic) {
       case "privacy-pane-loaded": {
+        if (
+          !Services.prefs.getBoolPref(
+            "browser.settings-redesign.enabled",
+            false
+          )
+        ) {
+          let formAutofillPreferences = new lazy.FormAutofillPreferences();
+          let document = subject.document;
+          formAutofillPreferences.init(document);
+        }
+        break;
+      }
+
+      case "passwordsAutofill-pane-loaded": {
         let formAutofillPreferences = new lazy.FormAutofillPreferences();
-        let document = subject.document;
-        formAutofillPreferences.init(document);
+        formAutofillPreferences.init(subject.document);
         break;
       }
 
@@ -251,6 +285,8 @@ ChromeUtils.defineLazyGetter(lazy, "gFormAutofillStorage", () => {
 });
 
 export class FormAutofillParent extends JSWindowActorParent {
+  static #mlFeature;
+
   constructor() {
     super();
     FormAutofillStatus.init();
@@ -295,10 +331,11 @@ export class FormAutofillParent extends JSWindowActorParent {
    * @param   {object} message.data The data of the message.
    */
   async receiveMessage({ name, data }) {
-    if (
-      !FormAutofill.isAutofillCreditCardsAvailable &&
-      !FormAutofill.isAutofillAddressesAvailable
-    ) {
+    if (!FormAutofill.isAnyAutofillFeatureAvailable) {
+      return undefined;
+    }
+
+    if (!FORM_AUTOFILL_MESSAGES.has(name) && !Cu.isInAutomation) {
       return undefined;
     }
 
@@ -360,18 +397,18 @@ export class FormAutofillParent extends JSWindowActorParent {
         break;
       }
       case "FormAutofill:SaveCreditCard": {
-        // Setting the first parameter of OSKeyStore.ensurLoggedIn as false
-        // since this case only called in tests. Also the reason why we're not calling FormAutofill.verifyUserOSAuth.
-        if (!(await lazy.OSKeyStore.ensureLoggedIn(false)).authenticated) {
-          lazy.log.warn("User canceled encryption login");
-          return undefined;
-        }
         await lazy.gFormAutofillStorage.creditCards.add(data.creditcard);
         break;
       }
       case "FormAutofill:RemoveAddresses": {
-        data.guids.forEach(guid =>
-          lazy.gFormAutofillStorage.addresses.remove(guid)
+        // Not removeMany(): that one is the migration's silent bulk delete,
+        // while the test helpers wait for one formautofill-storage-changed per
+        // guid. The Rust store removes asynchronously, so forEach would drop
+        // the promises and return before any record was deleted.
+        await Promise.all(
+          data.guids.map(guid =>
+            lazy.gFormAutofillStorage.addresses.remove(guid)
+          )
         );
         break;
       }
@@ -463,6 +500,10 @@ export class FormAutofillParent extends JSWindowActorParent {
       }
 
       const iframeBC = BrowsingContext.get(field.browsingContextId);
+      if (!iframeBC || iframeBC.parent != browsingContext) {
+        continue;
+      }
+
       const [fields] = await this.identifyAllSubTreeFields(
         iframeBC,
         focusedBCId,
@@ -493,6 +534,24 @@ export class FormAutofillParent extends JSWindowActorParent {
     // At this point we have identified all the fields that are under the same
     // root element. We can run section classification heuristic now.
     return lazy.FormAutofillSection.classifySections(fieldDetails, options);
+  }
+
+  /**
+   * When ML inference is enabled, we skip the regular expression-based heuristics
+   * in the child process, so some field names may be missing by the time the
+   * fields reach the parent process. This function runs ML inference to fill in
+   * those missing field names.
+   *
+   * @param {Array<FieldDetail>} fieldDetails
+   *        An array of the identified fields.
+   */
+  async runMLInference(fieldDetails) {
+    if (!FormAutofillUtils.useMLInference) {
+      return;
+    }
+
+    FormAutofillParent.#mlFeature ??= new lazy.FormAutofillML();
+    await FormAutofillParent.#mlFeature.detectFields(fieldDetails);
   }
 
   /**
@@ -528,6 +587,8 @@ export class FormAutofillParent extends JSWindowActorParent {
       focusedBCId,
       fieldsIncludeIframe
     );
+
+    await this.runMLInference(fieldDetails);
 
     // Now we have collected all the fields for the form, run parsing heuristics
     // to update the field name based on surrounding fields.
@@ -623,8 +684,7 @@ export class FormAutofillParent extends JSWindowActorParent {
       return;
     }
 
-    const address = [];
-    const creditCard = [];
+    const submittedRecords = [];
 
     // Caching the submitted data as actors may be destroyed immediately after
     // submission.
@@ -672,13 +732,11 @@ export class FormAutofillParent extends JSWindowActorParent {
         continue;
       }
 
-      if (section instanceof lazy.FormAutofillAddressSection) {
-        address.push(secRecord);
-      } else if (section instanceof lazy.FormAutofillCreditCardSection) {
-        creditCard.push(secRecord);
-      } else {
+      const typeId = section.type;
+      if (!AutofillDataTypes.get(typeId)) {
         throw new Error("Unknown section type");
       }
+      submittedRecords.push({ typeId, record: secRecord });
     }
 
     try {
@@ -699,31 +757,26 @@ export class FormAutofillParent extends JSWindowActorParent {
 
     // Transmit the telemetry immediately in the meantime form submitted, and handle
     // these pending doorhangers later.
-    await Promise.all(
-      [
-        await Promise.all(
-          address.map(addrRecord => this._onAddressSubmit(addrRecord, browser))
-        ),
-        await Promise.all(
-          creditCard.map(ccRecord =>
-            this._onCreditCardSubmit(ccRecord, browser)
-          )
-        ),
-      ]
-        .map(pendingDoorhangers => {
-          return pendingDoorhangers.filter(
-            pendingDoorhanger =>
-              !!pendingDoorhanger && typeof pendingDoorhanger == "function"
-          );
-        })
-        .map(pendingDoorhangers =>
-          (async () => {
-            for (const showDoorhanger of pendingDoorhangers) {
-              await showDoorhanger();
-            }
-          })()
-        )
+    const submitHandlerByType = {
+      [AutofillDataTypes.ADDRESS]: record =>
+        this._onAddressSubmit(record, browser),
+      [AutofillDataTypes.CREDIT_CARD]: record =>
+        this._onCreditCardSubmit(record, browser),
+      [AutofillDataTypes.PASSPORT]: record =>
+        this._onPassportSubmit(record, browser),
+    };
+
+    const pendingDoorhangers = await Promise.all(
+      submittedRecords.map(({ typeId, record }) =>
+        submitHandlerByType[typeId](record)
+      )
     );
+
+    for (const showDoorhanger of pendingDoorhangers) {
+      if (typeof showDoorhanger == "function") {
+        await showDoorhanger();
+      }
+    }
   }
 
   /**
@@ -776,7 +829,10 @@ export class FormAutofillParent extends JSWindowActorParent {
 
       if (
         collectionName == ADDRESSES_COLLECTION_NAME &&
-        !FormAutofill.isAutofillAddressesAvailableInCountry(record.country)
+        !FormAutofill.isAutofillTypeAvailableInCountry(
+          AutofillDataTypes.ADDRESS,
+          record.country
+        )
       ) {
         // Address autofill isn't supported for the record's country so we don't
         // want to attempt to potentially incorrectly fill the address fields.
@@ -795,7 +851,7 @@ export class FormAutofillParent extends JSWindowActorParent {
    */
 
   async _onAddressSubmit(address, browser) {
-    if (!FormAutofill.isAutofillAddressesEnabled) {
+    if (!FormAutofill.isAutofillTypeEnabled(AutofillDataTypes.ADDRESS)) {
       return false;
     }
 
@@ -841,7 +897,7 @@ export class FormAutofillParent extends JSWindowActorParent {
         lazy.log.debug(
           "A duplicated address record is found, do not show the prompt"
         );
-        storage.notifyUsed(record.guid);
+        await storage.notifyUsed(record.guid);
         return false;
       }
 
@@ -890,7 +946,8 @@ export class FormAutofillParent extends JSWindowActorParent {
     }
 
     return async () => {
-      await lazy.FormAutofillPrompter.promptToSaveAddress(
+      await lazy.FormAutofillPrompter.promptToSave(
+        AutofillDataTypes.ADDRESS,
         browser,
         storage,
         address.flowId,
@@ -919,7 +976,7 @@ export class FormAutofillParent extends JSWindowActorParent {
     }
 
     // Suppress the pending doorhanger from showing up if user disabled credit card in previous doorhanger.
-    if (!FormAutofill.isAutofillCreditCardsEnabled) {
+    if (!FormAutofill.isAutofillTypeEnabled(AutofillDataTypes.CREDIT_CARD)) {
       return false;
     }
 
@@ -928,11 +985,52 @@ export class FormAutofillParent extends JSWindowActorParent {
       (await storage.getDuplicateRecords(creditCard.record).next()).value ?? {};
 
     return async () => {
-      await lazy.FormAutofillPrompter.promptToSaveCreditCard(
+      await lazy.FormAutofillPrompter.promptToSave(
+        AutofillDataTypes.CREDIT_CARD,
         browser,
         storage,
         creditCard.flowId,
         { oldRecord: duplicateRecord, newRecord: creditCard.record }
+      );
+    };
+  }
+
+  async _onPassportSubmit(passport, browser) {
+    if (!FormAutofill.isAutofillTypeEnabled(AutofillDataTypes.PASSPORT)) {
+      return false;
+    }
+
+    // Normalize the captured record to the shape the doorhanger expects. A form
+    // may capture the name as split parts (given/additional/family) instead of
+    // a combined `passport-name`, so merge them for the single name field.
+    // Conversely, a date may be captured as a single combined field instead of
+    // separate month/day/year parts, so split it for the per-part date inputs.
+    try {
+      lazy.PassportRecord.mergeNameComponents(passport.record);
+      lazy.PassportRecord.splitDateComponents(passport.record);
+    } catch (e) {
+      lazy.log.warn("Failed to normalize the captured passport record: ", e);
+      return false;
+    }
+
+    const storage = lazy.gFormAutofillStorage.passports;
+
+    // If the passport already exists in storage, don't bother showing the
+    // prompt. Passports are deduped by passport number.
+    const matchRecord = (await storage.getMatchRecords(passport.record).next())
+      .value;
+    if (matchRecord) {
+      storage.notifyUsed(matchRecord.guid);
+      return false;
+    }
+
+    return async () => {
+      await lazy.FormAutofillPrompter.promptToSave(
+        AutofillDataTypes.PASSPORT,
+        browser,
+        storage,
+        passport.flowId,
+        { newRecord: passport.record }
       );
     };
   }
@@ -943,7 +1041,12 @@ export class FormAutofillParent extends JSWindowActorParent {
     }
 
     // Do not save address for regions that we don't support
-    if (!FormAutofill.isAutofillAddressesAvailableInCountry(record.country)) {
+    if (
+      !FormAutofill.isAutofillTypeAvailableInCountry(
+        AutofillDataTypes.ADDRESS,
+        record.country
+      )
+    ) {
       lazy.log.debug(
         `Do not show the address capture prompt for unsupported regions - ${record.country}`
       );
@@ -989,7 +1092,7 @@ export class FormAutofillParent extends JSWindowActorParent {
    *         `allFieldNames` is an array containing all the matched field name found in this section.
    */
   async searchAutoCompleteEntries(searchString, options) {
-    const { fieldName, elementId, scenarioName } = options;
+    const { fieldName, elementId, inputType, scenarioName } = options;
 
     const section = this.getSectionByElementId(elementId);
     if (!section.isValidSection() || !section.isEnabled()) {
@@ -1007,19 +1110,30 @@ export class FormAutofillParent extends JSWindowActorParent {
       hasInput: !!searchString?.length,
     });
 
+    const smartFormFillPromise =
+      lazy.SmartFormFillAutocomplete?.autocompleteItemsAsync({
+        browsingContext: this.browsingContext,
+        searchString,
+        inputType,
+        focusElementId: elementId,
+      }) ?? [];
+
     // Retrieve information for the autocomplete entry
     const recordsPromise = this.getRecords({
       searchString,
       fieldName,
     });
 
-    const [records, externalEntries] = await Promise.all([
+    const [records, relayEntries, smartFormFillEntries] = await Promise.all([
       recordsPromise,
       relayPromise,
+      smartFormFillPromise,
     ]);
+    const externalEntries = [...relayEntries, ...smartFormFillEntries];
 
     // Sort addresses by timeLastUsed for showing the lastest used address at top.
     records.sort((a, b) => b.timeLastUsed - a.timeLastUsed);
+
     return { records, externalEntries, allFieldNames: section.allFieldNames };
   }
 
@@ -1029,11 +1143,13 @@ export class FormAutofillParent extends JSWindowActorParent {
    */
   async onAutoCompleteEntrySelected(message, data) {
     switch (message) {
-      case "FormAutofill:OpenPreferences": {
-        const win = lazy.BrowserWindowTracker.getTopWindow({
-          allowFromInactiveWorkspace: true,
-        });
-        win.openPreferences("privacy-form-autofill");
+      case "FormAutofill:OpenPaymentPreferences": {
+        lazy.FormAutofillPreferences.openPaymentPreference();
+        break;
+      }
+
+      case "FormAutofill:OpenAddressPreferences": {
+        lazy.FormAutofillPreferences.openAddressPreference();
         break;
       }
 
@@ -1078,7 +1194,13 @@ export class FormAutofillParent extends JSWindowActorParent {
   #FIELDS_FILLED_WHEN_SAME_ORIGIN = ["cc-number"];
 
   /**
-   * Determines if the field should be autofilled based on its origin.
+   * Determines whether a field is eligible for autofill based on its origin.
+   *
+   * The rules for autofill eligibility are as follows:
+   * 1. Autofill is permitted if the field resides in a frame that shares the same origin
+   *    as the field that triggered the autofill action.
+   * 2. Autofill is also allowed if the field is same-origin with the top-level frame
+   *    and is not designated as a credit card number field.
    *
    * @param {BorwsingContext} bc
    *        The browsing context the field is in.
@@ -1226,12 +1348,6 @@ export class FormAutofillParent extends JSWindowActorParent {
       // For testing only
       Services.obs.notifyObservers(null, "formautofill-autofill-complete");
       return;
-    }
-
-    if (AppConstants.platform !== "android") {
-      lazy.NimbusFeatures["address-autofill-feature"].recordExposureEvent({
-        once: true,
-      });
     }
 
     const msg = "FormAutofill:FillFields";
@@ -1410,6 +1526,8 @@ export class FormAutofillParent extends JSWindowActorParent {
         msg
       );
 
+      await this.runMLInference(fieldDetails);
+
       fieldDetails.forEach(field => {
         const overwriteField = overwriteFieldDetails.find(
           ow => ow.inspectId == field.inspectId
@@ -1431,8 +1549,11 @@ export class FormAutofillParent extends JSWindowActorParent {
   }
 
   #getTemporaryRecordForTab(collectionName) {
-    // The temporary record is stored in the top-level actor.
-    const topBC = this.browsingContext.top;
+    // The temporary record is stored in the top-level actor. Reached through
+    // manager, which is null once the window has gone away, where
+    // browsingContext throws instead: getRecords() awaits before calling this,
+    // so the tab can close in between.
+    const topBC = this.manager?.browsingContext.top;
     const actor = FormAutofillParent.getActor(topBC);
     return actor?.temporaryRecords?.[collectionName] ?? [];
   }
@@ -1447,10 +1568,9 @@ export class FormAutofillParent extends JSWindowActorParent {
   async setTemporaryRecordsForTab(records) {
     const topBC = this.browsingContext.top;
     const actor = FormAutofillParent.getActor(topBC);
-    actor.temporaryRecords = {
-      [ADDRESSES_COLLECTION_NAME]: [],
-      [CREDITCARDS_COLLECTION_NAME]: [],
-    };
+    actor.temporaryRecords = Object.fromEntries(
+      AutofillDataTypes.all.map(type => [type.collectionName, []])
+    );
 
     for (const record of records) {
       const fields = Object.keys(record);
@@ -1460,10 +1580,7 @@ export class FormAutofillParent extends JSWindowActorParent {
       const collection = FormAutofillUtils.getCollectionNameFromFieldName(
         fields[0]
       );
-      const storage =
-        collection == ADDRESSES_COLLECTION_NAME
-          ? lazy.gFormAutofillStorage.addresses
-          : lazy.gFormAutofillStorage.creditCards;
+      const storage = lazy.gFormAutofillStorage[collection];
       // Since we don't define the pattern for the passed 'record',
       // we need to normalize it first.
       storage._normalizeRecord(record);

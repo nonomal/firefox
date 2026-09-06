@@ -76,6 +76,7 @@ const LOAD_CAUSE_STRINGS = {
   [Ci.nsIContentPolicy.TYPE_FONT]: "font",
   [Ci.nsIContentPolicy.TYPE_MEDIA]: "media",
   [Ci.nsIContentPolicy.TYPE_WEBSOCKET]: "websocket",
+  [Ci.nsIContentPolicy.TYPE_WEB_TRANSPORT]: "webtransport",
   [Ci.nsIContentPolicy.TYPE_CSP_REPORT]: "csp",
   [Ci.nsIContentPolicy.TYPE_XSLT]: "xslt",
   [Ci.nsIContentPolicy.TYPE_BEACON]: "beacon",
@@ -85,17 +86,32 @@ const LOAD_CAUSE_STRINGS = {
   [Ci.nsIContentPolicy.TYPE_WEB_IDENTITY]: "webidentity",
 };
 
-function causeTypeToString(causeType, loadFlags, internalContentPolicyType) {
+const REDIRECT_CODES = [
+  301, // HTTP Moved Permanently
+  302, // HTTP Found
+  303, // HTTP See Other
+  307, // HTTP Temporary Redirect
+  308, // HTTP Moved Permanently
+];
+
+function getChannelCauseType(channel) {
+  if (channel.loadInfo.isInDevToolsContext) {
+    return "devtools";
+  }
+
+  const { externalContentPolicyType, internalContentPolicyType } =
+    channel.loadInfo;
+
   let prefix = "";
   if (
-    (causeType == Ci.nsIContentPolicy.TYPE_IMAGESET ||
+    (externalContentPolicyType == Ci.nsIContentPolicy.TYPE_IMAGESET ||
       internalContentPolicyType == Ci.nsIContentPolicy.TYPE_INTERNAL_IMAGE) &&
-    loadFlags & Ci.nsIRequest.LOAD_BACKGROUND
+    channel.loadFlags & Ci.nsIRequest.LOAD_BACKGROUND
   ) {
     prefix = "lazy-";
   }
 
-  return prefix + LOAD_CAUSE_STRINGS[causeType] || "unknown";
+  return prefix + LOAD_CAUSE_STRINGS[externalContentPolicyType] || "unknown";
 }
 
 function stringToCauseType(value) {
@@ -106,8 +122,8 @@ function stringToCauseType(value) {
 
 function isChannelFromSystemPrincipal(channel) {
   let principal;
-
-  if (channel.isDocument) {
+  const channelURI = channel.originalURI || channel.URI;
+  if (channelURI?.spec.startsWith("view-source:") || channel.isDocument) {
     // The loadingPrincipal is the principal where the request will be used.
     principal = channel.loadInfo.loadingPrincipal;
   } else {
@@ -135,11 +151,7 @@ function isChromeFileChannel(channel) {
 }
 
 function isPrivilegedChannel(channel) {
-  return (
-    isChannelFromSystemPrincipal(channel) ||
-    isChromeFileChannel(channel) ||
-    channel.loadInfo.isInDevToolsContext
-  );
+  return isChannelFromSystemPrincipal(channel) || isChromeFileChannel(channel);
 }
 
 /**
@@ -160,8 +172,8 @@ function getChannelBrowsingContextID(channel) {
     return channel.loadInfo.browsingContextID;
   }
 
-  if (channel.loadInfo.workerAssociatedBrowsingContextID) {
-    return channel.loadInfo.workerAssociatedBrowsingContextID;
+  if (channel.loadInfo.associatedBrowsingContextID) {
+    return channel.loadInfo.associatedBrowsingContextID;
   }
 
   // At least WebSocket channel aren't having a browsingContextID set on their loadInfo
@@ -210,7 +222,8 @@ function isPreloadRequest(channel) {
     type == Ci.nsIContentPolicy.TYPE_INTERNAL_IMAGE_PRELOAD ||
     type == Ci.nsIContentPolicy.TYPE_INTERNAL_STYLESHEET_PRELOAD ||
     type == Ci.nsIContentPolicy.TYPE_INTERNAL_FONT_PRELOAD ||
-    type == Ci.nsIContentPolicy.TYPE_INTERNAL_JSON_PRELOAD
+    type == Ci.nsIContentPolicy.TYPE_INTERNAL_JSON_PRELOAD ||
+    type == Ci.nsIContentPolicy.TYPE_INTERNAL_TEXT_PRELOAD
   );
 }
 
@@ -224,25 +237,11 @@ function isPreloadRequest(channel) {
  *          - type {string} cause type as string
  */
 function getCauseDetails(channel) {
-  // Determine the cause and if this is an XHR request.
-  let causeType = Ci.nsIContentPolicy.TYPE_OTHER;
-  let causeUri = null;
-
-  if (channel.loadInfo) {
-    causeType = channel.loadInfo.externalContentPolicyType;
-    const { loadingPrincipal } = channel.loadInfo;
-    if (loadingPrincipal) {
-      causeUri = loadingPrincipal.spec;
-    }
-  }
-
   return {
-    loadingDocumentUri: causeUri,
-    type: causeTypeToString(
-      causeType,
-      channel.loadFlags,
-      channel.loadInfo.internalContentPolicyType
-    ),
+    loadingDocumentUri: channel.loadInfo.loadingPrincipal
+      ? channel.loadInfo.loadingPrincipal.spec
+      : null,
+    type: getChannelCauseType(channel),
   };
 }
 
@@ -561,20 +560,19 @@ function matchRequest(channel, filters) {
     }
 
     if (type == "browser-element") {
-      if (!channel.loadInfo.browsingContext) {
+      let browsingContext =
+        channel.loadInfo.browsingContext ||
+        channel.loadInfo.associatedBrowsingContext;
+
+      if (!browsingContext) {
         const topFrame = lazy.NetworkHelper.getTopFrameForRequest(channel);
-        // `topFrame` is typically null for some chrome requests like favicons
-        // And its `browsingContext` attribute might be null if the request happened
+        // `topFrame` is typically null for some chrome requests like favicons,
+        // and its `browsingContext` attribute might be null if the request happened
         // while the tab is being closed.
-        return (
-          topFrame?.browsingContext?.browserId ==
-          filters.sessionContext.browserId
-        );
+        browsingContext = topFrame?.browsingContext;
       }
-      return (
-        channel.loadInfo.browsingContext.browserId ==
-        filters.sessionContext.browserId
-      );
+
+      return browsingContext?.browserId == filters.sessionContext.browserId;
     }
     if (type == "webextension") {
       return (
@@ -614,7 +612,8 @@ function matchRequest(channel, filters) {
 }
 
 function getBlockedReason(channel, fromCache = false) {
-  let blockingExtension, blockedReason;
+  let blockedReason;
+  const extension = {};
   const { status } = channel;
 
   try {
@@ -622,15 +621,27 @@ function getBlockedReason(channel, fromCache = false) {
     const properties = request.QueryInterface(Ci.nsIPropertyBag);
 
     blockedReason = request.loadInfo.requestBlockingReason;
-    blockingExtension = properties.getProperty("cancelledByExtension");
+    extension.blocking = properties.getProperty("cancelledByExtension");
 
     // WebExtensionPolicy is not available for workers
     if (typeof WebExtensionPolicy !== "undefined") {
-      blockingExtension = WebExtensionPolicy.getByID(blockingExtension).name;
+      extension.blocking = WebExtensionPolicy.getByID(extension.blocking).name;
     }
   } catch (err) {
     // "cancelledByExtension" doesn't have to be available.
   }
+
+  if (
+    blockedReason === Ci.nsILoadInfo.BLOCKING_REASON_CLASSIFY_HARMFULADDON_URI
+  ) {
+    try {
+      const properties = channel.QueryInterface(Ci.nsIPropertyBag);
+      extension.blocked = properties.getProperty("blockedExtension");
+    } catch (err) {
+      // "blockedExtension" doesn't have to be available.
+    }
+  }
+
   // These are platform errors which are not exposed to the users,
   // usually the requests (with these errors) might be displayed with various
   // other status codes.
@@ -666,7 +677,7 @@ function getBlockedReason(channel, fromCache = false) {
     blockedReason = ChromeUtils.getXPCOMErrorName(status);
   }
 
-  return { blockingExtension, blockedReason };
+  return { extension, blockedReason };
 }
 
 function getCharset(channel) {
@@ -853,7 +864,15 @@ async function decodeCompressedStream(stream, length, encodings) {
         _length,
         data
       ) {
-        resolve(String.fromCharCode.apply(this, data));
+        // `data`` might be a very large array, chunk calls to fromCharCode to
+        // avoid "RangeError: too many arguments provided for a function call".
+        const CHUNK_SIZE = 65536;
+        let result = "";
+        for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+          const chunk = data.slice(i, i + CHUNK_SIZE);
+          result += String.fromCharCode.apply(null, chunk);
+        }
+        resolve(result);
       },
     });
   });
@@ -882,6 +901,10 @@ async function decodeCompressedStream(stream, length, encodings) {
   return onDecodingComplete;
 }
 
+function isRedirect(responseStatus) {
+  return REDIRECT_CODES.includes(responseStatus);
+}
+
 /**
  * Remove any frames in a stack that are related to chrome resource files.
  *
@@ -904,7 +927,6 @@ function removeChromeFrames(stacktrace) {
 
 export const NetworkUtils = {
   ACCEPTED_COMPRESSION_ENCODINGS,
-  causeTypeToString,
   decodeResponseChunks,
   fetchRequestHeadersAndCookies,
   fetchResponseHeadersAndCookies,
@@ -924,6 +946,7 @@ export const NetworkUtils = {
   isFromCache,
   isNavigationRequest,
   isPreloadRequest,
+  isRedirect,
   isThirdPartyTrackingResource,
   matchRequest,
   NETWORK_EVENT_TYPES,

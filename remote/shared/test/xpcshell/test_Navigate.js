@@ -20,7 +20,7 @@ const {
 
 const { isInitialDocument, isUncommittedInitialDocument } =
   ChromeUtils.importESModule(
-    "chrome://remote/content/shared/messagehandler/transports/BrowsingContextUtils.sys.mjs"
+    "chrome://remote/content/shared/BrowsingContextUtils.sys.mjs"
   );
 
 const LOAD_FLAG_ERROR_PAGE = 0x10000;
@@ -30,6 +30,9 @@ const INITIAL_URI = Services.io.newURI("about:blank");
 const TARGET_URI = Services.io.newURI("http://foo.cheese/");
 const TARGET_URI_ERROR_PAGE = Services.io.newURI("doesnotexist://");
 const TARGET_URI_WITH_HASH = Services.io.newURI("http://foo.cheese/#foo");
+const TARGET_URI_FROM_NAVIGATION_COMMITTED = Services.io.newURI(
+  "http://foo.cheese/#bar"
+);
 
 function wait(time) {
   // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
@@ -131,6 +134,11 @@ class MockWebProgress {
     this.isLoadingDocument = false;
     this.documentRequest = null;
 
+    if (loadType & LOAD_FLAG_ERROR_PAGE) {
+      // loadType must be set before sending the stop state.
+      this.loadType = 0x10000;
+    }
+
     this.listener?.onStateChange(
       this,
       this.documentRequest,
@@ -139,7 +147,6 @@ class MockWebProgress {
     );
 
     if (loadType & LOAD_FLAG_ERROR_PAGE) {
-      this.loadType = 0x10000;
       return this.sendLocationChange({
         flag: Ci.nsIWebProgressListener.LOCATION_CHANGE_ERROR_PAGE,
       });
@@ -694,19 +701,31 @@ add_task(async function test_ProgressListener_resolveWhenCommitted() {
   // Emit an unexpected navigation-committed for the other navigation id.
   mockNavigationManager.emit("navigation-committed", {
     navigationId: navigationId2,
+    url: TARGET_URI_FROM_NAVIGATION_COMMITTED.spec,
   });
   ok(
     !(await hasPromiseResolved(navigated)),
     "Listener has not resolved after an unexpected navigation-committed"
   );
+  notEqual(
+    progressListener.targetURI.spec,
+    TARGET_URI_FROM_NAVIGATION_COMMITTED.spec,
+    "Expected target URI has not been set from unexpected navigation-committed"
+  );
 
   // Emit the expected navigation-committed event.
   mockNavigationManager.emit("navigation-committed", {
     navigationId: navigationId1,
+    url: TARGET_URI_FROM_NAVIGATION_COMMITTED.spec,
   });
   ok(
     await hasPromiseResolved(navigated),
     "Listener has resolved after receiving the correct navigation-committed"
+  );
+  equal(
+    progressListener.targetURI.spec,
+    TARGET_URI_FROM_NAVIGATION_COMMITTED.spec,
+    "Expected target URI has been set from navigation-committed"
   );
 });
 
@@ -852,6 +871,49 @@ add_task(
         "Listener has rejected in stop state for erroneous navigation"
       );
     }
+  }
+);
+
+add_task(
+  async function test_ProgressListener_navigationRejectedWaitsForNavigationCommitted() {
+    const browsingContext = new MockTopContext();
+    const webProgress = browsingContext.webProgress;
+    const mockNavigationManager = new MockNavigationManager();
+
+    const progressListener = new ProgressListener(webProgress, {
+      navigationManager: mockNavigationManager,
+    });
+
+    const navigationId = "navigationId1";
+    const navigated = progressListener.start(navigationId);
+
+    await webProgress.sendStartState();
+
+    // Emit a first navigation-committed before the location change
+    mockNavigationManager.emit("navigation-committed", {
+      navigationId,
+      url: TARGET_URI.spec,
+    });
+
+    await webProgress.sendStopState({
+      flag: Cr.NS_ERROR_MALWARE_URI,
+      loadType: LOAD_FLAG_ERROR_PAGE,
+    });
+
+    ok(
+      !(await hasPromiseRejected(navigated)),
+      "Listener waiting for navigation-committed event before rejecting"
+    );
+
+    mockNavigationManager.emit("navigation-committed", {
+      navigationId,
+      url: TARGET_URI_ERROR_PAGE.spec,
+    });
+
+    ok(
+      await hasPromiseRejected(navigated),
+      "Listener rejected after receiving navigation-committed for error page"
+    );
   }
 );
 

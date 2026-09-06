@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -100,8 +98,9 @@ AVCaptureDeviceFormat* _Nullable FindFormat(
 
 namespace webrtc::videocapturemodule {
 VideoCaptureAvFoundation::VideoCaptureAvFoundation(
-    AVCaptureDevice* _Nonnull aDevice)
-    : mDevice(aDevice),
+    Clock* _Nonnull clock, AVCaptureDevice* _Nonnull aDevice)
+    : VideoCaptureImpl(clock),
+      mDevice(aDevice),
       mAdapter([[VideoCaptureAdapter alloc] init]),
       mCapturer([[RTC_OBJC_TYPE(RTCCameraVideoCapturer) alloc]
           initWithDelegate:mAdapter]),
@@ -121,7 +120,7 @@ VideoCaptureAvFoundation::~VideoCaptureAvFoundation() {
 
 /* static */
 webrtc::scoped_refptr<VideoCaptureModule> VideoCaptureAvFoundation::Create(
-    const char* _Nullable aDeviceUniqueIdUTF8) {
+    Clock* _Nonnull clock, const char* _Nullable aDeviceUniqueIdUTF8) {
   std::string uniqueId(aDeviceUniqueIdUTF8);
 
   for (AVCaptureDevice* device in [RTCCameraVideoCapturer
@@ -129,7 +128,8 @@ webrtc::scoped_refptr<VideoCaptureModule> VideoCaptureAvFoundation::Create(
                                              defaultCaptureDeviceTypes]]) {
     if ([NSString stdStringForString:device.uniqueID] == uniqueId) {
       webrtc::scoped_refptr<VideoCaptureModule> module(
-          new webrtc::RefCountedObject<VideoCaptureAvFoundation>(device));
+          new webrtc::RefCountedObject<VideoCaptureAvFoundation>(clock,
+                                                                 device));
       return module;
     }
   }

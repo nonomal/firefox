@@ -30,7 +30,7 @@ exports.actorSpecs = actorSpecs;
  *   Either a DevToolsServerConnection or a DevToolsClient.  Must have
  *   addActorPool, removeActorPool, and poolFor.
  *   conn can be null if the subclass provides a conn property.
- * @constructor
+ * @class
  */
 
 class Actor extends Pool {
@@ -140,8 +140,19 @@ class Actor extends Pool {
       fileName: error.fileName || error.filename,
       lineNumber: error.lineNumber,
       columnNumber: error.columnNumber,
-      // Also pass the whole stack as string
-      stack: error.stack,
+      // Also pass the whole stack as string.
+      //
+      // "out of memory" string may be thrown by SpiderMonkey,
+      // in which case getLastOOMStackTrace can return a last resort stack as a string.
+      // https://searchfox.org/firefox-main/rev/33bba5cfe4a89dda0ee07fa9fbac578353713fd3/js/src/vm/JSContext.cpp#296-297
+      stack:
+        error == "out of memory"
+          ? ChromeUtils.getLastOOMStackTrace()
+          : error.stack,
+      // DevToolsProcessParent may convey yet another stack if the exception happened in the content process
+      // (in this edgecase, this code runs in the parent process and will emit the stack up to the client)
+      contentProcessStack:
+        typeof error == "object" ? error.contentProcessStack : undefined,
     });
   }
 
@@ -174,7 +185,7 @@ exports.Actor = Actor;
  * When a RDP packet is received for calling an actor method, this lookup for
  * the method name in this object and call the function holded on this attribute.
  *
- * @params {object} actorSpec
+ * @param {object} actorSpec
  *         The procotol-js actor specific coming from devtools/shared/specs/*.js files
  *         This describes the types for methods and events implemented by all actors.
  * @return {object} requestTypes
@@ -222,13 +233,20 @@ var generateRequestTypes = function (actorSpec) {
 
         const sendReturn = retToSend => {
           if (spec.oneway) {
+            if (spec.release) {
+              try {
+                this.destroy();
+              } catch (e) {
+                this.writeError(e, actorSpec.typeName, spec.name);
+              }
+            }
             // No need to send a response.
             return;
           }
           if (isBulkResponse) {
             if (retToSend) {
-              throw new Actor(
-                `Actor method '${this.typeName}.${spec.name}' is supposed to return a bulk response, but returned some value.`
+              throw new Error(
+                `Actor method '${this.typeName}.${spec.name}' is supposed to return a bulk response, via last 'startBulkSend' callback argument, but returned some value.`
               );
             }
             // Bulk response are one-way requests and are not replying any JSON packet.

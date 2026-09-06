@@ -16,7 +16,11 @@ ChromeUtils.defineLazyGetter(lazy, "logConsole", function () {
   });
 });
 
-const EXTRA_ARGS_TYPES_ALLOWLIST = ["event", "memory_distribution"];
+const EXTRA_ARGS_TYPES_ALLOWLIST = [
+  "event",
+  "memory_distribution",
+  "timing_distribution",
+];
 
 /**
  * Module for managing Glean telemetry metrics and pings in the New Tab page.
@@ -170,6 +174,7 @@ export const NewTabGleanUtils = {
         pings,
         `"${lifetime}"`,
         disabled,
+        false /* aInSession */,
         extraArgsJson
       );
       gleanSuccessMetric.set(true);

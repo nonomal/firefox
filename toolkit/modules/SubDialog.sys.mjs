@@ -102,7 +102,7 @@ SubDialog.prototype = {
   },
 
   get _window() {
-    return this._overlay?.ownerGlobal;
+    return this._overlay?.documentGlobal;
   },
 
   updateTitle(aEvent) {
@@ -313,8 +313,12 @@ SubDialog.prototype = {
   handleEvent(aEvent) {
     switch (aEvent.type) {
       case "click":
-        // Close the dialog if the user clicked the overlay background, just
-        // like when the user presses the ESC key (case "command" below).
+        // Clicks on the close button close the dialog directly.
+        if (aEvent.target === this._closeButton) {
+          this._frame.contentWindow.close();
+          break;
+        }
+        // Otherwise, only clicks on the overlay background close the dialog.
         if (aEvent.target !== this._overlay) {
           break;
         }
@@ -323,9 +327,6 @@ SubDialog.prototype = {
           break;
         }
         this._frame.focus();
-        break;
-      case "command":
-        this._frame.contentWindow.close();
         break;
       case "dialogclosing":
         this._onDialogClosing(aEvent);
@@ -762,7 +763,7 @@ SubDialog.prototype = {
       aEvent.preventDefault();
       aEvent.stopImmediatePropagation();
 
-      let parentWin = this._window.docShell.chromeEventHandler.ownerGlobal;
+      let parentWin = this._window.docShell.chromeEventHandler.documentGlobal;
       if (forward) {
         fm.moveFocus(parentWin, null, fm.MOVEFOCUS_FIRST, fm.FLAG_BYKEY);
       } else {
@@ -813,9 +814,6 @@ SubDialog.prototype = {
       }
     }
 
-    // Make the close button work.
-    this._closeButton?.addEventListener("command", this);
-
     if (includeLoad) {
       // DOMFrameContentLoaded only fires on the top window
       this._window.addEventListener("DOMFrameContentLoaded", this, true);
@@ -855,8 +853,6 @@ SubDialog.prototype = {
 
       chromeBrowser.removeEventListener("DOMTitleChanged", this, true);
     }
-
-    this._closeButton?.removeEventListener("command", this);
 
     if (includeLoad) {
       this._window.removeEventListener("DOMFrameContentLoaded", this, true);
@@ -1088,7 +1084,7 @@ export class SubDialogManager {
   /**
    * Abort open dialogs.
    *
-   * @param {function} [filterFn] - Function which should return true for
+   * @param {Function} [filterFn] - Function which should return true for
    * dialogs that should be aborted and false for dialogs that should remain
    * open. Defaults to aborting all dialogs.
    */
@@ -1121,6 +1117,25 @@ export class SubDialogManager {
         this._onDialogClose(aEvent.detail.dialog);
         break;
       }
+      case "click": {
+        this._onClickSplitViewPanel(aEvent);
+        break;
+      }
+    }
+  }
+
+  _onClickSplitViewPanel(aEvent) {
+    const splitViewPanel =
+      aEvent.currentTarget.offsetParent.closest(".split-view-panel");
+    // If the dialog is within a split view panel and the panel is currently not
+    // selected, select corresponding tab.
+    if (splitViewPanel) {
+      const browser = splitViewPanel.querySelector("browser");
+      const tabbrowser = browser.getTabBrowser();
+      const tabbox = aEvent.currentTarget.offsetParent.closest("tabbox");
+      const tab = tabbrowser.getTabForBrowser(browser);
+      const tabstrip = tabbox.tabs;
+      tabstrip.selectedItem = tab;
     }
   }
 
@@ -1177,11 +1192,13 @@ export class SubDialogManager {
   _ensureStackEventListeners() {
     this._dialogStack.addEventListener("dialogopen", this);
     this._dialogStack.addEventListener("dialogclose", this);
+    this._dialogStack.addEventListener("click", this);
   }
 
   _removeStackEventListeners() {
     this._dialogStack.removeEventListener("dialogopen", this);
     this._dialogStack.removeEventListener("dialogclose", this);
+    this._dialogStack.removeEventListener("click", this);
   }
 }
 

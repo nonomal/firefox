@@ -864,7 +864,7 @@ class RulesetsStore {
    *        `enabledRulesetIds` contains the IDs of disabled rulesets that
    *        should be enabled. Already-enabled rulesets are not included in
    *        `enabledRulesetIds`.
-   * @param {import("ExtensionDNR.sys.mjs").RuleQuotaCounter} [options.ruleQuotaCounter]
+   * @param {import("./ExtensionDNR.sys.mjs").RuleQuotaCounter} [options.ruleQuotaCounter]
    *        The counter of already-enabled rules that are not part of
    *        `enabledRulesetIds`. Set when `isUpdateEnabledRulesets` is true.
    *        This method may mutate its internal counters.
@@ -1000,7 +1000,7 @@ class RulesetsStore {
    * of raw rules data (e.g. in form of plain objects read from the static rules
    * JSON files or the dynamicRuleset property from the extension DNR store data).
    *
-   * @typedef {import("ExtensionDNR.sys.mjs").Rule} Rule
+   * @typedef {import("./ExtensionDNR.sys.mjs").Rule} Rule
    *
    * @param   {Extension}     extension
    * @param   {string}        rulesetId
@@ -1174,6 +1174,7 @@ class RulesetsStore {
       let storeData = this.#getDefaults(extension);
       this._data.set(extension.uuid, storeData);
       this._dataPromises.set(extension.uuid, Promise.resolve(storeData));
+      this._startupCacheData.delete(extension.uuid);
       this.unloadOnShutdown(extension);
     }
   }
@@ -1199,14 +1200,6 @@ class RulesetsStore {
 
   #promiseStartupCacheLoaded() {
     if (!this._ensureCacheLoaded) {
-      if (this._data.size) {
-        return Promise.reject(
-          new Error(
-            "Unexpected non-empty DNRStore data. DNR startupCache data load aborted."
-          )
-        );
-      }
-
       const startTime = ChromeUtils.now();
       const timerId = Glean.extensionsApisDnr.startupCacheReadTime.start();
       this._ensureCacheLoaded = (async () => {
@@ -1224,16 +1217,16 @@ class RulesetsStore {
           await IOUtils.remove(cacheFilePath, { ignoreAbsent: true });
           return;
         }
-        if (this._data.size) {
-          Cu.reportError(
-            `Unexpected non-empty DNRStore data. DNR startupCache data load dropped.`
-          );
-          return;
-        }
         for (const [
           extUUID,
           cacheStoreData,
         ] of decodedData.cacheData.entries()) {
+          if (this._data.has(extUUID)) {
+            // Already initialized elsewhere (#initExtension), initially with
+            // empty data, but potentially already expanded with more data by
+            // now. Ignore this startupcache entry.
+            continue;
+          }
           if (StoreData.isStaleCacheEntry(extUUID, cacheStoreData)) {
             StoreData.clearLastUpdateTagPref(extUUID);
             continue;
@@ -1363,7 +1356,21 @@ class RulesetsStore {
   // (because the StoreData instances get converted into plain objects when
   // serialized into the startupCache structured clone blobs).
   async #readStoreDataFromStartupCache(extension) {
+    if (this._data.has(extension.uuid)) {
+      // This should be unreachable.
+      Cu.reportError(
+        `Unexpected non-empty DNRStore data. DNR startupCache data load aborted for ${extension.id}.`
+      );
+      return;
+    }
     await this.#promiseStartupCacheLoaded();
+    if (this._data.has(extension.uuid)) {
+      // This should be unreachable.
+      Cu.reportError(
+        `Unexpected non-empty DNRStore data. DNR startupCache data load dropped for ${extension.id}.`
+      );
+      return;
+    }
 
     if (!this._startupCacheData.has(extension.uuid)) {
       Glean.extensionsApisDnr.startupCacheEntries.miss.add(1);

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-*/
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -21,6 +20,16 @@ namespace layers {
 class Image;
 }  // namespace layers
 
+// The conversion routines below scale with libyuv's box filter, which is
+// defined for image dimensions below this value.
+static constexpr int32_t kMaxConvertImageDimension = 32768;
+
+// Whether an image of aSize can be passed to the conversion routines below.
+inline bool IsImageDimensionSupportedForConversion(const gfx::IntSize& aSize) {
+  return aSize.width < kMaxConvertImageDimension &&
+         aSize.height < kMaxConvertImageDimension;
+}
+
 /**
  * Gets a SourceSurface from given image.
  */
@@ -35,6 +44,9 @@ nsresult ConvertToI420(layers::Image* aImage, uint8_t* aDestY, int aDestStrideY,
 
 /**
  * Converts aImage to an NV12 image and writes it to the given buffers.
+ *
+ * aDestStrideUV must be at least 2 * ceil(aDestSize.width / 2), since U and V
+ * are interleaved. Returns NS_ERROR_INVALID_ARG if either stride is too small.
  */
 nsresult ConvertToNV12(layers::Image* aImage, uint8_t* aDestY, int aDestStrideY,
                        uint8_t* aDestUV, int aDestStrideUV,

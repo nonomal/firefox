@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -70,6 +68,7 @@ class ArenaChunk;
   _("compactingEnabled", JSGC_COMPACTING_ENABLED, true)                     \
   _("nurseryEnabled", JSGC_NURSERY_ENABLED, true)                           \
   _("parallelMarkingEnabled", JSGC_PARALLEL_MARKING_ENABLED, true)          \
+  _("concurrentMarkingEnabled", JSGC_CONCURRENT_MARKING_ENABLED, true)      \
   _("parallelMarkingThresholdMB", JSGC_PARALLEL_MARKING_THRESHOLD_MB, true) \
   _("minLastDitchGCPeriod", JSGC_MIN_LAST_DITCH_GC_PERIOD, true)            \
   _("nurseryEagerCollectionThresholdKB",                                    \
@@ -93,11 +92,14 @@ class ArenaChunk;
   _("generateMissingAllocSites", JSGC_GENERATE_MISSING_ALLOC_SITES, true)   \
   _("highFrequencyMode", JSGC_HIGH_FREQUENCY_MODE, false)                   \
   _("storeBufferEntries", JSGC_STORE_BUFFER_ENTRIES, true)                  \
-  _("storeBufferScaling", JSGC_STORE_BUFFER_SCALING, true)
+  _("storeBufferScaling", JSGC_STORE_BUFFER_SCALING, true)                  \
+  _("incrementalWeakMapMarkingEnabled", JSGC_INCREMENTAL_WEAKMAP_ENABLED, true)
 
 // Get the key and writability give a GC parameter name.
 extern bool GetGCParameterInfo(const char* name, JSGCParamKey* keyOut,
                                bool* writableOut);
+
+extern bool IsGCParameterFuzzingSafe(JSGCParamKey key);
 
 namespace gc {
 
@@ -107,14 +109,13 @@ void FinishGC(JSContext* cx, JS::GCReason = JS::GCReason::FINISH_GC);
 class MOZ_RAII AutoHeapSession {
  public:
   ~AutoHeapSession();
+  AutoHeapSession(const AutoHeapSession&) = delete;
+  void operator=(const AutoHeapSession&) = delete;
 
  protected:
   AutoHeapSession(GCRuntime* gc, JS::HeapState state);
 
  private:
-  AutoHeapSession(const AutoHeapSession&) = delete;
-  void operator=(const AutoHeapSession&) = delete;
-
   GCRuntime* gc;
   JS::HeapState prevState;
   mozilla::Maybe<AutoGeckoProfilerEntry> profilingStackFrame;
@@ -229,6 +230,8 @@ void VerifyBarriers(JSRuntime* rt, VerifierType type);
 
 void MaybeVerifyBarriers(JSContext* cx, bool always = false);
 
+void MaybeSleepForConcurrentMarkingDelays(JSContext* cx);
+
 void DumpArenaInfo();
 
 #else
@@ -236,6 +239,8 @@ void DumpArenaInfo();
 static inline void VerifyBarriers(JSRuntime* rt, VerifierType type) {}
 
 static inline void MaybeVerifyBarriers(JSContext* cx, bool always = false) {}
+
+static inline void MaybeSleepForConcurrentMarkingDelays(JSContext* cx) {}
 
 #endif
 
@@ -254,7 +259,7 @@ static inline void MaybeVerifyBarriers(JSContext* cx, bool always = false) {}
  *
  *  - error reporting
  *  - JIT bailout handling
- *  - brain transplants (JSObject::swap)
+ *  - brain transplants (ProxyObject::swap)
  *  - debugging utilities not exposed to the browser
  *
  * This works by updating the |JSContext::suppressGC| counter which is checked

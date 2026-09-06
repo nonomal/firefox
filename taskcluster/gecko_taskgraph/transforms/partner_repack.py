@@ -5,11 +5,10 @@
 Transform the partner repack task into an actual task description.
 """
 
+from mozilla_taskgraph.worker_types import get_release_config
 from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.dependencies import get_dependencies
-from taskgraph.util.schema import resolve_keyed_by
 
-from gecko_taskgraph.util.attributes import release_level
 from gecko_taskgraph.util.partners import (
     apply_partner_priority,
     check_if_partners_enabled,
@@ -17,7 +16,6 @@ from gecko_taskgraph.util.partners import (
     get_partner_url_config,
     get_repack_ids_by_platform,
 )
-from gecko_taskgraph.util.scriptworker import get_release_config
 
 transforms = TransformSequence()
 transforms.add(check_if_partners_enabled)
@@ -65,15 +63,6 @@ def populate_repack_manifests_url(config, tasks):
                 break
         else:
             raise Exception("Can't find partner REPACK_MANIFESTS_URL")
-
-        for property in ("limit-locales",):
-            property = f"extra.{property}"
-            resolve_keyed_by(
-                task,
-                property,
-                property,
-                **{"release-level": release_level(config.params["project"])},
-            )
 
         if task["worker"]["env"]["REPACK_MANIFESTS_URL"].startswith("git@"):
             task.setdefault("scopes", []).append(
@@ -129,13 +118,11 @@ def add_command_arguments(config, tasks):
         # blocks that. It's space-separated string of ids in the end.
         task["worker"]["env"]["UPSTREAM_TASKIDS"] = {
             # We only want signing related tasks here, not build (used by mac builds for signing artifact resolution)
-            "task-reference": " ".join(
-                [
-                    f"<{dep}>"
-                    for dep in task["dependencies"]
-                    if ("signing" in dep or "notarization" in dep)
-                ]
-            )
+            "task-reference": " ".join([
+                f"<{dep}>"
+                for dep in task["dependencies"]
+                if ("signing" in dep or "notarization" in dep)
+            ])
         }
 
         # Forward the release type for bouncer product construction
@@ -158,11 +145,9 @@ def add_macos_signing_artifacts(config, tasks):
         assert build_dep, f"repackage job {task['name']} has no build dependency"
         for path, artifact in build_dep.task["payload"]["artifacts"].items():
             if path.startswith("public/build/security/"):
-                task["worker"].setdefault("artifacts", []).append(
-                    {
-                        "name": path,
-                        "path": artifact["path"],
-                        "type": "file",
-                    }
-                )
+                task["worker"].setdefault("artifacts", []).append({
+                    "name": path,
+                    "path": artifact["path"],
+                    "type": "file",
+                })
         yield task

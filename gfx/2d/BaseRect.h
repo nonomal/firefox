@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,9 +10,10 @@
 #include <ostream>
 #include <type_traits>
 
-#include "mozilla/Assertions.h"
-#include "mozilla/gfx/ScaleFactors2D.h"
 #include "Types.h"
+#include "mozilla/Assertions.h"
+#include "mozilla/Saturate.h"
+#include "mozilla/gfx/ScaleFactors2D.h"
 
 namespace mozilla::gfx {
 
@@ -491,15 +490,36 @@ struct BaseRect {
   Point Center() const { return Point(x, y) + Point(width, height) / 2; }
   SizeT Size() const { return SizeT(width, height); }
 
-  T Area() const { return width * height; }
+  // For integer coordinates, widen to 64-bit before multiplying so that the
+  // area of a large rect does not overflow.
+  auto Area() const {
+    if constexpr (std::is_integral_v<T>) {
+      return int64_t(width) * int64_t(height);
+    } else {
+      return width * height;
+    }
+  }
 
   // Helper methods for computing the extents
   MOZ_ALWAYS_INLINE T X() const { return x; }
   MOZ_ALWAYS_INLINE T Y() const { return y; }
   MOZ_ALWAYS_INLINE T Width() const { return width; }
   MOZ_ALWAYS_INLINE T Height() const { return height; }
-  MOZ_ALWAYS_INLINE T XMost() const { return x + width; }
-  MOZ_ALWAYS_INLINE T YMost() const { return y + height; }
+
+  MOZ_ALWAYS_INLINE T XMost() const {
+    if constexpr (std::is_integral<T>::value) {
+      return (Saturate<T>(x) + width).value();
+    } else {
+      return x + width;
+    }
+  }
+  MOZ_ALWAYS_INLINE T YMost() const {
+    if constexpr (std::is_integral<T>::value) {
+      return (Saturate<T>(y) + height).value();
+    } else {
+      return y + height;
+    }
+  }
 
   // Set width and height. SizeTo() sets them together.
   MOZ_ALWAYS_INLINE void SetWidth(T aWidth) { width = aWidth; }

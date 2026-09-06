@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -171,6 +170,9 @@ class HTMLEditor final : public EditorBase,
 
   bool IsEmpty() const final;
 
+  dom::EditContext* ComputeEditContext() const final;
+  bool IsFiringTextUpdate() const;
+
   bool CanPaste(nsIClipboard::ClipboardType aClipboardType) const final;
   using EditorBase::CanPaste;
 
@@ -203,10 +205,34 @@ class HTMLEditor final : public EditorBase,
   dom::EventTarget* GetDOMEventTarget() const final;
   [[nodiscard]] Element* FindSelectionRoot(const nsINode& aNode) const final;
   bool IsAcceptableInputEvent(WidgetGUIEvent* aGUIEvent) const final;
-  nsresult GetPreferredIMEState(widget::IMEState* aState) final;
+  [[nodiscard]] Result<widget::IMEState, nsresult> GetPreferredIMEState()
+      const final;
   MOZ_CAN_RUN_SCRIPT nsresult
   OnFocus(const nsINode& aOriginalEventTargetNode) final;
-  nsresult OnBlur(const dom::EventTarget* aEventTarget) final;
+  MOZ_CAN_RUN_SCRIPT void PostHandleFocusEvent(
+      const nsINode& aFocusEventTargetNode) final;
+  MOZ_CAN_RUN_SCRIPT nsresult
+  OnBlur(const dom::EventTarget* aEventTarget) final;
+
+  /**
+   * Called when eFocus event of aNode will be dispatched to the DOM.
+   * Note that aNode is the original target of eFocus (i.e., may be the target
+   * in a shadow). However, aNode may not be editable. E.g., <a href> element
+   * outside contenteditable. Therefore, even when this method is called,
+   * HTMLEditor won't get focus.
+   */
+  MOZ_CAN_RUN_SCRIPT static void WillFocusNode(PresShell& aPresShell,
+                                               nsINode* aNode);
+
+  /**
+   * Called when eFocus event of aNode will be dispatched to the DOM.
+   * Note that aNode is the original target of eBlur (i.e., may be the target
+   * in a shadow). However, aNode may not be editable. E.g., <a href> element
+   * outside contenteditable. Therefore, even when this method is called,
+   * HTMLEditor may not have focus.
+   */
+  MOZ_CAN_RUN_SCRIPT static void WillBlurNode(PresShell& aPresShell,
+                                              nsINode* aNode);
 
   /**
    * Called when aDocument or aElement becomes editable without focus change.
@@ -233,27 +259,6 @@ class HTMLEditor final : public EditorBase,
    */
   MOZ_CAN_RUN_SCRIPT nsresult GetBackgroundColorState(bool* aMixed,
                                                       nsAString& aOutColor);
-
-  /**
-   * PasteNoFormattingAsAction() pastes content in clipboard without any style
-   * information.
-   *
-   * @param aClipboardType      nsIClipboard::kGlobalClipboard or
-   *                            nsIClipboard::kSelectionClipboard.
-   * @param aDispatchPasteEvent Yes if this should dispatch ePaste event
-   *                            before pasting.  Otherwise, No.
-   * @param aDataTransfer       The object containing the data to use for the
-   *                            paste operation. May be nullptr, in which case
-   *                            this will just get the data from the clipboard.
-   * @param aPrincipal          Set subject principal if it may be called by
-   *                            JS.  If set to nullptr, will be treated as
-   *                            called by system.
-   */
-  MOZ_CAN_RUN_SCRIPT nsresult
-  PasteNoFormattingAsAction(nsIClipboard::ClipboardType aClipboardType,
-                            DispatchPasteEvent aDispatchPasteEvent,
-                            DataTransfer* aDataTransfer = nullptr,
-                            nsIPrincipal* aPrincipal = nullptr);
 
   bool CanPasteTransferable(nsITransferable* aTransferable) final;
 
@@ -403,9 +408,12 @@ class HTMLEditor final : public EditorBase,
   bool IsCSSEnabled() const { return mIsCSSPrefChecked; }
 
   /**
-   * Return true when editing host is not plaintext-only.
+   * Return true when editing host is not plaintext-only/EditContext.
+   *
+   * @param aEditingHost Pass editing host to avoid recomputing it.
    */
-  [[nodiscard]] bool IsStyleEditable() const;
+  [[nodiscard]] bool IsStyleEditable(
+      const Element* aEditingHost = nullptr) const;
 
   /**
    * Enable/disable object resizers for <img> elements, <table> elements,
@@ -738,8 +746,8 @@ class HTMLEditor final : public EditorBase,
    * @parem aNodeInserted  Return the node which was inserted.
    */
   MOZ_CAN_RUN_SCRIPT  // USED_BY_COMM_CENTRAL
-      nsresult
-      InsertAsQuotation(const nsAString& aQuotedText, nsINode** aNodeInserted);
+      nsresult InsertAsQuotation(const nsAString& aQuotedText,
+                                 nsINode** aNodeInserted);
 
   MOZ_CAN_RUN_SCRIPT nsresult InsertHTMLAsAction(
       const nsAString& aInString, nsIPrincipal* aPrincipal = nullptr);
@@ -850,8 +858,8 @@ class HTMLEditor final : public EditorBase,
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<InsertTextResult, nsresult>
   ReplaceTextWithTransaction(dom::Text& aTextNode, uint32_t aOffset,
-                             uint32_t aLength,
-                             const nsAString& aStringToInsert);
+                             uint32_t aLength, const nsAString& aStringToInsert,
+                             InsertTextFor aPurpose);
 
   struct NormalizedStringToInsertText;
 
@@ -863,7 +871,8 @@ class HTMLEditor final : public EditorBase,
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<InsertTextResult, nsresult>
   InsertOrReplaceTextWithTransaction(const EditorDOMPoint& aPointToInsert,
-                                     const NormalizedStringToInsertText& aData);
+                                     const NormalizedStringToInsertText& aData,
+                                     InsertTextFor aPurpose);
 
   struct ReplaceWhiteSpacesData;
 
@@ -872,7 +881,8 @@ class HTMLEditor final : public EditorBase,
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<InsertTextResult, nsresult>
   ReplaceTextWithTransaction(dom::Text& aTextNode,
-                             const ReplaceWhiteSpacesData& aData);
+                             const ReplaceWhiteSpacesData& aData,
+                             InsertTextFor aPurpose);
 
   /**
    * Insert aStringToInsert to aPointToInsert.  If the point is not editable,
@@ -881,7 +891,8 @@ class HTMLEditor final : public EditorBase,
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<InsertTextResult, nsresult>
   InsertTextWithTransaction(const nsAString& aStringToInsert,
                             const EditorDOMPoint& aPointToInsert,
-                            InsertTextTo aInsertTextTo) final;
+                            InsertTextTo aInsertTextTo,
+                            InsertTextFor aPurpose) final;
 
   /**
    * CopyLastEditableChildStyles() clones inline container elements into
@@ -1130,7 +1141,7 @@ class HTMLEditor final : public EditorBase,
    * XXX I think that `IsSelectionEditable()` is better name, but it's already
    *     in `EditorBase`...
    */
-  enum class CheckSelectionInReplacedElement { Yes, OnlyWhenNotInSameNode };
+  enum class CheckSelectionInReplacedElement { No, Yes, OnlyWhenNotInSameNode };
   Result<EditActionResult, nsresult> CanHandleHTMLEditSubAction(
       CheckSelectionInReplacedElement aCheckSelectionInReplacedElement =
           CheckSelectionInReplacedElement::Yes) const;
@@ -1637,7 +1648,7 @@ class HTMLEditor final : public EditorBase,
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<CreateLineBreakResult, nsresult>
   InsertPaddingBRElementToMakeEmptyLineVisibleIfNeeded(
-      const EditorDOMPoint& aPointToInsert);
+      const EditorDOMPoint& aPointToInsert, const Element& aEditingHost);
 
   /**
    * Insert a padding <br> if aPoint is in an empty block.
@@ -1945,21 +1956,24 @@ class HTMLEditor final : public EditorBase,
    *                            style, this method will set `style` attribute to
    *                            moving node or creating new <span> element.
    * @param aRemoveIfCommentNode
-   *                            If yes, this removes a comment node instead of
-   *                            moving it to the destination.  Note that this
-   *                            does not remove comment nodes in moving nodes
-   *                            because it requires additional scan.
+   *                            If yes, this removes invisible nodes such as
+   *                            comment nodes, empty inline containers (even if
+   *                            it has border, etc) instead of moving it to the
+   *                            destination.  Note that this does not remove
+   *                            invisible descendants in containers which have
+   *                            visible nodes because it requires additional
+   *                            scan.
    */
   enum class PreserveWhiteSpaceStyle { No, Yes };
   friend std::ostream& operator<<(
       std::ostream& aStream,
       const PreserveWhiteSpaceStyle aPreserveWhiteSpaceStyle);
-  enum class RemoveIfCommentNode { No, Yes };
+  enum class RemoveIfInvisibleNode { No, Yes };
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<MoveNodeResult, nsresult>
   MoveNodeOrChildrenWithTransaction(
       nsIContent& aContentToMove, const EditorDOMPoint& aPointToInsert,
       PreserveWhiteSpaceStyle aPreserveWhiteSpaceStyle,
-      RemoveIfCommentNode aRemoveIfCommentNode);
+      RemoveIfInvisibleNode aRemoveIfInvisibleNode);
 
   /**
    * CanMoveNodeOrChildren() returns true if
@@ -1985,16 +1999,19 @@ class HTMLEditor final : public EditorBase,
    *                            style, this method will set `style` attribute to
    *                            moving node or creating new <span> element.
    * @param aRemoveIfCommentNode
-   *                            If yes, this removes a comment node instead of
-   *                            moving it to the destination.  Note that this
-   *                            does not remove comment nodes in moving nodes
-   *                            because it requires additional scan.
+   *                            If yes, this removes invisible nodes such as
+   *                            comment nodes, empty inline containers (even if
+   *                            it has border, etc) instead of moving it to the
+   *                            destination.  Note that this does not remove
+   *                            invisible descendants in containers which have
+   *                            visible nodes because it requires additional
+   *                            scan.
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<MoveNodeResult, nsresult>
   MoveChildrenWithTransaction(Element& aElement,
                               const EditorDOMPoint& aPointToInsert,
                               PreserveWhiteSpaceStyle aPreserveWhiteSpaceStyle,
-                              RemoveIfCommentNode aRemoveIfCommentNode);
+                              RemoveIfInvisibleNode aRemoveIfInvisibleNode);
 
   /**
    * CanMoveChildren() returns true if `MoveChildrenWithTransaction()` can move
@@ -2998,12 +3015,7 @@ class HTMLEditor final : public EditorBase,
     MOZ_CAN_RUN_SCRIPT void Update(HTMLEditor& aHTMLEditor,
                                    Selection& aSelection);
 
-    bool operator==(const CellIndexes& aOther) const {
-      return mRow == aOther.mRow && mColumn == aOther.mColumn;
-    }
-    bool operator!=(const CellIndexes& aOther) const {
-      return mRow != aOther.mRow || mColumn != aOther.mColumn;
-    }
+    bool operator==(const CellIndexes& aOther) const = default;
 
     [[nodiscard]] bool isErr() const { return mRow < 0 || mColumn < 0; }
 
@@ -3263,6 +3275,9 @@ class HTMLEditor final : public EditorBase,
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult
   HandlePasteTransferable(AutoEditActionDataSetter& aEditActionData,
                           nsITransferable& aTransferable) final;
+  [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult HandlePasteNoFormatting(
+      AutoEditActionDataSetter& aEditActionData,
+      nsIClipboard::ClipboardType aClipboardType, DataTransfer* aDataTransfer);
 
   /**
    * PasteInternal() pasts text with replacing selected content.
@@ -3395,21 +3410,41 @@ class HTMLEditor final : public EditorBase,
   MOZ_CAN_RUN_SCRIPT Result<EditorDOMPoint, nsresult> PrepareToInsertLineBreak(
       LineBreakType aLineBreakType, const EditorDOMPoint& aPointToInsert);
 
+  enum class PreservePreformattedLineBreak : bool { No, Yes };
+
   /**
    * If unnecessary line break is there immediately after aPoint, this deletes
    * the line break.  Note that unnecessary line break means that the line break
    * is a padding line break for empty line immediately before a block boundary
    * and it's not a placeholder of ancestor inline elements.
    *
-   * @param aNextOrAfterModifiedPoint   If you inserted something, this should
-   *                                    be next point or after the inserted
-   *                                    content.
-   *                                    If you deleted something, this should be
-   *                                    end of the deleted range.
+   * @param aNextOrAfterModifiedPoint
+   *                            If you inserted something, this should be next
+   *                            point or after the inserted content. If you
+   *                            deleted something, this should be end of the
+   *                            deleted range.
+   * @param aPreservePreformattedLineBreak
+   *                            Whether this method should preserve preformatted
+   *                            linefeed or not. If "Yes", this will delete only
+   *                            when the unnecessary line break is a <br>.
+   * @param aPaddingForEmptyBlock
+   *                            Treat the line break for empty block is
+   *                            unnecessary or not. If this is set to
+   *                            "Unnecessary", preformatted line break will be
+   *                            deleted if it's a padding for empty block and
+   *                            aPreservePreformattedLineBreak is "Yes".
+   *                            This should be "Significant" if you use this
+   *                            after handling the edit action. So, you can use
+   *                            "Unnecessary" only when you are calling this
+   *                            before handling the edit action.
+   * @param aEditingHost        The editing host containing
+   *                            aNextOrAfterModifiedPoint.
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult
   EnsureNoFollowingUnnecessaryLineBreak(
-      const EditorDOMPoint& aNextOrAfterModifiedPoint);
+      const EditorDOMPoint& aNextOrAfterModifiedPoint,
+      PreservePreformattedLineBreak aPreservePreformattedLineBreak,
+      PaddingForEmptyBlock aPaddingForEmptyBlock, const Element& aEditingHost);
 
   /**
    * IndentAsSubAction() indents the content around Selection.
@@ -3459,7 +3494,8 @@ class HTMLEditor final : public EditorBase,
   template <size_t N>
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult SetInlinePropertiesAroundRanges(
       AutoClonedRangeArray& aRanges,
-      const AutoTArray<EditorInlineStyleAndValue, N>& aStylesToSet);
+      const AutoTArray<EditorInlineStyleAndValue, N>& aStylesToSet,
+      const Element& aEditingHost);
 
   /**
    * RemoveInlinePropertiesAsSubAction() removes specified styles from
@@ -3937,6 +3973,10 @@ class HTMLEditor final : public EditorBase,
       DeleteSelectedContent aDeleteSelectedContent,
       const Element& aEditingHost);
 
+  MOZ_CAN_RUN_SCRIPT nsresult InsertURLAsLinkInternal(
+      const nsAString& aURL, const EditorDOMPoint& aPointToInsert,
+      DeleteSelectedContent aDeleteSelectedContent);
+
   static HavePrivateHTMLFlavor DataTransferOrClipboardHasPrivateHTMLFlavor(
       DataTransfer* aDataTransfer, nsIClipboard* clipboard);
 
@@ -4269,13 +4309,14 @@ class HTMLEditor final : public EditorBase,
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult RefreshResizersInternal();
 
-  ManualNACPtr CreateResizer(int16_t aLocation, nsIContent& aParentContent);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY ManualNACPtr
+  CreateResizer(int16_t aLocation, nsIContent& aParentContent);
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult
   SetAnonymousElementPositionWithoutTransaction(nsStyledElement& aStyledElement,
                                                 int32_t aX, int32_t aY);
 
-  ManualNACPtr CreateShadow(nsIContent& aParentContent,
-                            Element& aOriginalObject);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY ManualNACPtr
+  CreateShadow(nsIContent& aParentContent, Element& aOriginalObject);
 
   /**
    * SetShadowPosition() moves the shadow element to proper position.
@@ -4289,7 +4330,8 @@ class HTMLEditor final : public EditorBase,
   SetShadowPosition(Element& aShadowElement, Element& aElement,
                     int32_t aElementLeft, int32_t aElementTop);
 
-  ManualNACPtr CreateResizingInfo(nsIContent& aParentContent);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY ManualNACPtr
+  CreateResizingInfo(nsIContent& aParentContent);
   MOZ_CAN_RUN_SCRIPT nsresult SetResizingInfoPosition(int32_t aX, int32_t aY,
                                                       int32_t aW, int32_t aH);
 
@@ -4364,7 +4406,8 @@ class HTMLEditor final : public EditorBase,
    * always non-nullptr.  Otherwise, i.e., the grabber is hidden during
    * creation, this returns false.
    */
-  bool CreateGrabberInternal(nsIContent& aParentContent);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY bool CreateGrabberInternal(
+      nsIContent& aParentContent);
 
   MOZ_CAN_RUN_SCRIPT nsresult StartMoving();
   MOZ_CAN_RUN_SCRIPT nsresult SetFinalPosition(int32_t aX, int32_t aY);
@@ -4417,9 +4460,9 @@ class HTMLEditor final : public EditorBase,
    *                              is to be added to the created anonymous
    *                              element
    */
-  ManualNACPtr CreateAnonymousElement(nsAtom* aTag, nsIContent& aParentContent,
-                                      const nsAString& aClass,
-                                      bool aIsCreatedHidden);
+  MOZ_CAN_RUN_SCRIPT ManualNACPtr
+  CreateAnonymousElement(nsAtom* aTag, nsIContent& aParentContent,
+                         const nsAString& aClass, bool aIsCreatedHidden);
 
   /**
    * Reads a blob into memory and notifies the BlobReader object when the read

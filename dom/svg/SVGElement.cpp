@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -27,7 +25,6 @@
 #include "SVGMotionSMILAttr.h"
 #include "mozAutoDocUpdate.h"
 #include "mozilla/AlreadyAddRefed.h"
-#include "mozilla/DeclarationBlock.h"
 #include "mozilla/EventListenerManager.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/RestyleManager.h"
@@ -36,13 +33,11 @@
 #include "mozilla/SVGObserverUtils.h"
 #include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/dom/BindContext.h"
-#include "mozilla/dom/CSSRuleBinding.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/MutationObservers.h"
 #include "mozilla/dom/SVGElementBinding.h"
-#include "mozilla/dom/SVGGeometryElement.h"
-#include "mozilla/dom/SVGLengthBinding.h"
 #include "mozilla/dom/SVGSVGElement.h"
 #include "mozilla/dom/SVGTests.h"
 #include "mozilla/dom/SVGUnitTypesBinding.h"
@@ -53,7 +48,6 @@
 #include "nsDOMCSSAttrDeclaration.h"
 #include "nsError.h"
 #include "nsGkAtoms.h"
-#include "nsICSSDeclaration.h"
 #include "nsIContentInlines.h"
 #include "nsIFrame.h"
 #include "nsIMutationObserver.h"
@@ -67,9 +61,8 @@
 static_assert(sizeof(void*) == sizeof(nullptr),
               "nullptr should be the correct size");
 
-nsresult NS_NewSVGElement(
-    mozilla::dom::Element** aResult,
-    already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo) {
+nsresult NS_NewSVGElement(mozilla::dom::Element** aResult,
+                          already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo) {
   RefPtr<mozilla::dom::NodeInfo> nodeInfo(aNodeInfo);
   auto* nim = nodeInfo->NodeInfoManager();
   RefPtr<mozilla::dom::SVGElement> it =
@@ -99,7 +92,7 @@ SVGEnumMapping SVGElement::sSVGUnitTypesMap[] = {
     {nsGkAtoms::objectBoundingBox, SVG_UNIT_TYPE_OBJECTBOUNDINGBOX},
     {nullptr, 0}};
 
-SVGElement::SVGElement(already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
+SVGElement::SVGElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo)
     : SVGElementBase(std::move(aNodeInfo)) {}
 
 SVGElement::~SVGElement() = default;
@@ -128,7 +121,7 @@ void SVGElement::AttributesInfo<Value, Info>::CopyAllFrom(
 
 template <>
 void SVGElement::LengthAttributesInfo::Reset(uint8_t aAttrEnum) {
-  mValues[aAttrEnum].Init(mInfos[aAttrEnum].mCtxType, aAttrEnum,
+  mValues[aAttrEnum].Init(mInfos[aAttrEnum].mAxis, aAttrEnum,
                           mInfos[aAttrEnum].mDefaultValue,
                           mInfos[aAttrEnum].mDefaultUnitType);
 }
@@ -153,8 +146,7 @@ void SVGElement::NumberAttributesInfo::Reset(uint8_t aAttrEnum) {
 
 template <>
 void SVGElement::NumberPairAttributesInfo::Reset(uint8_t aAttrEnum) {
-  mValues[aAttrEnum].Init(aAttrEnum, mInfos[aAttrEnum].mDefaultValue1,
-                          mInfos[aAttrEnum].mDefaultValue2);
+  mValues[aAttrEnum].Init(aAttrEnum, mInfos[aAttrEnum].mDefaultValue);
 }
 
 template <>
@@ -164,8 +156,7 @@ void SVGElement::IntegerAttributesInfo::Reset(uint8_t aAttrEnum) {
 
 template <>
 void SVGElement::IntegerPairAttributesInfo::Reset(uint8_t aAttrEnum) {
-  mValues[aAttrEnum].Init(aAttrEnum, mInfos[aAttrEnum].mDefaultValue1,
-                          mInfos[aAttrEnum].mDefaultValue2);
+  mValues[aAttrEnum].Init(aAttrEnum, mInfos[aAttrEnum].mDefaultValue);
 }
 
 template <>
@@ -241,22 +232,22 @@ nsresult SVGElement::CopyInnerTo(mozilla::dom::Element* aDest) {
     if (const auto* pointList = GetAnimatedPointList()) {
       *dest->GetAnimatedPointList() = *pointList;
     }
-    if (const auto* pathSegList = GetAnimPathSegList()) {
-      *dest->GetAnimPathSegList() = *pathSegList;
+    if (const auto* pathSegList = GetAnimatedPathSegList()) {
+      *dest->GetAnimatedPathSegList() = *pathSegList;
       if (pathSegList->IsAnimating()) {
         dest->SMILOverrideStyle()->SetSMILValue(eCSSProperty_d, *pathSegList);
       }
     }
-    if (const auto* transformList = GetAnimatedTransformList()) {
-      *dest->GetAnimatedTransformList(DO_ALLOCATE) = *transformList;
+    if (const auto* transformList = GetExistingAnimatedTransformList()) {
+      *dest->GetOrCreateAnimatedTransformList() = *transformList;
     }
     if (const auto* animateMotionTransform = GetAnimateMotionTransform()) {
       dest->SetAnimateMotionTransform(animateMotionTransform);
     }
     if (const auto* smilOverrideStyleDecoration =
             GetSMILOverrideStyleDeclaration()) {
-      RefPtr<DeclarationBlock> declClone = smilOverrideStyleDecoration->Clone();
-      declClone->SetDirty();
+      RefPtr<StyleLockedDeclarationBlock> declClone =
+          Servo_DeclarationBlock_Clone(smilOverrideStyleDecoration).Consume();
       dest->SetSMILOverrideStyleDeclaration(*declClone);
     }
   }
@@ -267,27 +258,31 @@ nsresult SVGElement::CopyInnerTo(mozilla::dom::Element* aDest) {
 //----------------------------------------------------------------------
 // SVGElement methods
 
-void SVGElement::DidAnimateClass() {
-  // For Servo, snapshot the element before we change it.
-  PresShell* presShell = OwnerDoc()->GetPresShell();
-  if (presShell) {
-    if (nsPresContext* presContext = presShell->GetPresContext()) {
-      presContext->RestyleManager()->ClassAttributeWillBeChangedBySMIL(this);
+void SVGElement::WillAnimateClass() {
+  if (auto* doc = GetComposedDoc()) {
+    if (auto* pc = doc->GetPresContext()) {
+      pc->RestyleManager()->ClassAttributeWillBeChangedBySMIL(this);
     }
   }
+}
 
-  nsAutoString src;
-  mClassAttribute.GetAnimValue(src, this);
-  if (!mClassAnimAttr) {
-    mClassAnimAttr = MakeUnique<nsAttrValue>();
+void SVGElement::DidAnimateClass() {
+  if (mClassAttribute.IsAnimated()) {
+    nsAutoString src;
+    mClassAttribute.GetAnimValue(src, this);
+    if (!mClassAnimAttr) {
+      mClassAnimAttr = std::make_unique<nsAttrValue>();
+    }
+    mClassAnimAttr->ParseAtomArray(src);
+  } else {
+    mClassAnimAttr.reset();
   }
-  mClassAnimAttr->ParseAtomArray(src);
 
-  // FIXME(emilio): This re-selector-matches, but we do the snapshot stuff right
-  // above... Is this needed anymore?
-  if (presShell) {
-    presShell->RestyleForAnimation(this, RestyleHint::RESTYLE_SELF);
-  }
+  // Update bloom filter after mutating mClassAnimAttr.
+  UpdateSubtreeBloomFilterForClass(GetClasses());
+  UpdateSubtreeBloomFilterForAttribute(nsGkAtoms::_class);
+  PropagateBloomFilterToParents();
+
   DidAnimateAttribute(kNameSpaceID_None, nsGkAtoms::_class);
 }
 
@@ -453,12 +448,13 @@ bool SVGElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
       // Check for SVGAnimatedPointList attribute
       if (GetPointListAttrName() == aAttribute) {
         if (SVGAnimatedPointList* pointList = GetAnimatedPointList()) {
-          pointList->SetBaseValueString(aValue);
-          // The spec says we parse everything up to the failure, so we DON'T
-          // need to check the result of SetBaseValueString or call
-          // pointList->ClearBaseValue() if it fails
-          aResult.SetTo(pointList->GetBaseValue(), &aValue);
-          didSetResult = true;
+          rv = pointList->SetBaseValueString(aValue);
+          if (NS_FAILED(rv)) {
+            pointList->ClearBaseValue();
+          } else {
+            aResult.SetTo(pointList->GetBaseValue(), &aValue);
+            didSetResult = true;
+          }
           foundMatch = true;
         }
       }
@@ -467,7 +463,7 @@ bool SVGElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
     if (!foundMatch) {
       // Check for SVGAnimatedPathSegList attribute
       if (GetPathDataAttrName() == aAttribute) {
-        if (SVGAnimatedPathSegList* segList = GetAnimPathSegList()) {
+        if (SVGAnimatedPathSegList* segList = GetAnimatedPathSegList()) {
           segList->SetBaseValueString(aValue);
           // The spec says we parse everything up to the failure, so we DON'T
           // need to check the result of SetBaseValueString or call
@@ -665,7 +661,7 @@ bool SVGElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
         // The transform attribute is being set, so we must ensure that the
         // SVGAnimatedTransformList is/has been allocated:
         SVGAnimatedTransformList* transformList =
-            GetAnimatedTransformList(DO_ALLOCATE);
+            GetOrCreateAnimatedTransformList();
         rv = transformList->SetBaseValueString(aValue, this);
         if (NS_FAILED(rv)) {
           transformList->ClearBaseValue();
@@ -776,7 +772,7 @@ void SVGElement::UnsetAttrInternal(int32_t aNamespaceID, nsAtom* aName,
 
     // Check if this is a path segment list attribute going away
     if (GetPathDataAttrName() == aName) {
-      SVGAnimatedPathSegList* segList = GetAnimPathSegList();
+      SVGAnimatedPathSegList* segList = GetAnimatedPathSegList();
       if (segList) {
         segList->ClearBaseValue();
         return;
@@ -873,7 +869,8 @@ void SVGElement::UnsetAttrInternal(int32_t aNamespaceID, nsAtom* aName,
 
     // Check if this is a transform list attribute going away
     if (GetTransformListAttrName() == aName) {
-      SVGAnimatedTransformList* transformList = GetAnimatedTransformList();
+      SVGAnimatedTransformList* transformList =
+          GetExistingAnimatedTransformList();
       if (transformList) {
         transformList->ClearBaseValue();
         return;
@@ -942,20 +939,19 @@ void SVGElement::NodeInfoChanged(Document* aOldDoc) {
   SVGElementBase::NodeInfoChanged(aOldDoc);
 }
 
-NS_IMETHODIMP_(bool)
-SVGElement::IsAttributeMapped(const nsAtom* name) const {
+bool SVGElement::IsNoNamespaceAttrMapped(const nsAtom* name) const {
   if (name == nsGkAtoms::lang) {
     return true;
   }
 
   if (IsSVGAnimationElement()) {
-    return SVGElementBase::IsAttributeMapped(name);
+    return SVGElementBase::IsNoNamespaceAttrMapped(name);
   }
 
   static const MappedAttributeEntry attributes[] = {
       // Properties that we don't support are commented out.
       // { nsGkAtoms::alignment_baseline },
-      // { nsGkAtoms::baseline_shift },
+      {nsGkAtoms::baseline_shift},
       {nsGkAtoms::clip},
       {nsGkAtoms::clip_path},
       {nsGkAtoms::clip_rule},
@@ -1017,7 +1013,7 @@ SVGElement::IsAttributeMapped(const nsAtom* name) const {
   static const MappedAttributeEntry* const map[] = {attributes};
 
   return FindAttributeDependence(name, map) ||
-         SVGElementBase::IsAttributeMapped(name);
+         SVGElementBase::IsNoNamespaceAttrMapped(name);
 }
 
 //----------------------------------------------------------------------
@@ -1057,7 +1053,7 @@ bool SVGElement::UpdateDeclarationBlockFromLength(
     const StyleLockedDeclarationBlock& aBlock, NonCustomCSSPropertyId aPropId,
     const SVGAnimatedLength& aLength, ValToUse aValToUse) {
   float value;
-  uint8_t units;
+  uint16_t units;
   if (aValToUse == ValToUse::Anim) {
     value = aLength.GetAnimValInSpecifiedUnits();
     units = aLength.GetAnimUnitType();
@@ -1178,8 +1174,8 @@ bool SVGElement::UpdateDeclarationBlockFromTransform(
                                              ? aTransform->GetAnimValue()
                                              : aTransform->GetBaseValue();
     // TODO: Maybe make SVGTransform use StyleTransformOperation directly?
-    for (size_t i = 0, len = transforms.Length(); i < len; ++i) {
-      SVGTransformToCSS(transforms[i], operations);
+    for (const auto& transform : transforms) {
+      SVGTransformToCSS(transform, operations);
     }
   }
   Servo_DeclarationBlock_SetTransform(&aBlock, eCSSProperty_transform,
@@ -1210,6 +1206,8 @@ class MOZ_STACK_CLASS MappedAttrParser {
   // Parses a mapped attribute value.
   void ParseMappedAttrValue(nsAtom* aMappedAttrName,
                             const nsAString& aMappedAttrValue);
+
+  void MapLang(nsAtom* aLangValue);
 
   void TellStyleAlreadyParsedResult(nsAtom const* aAtom,
                                     SVGAnimatedLength const& aLength);
@@ -1253,36 +1251,29 @@ void MappedAttrParser::ParseMappedAttrValue(nsAtom* aMappedAttrName,
   // Get the NonCustomCSSPropertyId id for our mapped attribute.
   NonCustomCSSPropertyId propertyId =
       nsCSSProps::LookupProperty(nsAutoAtomCString(aMappedAttrName));
-  if (propertyId != eCSSProperty_UNKNOWN) {
-    bool changed = false;  // outparam for ParseProperty.
-    NS_ConvertUTF16toUTF8 value(aMappedAttrValue);
+  MOZ_ASSERT(propertyId != eCSSProperty_UNKNOWN);
+  bool changed = false;  // outparam for ParseProperty.
+  NS_ConvertUTF16toUTF8 value(aMappedAttrValue);
 
-    auto* doc = mElement.OwnerDoc();
-    changed = Servo_DeclarationBlock_SetPropertyById(
-        &EnsureDeclarationBlock(), propertyId, &value, false,
-        &EnsureExtraData(), StyleParsingMode::ALLOW_UNITLESS_LENGTH,
-        doc->GetCompatibilityMode(), &doc->EnsureCSSLoader(),
-        StyleCssRuleType::Style, {});
+  auto* doc = mElement.OwnerDoc();
+  changed = Servo_DeclarationBlock_SetPropertyById(
+      &EnsureDeclarationBlock(), propertyId, &value, false, &EnsureExtraData(),
+      StyleParsingMode::ALLOW_UNITLESS_LENGTH, doc->GetCompatibilityMode(),
+      &doc->EnsureCSSLoader(), StyleCssRuleType::Style, {});
 
-    // TODO(emilio): If we want to record these from CSSOM more generally, we
-    // can pass the document use counters down the FFI call. For now manually
-    // count them.
-    if (changed && StaticPrefs::layout_css_use_counters_enabled()) {
-      UseCounter useCounter = nsCSSProps::UseCounterFor(propertyId);
-      MOZ_ASSERT(useCounter != eUseCounter_UNKNOWN);
-      doc->SetUseCounter(useCounter);
-    }
-    return;
+  // TODO(emilio): If we want to record these from CSSOM more generally, we
+  // can pass the document use counters down the FFI call. For now manually
+  // count them.
+  if (changed && StaticPrefs::layout_css_use_counters_enabled()) {
+    UseCounter useCounter = nsCSSProps::UseCounterFor(propertyId);
+    MOZ_ASSERT(useCounter != eUseCounter_UNKNOWN);
+    doc->SetUseCounter(useCounter);
   }
-  MOZ_ASSERT(aMappedAttrName == nsGkAtoms::lang,
-             "Only 'lang' should be unrecognized!");
-  // CSS parser doesn't know about 'lang', so we need to handle it specially.
-  if (aMappedAttrName == nsGkAtoms::lang) {
-    propertyId = eCSSProperty__x_lang;
-    RefPtr<nsAtom> atom = NS_Atomize(aMappedAttrValue);
-    Servo_DeclarationBlock_SetIdentStringValue(&EnsureDeclarationBlock(),
-                                               propertyId, atom);
-  }
+}
+
+void MappedAttrParser::MapLang(nsAtom* aLangValue) {
+  Servo_DeclarationBlock_SetIdentStringValue(&EnsureDeclarationBlock(),
+                                             eCSSProperty__x_lang, aLangValue);
 }
 
 void MappedAttrParser::TellStyleAlreadyParsedResult(
@@ -1318,22 +1309,22 @@ void SVGElement::UpdateMappedDeclarationBlock() {
 
   const bool lengthAffectsStyle =
       SVGGeometryProperty::ElementMapsLengthsToStyle(this);
-  bool sawTransform = false;
   uint32_t i = 0;
+  const nsAttrValue* xmlLang = nullptr;
   while (BorrowedAttrInfo info = GetAttrInfoAt(i++)) {
     const nsAttrName* attrName = info.mName;
     if (!attrName->IsAtom()) {
+      if (!IsAttrMapped(attrName->NamespaceID(), attrName->LocalName())) {
+        continue;
+      }
+      // We map `xml:lang` last, to guarantee it overrides `lang`.
+      MOZ_ASSERT(attrName->Equals(nsGkAtoms::lang, kNameSpaceID_XML));
+      xmlLang = info.mValue;
       continue;
     }
 
     nsAtom* nameAtom = attrName->Atom();
-    if (!IsAttributeMapped(nameAtom)) {
-      continue;
-    }
-
-    if (nameAtom == nsGkAtoms::lang &&
-        HasAttr(kNameSpaceID_XML, nsGkAtoms::lang)) {
-      // xml:lang has precedence, and will get set via Gecko_GetXMLLangValue().
+    if (!IsNoNamespaceAttrMapped(nameAtom)) {
       continue;
     }
 
@@ -1353,8 +1344,7 @@ void SVGElement::UpdateMappedDeclarationBlock() {
     if (nameAtom == nsGkAtoms::transform ||
         nameAtom == nsGkAtoms::patternTransform ||
         nameAtom == nsGkAtoms::gradientTransform) {
-      sawTransform = true;
-      const auto* transform = GetAnimatedTransformList();
+      const auto* transform = GetExistingAnimatedTransformList();
       MOZ_ASSERT(GetTransformListAttrName() == nameAtom);
       MOZ_ASSERT(transform);
       // We want to go through the optimized path to tell the style system the
@@ -1364,7 +1354,7 @@ void SVGElement::UpdateMappedDeclarationBlock() {
     }
 
     if (nameAtom == nsGkAtoms::d) {
-      const auto* path = GetAnimPathSegList();
+      const auto* path = GetAnimatedPathSegList();
       // Note: Only SVGPathElement has d attribute.
       MOZ_ASSERT(
           path,
@@ -1387,14 +1377,23 @@ void SVGElement::UpdateMappedDeclarationBlock() {
       continue;
     }
 
+    if (nameAtom == nsGkAtoms::lang) {
+      mappedAttrParser.MapLang(info.mValue->GetAtomValue());
+      continue;
+    }
+
     nsAutoString value;
     info.mValue->ToString(value);
     mappedAttrParser.ParseMappedAttrValue(nameAtom, value);
   }
 
-  // We need to map the SVG view's transform if we haven't mapped it already.
-  if (NodeInfo()->NameAtom() == nsGkAtoms::svg && !sawTransform) {
-    if (const auto* transform = GetAnimatedTransformList()) {
+  if (xmlLang) {
+    mappedAttrParser.MapLang(xmlLang->GetAtomValue());
+  }
+
+  // We need to map the SVG view's transform, if there is one.
+  if (auto* svg = SVGSVGElement::FromNode(this)) {
+    if (const auto* transform = svg->GetViewTransformList()) {
       mappedAttrParser.TellStyleAlreadyParsedResult(*transform);
     }
   }
@@ -1469,7 +1468,8 @@ void SVGElement::DidChangeValue(nsAtom* aName, nsAttrValue& aNewValue,
   const nsAttrValue emptyValue;
   SetAttrAndNotify(kNameSpaceID_None, aName, nullptr, &emptyValue, aNewValue,
                    nullptr, modType, kNotifyDocumentObservers,
-                   kCallAfterSetAttr, GetComposedDoc(), aProofOfUpdate);
+                   kCallAfterSetAttr, GetComposedDoc(), aProofOfUpdate,
+                   mozilla::dom::IsKnownNewAttr::No);
 }
 
 nsAtom* SVGElement::GetEventNameForAttr(nsAtom* aAttr) {
@@ -1724,7 +1724,7 @@ void SVGElement::DidChangePathSegList(const mozAutoDocUpdate& aProofOfUpdate) {
   MOZ_ASSERT(GetPathDataAttrName(), "Changing non-existent path seg list?");
 
   nsAttrValue newValue;
-  newValue.SetTo(GetAnimPathSegList()->GetBaseValue(), nullptr);
+  newValue.SetTo(GetAnimatedPathSegList()->GetBaseValue(), nullptr);
 
   DidChangeValue(GetPathDataAttrName(), newValue, aProofOfUpdate);
 }
@@ -1737,7 +1737,7 @@ void SVGElement::DidAnimatePathSegList() {
 
   // Notify style we have to update the d property because of SMIL animation.
   if (name == nsGkAtoms::d) {
-    auto* animPathSegList = GetAnimPathSegList();
+    auto* animPathSegList = GetAnimatedPathSegList();
     if (animPathSegList->IsAnimating()) {
       SMILOverrideStyle()->SetSMILValue(eCSSProperty_d, *animPathSegList);
     } else {
@@ -1763,7 +1763,7 @@ void SVGElement::DidChangeNumber(uint8_t aAttrEnum) {
   attrValue.SetTo(info.mValues[aAttrEnum].GetBaseValue(), nullptr);
 
   SetParsedAttr(kNameSpaceID_None, info.mInfos[aAttrEnum].mName, nullptr,
-                attrValue, true);
+                attrValue, true, mozilla::dom::IsKnownNewAttr::No);
 }
 
 void SVGElement::GetAnimatedNumberValues(float* aFirst, ...) {
@@ -1822,7 +1822,7 @@ void SVGElement::DidChangeInteger(uint8_t aAttrEnum) {
   attrValue.SetTo(info.mValues[aAttrEnum].GetBaseValue(), nullptr);
 
   SetParsedAttr(kNameSpaceID_None, info.mInfos[aAttrEnum].mName, nullptr,
-                attrValue, true);
+                attrValue, true, mozilla::dom::IsKnownNewAttr::No);
 }
 
 void SVGElement::GetAnimatedIntegerValues(int32_t* aFirst, ...) {
@@ -1880,7 +1880,7 @@ void SVGElement::DidChangeBoolean(uint8_t aAttrEnum) {
 
   nsAttrValue attrValue(info.mValues[aAttrEnum].GetBaseValueAtom());
   SetParsedAttr(kNameSpaceID_None, info.mInfos[aAttrEnum].mName, nullptr,
-                attrValue, true);
+                attrValue, true, mozilla::dom::IsKnownNewAttr::No);
 }
 
 SVGElement::EnumAttributesInfo SVGElement::GetEnumInfo() {
@@ -1896,7 +1896,7 @@ void SVGElement::DidChangeEnum(uint8_t aAttrEnum) {
 
   nsAttrValue attrValue(info.mValues[aAttrEnum].GetBaseValueAtom(this));
   SetParsedAttr(kNameSpaceID_None, info.mInfos[aAttrEnum].mName, nullptr,
-                attrValue, true);
+                attrValue, true, mozilla::dom::IsKnownNewAttr::No);
 }
 
 SVGAnimatedOrient* SVGElement::GetAnimatedOrient() { return nullptr; }
@@ -1970,8 +1970,7 @@ void SVGElement::DidChangeTransformList(
   // The transform attribute is being set, so we must ensure that the
   // SVGAnimatedTransformList is/has been allocated:
   nsAttrValue newValue;
-  newValue.SetTo(GetAnimatedTransformList(DO_ALLOCATE)->GetBaseValue(),
-                 nullptr);
+  newValue.SetTo(GetOrCreateAnimatedTransformList()->GetBaseValue(), nullptr);
 
   DidChangeValue(GetTransformListAttrName(), newValue, aProofOfUpdate);
 }
@@ -1979,7 +1978,7 @@ void SVGElement::DidChangeTransformList(
 void SVGElement::DidAnimateTransformList() {
   MOZ_ASSERT(GetTransformListAttrName(),
              "Animating non-existent transform data?");
-  const auto* animTransformList = GetAnimatedTransformList();
+  const auto* animTransformList = GetExistingAnimatedTransformList();
   const auto* animateMotion = GetAnimateMotionTransform();
   if (animateMotion ||
       (animTransformList && animTransformList->IsAnimating())) {
@@ -2087,19 +2086,19 @@ nsresult SVGElement::ReportAttributeParseFailure(Document* aDocument,
                                           strings);
 }
 
-UniquePtr<SMILAttr> SVGElement::GetAnimatedAttr(int32_t aNamespaceID,
-                                                nsAtom* aName) {
+std::unique_ptr<SMILAttr> SVGElement::GetAnimatedAttr(int32_t aNamespaceID,
+                                                      nsAtom* aName) {
   if (aNamespaceID == kNameSpaceID_None) {
     // Transforms:
     if (GetTransformListAttrName() == aName) {
       // The transform attribute is being animated, so we must ensure that the
       // SVGAnimatedTransformList is/has been allocated:
-      return GetAnimatedTransformList(DO_ALLOCATE)->ToSMILAttr(this);
+      return GetOrCreateAnimatedTransformList()->ToSMILAttr(this);
     }
 
     // Motion (fake 'attribute' for animateMotion)
     if (aName == nsGkAtoms::mozAnimateMotionDummyAttr) {
-      return MakeUnique<SVGMotionSMILAttr>(this);
+      return std::make_unique<SVGMotionSMILAttr>(this);
     }
 
     // Lengths:
@@ -2227,7 +2226,7 @@ UniquePtr<SMILAttr> SVGElement::GetAnimatedAttr(int32_t aNamespaceID,
     // PathSegLists:
     {
       if (GetPathDataAttrName() == aName) {
-        SVGAnimatedPathSegList* segList = GetAnimPathSegList();
+        SVGAnimatedPathSegList* segList = GetAnimatedPathSegList();
         if (segList) {
           return segList->ToSMILAttr(this);
         }

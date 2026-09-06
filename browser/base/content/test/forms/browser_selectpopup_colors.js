@@ -27,12 +27,12 @@ const gSelects = {
     '  <option value="Four" selected="true">{"end": "true"}</option>' +
     "</select></body></html>",
 
-  TRANSPARENT_SELECT:
+  TRANSPARENT_SELECT_BG:
     "<html><head><style>" +
     "  #one { background-color: transparent; }" +
     "</style>" +
     "<body><select id='one'>" +
-    '  <option value="One">{"unstyled": "true"}</option>' +
+    '  <option value="One">{"color": "-moz-ComboboxText", "backgroundColor": "rgba(0, 0, 0, 0)"}</option>' +
     '  <option value="Two" selected="true">{"end": "true"}</option>' +
     "</select></body></html>",
 
@@ -150,14 +150,6 @@ const gSelects = {
     '  <option selected="true">{"end": "true"}</option>' +
     "</select></body></html>",
 
-  SELECT_TRANSPARENT_COLOR_WITH_TEXT_SHADOW:
-    "<html><head><style>" +
-    "  select { color: transparent; text-shadow: 0 0 0 #303030; }" +
-    "</style></head><body><select id='one'>" +
-    '  <option>{"color": "rgba(0, 0, 0, 0)", "backgroundColor": "rgba(0, 0, 0, 0)", "textShadow": "rgb(48, 48, 48) 0px 0px 0px"}</option>' +
-    '  <option selected="true">{"end": "true"}</option>' +
-    "</select></body></html>",
-
   SELECT_LONG_WITH_TRANSITION:
     "<html><head><style>" +
     "  select { transition: all .2s linear; }" +
@@ -244,6 +236,28 @@ const gSelects = {
      <option>{"colorScheme": "light", "color": "rgb(43, 43, 43)", "backgroundColor": "rgb(255, 255, 255)"}</option>
      <option selected="true">{"end": "true"}</option>
    </select></body></html>
+`,
+
+  BG_IMAGE_ON_SELECT: `
+ <html><head><style>
+   select { background-image: linear-gradient(#fff); }
+   option { color: #2b2b2b; background-color: #fff; }
+ </style></head><body><select id='one'>
+  <option>{"unstyled": "true"}</option>
+  <option>{"unstyled": "true"}</option>
+  <option selected="true">{"end": "true"}</option>
+ </select></body></html>
+`,
+
+  TRANSPARENT_SELECT_FG: `
+ <html><head><style>
+   select { color: transparent; }
+   option { color: #2b2b2b; background-color: #fff; }
+ </style></head><body><select id='one'>
+  <option>{"unstyled": "true"}</option>
+  <option>{"unstyled": "true"}</option>
+  <option selected="true">{"end": "true"}</option>
+ </select></body></html>
 `,
 };
 
@@ -461,10 +475,7 @@ let kDefaultSelectStyles = {};
 
 add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["test.wait300msAfterTabSwitch", true],
-      ["dom.forms.select.customstyling", true],
-    ],
+    set: [["dom.forms.select.customstyling", true]],
   });
   kDefaultSelectStyles = await BrowserTestUtils.withNewTab(
     `data:text/html,<select>`,
@@ -500,10 +511,18 @@ add_task(async function test_colors_applied_to_popup() {
 // This test checks when a <select> element has a transparent background applied to itself.
 add_task(async function test_transparent_applied_to_popup() {
   let options = {
+    skipSelectColorTest: true,
+  };
+  await testSelectColors("TRANSPARENT_SELECT_BG", 2, options);
+});
+
+// This test checks when a <select> element has a transparent foreground applied to itself.
+add_task(async function test_transparent_fg_applied_to_popup() {
+  let options = {
     unstyled: true,
     skipSelectColorTest: true,
   };
-  await testSelectColors("TRANSPARENT_SELECT", 2, options);
+  await testSelectColors("TRANSPARENT_SELECT_FG", 3, options);
 });
 
 // This test checks when a <select> element has a background set, and the
@@ -611,7 +630,7 @@ add_task(
     let options = {
       skipSelectColorTest: true,
       waitForComputedStyle: {
-        property: "--panel-color",
+        property: "--panel-text-color",
         value: "rgb(255, 0, 0)",
       },
     };
@@ -658,27 +677,13 @@ add_task(
   }
 );
 
-add_task(async function test_transparent_color_with_text_shadow() {
-  let options = {
-    selectColor: "rgba(0, 0, 0, 0)",
-    selectTextShadow: "rgb(48, 48, 48) 0px 0px 0px",
-    selectBgColor: kDefaultSelectStyles.backgroundColor,
-  };
-
-  await testSelectColors(
-    "SELECT_TRANSPARENT_COLOR_WITH_TEXT_SHADOW",
-    2,
-    options
-  );
-});
-
 add_task(
   async function test_select_with_transition_doesnt_lose_scroll_position() {
     let options = {
       selectColor: "rgb(128, 0, 128)",
       selectBgColor: kDefaultSelectStyles.backgroundColor,
       waitForComputedStyle: {
-        property: "--panel-color",
+        property: "--panel-text-color",
         value: "rgb(128, 0, 128)",
       },
       leaveOpen: true,
@@ -787,12 +792,19 @@ add_task(async function test_scrollbar_props() {
   is(popupStyle.scrollbarColor, "rgb(255, 0, 0) rgb(0, 0, 255)");
 
   let scrollBoxStyle = getComputedStyle(selectPopup.scrollBox.scrollbox);
-  is(scrollBoxStyle.overflow, "auto", "Should be the scrollable box");
+  is(scrollBoxStyle.overflowY, "auto", "Should be the scrollable box");
   is(scrollBoxStyle.scrollbarWidth, "thin");
   is(scrollBoxStyle.scrollbarColor, "rgb(255, 0, 0) rgb(0, 0, 255)");
 
   await hideSelectPopup("escape");
   BrowserTestUtils.removeTab(tab);
+});
+
+add_task(async function test_bg_image() {
+  await testSelectColors("BG_IMAGE_ON_SELECT", 3, {
+    unstyled: true,
+    skipSelectColorTest: true,
+  });
 });
 
 if (AppConstants.platform == "win") {

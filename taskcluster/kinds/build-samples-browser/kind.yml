@@ -27,12 +27,15 @@ task-defaults:
     fetches:
         toolchain:
             - android-sdk-linux
+            - linux64-embedded-uniffi-bindgen
+            - linux64-nimbus-fml
             - android-gradle-dependencies
             - linux64-jdk
         build-fat-aar:
             - target.maven.zip
     include-coverage: true
     run:
+        clone-with: hg
         pre-gradlew:
             - ["cd", "mobile/android/android-components"]
         using: gradlew

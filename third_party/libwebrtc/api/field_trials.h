@@ -11,6 +11,7 @@
 #ifndef API_FIELD_TRIALS_H_
 #define API_FIELD_TRIALS_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <utility>
@@ -18,6 +19,8 @@
 #include "absl/base/nullability.h"
 #include "absl/strings/string_view.h"
 #include "api/field_trials_registry.h"
+#include "api/field_trials_view.h"
+#include "rtc_base/checks.h"
 #include "rtc_base/containers/flat_map.h"
 
 namespace webrtc {
@@ -47,12 +50,15 @@ class FieldTrials : public FieldTrialsRegistry {
 
   // Creates field trials from a string.
   // It is an error to call the constructor with an invalid field trial string.
-  explicit FieldTrials(absl::string_view s);
+  explicit FieldTrials(absl::string_view s) : FieldTrials(s, false) {}
+  // Setting is_test to true is only intended to be used by
+  // CreateTestFieldTrials.
+  FieldTrials(absl::string_view s, bool is_test);
 
-  FieldTrials(const FieldTrials&) = default;
-  FieldTrials(FieldTrials&&) = default;
-  FieldTrials& operator=(const FieldTrials&) = default;
-  FieldTrials& operator=(FieldTrials&&) = default;
+  FieldTrials(const FieldTrials&);
+  FieldTrials(FieldTrials&&);
+  FieldTrials& operator=(const FieldTrials&);
+  FieldTrials& operator=(FieldTrials&&);
 
   ~FieldTrials() override = default;
 
@@ -70,13 +76,40 @@ class FieldTrials : public FieldTrialsRegistry {
   // Setting empty `group` is valid and removes the `trial`.
   void Set(absl::string_view trial, absl::string_view group);
 
+  // Create a copy of this view.
+  std::unique_ptr<FieldTrialsView> CreateCopy() const override {
+    // We don't need to reset get_value_called_ on the returned copy
+    // since it is a FieldTrialsView that has no mutable methods.
+    return std::make_unique<FieldTrials>(*this);
+  }
+
+  void AssertGetValueNotCalled() const {
+#if RTC_DCHECK_IS_ON
+    RTC_DCHECK(!get_value_called_)
+        << "FieldTrials are immutable once first Lookup has been performed";
+#endif
+  }
+
+  bool IsTest() const override { return is_test_; }
+
  private:
   explicit FieldTrials(flat_map<std::string, std::string> key_value_map)
       : key_value_map_(std::move(key_value_map)) {}
 
   std::string GetValue(absl::string_view key) const override;
 
+#if RTC_DCHECK_IS_ON
+  // Keep track of if GetValue() has been called.
+  // This is used to enforce immutability by DCHECK:ing
+  // that modification are performed once get_value_called_
+  // is true.
+  mutable std::atomic<bool> get_value_called_ = false;
+#endif
+
   flat_map<std::string, std::string> key_value_map_;
+  // True if these field trials were created with CreateTestFieldTrials,
+  // which include trials set on the command line.
+  bool is_test_ = false;
 };
 
 template <typename Sink>
@@ -89,6 +122,9 @@ void AbslStringify(Sink& sink, const FieldTrials& self) {
     // Stringification is intended only for human readable logs, and is not
     // intended for reusing as `FieldTrials` construction parameter.
     sink.Append("//");
+    if (self.is_test_) {
+      sink.Append("Test");
+    }
   }
 }
 

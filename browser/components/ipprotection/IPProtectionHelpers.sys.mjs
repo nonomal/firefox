@@ -7,27 +7,36 @@
  * corresponding documentation in the `docs` folder as well.
  */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+import { IPProtectionActivator } from "moz-src:///toolkit/components/ipprotection/IPProtectionActivator.sys.mjs";
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   IPPExceptionsManager:
-    "resource:///modules/ipprotection/IPPExceptionsManager.sys.mjs",
-  IPProtection: "resource:///modules/ipprotection/IPProtection.sys.mjs",
+    "moz-src:///toolkit/components/ipprotection/IPPExceptionsManager.sys.mjs",
+  IPProtection:
+    "moz-src:///browser/components/ipprotection/IPProtection.sys.mjs",
   IPProtectionService:
-    "resource:///modules/ipprotection/IPProtectionService.sys.mjs",
+    "moz-src:///toolkit/components/ipprotection/IPProtectionService.sys.mjs",
   IPProtectionStates:
-    "resource:///modules/ipprotection/IPProtectionService.sys.mjs",
+    "moz-src:///toolkit/components/ipprotection/IPProtectionService.sys.mjs",
+  IPPFxaActivateAuthProvider:
+    "moz-src:///toolkit/components/ipprotection/fxa/IPPFxaActivateAuthProvider.sys.mjs",
 });
 
-import { IPPProxyManager } from "resource:///modules/ipprotection/IPPProxyManager.sys.mjs";
-import { IPPAutoStartHelpers } from "resource:///modules/ipprotection/IPPAutoStart.sys.mjs";
-import { IPPEnrollAndEntitleManager } from "resource:///modules/ipprotection/IPPEnrollAndEntitleManager.sys.mjs";
-import { IPPNimbusHelper } from "resource:///modules/ipprotection/IPPNimbusHelper.sys.mjs";
-import { IPProtectionServerlist } from "resource:///modules/ipprotection/IPProtectionServerlist.sys.mjs";
-import { IPPSignInWatcher } from "resource:///modules/ipprotection/IPPSignInWatcher.sys.mjs";
-import { IPPStartupCache } from "resource:///modules/ipprotection/IPPStartupCache.sys.mjs";
-import { IPPOptOutHelper } from "resource:///modules/ipprotection/IPPOptOutHelper.sys.mjs";
-import { IPPVPNAddonHelper } from "resource:///modules/ipprotection/IPPVPNAddonHelper.sys.mjs";
+if (AppConstants.MOZ_ENTERPRISE) {
+  ChromeUtils.defineESModuleGetters(lazy, {
+    IPPEnterpriseAuthProvider:
+      "moz-src:///toolkit/components/ipprotection/enterprise/IPPEnterpriseAuthProvider.sys.mjs",
+  });
+}
+import { IPPUsageHelper } from "moz-src:///browser/components/ipprotection/IPPUsageHelper.sys.mjs";
+import { IPPL10nHelper } from "moz-src:///browser/components/ipprotection/IPPL10nHelper.sys.mjs";
+import { IPPOnboardingMessage } from "moz-src:///browser/components/ipprotection/IPPOnboardingMessageHelper.sys.mjs";
+import { IPPOptOutHelper } from "moz-src:///browser/components/ipprotection/IPPOptOutHelper.sys.mjs";
+import { IPProtectionAlertManager } from "moz-src:///browser/components/ipprotection/IPProtectionAlertManager.sys.mjs";
+import { IPProtectionInfobarManager } from "moz-src:///browser/components/ipprotection/IPProtectionInfobarManager.sys.mjs";
 
 /**
  * This simple class controls the UI activation/deactivation.
@@ -78,17 +87,26 @@ class UIHelper {
   }
 }
 
-const IPPHelpers = [
-  IPPStartupCache,
-  IPPSignInWatcher,
-  IPProtectionServerlist,
-  IPPEnrollAndEntitleManager,
-  IPPProxyManager,
-  new UIHelper(),
-  IPPVPNAddonHelper,
-  ...IPPAutoStartHelpers,
-  IPPOptOutHelper,
-  IPPNimbusHelper,
-];
+function pickAuthProvider() {
+  if (AppConstants.MOZ_ENTERPRISE) {
+    return lazy.IPPEnterpriseAuthProvider;
+  }
+  return lazy.IPPFxaActivateAuthProvider;
+}
 
-export { IPPHelpers };
+const authProvider = pickAuthProvider();
+
+IPProtectionActivator.addHelpers([
+  IPPL10nHelper,
+  IPPOnboardingMessage,
+  IPPUsageHelper,
+  new UIHelper(),
+  IPPOptOutHelper,
+  IPProtectionAlertManager,
+  IPProtectionInfobarManager,
+  ...authProvider.helpers,
+]);
+
+IPProtectionActivator.setAuthProvider(authProvider);
+
+export { IPProtectionActivator };

@@ -11,16 +11,49 @@
  * @import {OpenedConnection} from "resource://gre/modules/Sqlite.sys.mjs"
  */
 
-const lazy = {};
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
+const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
-  DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
   AsyncShutdown: "resource://gre/modules/AsyncShutdown.sys.mjs",
-  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+  DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
+  embeddingsGeneratorFactory:
+    "chrome://global/content/ml/EmbeddingsGenerator.sys.mjs",
   PlacesSemanticHistoryDatabase:
     "resource://gre/modules/PlacesSemanticHistoryDatabase.sys.mjs",
-  EmbeddingsGenerator: "chrome://global/content/ml/EmbeddingsGenerator.sys.mjs",
+  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+  Region: "resource://gre/modules/Region.sys.mjs",
+  RegionLocaleMap: "moz-src:///toolkit/modules/RegionLocaleMap.sys.mjs",
 });
+
+/**
+ * Returns whether two model configurations represent the same embedding model.
+ * Null and undefined are considered equivalent.
+ *
+ * @param {object} a
+ *   First embedding model configuration.
+ * @param {string|null|undefined} a.featureId
+ * @param {string|null|undefined} a.modelId
+ * @param {number|null|undefined} a.embeddingDimension
+ * @param {object} b
+ *   Second embedding model configuration.
+ * @param {string|null|undefined} b.featureId
+ * @param {string|null|undefined} b.modelId
+ * @param {number|null|undefined} b.embeddingDimension
+ * @returns {boolean}
+ *   True if the configurations describe the same embedding model.
+ */
+function modelConfigMatches(a, b) {
+  // SQLite NULLs come back as JS null; resolved configs may have undefined
+  // for absent fields. Treat the two as equivalent so a benign shape
+  // mismatch does not trigger a spurious drop-and-rebuild.
+  const eq = (x, y) => (x ?? null) === (y ?? null);
+  return (
+    eq(a.featureId, b.featureId) &&
+    eq(a.modelId, b.modelId) &&
+    eq(a.embeddingDimension, b.embeddingDimension)
+  );
+}
 
 ChromeUtils.defineLazyGetter(lazy, "logger", function () {
   return lazy.PlacesUtils.getLogger({ prefix: "PlacesSemanticHistoryManager" });
@@ -33,6 +66,67 @@ ChromeUtils.defineLazyGetter(lazy, "PAGES_FRECENCY_FIELD", () => {
     : "frecency";
 });
 
+// This list is based on the current model capabilities. It is a Map-like list
+// of regions where English is predominant, and a common language is latin-based.
+// See RegionLocaleMap for the format. The list of supported regions and locales
+// is loaded from the places.semanticHistory.supportedRegions string pref, and
+// this is used as a fallback if we fail to parse the pref.
+/** @type {[string, string[]][]} */
+const ENABLED_REGIONS_DEFAULT = [
+  ["AU", ["en-*"]],
+  ["CA", ["en-*"]],
+  ["GB", ["en-*"]],
+  ["IE", ["en-*"]],
+  ["NZ", ["en-*"]],
+  ["PH", ["en-*"]],
+  ["US", ["en-*"]],
+  ["FR", ["en-*", "fr-*"]],
+];
+const FAILSAFE_THROTTLE_ID = "failsafe";
+const SOFT_THROTTLE_ID = "soft";
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "supportedRegions",
+  "places.semanticHistory.supportedRegions",
+  JSON.stringify(ENABLED_REGIONS_DEFAULT),
+  null,
+  json =>
+    lazy.RegionLocaleMap.fromJSON(json, {
+      fallback: ENABLED_REGIONS_DEFAULT,
+      onInvalid: () =>
+        lazy.logger.debug("Invalid json in supportedRegions pref."),
+    })
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "semanticHistorySmartwindowFeatureGate",
+  "places.semanticHistory.smartwindow.featureGate",
+  false
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "maxChunkTimeMs",
+  "places.semanticHistory.maxChunkTimeMs",
+  300
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "maxChunkTimeMsFailsafe",
+  "places.semanticHistory.maxChunkTimeMsFailsafe",
+  500
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "minEntriesBeforeThrottle",
+  "places.semanticHistory.minEntriesBeforeThrottle",
+  1000
+);
+
 // Time between deferred task executions.
 const DEFERRED_TASK_INTERVAL_MS = 3000;
 // Maximum time to wait for an idle before the task is executed anyway.
@@ -42,9 +136,20 @@ const DEFAULT_CHUNK_SIZE = Services.prefs.getIntPref(
   "places.semanticHistory.defaultBatchChunksize",
   25
 );
+const MIN_CHUNK_SIZE = 10;
+
+// Minimum number of embeddings required before semantic search is enabled.
+const COMPLETED_EMBEDDINGS_MINIMUM = 10;
+
+// Number of recent chunk durations kept to decide whether to throttle indexing.
+const CHUNK_LATENCY_MONITORING_WINDOW = 9;
+// How often (in update-task runs) to report the embeddings count to telemetry.
+const GLEAN_REPORT_DB_SIZE_FREQUENCY = 40;
 const ONE_MiB = 1024 * 1024;
 // minimum title length threshold; Usage len(title || description) > MIN_TITLE_LENGTH
 const MIN_TITLE_LENGTH = 4;
+
+const DEFAULT_QUERY_OVERSAMPLE = 50;
 
 /**
  * PlacesSemanticHistoryManager manages the semantic.sqlite database and provides helper
@@ -59,6 +164,7 @@ class PlacesSemanticHistoryManager {
   #changeThresholdCount;
   #distanceThreshold;
   #finalized = false;
+  #chunkSize = DEFAULT_CHUNK_SIZE;
   #updateTask = null;
   #prevPagesRankChangedCount = 0;
   #pendingUpdates = true;
@@ -66,11 +172,14 @@ class PlacesSemanticHistoryManager {
   #updateTaskLatency = [];
   embedder;
   qualifiedForSemanticSearch = false;
-  #promiseRemoved = null;
+  #promiseInitialized = null;
   enoughEntries = false;
   #shutdownProgress = { state: "Not started" };
   #deferredTaskInterval = DEFERRED_TASK_INTERVAL_MS;
   #lastMaxChunksCount = 0;
+  #recentChunkTimes = [];
+  #indexingBlocked = false;
+  #reportDbSizeModCounter = 0;
 
   /**
    * Checks if a value is an array or a typed array.
@@ -86,23 +195,20 @@ class PlacesSemanticHistoryManager {
    * Constructor for PlacesSemanticHistoryManager.
    *
    * @param {object} options - Configuration options.
-   * @param {string} [options.backend] - The backend to use for embeddings.
-   *   See EmbeddingsGenerator.sys.mjs for a list of available backends.
-   * @param {number} [options.embeddingSize=512] - Size of embeddings used for vector operations.
    * @param {number} [options.rowLimit=10000] - Maximum number of rows to process from the database.
    * @param {string} [options.samplingAttrib="frecency"] - Attribute used for sampling rows.
    * @param {number} [options.changeThresholdCount=3] - Threshold of changed rows to trigger updates.
    * @param {number} [options.distanceThreshold=0.6] - Cosine distance threshold to determine similarity.
    * @param {boolean} [options.testFlag=false] - Flag for test behavior.
+   * @param {number} [options.deferredTaskInterval=DEFERRED_TASK_INTERVAL_MS] - Interval for deferred task execution.
    */
   constructor({
-    backend = "static-embeddings",
-    embeddingSize = 512,
     rowLimit = 10000,
     samplingAttrib = "frecency",
     changeThresholdCount = 3,
     distanceThreshold = 0.6,
     testFlag = false,
+    deferredTaskInterval = DEFERRED_TASK_INTERVAL_MS,
   } = {}) {
     this.QueryInterface = ChromeUtils.generateQI([
       "nsIObserver",
@@ -118,12 +224,10 @@ class PlacesSemanticHistoryManager {
       this.#finalized = true;
       return;
     }
-    this.embedder = new lazy.EmbeddingsGenerator({
-      backend,
-      embeddingSize,
-    });
+
+    this.embedder = lazy.embeddingsGeneratorFactory.forPlaces();
     this.semanticDB = new lazy.PlacesSemanticHistoryDatabase({
-      embeddingSize,
+      embeddingSize: this.embedder.embeddingSize,
       fileName: "places_semantic.sqlite",
     });
     this.qualifiedForSemanticSearch =
@@ -144,41 +248,82 @@ class PlacesSemanticHistoryManager {
     );
 
     this.#rowLimit = rowLimit;
-    this.#embeddingSize = embeddingSize;
+    this.#embeddingSize = this.embedder.embeddingSize;
     this.#samplingAttrib = samplingAttrib;
     this.#changeThresholdCount = changeThresholdCount;
     this.#distanceThreshold = distanceThreshold;
     this.testFlag = testFlag;
+    this.#deferredTaskInterval = deferredTaskInterval;
     this.#updateTaskLatency = [];
     lazy.logger.trace("PlaceSemanticManager constructor");
 
-    // When semantic history is disabled or not available anymore due to system
-    // requirements, we want to remove the database files, though we don't want
-    // to check on disk on every startup, thus we use a pref. The removal is
-    // done on startup anyway, as it's less likely to fail.
-    // We check UserValue because users may set it to false to try to disable
-    // the feature, then if we'd check the value the files would not be removed.
-    let wasInitialized = Services.prefs.prefHasUserValue(
-      "places.semanticHistory.initialized"
-    );
-    let isAvailable = this.canUseSemanticSearch;
-    let removeFiles =
-      (wasInitialized && !isAvailable) ||
-      Services.prefs.getBoolPref(
-        "places.semanticHistory.removeOnStartup",
-        false
+    this.#promiseInitialized = (async () => {
+      // canUseSemanticSearch depends on Region being initialized.
+      if (!lazy.Region.home) {
+        await lazy.Region.init();
+      }
+
+      // When semantic history is disabled or not available anymore due to
+      // system requirements, we want to remove the database files, though we
+      // don't want to check on disk on every startup, thus we use a pref.
+      // The removal is done on startup anyway, as it's less likely to fail.
+      // We check prefHasUserValue instead of the value itself, because users
+      // may set it to false to try to disable the feature, then checking value
+      // the files would not be removed.
+      lazy.logger.debug(
+        "PlaceSemanticManager detected region:",
+        lazy.Region.home
       );
-    if (removeFiles) {
-      lazy.logger.info("Removing database files on startup");
-      Services.prefs.clearUserPref("places.semanticHistory.removeOnStartup");
-      this.#promiseRemoved = this.semanticDB
-        .removeDatabaseFiles()
-        .catch(console.error);
-    }
-    if (!isAvailable) {
-      Services.prefs.clearUserPref("places.semanticHistory.initialized");
-    } else if (!wasInitialized) {
-      Services.prefs.setBoolPref("places.semanticHistory.initialized", true);
+      let wasInitialized = Services.prefs.prefHasUserValue(
+        "places.semanticHistory.initialized"
+      );
+
+      let isAvailable =
+        this.canUseSemanticSearch || this.isEnabledForSmartWindow;
+      let removeFiles =
+        (wasInitialized && !isAvailable) ||
+        Services.prefs.getBoolPref(
+          "places.semanticHistory.removeOnStartup",
+          false
+        );
+      if (removeFiles) {
+        lazy.logger.info("Removing database files on startup");
+        Services.prefs.clearUserPref("places.semanticHistory.removeOnStartup");
+        await this.semanticDB.removeDatabaseFiles().catch(console.error);
+      }
+      if (!isAvailable) {
+        Services.prefs.clearUserPref("places.semanticHistory.initialized");
+      } else if (!wasInitialized) {
+        Services.prefs.setBoolPref("places.semanticHistory.initialized", true);
+      }
+    })();
+  }
+
+  /**
+   * Ensures the semantic DB schema/config matches the currently resolved
+   * embedder model configuration.
+   *
+   * This is invoked lazily during the first `getConnection()` call.
+   *
+   * If the active on-disk model configuration differs from the embedder's
+   * current model context, the embedding tables are recreated to match the
+   * new model dimensions and feature identifiers.
+   *
+   * @param {object} conn
+   *   Active database connection.
+   */
+  async #reconcileModelState(conn) {
+    try {
+      const desired = this.embedder.modelContext;
+      const onDisk = await this.semanticDB.getActiveModelConfig(conn);
+      if (onDisk && !modelConfigMatches(onDisk, desired)) {
+        lazy.logger.info(
+          `Model switch detected: ${onDisk.featureId}/${onDisk.embeddingDimension} -> ${desired.featureId}/${desired.embeddingDimension}`
+        );
+        await this.semanticDB.replaceEmbeddingTables(desired, conn);
+      }
+    } catch (e) {
+      lazy.logger.error("Model reconciliation failed", e);
     }
   }
 
@@ -192,40 +337,41 @@ class PlacesSemanticHistoryManager {
     if (
       Services.startup.isInOrBeyondShutdownPhase(
         Ci.nsIAppStartup.SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED
-      ) ||
-      !this.canUseSemanticSearch
+      )
     ) {
       return null;
     }
-    // We must eventually wait for removal to finish.
-    await this.#promiseRemoved;
+
+    await this.#promiseInitialized;
+
+    if (!this.canUseSemanticSearch && !this.isEnabledForSmartWindow) {
+      return null;
+    }
 
     // Avoid re-entrance using a cached promise rather than handing off a conn.
     if (!this.#promiseConn) {
-      this.#promiseConn = this.semanticDB.getConnection().then(conn => {
+      this.#promiseConn = (async () => {
+        const conn = await this.semanticDB.getConnection();
         // Kick off updates.
+        await this.#reconcileModelState(conn);
         this.#createOrUpdateTask();
         this.onPagesRankChanged();
         return conn;
-      });
+      })();
     }
     return this.#promiseConn;
   }
 
   /**
-   * Checks whether the semantic-history vector DB is *sufficiently populated*.
+   * Checks whether the semantic-history vector DB holds the minimum number of
+   * embeddings required to enable semantic search.
    *
-   * We look at the **top N** Places entries (N = `#rowLimit`, ordered by
-   * `#samplingAttrib`) and count how many of them already have an embedding in
-   * `vec_history_mapping`.  If **more than completionThreshold %** are *missing* we consider the
-   * DB **not ready** and set to true when the completionThreshold reaches
-   *
-   * The boolean result is memoised in `this.enoughEntries`; subsequent
-   * calls return that cached value to avoid repeating the query.
+   * The result is memoised in `this.enoughEntries` once the minimum is reached;
+   * subsequent calls return that cached value to avoid repeating the query.
    *
    * @returns {Promise<boolean>}
-   *   `true`  – **not enough** entries yet (pending / total ≥ completionThreshold)
-   *   `false` – DB is sufficiently populated (pending / total < completionThreshold)
+   *   `true` once at least `COMPLETED_EMBEDDINGS_MINIMUM` embeddings exist,
+   *   `false` while the DB is still below that minimum.
    */
   async hasSufficientEntriesForSearching() {
     if (this.enoughEntries) {
@@ -234,47 +380,18 @@ class PlacesSemanticHistoryManager {
     }
     let conn = await this.getConnection();
 
-    // Compute total candidates and how many of them updated with vectors.
+    // Count how many embeddings we currently have.
     const [row] = await conn.execute(
-      `
-      WITH top_places AS (
-        SELECT url_hash FROM moz_places
-        WHERE title NOTNULL
-          AND length(title || ifnull(description,'')) > :min_title_length
-          AND last_visit_date NOTNULL
-          AND frecency > 0
-        ORDER BY ${this.#samplingAttrib} DESC
-        LIMIT :rowLimit
-      )
-      SELECT
-        (SELECT COUNT(*) FROM top_places) AS total,
-        (SELECT COUNT(*) FROM top_places tp
-         JOIN vec_history_mapping map USING (url_hash)) AS completed
-      `,
-      {
-        rowLimit: this.#rowLimit,
-        min_title_length: MIN_TITLE_LENGTH,
-      }
+      `SELECT COUNT(*) AS completed FROM vec_history_mapping`
     );
-
-    const total = row.getResultByName("total");
     const completed = row.getResultByName("completed");
-    const ratio = total ? completed / total : 0;
 
-    const completionThreshold = Services.prefs.getFloatPref(
-      "places.semanticHistory.completionThreshold",
-      0.5
-    );
-    // Ready once ≥ completionThreshold % completed.
-    this.enoughEntries = ratio >= completionThreshold;
+    this.enoughEntries = completed > COMPLETED_EMBEDDINGS_MINIMUM;
 
     if (this.enoughEntries) {
       lazy.logger.debug(
-        `Semantic-DB status — completed: ${completed}/${total} ` +
-          `(${(ratio * 100).toFixed(1)} %). ` +
-          (this.enoughEntries
-            ? "Threshold met; update task can run at normal cadence."
-            : "Below threshold; updater remains armed for frequent updates.")
+        `Semantic-DB ready — ${completed} embeddings; update task can run at ` +
+          `normal cadence.`
       );
     }
 
@@ -289,11 +406,44 @@ class PlacesSemanticHistoryManager {
    *   else false
    */
   get canUseSemanticSearch() {
+    // This requires Region to have been initialized somewhere else
+    // asynchronously, so consumer is responsible for that, otherwise it may
+    // be null.
     return (
       this.qualifiedForSemanticSearch &&
       Services.prefs.getBoolPref("browser.ml.enable", true) &&
-      Services.prefs.getBoolPref("places.semanticHistory.featureGate", false)
+      Services.prefs.getBoolPref("places.semanticHistory.featureGate", false) &&
+      this.#isSupportedLocale(Services.locale.appLocaleAsBCP47)
     );
+  }
+
+  /**
+   * Per-window-type enablement check for Smart Window. This is a UI-surface
+   * decision (should the SW search consumer query semantic history?), distinct
+   * from `canUseSemanticSearch` which gates the Classic Window surface. The
+   * underlying singleton DB initializes if either gate is on, so toggling SW
+   * does not affect CW behavior and vice versa.
+   *
+   * @returns {boolean}
+   */
+  get isEnabledForSmartWindow() {
+    return (
+      this.qualifiedForSemanticSearch &&
+      Services.prefs.getBoolPref("browser.ml.enable", true) &&
+      lazy.semanticHistorySmartwindowFeatureGate &&
+      this.#isSupportedLocale(Services.locale.appLocaleAsBCP47)
+    );
+  }
+
+  /**
+   * Check if the given locale is supported for Semantic History Search in the
+   * home region.
+   *
+   * @param {string} appLocale BCP 47 language tag.
+   * @returns {boolean} Whether the locale is supported.
+   */
+  #isSupportedLocale(appLocale) {
+    return lazy.supportedRegions.matches(lazy.Region.home, appLocale);
   }
 
   handlePlacesEvents(events) {
@@ -313,12 +463,17 @@ class PlacesSemanticHistoryManager {
    *
    * This is invoked whenever the `"pages-rank-changed"` or
    * `"history-cleared"` event is observed.
-   * It re-arms the DeferredTask for updates if not finalized.
+   * It re-arms the DeferredTask for updates if not finalized and indexing has
+   * not been blocked by the failsafe.
    *
    * @private
    */
   async onPagesRankChanged() {
-    if (this.#updateTask && !this.#updateTask.isFinalized) {
+    if (
+      this.#updateTask &&
+      !this.#updateTask.isFinalized &&
+      !this.#indexingBlocked
+    ) {
       lazy.logger.trace("Arm update task");
       this.#updateTask.arm();
     }
@@ -330,12 +485,76 @@ class PlacesSemanticHistoryManager {
   }
 
   /**
-   * Sets the DeferredTask interval for testing purposes.
+   * Records the duration of the last processed chunk, keeping only the most
+   * recent CHUNK_LATENCY_MONITORING_WINDOW samples.
    *
-   * @param {number} val minimum milliseconds between deferred task executions.
+   * @param {number} durationMS Chunk processing duration in milliseconds.
    */
-  setDeferredTaskIntervalForTests(val) {
-    this.#deferredTaskInterval = val;
+  #recordChunkTime(durationMS) {
+    this.#recentChunkTimes.push(durationMS);
+    if (this.#recentChunkTimes.length > CHUNK_LATENCY_MONITORING_WINDOW) {
+      this.#recentChunkTimes.shift();
+    }
+  }
+
+  /**
+   * Decides whether background indexing should stop advancing because recent
+   * chunks have been too slow, based on the last
+   * CHUNK_LATENCY_MONITORING_WINDOW durations.
+   *
+   * The failsafe is a hard brake: if half or more of the recent chunks exceed
+   * `maxChunkTimeMsFailsafe`, indexing stops regardless of how much is stored
+   * and is not restarted for the rest of the session.
+   * The soft threshold only applies once the DB holds more than
+   * `minEntriesBeforeThrottle` embeddings, so slow machines keep going until the
+   * feature is usable.
+   *
+   * @param {OpenedConnection} conn a SQLite connection to the database.
+   * @returns {Promise<?string>}
+   *   `FAILSAFE_THROTTLE_ID` or `SOFT_THROTTLE_ID` when indexing should be
+   *   throttled, otherwise `null`.
+   */
+  async #shouldThrottleIndexing(conn) {
+    if (this.#recentChunkTimes.length < CHUNK_LATENCY_MONITORING_WINDOW) {
+      return null;
+    }
+
+    const majority = Math.ceil(CHUNK_LATENCY_MONITORING_WINDOW / 2);
+    let countOver = threshold =>
+      this.#recentChunkTimes.filter(ms => ms > threshold).length;
+
+    if (countOver(lazy.maxChunkTimeMsFailsafe) >= majority) {
+      return FAILSAFE_THROTTLE_ID;
+    }
+
+    if (countOver(lazy.maxChunkTimeMs) >= majority) {
+      const [row] = await conn.execute(
+        `SELECT COUNT(*) AS c FROM vec_history_mapping`
+      );
+      if (row.getResultByName("c") > lazy.minEntriesBeforeThrottle) {
+        return SOFT_THROTTLE_ID;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Reports the number of stored embeddings to telemetry, roughly once every
+   * GLEAN_REPORT_DB_SIZE_FREQUENCY update-task runs to avoid querying the DB on
+   * every run.
+   *
+   * @param {OpenedConnection} conn a SQLite connection to the database.
+   */
+  async #maybeReportEntriesCount(conn) {
+    if (this.#reportDbSizeModCounter++ % GLEAN_REPORT_DB_SIZE_FREQUENCY == 0) {
+      const [row] = await conn.execute(
+        `SELECT COUNT(*) AS c FROM vec_history_mapping`
+      );
+      Glean.places.databaseSemanticHistoryNumEntries.set(
+        row.getResultByName("c")
+      );
+    }
   }
 
   /**
@@ -369,6 +588,9 @@ class PlacesSemanticHistoryManager {
         try {
           lazy.logger.info("Running vector DB update task...");
           let conn = await this.getConnection();
+          if (!conn) {
+            return;
+          }
           let pagesRankChangedCount =
             PlacesObservers.counts.get("pages-rank-changed") +
             PlacesObservers.counts.get("history-cleared") +
@@ -382,6 +604,8 @@ class PlacesSemanticHistoryManager {
             lazy.logger.info("No significant changes detected.");
             return;
           }
+
+          await this.#maybeReportEntriesCount(conn);
 
           this.#prevPagesRankChangedCount = pagesRankChangedCount;
           const startTime = ChromeUtils.now();
@@ -410,14 +634,16 @@ class PlacesSemanticHistoryManager {
               Glean.places.semanticHistoryChunkCalculateTime.start();
 
             let chunksCount =
-              Math.ceil(addCount / DEFAULT_CHUNK_SIZE) +
-              Math.ceil(deleteCount / DEFAULT_CHUNK_SIZE);
+              Math.ceil(addCount / this.#chunkSize) +
+              Math.ceil(deleteCount / this.#chunkSize);
             if (chunksCount > this.#lastMaxChunksCount) {
               this.#lastMaxChunksCount = chunksCount;
               Glean.places.semanticHistoryMaxChunksCount.set(chunksCount);
             }
 
+            const chunkStart = ChromeUtils.now();
             await this.updateVectorDB(conn, addRows, deleteRows);
+            this.#recordChunkTime(ChromeUtils.now() - chunkStart);
             ChromeUtils.addProfilerMarker(
               "updateVectorDB",
               startTime,
@@ -429,13 +655,47 @@ class PlacesSemanticHistoryManager {
             );
           }
 
-          if (
-            addCount > DEFAULT_CHUNK_SIZE ||
-            deleteCount > DEFAULT_CHUNK_SIZE
-          ) {
-            // There's still entries to update, re-arm the task.
-            this.#pendingUpdates = true;
-            this.#updateTask.arm();
+          if (addCount > this.#chunkSize || deleteCount > this.#chunkSize) {
+            // There's still entries to update, but recent chunks may have been
+            // too slow.
+            const throttle = await this.#shouldThrottleIndexing(conn);
+            if (throttle) {
+              // Capture the samples for logging before resetting the window, so
+              // the next decision is based on the new chunk size's performance.
+              const recentTimes = this.#recentChunkTimes.join(", ");
+              this.#recentChunkTimes = [];
+              Glean.places.semanticHistoryIndexingStopped[throttle].add(1);
+              this.#pendingUpdates = true;
+              if (throttle == FAILSAFE_THROTTLE_ID) {
+                // Hard stop: block indexing for the rest of the session. The
+                // task will not be re-armed by Places observer events.
+                this.#indexingBlocked = true;
+                lazy.logger.debug(
+                  `Blocking indexing (failsafe); recent chunk times: ` +
+                    `${recentTimes} ms.`
+                );
+                return;
+              }
+              // Soft throttle: halve the chunk size (down to MIN_CHUNK_SIZE) so
+              // the next run, re-armed by the usual Places observer events, does
+              // less work. This reduction persists until the service restarts.
+              if (this.#chunkSize > MIN_CHUNK_SIZE) {
+                this.#chunkSize = Math.max(
+                  MIN_CHUNK_SIZE,
+                  Math.floor(this.#chunkSize / 2)
+                );
+                lazy.logger.debug(
+                  `Reducing chunk size to ${this.#chunkSize}; recent chunk ` +
+                    `times: ${recentTimes} ms.`
+                );
+              }
+              return;
+            }
+            if (!this.#indexingBlocked) {
+              // There's still entries to update, re-arm the task.
+              this.#pendingUpdates = true;
+              this.#updateTask.arm();
+            }
             return;
           }
 
@@ -517,7 +777,7 @@ class PlacesSemanticHistoryManager {
       {
         rowLimit: this.#rowLimit,
         min_title_length: MIN_TITLE_LENGTH,
-        chunkSize: DEFAULT_CHUNK_SIZE,
+        chunkSize: this.#chunkSize,
       }
     );
 
@@ -573,7 +833,7 @@ class PlacesSemanticHistoryManager {
       {
         rowLimit: this.#rowLimit,
         min_title_length: MIN_TITLE_LENGTH,
-        chunkSize: DEFAULT_CHUNK_SIZE,
+        chunkSize: this.#chunkSize,
       }
     );
 
@@ -598,7 +858,7 @@ class PlacesSemanticHistoryManager {
         );
         batchTensors = this.#convertTensor(batchTensors, rowsToAdd.length);
       } catch (ex) {
-        lazy.logger.error(`Error processing tensors: ${ex}`);
+        lazy.logger.error(`Error processing tensors`, ex);
         // If we failed generating tensors skip the addition, but proceed
         // with removals below.
         rowsToAdd.length = 0;
@@ -637,46 +897,16 @@ class PlacesSemanticHistoryManager {
             lazy.logger.error(`Unable to get inserted rowid for: ${url_hash}`);
             continue;
           }
-
-          // UPSERT or INSERT OR REPLACE are not yet supported by the sqlite-vec
-          // extension, so we must manage the conflict manually.
-          // See https://github.com/asg017/sqlite-vec/issues/127.
-          try {
-            await conn.executeCached(
-              `
-              INSERT INTO vec_history (rowid, embedding, embedding_coarse)
-              VALUES (:rowid, :vector, vec_quantize_binary(:vector))
-              `,
-              {
-                rowid,
-                vector: lazy.PlacesUtils.tensorToSQLBindable(tensor),
-              }
-            );
-          } catch (error) {
-            lazy.logger.trace(
-              `Error while inserting new vector, possible conflict. Error (${error.result}): ${error.message}`
-            );
-            // Ideally we'd check for `error.result == Cr.NS_ERROR_STORAGE_CONSTRAINT`,
-            // unfortunately sqlite-vec doesn't generate a SQLITE_CONSTRAINT
-            // error in this case, so we get a generic NS_ERROR_FAILURE.
-            await conn.executeCached(
-              `
-              DELETE FROM vec_history WHERE rowid = :rowid
-              `,
-              { rowid }
-            );
-            await conn.executeCached(
-              `
-              INSERT INTO vec_history (rowid, embedding, embedding_coarse)
-              VALUES (:rowid, :vector, vec_quantize_binary(:vector))
-              `,
-              {
-                rowid,
-                vector: lazy.PlacesUtils.tensorToSQLBindable(tensor),
-              }
-            );
-          }
-
+          await conn.executeCached(
+            `
+            INSERT OR REPLACE INTO vec_history (rowid, embedding)
+            VALUES (:rowid, :vector)
+            `,
+            {
+              rowid,
+              vector: lazy.PlacesUtils.tensorToSQLBindable(tensor),
+            }
+          );
           lazy.logger.info(
             `Added embedding and mapping for url_hash: ${url_hash}`
           );
@@ -778,23 +1008,26 @@ class PlacesSemanticHistoryManager {
 
     let conn = await this.getConnection();
 
+    await conn.execute(`INSERT INTO vec_history(vec_history) VALUES(:cmd)`, {
+      cmd: `oversample=${DEFAULT_QUERY_OVERSAMPLE}`,
+    });
+
     let rows = await conn.executeCached(
       `
-      WITH coarse_matches AS (
-        SELECT rowid,
-               embedding
-        FROM vec_history
-        WHERE embedding_coarse match vec_quantize_binary(:vector)
-        ORDER BY distance
-        LIMIT 100
-      ),
+      WITH
       matches AS (
-        SELECT url_hash, vec_distance_cosine(embedding, :vector) AS distance
+        SELECT rowid AS vec_rowid, url_hash
         FROM vec_history_mapping
-        JOIN coarse_matches USING (rowid)
-        WHERE distance <= :distanceThreshold
+        JOIN vec_history USING (rowid)
+        WHERE embedding MATCH (:vector)
+        AND k=2
         ORDER BY distance
-        LIMIT 2
+      ),
+      scored AS (
+        SELECT matches.url_hash,
+               vec_distance_cosine(vec_history.embedding, :vector) AS distance
+        FROM matches
+        JOIN vec_history ON vec_history.rowid = matches.vec_rowid
       )
       SELECT id,
              title,
@@ -803,8 +1036,9 @@ class PlacesSemanticHistoryManager {
              frecency,
              last_visit_date
       FROM moz_places
-      JOIN matches USING (url_hash)
+      JOIN scored USING (url_hash)
       WHERE ${lazy.PAGES_FRECENCY_FIELD} <> 0
+      AND distance <= :distanceThreshold
       ORDER BY distance
       `,
       {

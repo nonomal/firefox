@@ -1,45 +1,44 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "nsCoreUtils.h"
 
-#include "nsAttrValue.h"
-#include "nsIAccessibleTypes.h"
-
-#include "mozilla/dom/Document.h"
-#include "nsAccUtils.h"
-#include "nsRange.h"
-#include "nsXULElement.h"
-#include "nsIDocShell.h"
-#include "nsIObserverService.h"
-#include "nsPresContext.h"
-#include "nsISelectionController.h"
-#include "nsISimpleEnumerator.h"
-#include "mozilla/dom/TouchEvent.h"
+#include "AnchorPositioningUtils.h"
+#include "XULTreeElement.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/EventListenerManager.h"
 #include "mozilla/EventStateManager.h"
 #include "mozilla/MouseEvents.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ScrollContainerFrame.h"
-#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/TouchEvents.h"
-#include "nsGkAtoms.h"
-
-#include "AnchorPositioningUtils.h"
-#include "nsComponentManagerUtils.h"
-
-#include "XULTreeElement.h"
-#include "nsIContentInlines.h"
-#include "nsTreeColumns.h"
+#include "mozilla/dom/AncestorIterator.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/ElementInternals.h"
 #include "mozilla/dom/HTMLLabelElement.h"
+#include "mozilla/dom/HTMLOptGroupElement.h"
+#include "mozilla/dom/HTMLOptionElement.h"
+#include "mozilla/dom/HTMLSelectElement.h"
 #include "mozilla/dom/MouseEventBinding.h"
 #include "mozilla/dom/Selection.h"
+#include "mozilla/dom/TouchEvent.h"
+#include "nsAccUtils.h"
+#include "nsAttrValue.h"
+#include "nsComponentManagerUtils.h"
+#include "nsGkAtoms.h"
+#include "nsIAccessibleTypes.h"
+#include "nsIContentInlines.h"
+#include "nsIDocShell.h"
+#include "nsIObserverService.h"
+#include "nsISelectionController.h"
+#include "nsISimpleEnumerator.h"
+#include "nsPresContext.h"
+#include "nsRange.h"
+#include "nsTreeColumns.h"
+#include "nsXULElement.h"
 
 using namespace mozilla;
 
@@ -56,7 +55,7 @@ using mozilla::a11y::nsAccUtils;
 
 bool nsCoreUtils::IsLabelWithControl(nsIContent* aContent) {
   dom::HTMLLabelElement* label = dom::HTMLLabelElement::FromNode(aContent);
-  if (label && label->GetControl()) return true;
+  if (label && label->GetLabeledElementInternal()) return true;
 
   return false;
 }
@@ -157,8 +156,8 @@ void nsCoreUtils::DispatchTouchEvent(EventMessage aMessage, int32_t aX,
   WidgetTouchEvent event(true, aMessage, aRootWidget);
 
   // XXX: Touch has an identifier of -1 to hint that it is synthesized.
-  RefPtr<dom::Touch> t = new dom::Touch(-1, LayoutDeviceIntPoint(aX, aY),
-                                        LayoutDeviceIntPoint(1, 1), 0.0f, 1.0f);
+  auto t = MakeRefPtr<dom::Touch>(-1, LayoutDeviceIntPoint(aX, aY),
+                                  LayoutDeviceIntPoint(1, 1), 0.0f, 1.0f);
   t->SetTouchTarget(aContent);
   event.mTouches.AppendElement(t);
   nsEventStatus status = nsEventStatus_eIgnore;
@@ -193,6 +192,15 @@ nsIContent* nsCoreUtils::GetDOMElementFor(nsIContent* aContent) {
 
 nsINode* nsCoreUtils::GetDOMNodeFromDOMPoint(nsINode* aNode, uint32_t aOffset) {
   if (aNode && aNode->IsElement()) {
+    if (aNode->IsTextControlElement()) {
+      // Offsets in text controls refer to the control itself.
+      // TODO(bug 2017248): Return the anonymous text node itself. This is
+      // currently not a problem because the caret code is managed by
+      // HyperTextAccessible, but would be a problem if this was rewritten to
+      // use TextLeafPoint.
+      return aNode;
+    }
+
     uint32_t childCount = aNode->GetChildCount();
     NS_ASSERTION(aOffset <= childCount, "Wrong offset of the DOM point!");
 
@@ -221,27 +229,28 @@ bool nsCoreUtils::IsAncestorOf(nsINode* aPossibleAncestorNode,
 
 nsresult nsCoreUtils::ScrollSubstringTo(nsIFrame* aFrame, nsRange* aRange,
                                         uint32_t aScrollType) {
-  ScrollAxis vertical, horizontal;
+  AxisScrollParams vertical, horizontal;
   ConvertScrollTypeToPercents(aScrollType, &vertical, &horizontal);
 
   return ScrollSubstringTo(aFrame, aRange, vertical, horizontal);
 }
 
 nsresult nsCoreUtils::ScrollSubstringTo(nsIFrame* aFrame, nsRange* aRange,
-                                        ScrollAxis aVertical,
-                                        ScrollAxis aHorizontal) {
+                                        AxisScrollParams aVertical,
+                                        AxisScrollParams aHorizontal) {
   if (!aFrame || !aRange) {
     return NS_ERROR_FAILURE;
   }
 
-  nsPresContext* presContext = aFrame->PresContext();
-
-  nsCOMPtr<nsISelectionController> selCon;
-  aFrame->GetSelectionController(presContext, getter_AddRefs(selCon));
-  NS_ENSURE_TRUE(selCon, NS_ERROR_FAILURE);
-
-  RefPtr<dom::Selection> selection =
-      selCon->GetSelection(nsISelectionController::SELECTION_ACCESSIBILITY);
+  const RefPtr<dom::Selection> selection = [&]() -> dom::Selection* {
+    nsISelectionController* const selCon = aFrame->GetSelectionController();
+    NS_ENSURE_TRUE(selCon, nullptr);
+    return selCon->GetSelection(
+        nsISelectionController::SELECTION_ACCESSIBILITY);
+  }();
+  if (MOZ_UNLIKELY(!selection)) {
+    return NS_ERROR_FAILURE;
+  }
 
   selection->RemoveAllRanges(IgnoreErrors());
   selection->AddRangeAndSelectFramesAndNotifyListeners(*aRange, IgnoreErrors());
@@ -276,8 +285,8 @@ void nsCoreUtils::ScrollFrameToPoint(nsIFrame* aScrollContainerFrame,
 }
 
 void nsCoreUtils::ConvertScrollTypeToPercents(uint32_t aScrollType,
-                                              ScrollAxis* aVertical,
-                                              ScrollAxis* aHorizontal) {
+                                              AxisScrollParams* aVertical,
+                                              AxisScrollParams* aHorizontal) {
   WhereToScroll whereY, whereX;
   WhenToScroll whenY, whenX;
   switch (aScrollType) {
@@ -323,8 +332,8 @@ void nsCoreUtils::ConvertScrollTypeToPercents(uint32_t aScrollType,
       whereX = WhereToScroll::Center;
       whenX = WhenToScroll::IfNotFullyVisible;
   }
-  *aVertical = ScrollAxis(whereY, whenY);
-  *aHorizontal = ScrollAxis(whereX, whenX);
+  *aVertical = AxisScrollParams(whereY, whenY);
+  *aHorizontal = AxisScrollParams(whereX, whenX);
 }
 
 already_AddRefed<nsIDocShell> nsCoreUtils::GetDocShellFor(nsINode* aNode) {
@@ -528,7 +537,7 @@ bool nsCoreUtils::IsColumnHidden(nsTreeColumn* aColumn) {
 
 void nsCoreUtils::ScrollTo(PresShell* aPresShell, nsIContent* aContent,
                            uint32_t aScrollType) {
-  ScrollAxis vertical, horizontal;
+  AxisScrollParams vertical, horizontal;
   ConvertScrollTypeToPercents(aScrollType, &vertical, &horizontal);
   aPresShell->ScrollContentIntoView(aContent, vertical, horizontal,
                                     ScrollFlags::ScrollOverflowHidden);
@@ -583,29 +592,44 @@ bool nsCoreUtils::CanCreateAccessibleWithoutFrame(nsIContent* aContent) {
   if (!element) {
     return false;
   }
-  if (!element->HasServoData() || Servo_Element_IsDisplayNone(element)) {
-    // Out of the flat tree or in a display: none subtree.
-    return false;
+  // <option> and <optgroup> can create an accessible for comboboxes, if our
+  // select can also create an accessible (even if they're display: none)
+  if (auto* option = dom::HTMLOptionElement::FromNode(element)) {
+    if (auto* select = option->GetSelect(); select && select->IsCombobox()) {
+      element = select;
+    }
+  } else if (auto* optgroup = dom::HTMLOptGroupElement::FromNode(element)) {
+    if (auto* select = optgroup->GetSelect(); select && select->IsCombobox()) {
+      element = select;
+    }
+  } else if (element->GetPseudoElementType() == PseudoStyleType::Picker) {
+    if (auto* select =
+            dom::HTMLSelectElement::FromNode(element->GetFlattenedTreeParent());
+        select && select->IsCombobox()) {
+      element = select;
+    }
   }
 
   // If we aren't display: contents or option/optgroup we can't create an
   // accessible without frame. Our select combobox code relies on the latter.
-  if (!element->IsDisplayContents() &&
-      !element->IsAnyOfHTMLElements(nsGkAtoms::option, nsGkAtoms::optgroup)) {
+  // Note that we need to check primary frame explicitly for the <select> case
+  // above.
+  if (!element->GetPrimaryFrame() && !element->IsDisplayContents()) {
     return false;
   }
 
   // Even if we're display: contents or optgroups, we might not be able to
-  // create an accessible if we're in a content-visibility: hidden subtree.
+  // create an accessible if we're in a content-visibility: hidden, visibility:
+  // hidden or inert subtree.
   //
   // To check that, find the closest ancestor element with a frame.
-  for (nsINode* ancestor = element->GetFlattenedTreeParentNode();
-       ancestor && ancestor->IsContent();
-       ancestor = ancestor->GetFlattenedTreeParentNode()) {
-    if (nsIFrame* f = ancestor->AsContent()->GetPrimaryFrame()) {
+  for (nsIContent* c :
+       element->InclusiveFlatTreeAncestorsOfType<nsIContent>()) {
+    if (nsIFrame* f = c->GetPrimaryFrame()) {
       if (f->HidesContent(nsIFrame::IncludeContentVisibility::Hidden) ||
           f->IsHiddenByContentVisibilityOnAnyAncestor(
-              nsIFrame::IncludeContentVisibility::Hidden)) {
+              nsIFrame::IncludeContentVisibility::Hidden) ||
+          !f->StyleVisibility()->IsVisible() || f->StyleUI()->IsInert()) {
         return false;
       }
       break;
@@ -680,7 +704,7 @@ const nsIFrame* nsCoreUtils::GetAnchorForPositionedFrame(
     return nullptr;
   }
 
-  const nsAtom* anchorName = nullptr;
+  ScopedNameRef anchorName{nullptr, StyleCascadeLevel::Default()};
   AnchorPosReferenceData* referencedAnchors =
       aPositionedFrame->GetProperty(nsIFrame::AnchorPosReferences());
 
@@ -693,15 +717,16 @@ const nsIFrame* nsCoreUtils::GetAnchorForPositionedFrame(
       continue;
     }
 
-    if (anchorName && entry.GetKey() != anchorName) {
+    const auto& anchorKey = entry.GetKey();
+    if (anchorName.mName && anchorKey.mName != anchorName.mName) {
       // Multiple anchors referenced.
       return nullptr;
     }
 
-    anchorName = entry.GetKey();
+    anchorName = anchorKey;
   }
 
-  return anchorName
+  return anchorName.mName
              ? aPresShell->GetAnchorPosAnchor(anchorName, aPositionedFrame)
              : nullptr;
 }
@@ -715,6 +740,7 @@ nsIFrame* nsCoreUtils::GetPositionedFrameForAnchor(
   nsIFrame* positionedFrame = nullptr;
   const auto* styleDisp = aAnchorFrame->StyleDisplay();
   if (styleDisp->HasAnchorName()) {
+    auto treeScope = styleDisp->mAnchorName.scope;
     for (auto& name : styleDisp->mAnchorName.AsSpan()) {
       for (nsIFrame* frame : aPresShell->GetAnchorPosPositioned()) {
         // Bug 1990069: We need to iterate over all positioned frames in doc and
@@ -728,10 +754,10 @@ nsIFrame* nsCoreUtils::GetPositionedFrameForAnchor(
           // just skip this frame for now.
           continue;
         }
-        const auto* data = referencedAnchors->Lookup(name.AsAtom());
+        const ScopedNameRef nameRef(name.AsAtom(), treeScope);
+        const auto* data = referencedAnchors->Lookup(nameRef);
         if (data && *data && data->ref().mOffsetData) {
-          if (aAnchorFrame ==
-              aPresShell->GetAnchorPosAnchor(name.AsAtom(), frame)) {
+          if (aAnchorFrame == aPresShell->GetAnchorPosAnchor(nameRef, frame)) {
             if (positionedFrame) {
               // Multiple positioned frames reference this anchor.
               return nullptr;

@@ -5,38 +5,45 @@
 package org.mozilla.fenix.bookmarks
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarStore
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 import mozilla.components.lib.state.ext.flow
 
 /**
- * [BrowserToolbarStore] middleware that will synchronize bookmarks searches being ended
- * when the toolbar exits search mode.
+ * [BrowserToolbarStore] middleware that will synchronize bookmarks searches being ended when the toolbar exits search
+ * mode.
  */
 internal class BrowserToolbarSyncToBookmarksMiddleware(
     private val toolbarStore: BrowserToolbarStore,
     private val scope: CoroutineScope,
 ) : Middleware<BookmarksState, BookmarksAction> {
+
+    private var syncJob: Job? = null
+
     override fun invoke(
-        context: MiddlewareContext<BookmarksState, BookmarksAction>,
+        store: Store<BookmarksState, BookmarksAction>,
         next: (BookmarksAction) -> Unit,
         action: BookmarksAction,
     ) {
         next(action)
 
-        if (action is Init) {
-            toolbarStore.flow()
-                .map { it.isEditMode() }
-                .onEach { isInEditMode ->
-                    if (context.state.isSearching && !isInEditMode) {
-                        context.store.dispatch(SearchDismissed)
+        if (action is ViewAppeared && action.bookmarkToLoad == null) {
+            syncJob?.cancel()
+            syncJob =
+                toolbarStore
+                    .flow()
+                    .map { it.isEditMode() }
+                    .onEach { isInEditMode ->
+                        if (store.state.isSearching && !isInEditMode) {
+                            store.dispatch(SearchAction.SearchDismissed)
+                        }
                     }
-                }
-                .launchIn(scope)
+                    .launchIn(scope)
         }
     }
 }

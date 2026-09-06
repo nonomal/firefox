@@ -39,6 +39,7 @@ modules_unittests_resources = [
   "audio_device/audio_short16.pcm",
   "audio_device/audio_short44.pcm",
   "audio_device/audio_short48.pcm",
+  "audio_processing/aec3/noop_ml_aec_model_for_testing.tflite",
   "audio_processing/agc/agc_audio.pcm",
   "audio_processing/agc/agc_no_circular_buffer.dat",
   "audio_processing/agc/agc_pitch_gain.dat",
@@ -171,10 +172,20 @@ video_engine_tests_resources = [
 group("video_engine_tests_data") {
   data = video_engine_tests_resources
 }
+
+scenario_config_resources = [
+  "difficult_photo_1850_1110.yuv",
+  "photo_1850_1110.yuv",
+  "presentation_1850_1110.yuv",
+  "web_screenshot_1850_1110.yuv",
+]
+group("scenario_config_resources") {
+  data = scenario_config_resources
+}
 if (is_ios) {
-  bundle_data("video_engine_tests_bundle_data") {
+  bundle_data("scenario_config_resources_bundle_data") {
     testonly = true
-    sources = video_engine_tests_resources
+    sources = scenario_config_resources
     outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
   }
 }

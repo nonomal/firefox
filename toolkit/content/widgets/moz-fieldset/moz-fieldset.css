@@ -5,6 +5,8 @@
 @import url("chrome://global/skin/design-system/text-and-typography.css");
 
 :host {
+  --fieldset-gap-row: var(--space-small);
+  --fieldset-gap-column: var(--space-medium);
   display: block;
 }
 
@@ -15,16 +17,19 @@ fieldset {
 legend {
   padding: 0;
   font-weight: var(--font-weight-semibold);
-  display: inline-flex;
+  display: flex;
   gap: var(--space-small);
   align-items: baseline;
 
-  &:has(+ #description) {
-    display: flex;
+  /* FIXME(bug 2061147): Remove this hack */
+  /* stylelint-disable-next-line stylelint-plugin-mozilla/no-has-selector */
+  &:has(+ a, + slot[name="support-link"]:has-slotted) {
+    display: inline-flex;
   }
 
   /* Hack to handle vertical alignment in cases where we have an icon + heading
   followed by a support link */
+  /* stylelint-disable-next-line stylelint-plugin-mozilla/no-has-selector */
   &:has(.icon) + a[is="moz-support-link"],
   &:has(.icon) + ::slotted([slot="support-link"]) {
     vertical-align: baseline;
@@ -35,7 +40,7 @@ legend {
   width: var(--icon-size);
   height: var(--icon-size);
   -moz-context-properties: fill;
-  fill: var(--icon-color);
+  fill: currentColor;
   align-self: center;
 }
 
@@ -48,9 +53,9 @@ h6 {
   margin: 0;
 }
 
-#description {
+.description {
   margin: 0;
-  margin-block-start: var(--space-xxsmall);
+  margin-block-start: var(--space-xsmall);
   color: var(--text-color-deemphasized);
 }
 
@@ -62,11 +67,11 @@ h6 {
   fieldset[aria-orientation="horizontal"] & {
     flex-direction: row;
     flex-wrap: wrap;
-    row-gap: var(--space-small);
-    column-gap: var(--space-medium);
+    row-gap: var(--fieldset-gap-row);
+    column-gap: var(--fieldset-gap-column);
   }
 
-  :is(legend, #description) ~ & {
+  :is(legend, .description) ~ & {
     margin-top: var(--space-small);
 
     :host([hasheading]) & {

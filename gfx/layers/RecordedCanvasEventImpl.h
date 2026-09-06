@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -295,8 +293,10 @@ RecordedCacheDataSurface::RecordedCacheDataSurface(S& aStream)
 class RecordedGetDataForSurface final
     : public RecordedEventDerived<RecordedGetDataForSurface> {
  public:
-  explicit RecordedGetDataForSurface(const gfx::SourceSurface* aSurface)
-      : RecordedEventDerived(GET_DATA_FOR_SURFACE), mSurface(aSurface) {}
+  RecordedGetDataForSurface(uint32_t aId, const gfx::SourceSurface* aSurface)
+      : RecordedEventDerived(GET_DATA_FOR_SURFACE),
+        mId(aId),
+        mSurface(aSurface) {}
 
   template <class S>
   MOZ_IMPLICIT RecordedGetDataForSurface(S& aStream);
@@ -309,23 +309,26 @@ class RecordedGetDataForSurface final
   std::string GetName() const final { return "RecordedGetDataForSurface"; }
 
  private:
+  uint32_t mId = 0;
   ReferencePtr mSurface;
 };
 
 inline bool RecordedGetDataForSurface::PlayCanvasEvent(
     CanvasTranslator* aTranslator) const {
-  aTranslator->GetDataSurface(mSurface.mLongPtr);
+  aTranslator->GetDataSurface(mId, mSurface.mLongPtr);
   return true;
 }
 
 template <class S>
 void RecordedGetDataForSurface::Record(S& aStream) const {
+  WriteElement(aStream, mId);
   WriteElement(aStream, mSurface);
 }
 
 template <class S>
 RecordedGetDataForSurface::RecordedGetDataForSurface(S& aStream)
     : RecordedEventDerived(GET_DATA_FOR_SURFACE) {
+  ReadElement(aStream, mId);
   ReadElement(aStream, mSurface);
 }
 

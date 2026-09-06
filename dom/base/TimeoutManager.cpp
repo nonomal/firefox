@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -98,7 +96,7 @@ bool TimeoutManager::IsBackground() const {
 
 bool TimeoutManager::IsActive() const {
   // A window/worker is considered active if:
-  // * It is a chrome window
+  // * It is a chrome window/worker
   // * It is playing audio
   //
   // Note that a window/worker can be considered active if it is either in the
@@ -106,6 +104,10 @@ bool TimeoutManager::IsActive() const {
 
   nsGlobalWindowInner* window = GetInnerWindow();
   if (window && window->IsChromeWindow()) {
+    return true;
+  }
+
+  if (mIsChromeWorker) {
     return true;
   }
 
@@ -326,7 +328,8 @@ TimeDuration TimeoutManager::CalculateDelay(Timeout* aTimeout) const {
   TimeDuration result = aTimeout->mInterval;
 
   if (aTimeout->mNestingLevel >=
-      StaticPrefs::dom_clamp_timeout_nesting_level()) {
+          StaticPrefs::dom_clamp_timeout_nesting_level() &&
+      !mIsChromeWorker) {
     uint32_t minTimeoutValue = StaticPrefs::dom_min_timeout_value();
     result = TimeDuration::Max(result,
                                TimeDuration::FromMilliseconds(minTimeoutValue));
@@ -408,7 +411,8 @@ uint32_t TimeoutManager::sNestingLevel = 0;
 
 TimeoutManager::TimeoutManager(nsIGlobalObject& aHandle,
                                uint32_t aMaxIdleDeferMS,
-                               nsISerialEventTarget* aEventTarget)
+                               nsISerialEventTarget* aEventTarget,
+                               bool aIsChromeWorker)
     : mGlobalObject(aHandle),
       mExecutor(new TimeoutExecutor(this, false, 0)),
       mIdleExecutor(new TimeoutExecutor(this, true, aMaxIdleDeferMS)),
@@ -429,7 +433,8 @@ TimeoutManager::TimeoutManager(nsIGlobalObject& aHandle,
       mBudgetThrottleTimeouts(false),
       mIsLoading(false),
       mEventTarget(aEventTarget),
-      mIsWindow(aHandle.GetAsInnerWindow()) {
+      mIsWindow(aHandle.GetAsInnerWindow()),
+      mIsChromeWorker(aIsChromeWorker) {
   MOZ_LOG(gTimeoutLog, LogLevel::Debug,
           ("TimeoutManager %p created, tracking bucketing %s\n", this,
            StaticPrefs::privacy_trackingprotection_annotate_channels()
@@ -476,7 +481,8 @@ int32_t TimeoutManager::GetTimeoutId(Timeout::Reason aReason) {
       default:
         return -1;  // no cancellation support
     }
-  } while (mTimeouts.GetTimeout(timeoutId, aReason));
+  } while (mTimeouts.GetTimeout(timeoutId, aReason) ||
+           mIdleTimeouts.GetTimeout(timeoutId, aReason));
 
   return timeoutId;
 }
@@ -658,7 +664,7 @@ bool TimeoutManager::ClearTimeoutInternal(int32_t aTimerId,
   if (nextTimeout) {
     if (aIsIdle) {
       MOZ_ALWAYS_SUCCEEDS(
-          executor->MaybeSchedule(nextTimeout->When(), TimeDuration(0)));
+          executor->MaybeSchedule(nextTimeout->When(), TimeDuration()));
     } else {
       MOZ_ALWAYS_SUCCEEDS(MaybeSchedule(nextTimeout->When()));
     }
@@ -1060,8 +1066,8 @@ bool TimeoutManager::RescheduleTimeout(Timeout* aTimeout,
   // And make sure delay is nonnegative; that might happen if the timer
   // thread is firing our timers somewhat early or if they're taking a long
   // time to run the callback.
-  if (delay < TimeDuration(0)) {
-    delay = TimeDuration(0);
+  if (delay < TimeDuration()) {
+    delay = TimeDuration();
   }
 
   aTimeout->SetWhenOrTimeRemaining(aCurrentNow, delay);
@@ -1225,7 +1231,7 @@ void TimeoutManager::Freeze() {
     // re-apply it when the window is Thaw()'d.  This effectively
     // shifts timers to the right as if time does not pass while
     // the window is frozen.
-    TimeDuration delta(0);
+    TimeDuration delta;
     if (aTimeout->When() > now) {
       delta = aTimeout->When() - now;
     }

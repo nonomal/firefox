@@ -1,7 +1,5 @@
 "use strict";
 
-Services.prefs.setBoolPref("extensions.manifestV3.enabled", true);
-
 const server = createHttpServer({ hosts: ["example.com"] });
 
 server.registerPathHandler("/dummy", (request, response) => {
@@ -250,7 +248,7 @@ async function testPolicy({
     addEventListener(
       "DOMWindowCreated",
       event => {
-        let win = event.target.ownerGlobal;
+        let win = event.target.documentGlobal;
         function getCsp() {
           let { cspJSON } = win.document;
           return win.wrappedJSObject.JSON.parse(cspJSON);

@@ -9,26 +9,65 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Preferences: "resource://gre/modules/Preferences.sys.mjs",
   Region: "resource://gre/modules/Region.sys.mjs",
   TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
+  TelemetryReportingPolicy:
+    "resource://gre/modules/TelemetryReportingPolicy.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
-  UrlbarUtils: "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 // See the `QuickSuggest.SETTINGS_UI` jsdoc below.
 const SETTINGS_UI = Object.freeze({
+  // Settings relevant to both offline and online will be shown.
   FULL: 0,
+  // Settings relevant to both offline and online will be hidden.
   NONE: 1,
   // Only settings relevant to offline will be shown. Settings that pertain to
   // online will be hidden.
   OFFLINE_ONLY: 2,
 });
 
+// Timestamp in ms since epoch of the Firefox Terms of Use (ToU) pertaining to
+// Suggest. Keep this value in sync with Nimbus targeting in `constants.py` in
+// the `experimenter` repo.
+//
+// Privacy Notification Published date of 12:00 PM UTC on Dec 15, 2025
+const SUGGEST_TOU_TIMESTAMP = 1765800000000;
+
 const EN_LOCALES = ["en-CA", "en-GB", "en-US", "en-ZA"];
 
 /**
- * @typedef {[string[], boolean|number]} RegionLocaleDefault
- *   The first element is an array of locales (e.g. "en-US"), the second is the
- *   value of the preference.
+ * @typedef {[?string[], boolean|number|Function]} RegionLocaleDefault
+ *   A tuple. The first element is either null or an array of locales, e.g.,
+ *   `["en-US", "en-CA"]`. The second element is either the value of the pref or
+ *   a function that should return the value. If the first element is null, the
+ *   pref will be set for all locales; otherwise it will be set only for the
+ *   listed locales.
  */
+
+/**
+ * Boolean-valued `RegionLocaleDefault` records for EU expansion regions in 157
+ * (bug 2066294). Defined in one place here so they don't need to be repeated.
+ *
+ * @type {Record<string, RegionLocaleDefault>}
+ */
+const REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN = {
+  AT: [null, true],
+  BE: [null, true],
+  CH: [null, true],
+  CZ: [null, true],
+  DK: [null, true],
+  ES: [null, true],
+  FI: [null, true],
+  HU: [null, true],
+  IE: [null, true],
+  LU: [null, true],
+  NL: [null, true],
+  NO: [null, true],
+  PL: [null, true],
+  PT: [null, true],
+  SE: [null, true],
+  SK: [null, true],
+};
 
 /**
  * @typedef {object} SuggestPrefsRecord
@@ -65,39 +104,74 @@ const SUGGEST_PREFS = Object.freeze({
   // Please update `test_quicksuggest_defaultPrefs.js` when you change these.
   "quicksuggest.enabled": {
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
       DE: [["de", ...EN_LOCALES], true],
       FR: [["fr", ...EN_LOCALES], true],
       GB: [EN_LOCALES, true],
       IT: [["it", ...EN_LOCALES], true],
       US: [EN_LOCALES, true],
+
+      // EU expansion in 157 (bug 2066294)
+      ...REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN,
+    },
+  },
+  "quicksuggest.online.available": {
+    defaultValues: {
+      US: [EN_LOCALES, shouldOnlineBeAvailable],
     },
   },
   "quicksuggest.settingsUi": {
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
       DE: [["de"], SETTINGS_UI.OFFLINE_ONLY],
       FR: [["fr"], SETTINGS_UI.OFFLINE_ONLY],
       GB: [EN_LOCALES, SETTINGS_UI.OFFLINE_ONLY],
       IT: [["it"], SETTINGS_UI.OFFLINE_ONLY],
-      US: [EN_LOCALES, SETTINGS_UI.OFFLINE_ONLY],
+      US: [
+        EN_LOCALES,
+        () => {
+          return shouldOnlineBeAvailable()
+            ? SETTINGS_UI.FULL
+            : SETTINGS_UI.OFFLINE_ONLY;
+        },
+      ],
+
+      // EU expansion in 157 (bug 2066294)
+      ...Object.fromEntries(
+        Object.entries(REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN).map(
+          ([region, localeDefault]) => [
+            region,
+            [localeDefault[0], SETTINGS_UI.OFFLINE_ONLY],
+          ]
+        )
+      ),
     },
   },
   "suggest.quicksuggest.all": {
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
       DE: [["de"], true],
       FR: [["fr"], true],
       GB: [EN_LOCALES, true],
       IT: [["it"], true],
       US: [EN_LOCALES, true],
+
+      // EU expansion in 157 (bug 2066294)
+      ...REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN,
     },
   },
   "suggest.quicksuggest.sponsored": {
     nimbusVariableIfExposedInUi: "quickSuggestSponsoredEnabled",
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
       DE: [["de"], true],
       FR: [["fr"], true],
       GB: [EN_LOCALES, true],
       IT: [["it"], true],
       US: [EN_LOCALES, true],
+
+      // EU expansion in 157 (bug 2066294)
+      ...REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN,
     },
   },
 
@@ -111,8 +185,20 @@ const SUGGEST_PREFS = Object.freeze({
   },
   "amp.featureGate": {
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
+      DE: [["de"], true],
+      FR: [["fr"], true],
       GB: [EN_LOCALES, true],
+      IT: [["it"], true],
       US: [EN_LOCALES, true],
+
+      // EU expansion in 157 (bug 2066294)
+      ...REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN,
+    },
+  },
+  "flightStatus.featureGate": {
+    defaultValues: {
+      US: [EN_LOCALES, shouldOnlineBeAvailable],
     },
   },
   "importantDates.featureGate": {
@@ -124,9 +210,19 @@ const SUGGEST_PREFS = Object.freeze({
       US: [EN_LOCALES, true],
     },
   },
+  "market.featureGate": {
+    defaultValues: {
+      US: [EN_LOCALES, shouldOnlineBeAvailable],
+    },
+  },
   "mdn.featureGate": {
     defaultValues: {
       US: [EN_LOCALES, true],
+    },
+  },
+  "sports.featureGate": {
+    defaultValues: {
+      US: [EN_LOCALES, shouldOnlineBeAvailable],
     },
   },
   "weather.featureGate": {
@@ -140,8 +236,15 @@ const SUGGEST_PREFS = Object.freeze({
   },
   "wikipedia.featureGate": {
     defaultValues: {
+      // US, GB, and EU 3 (DE, FR, IT)
+      DE: [["de"], true],
+      FR: [["fr"], true],
       GB: [EN_LOCALES, true],
+      IT: [["it"], true],
       US: [EN_LOCALES, true],
+
+      // EU expansion in 157 (bug 2066294)
+      ...REGION_LOCALE_DEFAULTS_EU_157_BOOLEAN,
     },
   },
   "yelp.featureGate": {
@@ -224,15 +327,23 @@ class _QuickSuggest {
   }
 
   /**
-   * @returns {object}
-   *   Possible values of the `quickSuggestSettingsUi` Nimbus variable and its
-   *   fallback pref `browser.urlbar.quicksuggest.settingsUi`. When Suggest is
-   *   enabled, these values determine the Suggest settings that will be visible
-   *   in `about:preferences`. When Suggest is disabled, the variable/pref are
-   *   ignored and Suggest settings are hidden.
+   * Possible values of the `quickSuggestSettingsUi` Nimbus variable and its
+   * fallback pref `browser.urlbar.quicksuggest.settingsUi`. When Suggest is
+   * enabled, these values determine the Suggest settings that will be visible
+   * in `about:preferences`. When Suggest is disabled, the variable/pref are
+   * ignored and Suggest settings are hidden.
    */
   get SETTINGS_UI() {
     return SETTINGS_UI;
+  }
+
+  /**
+   * @returns {number}
+   *   The Firefox Terms of Use (ToU) timestamp in ms since epoch pertaining to
+   *   Suggest.
+   */
+  get SUGGEST_TOU_TIMESTAMP() {
+    return SUGGEST_TOU_TIMESTAMP;
   }
 
   /**
@@ -306,7 +417,7 @@ class _QuickSuggest {
 
   get logger() {
     if (!this._logger) {
-      this._logger = lazy.UrlbarUtils.getLogger({ prefix: "QuickSuggest" });
+      this._logger = lazy.UrlbarShared.getLogger({ prefix: "QuickSuggest" });
     }
     return this._logger;
   }
@@ -621,7 +732,10 @@ class _QuickSuggest {
         .map(([prefName, { defaultValues }]) => {
           if (defaultValues?.hasOwnProperty(region)) {
             let [enablingLocales, prefValue] = defaultValues[region];
-            if (enablingLocales.includes(locale)) {
+            if (!enablingLocales || enablingLocales.includes(locale)) {
+              if (typeof prefValue == "function") {
+                prefValue = prefValue();
+              }
               return [prefName, prefValue];
             }
           }
@@ -642,6 +756,12 @@ class _QuickSuggest {
    *   The name of the pref relative to `browser.urlbar`.
    */
   onPrefChanged(pref) {
+    // If the Terms of Use (ToU) pref changed, recalculate pref defaults since
+    // some prefs depend on it.
+    if (pref == lazy.TelemetryReportingPolicy.TOU_ACCEPTED_DATE_PREF) {
+      this.#initPrefs();
+    }
+
     // If any feature's enabling preferences changed, update it now.
     let features = this.#featuresByEnablingPrefs.get(pref);
     if (!features) {
@@ -700,6 +820,42 @@ class _QuickSuggest {
     return feature
       ? feature.isUrlEquivalentToResultUrl(url, result)
       : url == result.payload.url;
+  }
+
+  /**
+   * Returns the title and highlights for suggestions that should display their
+   * full keywords.
+   *
+   * When `fullKeyword` is defined, highlighting will be applied only to it, not
+   * to the title as a whole; otherwise highlighting will not be applied at all.
+   * It's unclear if that's the intended UI spec, but historically it's how
+   * highlighting has been implemented for suggestions that should display their
+   * full keywords.
+   *
+   * @param {object} options
+   * @param {Array} options.tokens
+   *   It is compatible to UrlbarQueryContext.tokens.
+   * @param {Values<typeof lazy.lazy.UrlbarShared.HIGHLIGHT>} [options.highlightType]
+   * @param {string} [options.fullKeyword]
+   *   Full keyword if there is.
+   * @param {string} options.title
+   *   Suggestion title.
+   * @returns {object} { value, highlights }
+   *   The value will be used for title.
+   *   The highlights will be created by UrlbarShared.getTokenMatches().
+   */
+  getFullKeywordTitleAndHighlights({
+    tokens,
+    highlightType,
+    fullKeyword,
+    title,
+  }) {
+    return {
+      value: fullKeyword ? `${fullKeyword} — ${title}` : title,
+      highlights: fullKeyword
+        ? lazy.UrlbarShared.getTokenMatches(tokens, fullKeyword, highlightType)
+        : [],
+    };
   }
 
   /**
@@ -890,7 +1046,7 @@ class _QuickSuggest {
    * @returns {number}
    */
   get MIGRATION_VERSION() {
-    return 6;
+    return 7;
   }
 
   /**
@@ -1058,6 +1214,32 @@ class _QuickSuggest {
     }
   }
 
+  _migrateUserPrefsTo_7(userBranch) {
+    // Firefox 149: Make the "Show less frequently" behavior of addon
+    // suggestions consistent with other suggestion types. This reverts the fix
+    // to bug 1836582 and goes back to using `addons.minKeywordLength`.
+    if (
+      userBranch.prefHasUserValue("addons.minKeywordLength") &&
+      !userBranch.prefHasUserValue("addons.showLessFrequentlyCount")
+    ) {
+      // The user clicked "Show less frequently" before bug 1836582 was fixed
+      // since `minKeywordLength` has a user value, but they haven't clicked it
+      // again since `showLessFrequentlyCount` does not have a user value. Set
+      // `showLessFrequentlyCount` to 1 and keep `minKeywordLength` the same.
+      userBranch.setIntPref("addons.showLessFrequentlyCount", 1);
+    } else if (
+      !userBranch.prefHasUserValue("addons.minKeywordLength") &&
+      userBranch.prefHasUserValue("addons.showLessFrequentlyCount")
+    ) {
+      // The user clicked "Show less frequently" after bug 1836582 was fixed but
+      // not before. We need to set `minKeywordLength` to something but we can't
+      // know what. Err on the side of not bothering the user by using the max
+      // keyword length as of 149. This will effectively disable addon
+      // suggestions unless/until longer keywords are added.
+      userBranch.setIntPref("addons.minKeywordLength", 20);
+    }
+  }
+
   async _test_reset(testOverrides = null) {
     if (this.#initStarted) {
       await this.initPromise;
@@ -1105,6 +1287,30 @@ class _QuickSuggest {
   // A plain JS object that maps pref names relative to `browser.urlbar.` to
   // their original unmodified values as defined in `firefox.js`.
   #unmodifiedDefaultPrefs;
+}
+
+/**
+ * Returns whether the user has accepted the Firefox Terms of Use (ToU)
+ * pertaining to Suggest.
+ *
+ * @returns {boolean}
+ *   Whether the user accepted the ToU.
+ */
+function userAcceptedSuggestToU() {
+  let date = lazy.TelemetryReportingPolicy.termsOfUseAcceptedDate;
+  return !!date && SUGGEST_TOU_TIMESTAMP <= date.getTime();
+}
+
+/**
+ * Returns whether online Suggest should be available to the user *excluding
+ * consideration of the user's region and locale*.
+ *
+ * @returns {boolean}
+ *   Whether online Suggest should be available, excluding region and locale
+ *   checks.
+ */
+function shouldOnlineBeAvailable() {
+  return userAcceptedSuggestToU();
 }
 
 function getDismissalKey(result) {

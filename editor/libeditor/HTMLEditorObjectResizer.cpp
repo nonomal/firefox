@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -59,9 +58,11 @@ using namespace dom;
 
 ManualNACPtr HTMLEditor::CreateResizer(int16_t aLocation,
                                        nsIContent& aParentContent) {
+  // <span> won't create a UA shadow, so, CreateAnonymousElement() won't run
+  // script actually. (That asserts in this method call.)
   ManualNACPtr resizer = CreateAnonymousElement(nsGkAtoms::span, aParentContent,
                                                 u"mozResizer"_ns, false);
-  if (!resizer) {
+  if (!resizer) [[unlikely]] {
     NS_WARNING(
         "HTMLEditor::CreateAnonymousElement(nsGkAtoms::span, mozResizer) "
         "failed");
@@ -128,12 +129,18 @@ ManualNACPtr HTMLEditor::CreateShadow(nsIContent& aParentContent,
     name = nsGkAtoms::span;
   }
 
+  // Neither <span> nor <img> will create a UA shadow, so,
+  // CreateAnonymousElement() won't run script actually. (This method asserts
+  // that.)
   return CreateAnonymousElement(name, aParentContent, u"mozResizingShadow"_ns,
                                 true);
 }
 
 ManualNACPtr HTMLEditor::CreateResizingInfo(nsIContent& aParentContent) {
   // let's create an info box through the element factory
+
+  // <span> won't create a UA shadow, so, CreateAnonymousElement()
+  // won't run script actually. (This method asserts that.)
   return CreateAnonymousElement(nsGkAtoms::span, aParentContent,
                                 u"mozResizingInfo"_ns, true);
 }
@@ -1163,8 +1170,9 @@ nsresult HTMLEditor::UpdateResizerOrGrabberPositionTo(
     int32_t yThreshold =
         LookAndFeel::GetInt(LookAndFeel::IntID::DragThresholdY, 1);
 
-    if (DeprecatedAbs(aClientPoint.x - mOriginalX) * 2 >= xThreshold ||
-        DeprecatedAbs(aClientPoint.y - mOriginalY) * 2 >= yThreshold) {
+    MOZ_ASSERT(xThreshold >= 0 && yThreshold >= 0);
+    if (Abs(aClientPoint.x - mOriginalX) * 2 >= (uint32_t)xThreshold ||
+        Abs(aClientPoint.y - mOriginalY) * 2 >= (uint32_t)yThreshold) {
       mGrabberClicked = false;
       DebugOnly<nsresult> rvIgnored = StartMoving();
       NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),

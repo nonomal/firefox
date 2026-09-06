@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -118,8 +116,8 @@ WheelHandlingUtils::GetDisregardedWheelScrollDirection(const nsIFrame* aFrame) {
 /* mozilla::WheelTransaction                                      */
 /******************************************************************/
 
-MOZ_CONSTINIT AutoWeakFrame WheelTransaction::sScrollTargetFrame;
-MOZ_CONSTINIT AutoWeakFrame WheelTransaction::sEventTargetFrame;
+constinit AutoWeakFrame WheelTransaction::sScrollTargetFrame;
+constinit AutoWeakFrame WheelTransaction::sEventTargetFrame;
 
 bool WheelTransaction::sHandledByApz(false);
 uint32_t WheelTransaction::sTime = 0;
@@ -149,23 +147,18 @@ void WheelTransaction::BeginTransaction(nsIFrame* aScrollTargetFrame,
   ScrollbarsForWheel::OwnWheelTransaction(false);
   sScrollTargetFrame = aScrollTargetFrame;
 
-  // Only set the static event target if wheel event groups are enabled.
-  if (StaticPrefs::dom_event_wheel_event_groups_enabled()) {
-    WTXN_LOG("WheelTransaction start for frame=0x%p handled-by-apz=%s",
-             aEventTargetFrame,
-             aEvent->mFlags.mHandledByAPZ ? "true" : "false");
-    // Set a static event target for the wheel transaction. This will be used
-    // to override the event target frame when computing the event target from
-    // input coordinates. When this preference is not set or there is no stored
-    // event target for the current wheel transaction, the event target will
-    // not be overridden by the current wheel transaction, but will be computed
-    // from the input coordinates.
-    sEventTargetFrame = aEventTargetFrame;
-    // If the wheel events will be handled by APZ, set a flag here. We can use
-    // this later to determine if we need to scroll snap at the end of the
-    // wheel operation.
-    sHandledByApz = aEvent->mFlags.mHandledByAPZ;
-  }
+  WTXN_LOG("WheelTransaction start for frame=0x%p handled-by-apz=%s",
+           aEventTargetFrame, aEvent->mFlags.mHandledByAPZ ? "true" : "false");
+  // Set a static event target for the wheel transaction. This will be used
+  // to override the event target frame when computing the event target from
+  // input coordinates. When there is no stored event target for the current
+  // wheel transaction, the event target will not be overridden by the current
+  // wheel transaction, but will be computed from the input coordinates.
+  sEventTargetFrame = aEventTargetFrame;
+  // If the wheel events will be handled by APZ, set a flag here. We can use
+  // this later to determine if we need to scroll snap at the end of the
+  // wheel operation.
+  sHandledByApz = aEvent->mFlags.mHandledByAPZ;
 
   sScrollSeriesCounter = 0;
   if (!UpdateTransaction(aEvent)) {
@@ -341,8 +334,8 @@ void WheelTransaction::OnEvent(WidgetEvent* aEvent) {
 
 /* static */
 void WheelTransaction::OnRemoveElement(nsIContent* aContent) {
-  // If dom.event.wheel-event-groups.enabled is not set or we have no current
-  // wheel event transaction there is no internal state to be updated.
+  // If we have no current wheel event transaction, there is no internal state
+  // to be updated.
   if (!sEventTargetFrame) {
     return;
   }
@@ -367,10 +360,9 @@ void WheelTransaction::OnFailToScrollTarget() {
 
   if (StaticPrefs::test_mousescroll()) {
     // This event is used for automated tests, see bug 442774.
+    const nsCOMPtr<nsIContent> content = sScrollTargetFrame->GetContent();
     nsContentUtils::DispatchEventOnlyToChrome(
-        sScrollTargetFrame->GetContent()->OwnerDoc(),
-        sScrollTargetFrame->GetContent(), u"MozMouseScrollFailed"_ns,
-        CanBubble::eYes, Cancelable::eYes);
+        content, u"MozMouseScrollFailed"_ns, CanBubble::eYes, Cancelable::eYes);
   }
   // The target frame might be destroyed in the event handler, at that time,
   // we need to finish the current transaction
@@ -397,9 +389,9 @@ void WheelTransaction::OnTimeout(nsITimer* aTimer, void* aClosure) {
 
   if (StaticPrefs::test_mousescroll()) {
     // This event is used for automated tests, see bug 442774.
+    const nsCOMPtr<nsIContent> content = frame->GetContent();
     nsContentUtils::DispatchEventOnlyToChrome(
-        frame->GetContent()->OwnerDoc(), frame->GetContent(),
-        u"MozMouseScrollTransactionTimeout"_ns, CanBubble::eYes,
+        content, u"MozMouseScrollTransactionTimeout"_ns, CanBubble::eYes,
         Cancelable::eYes);
   }
 }
@@ -474,8 +466,8 @@ DeltaValues WheelTransaction::OverrideSystemScrollSpeed(
 /* mozilla::ScrollbarsForWheel                                    */
 /******************************************************************/
 
-MOZ_CONSTINIT AutoWeakFrame ScrollbarsForWheel::sActiveOwner;
-MOZ_CONSTINIT AutoWeakFrame
+constinit AutoWeakFrame ScrollbarsForWheel::sActiveOwner;
+constinit AutoWeakFrame
     ScrollbarsForWheel::sActivatedScrollTargets[kNumberOfTargets];
 
 bool ScrollbarsForWheel::sHadWheelStart = false;
@@ -540,8 +532,8 @@ bool ScrollbarsForWheel::IsActive() {
   if (sActiveOwner) {
     return true;
   }
-  for (size_t i = 0; i < kNumberOfTargets; ++i) {
-    if (sActivatedScrollTargets[i]) {
+  for (auto& sActivatedScrollTarget : sActivatedScrollTargets) {
+    if (sActivatedScrollTarget) {
       return true;
     }
   }
@@ -572,8 +564,8 @@ void ScrollbarsForWheel::TemporarilyActivateAllPossibleScrollTargets(
 
 /* static */
 void ScrollbarsForWheel::DeactivateAllTemporarilyActivatedScrollTargets() {
-  for (size_t i = 0; i < kNumberOfTargets; i++) {
-    AutoWeakFrame* scrollTarget = &sActivatedScrollTargets[i];
+  for (auto& sActivatedScrollTarget : sActivatedScrollTargets) {
+    AutoWeakFrame* scrollTarget = &sActivatedScrollTarget;
     if (*scrollTarget) {
       nsIScrollbarMediator* scrollbarMediator = do_QueryFrame(*scrollTarget);
       if (scrollbarMediator) {

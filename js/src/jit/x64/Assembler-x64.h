@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -97,7 +95,6 @@ struct ScratchRegisterScope : public AutoRegisterScope {
 };
 
 static constexpr Register ReturnReg = rax;
-static constexpr Register HeapReg = r15;
 static constexpr Register64 ReturnReg64(rax);
 static constexpr FloatRegister ReturnFloat32Reg =
     FloatRegister(X86Encoding::xmm0, FloatRegisters::Single);
@@ -196,35 +193,32 @@ class ABIArgGenerator : public ABIArgGeneratorShared {
   ABIArg& current() { return current_; }
 };
 
-// These registers may be volatile or nonvolatile.
+// See "ABI special registers" in Assembler-shared.h for more information.
 // Avoid r11, which is the MacroAssembler's ScratchReg.
 static constexpr Register ABINonArgReg0 = rax;
 static constexpr Register ABINonArgReg1 = rbx;
 static constexpr Register ABINonArgReg2 = r10;
 static constexpr Register ABINonArgReg3 = r12;
 
-// This register may be volatile or nonvolatile. Avoid xmm15 which is the
-// ScratchDoubleReg.
+// See "ABI special registers" in Assembler-shared.h for more information.
+// Avoid xmm15 which is the ScratchDoubleReg.
 static constexpr FloatRegister ABINonArgDoubleReg =
     FloatRegister(X86Encoding::xmm8, FloatRegisters::Double);
 
-// These registers may be volatile or nonvolatile.
-// Note: these three registers are all guaranteed to be different
+// See "ABI special registers" in Assembler-shared.h for more information.
 static constexpr Register ABINonArgReturnReg0 = r10;
 static constexpr Register ABINonArgReturnReg1 = r12;
 static constexpr Register ABINonVolatileReg = r13;
 
-// This register is guaranteed to be clobberable during the prologue and
-// epilogue of an ABI call which must preserve both ABI argument, return
-// and non-volatile registers.
+// See "ABI special registers" in Assembler-shared.h for more information.
 static constexpr Register ABINonArgReturnVolatileReg = r10;
 
-// Instance pointer argument register for WebAssembly functions. This must not
-// alias any other register used for passing function arguments or return
-// values. Preserved by WebAssembly functions.
+// See "ABI special registers" in Assembler-shared.h, and "The WASM ABIs" in
+// WasmFrame.h for more information.
 static constexpr Register InstanceReg = r14;
+static constexpr Register HeapReg = r15;
 
-// Registers used for asm.js/wasm table calls. These registers must be disjoint
+// Registers used for wasm table calls. These registers must be disjoint
 // from the ABI argument registers, InstanceReg and each other.
 static constexpr Register WasmTableCallScratchReg0 = ABINonArgReg0;
 static constexpr Register WasmTableCallScratchReg1 = ABINonArgReg1;
@@ -687,11 +681,33 @@ class Assembler : public AssemblerX86Shared {
     }
   }
 
+  void adcq(Register src, Register dest) {
+    masm.adcq_rr(src.encoding(), dest.encoding());
+  }
+  void sbbq(Register src, Register dest) {
+    masm.sbbq_rr(src.encoding(), dest.encoding());
+  }
+
   void andq(Register src, Register dest) {
     masm.andq_rr(src.encoding(), dest.encoding());
   }
   void andq(Imm32 imm, Register dest) {
     masm.andq_ir(imm.value, dest.encoding());
+  }
+  void andq(Imm32 imm, const Operand& dest) {
+    switch (dest.kind()) {
+      case Operand::REG:
+        masm.andq_ir(imm.value, dest.reg());
+        break;
+      case Operand::MEM_REG_DISP:
+        masm.andq_im(imm.value, dest.disp(), dest.base());
+        break;
+      case Operand::MEM_ADDRESS32:
+        masm.andq_im(imm.value, dest.address());
+        break;
+      default:
+        MOZ_CRASH("unexpected operand kind");
+    }
   }
   void andq(const Operand& src, Register dest) {
     switch (src.kind()) {

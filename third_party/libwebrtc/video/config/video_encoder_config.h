@@ -86,6 +86,11 @@ struct VideoStream {
   // e.g. if source only provides lower resolution or
   // if resource adaptation is active.
   std::optional<Resolution> scale_resolution_down_to;
+
+  // The video format for the stream
+  // This should be set for mixed-codec simulcast, while for other cases,
+  // it is optional and can be unset.
+  std::optional<SdpVideoFormat> video_format;
 };
 
 class VideoEncoderConfig {
@@ -174,6 +179,10 @@ class VideoEncoderConfig {
 
   bool HasScaleResolutionDownTo() const;
 
+  bool HasScaleResolutionDownBy() const;
+
+  SdpVideoFormat GetSimulcastVideoFormat(size_t stream_index) const;
+
   // TODO(bugs.webrtc.org/6883): Consolidate on one of these.
   VideoCodecType codec_type;
   SdpVideoFormat video_format;
@@ -217,6 +226,9 @@ class VideoEncoderConfig {
 
   // Indicates whether quality scaling can be used or not.
   bool is_quality_scaling_allowed;
+
+  // Allow zero-hertz mode for regular video.
+  bool allow_zero_hertz_video;
 
   // Maximum Quantization Parameter.
   // This value is fed into EncoderStreamFactory that

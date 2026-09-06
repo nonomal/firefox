@@ -1,5 +1,3 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
@@ -23,7 +21,7 @@ Services.prefs.setBoolPref(
 /**
  * Returns a Date in the past usable to add expirable visits.
  *
- * @note Expiration ignores any visit added in the last 7 days, but it's
+ * Note: Expiration ignores any visit added in the last 7 days, but it's
  *       better be safe against DST issues, by going back one day more.
  */
 function getExpirableDate() {

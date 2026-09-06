@@ -1,14 +1,12 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "Types.h"
 
-#include "nsPrintfCString.h"
-
 #include <ostream>
+
+#include "nsPrintfCString.h"
 
 namespace mozilla {
 
@@ -47,6 +45,9 @@ std::ostream& operator<<(std::ostream& aOut, const SurfaceFormat& aFormat) {
     Emit(SurfaceFormat::R8G8B8);
     Emit(SurfaceFormat::B8G8R8);
     Emit(SurfaceFormat::R5G6B5_UINT16);
+    Emit(SurfaceFormat::R10G10B10A2_UINT32);
+    Emit(SurfaceFormat::R10G10B10X2_UINT32);
+    Emit(SurfaceFormat::R16G16B16A16F);
     Emit(SurfaceFormat::A8);
     Emit(SurfaceFormat::A16);
     Emit(SurfaceFormat::R8G8);
@@ -58,10 +59,13 @@ std::ostream& operator<<(std::ostream& aOut, const SurfaceFormat& aFormat) {
     Emit(SurfaceFormat::P016);
     Emit(SurfaceFormat::P010);
     Emit(SurfaceFormat::NV16);
+    Emit(SurfaceFormat::P210);
     Emit(SurfaceFormat::YUY2);
     Emit(SurfaceFormat::HSV);
     Emit(SurfaceFormat::Lab);
     Emit(SurfaceFormat::Depth);
+    Emit(SurfaceFormat::CMYK);
+    Emit(SurfaceFormat::InvertedCMYK);
     Emit(SurfaceFormat::UNKNOWN);
   }
 

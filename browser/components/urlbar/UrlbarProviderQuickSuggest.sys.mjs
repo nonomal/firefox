@@ -2,10 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import {
-  UrlbarProvider,
-  UrlbarUtils,
-} from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
+import { UrlbarProvider } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
 
 const lazy = {};
 
@@ -15,7 +12,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   QuickSuggest: "moz-src:///browser/components/urlbar/QuickSuggest.sys.mjs",
   SearchUtils: "moz-src:///toolkit/components/search/SearchUtils.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
 });
@@ -29,10 +27,10 @@ const DEFAULT_SUGGESTION_SCORE = 0.2;
  */
 export class UrlbarProviderQuickSuggest extends UrlbarProvider {
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.NETWORK;
+    return lazy.UrlbarShared.PROVIDER_TYPE.NETWORK;
   }
 
   /**
@@ -56,9 +54,9 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     // If the sources don't include search or the user used a restriction
     // character other than search, don't allow any suggestions.
     if (
-      !queryContext.sources.includes(UrlbarUtils.RESULT_SOURCE.SEARCH) ||
+      !queryContext.sources.includes(lazy.UrlbarShared.RESULT_SOURCE.SEARCH) ||
       (queryContext.restrictSource &&
-        queryContext.restrictSource != UrlbarUtils.RESULT_SOURCE.SEARCH)
+        queryContext.restrictSource != lazy.UrlbarShared.RESULT_SOURCE.SEARCH)
     ) {
       return false;
     }
@@ -66,7 +64,7 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     if (
       !lazy.UrlbarPrefs.get("quickSuggestEnabled") ||
       queryContext.isPrivate ||
-      queryContext.searchMode
+      queryContext.restrictInSearchMode()
     ) {
       return false;
     }
@@ -216,6 +214,13 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     return filteredSuggestions;
   }
 
+  /**
+   * @param {string} state
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {{index: number, result: UrlbarResult}[]} resultsAndIndexes
+   * @param {object|null} details
+   */
   onImpression(state, queryContext, controller, resultsAndIndexes, details) {
     // Build a map from each feature to its results in `resultsAndIndexes`.
     let resultsByFeature = resultsAndIndexes.reduce((memo, { result }) => {
@@ -243,6 +248,11 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     }
   }
 
+  /**
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   */
   onEngagement(queryContext, controller, details) {
     let { result } = details;
 
@@ -268,6 +278,11 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     }
   }
 
+  /**
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   */
   onSearchSessionEnd(queryContext, controller, details) {
     for (let backend of lazy.QuickSuggest.enabledBackends) {
       backend.onSearchSessionEnd(queryContext, controller, details);
@@ -287,9 +302,7 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
   }
 
   /**
-   * This is called only for dynamic result types, when the urlbar view updates
-   * the view of one of the results of the provider.  It should return an object
-   * describing the view update.
+   * This is called only for dynamic result types.
    *
    * @param {UrlbarResult} result The result whose view will be updated.
    * @returns {object} An object describing the view update.
@@ -353,30 +366,52 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
       return null;
     }
 
-    // Set important properties that every Suggest result should have. See
-    // `QuickSuggest.getFeatureBySource()` for `source` and `provider` values.
-    // If the suggestion isn't managed by a feature, then it's from Merino and
-    // we assume `is_sponsored` is set appropriately. (Merino uses snake_case.)
+    // Set important properties that every Suggest result should have.
+
+    // `source` indicates the Suggest backend the suggestion came from.
     result.payload.source = suggestion.source;
+
+    // `provider` depends on `source` and generally indicates the type of
+    // Suggest suggestion. See `QuickSuggest.getFeatureBySource()`.
     result.payload.provider = suggestion.provider;
-    if (suggestion.suggestionType) {
-      // `suggestionType` is defined only for dynamic Rust suggestions and is
-      // the dynamic type. Avoid adding an undefined property to other payloads.
-      result.payload.suggestionType = suggestion.suggestionType;
-    }
-    result.payload.telemetryType = this.#getSuggestionTelemetryType(suggestion);
-    result.payload.isSponsored = feature
-      ? feature.isSuggestionSponsored(suggestion)
-      : !!suggestion.is_sponsored;
-    if (suggestion.source == "rust") {
-      // `suggestionObject` is passed back into the Rust component on dismissal.
-      result.payload.suggestionObject = suggestion;
+
+    // Set `isSponsored` unless the feature already did.
+    if (!result.payload.hasOwnProperty("isSponsored")) {
+      result.payload.isSponsored = !!feature?.isSuggestionSponsored(suggestion);
     }
 
-    // Handle icons here so each feature doesn't have to do it, but use `||=` to
-    // let them do it if they need to.
+    // For most Suggest results, the result type recorded in urlbar telemetry is
+    // `${source}_${telemetryType}` (the payload values).
+    result.payload.telemetryType = this.#getSuggestionTelemetryType(suggestion);
+
+    // Handle icons here unless the feature already did.
     result.payload.icon ||= suggestion.icon;
     result.payload.iconBlob ||= suggestion.icon_blob;
+
+    switch (suggestion.source) {
+      case "merino":
+        // Dismissals of Merino suggestions are recorded in the Rust component's
+        // database. Each dismissal is recorded as a string value called a key.
+        // If Merino includes `dismissal_key` in the suggestion, use that as the
+        // key. Otherwise we'll use its URL. See `QuickSuggest.dismissResult()`.
+        if (
+          suggestion.dismissal_key &&
+          !result.payload.hasOwnProperty("dismissalKey")
+        ) {
+          result.payload.dismissalKey = suggestion.dismissal_key;
+        }
+        break;
+      case "rust":
+        // `suggestionObject` is passed back to the Rust component on dismissal.
+        // See `QuickSuggest.dismissResult()`.
+        result.payload.suggestionObject = suggestion;
+        // `suggestionType` is defined only for dynamic Rust suggestions and is
+        // the dynamic type. Don't add an undefined property to other payloads.
+        if (suggestion.suggestionType) {
+          result.payload.suggestionType = suggestion.suggestionType;
+        }
+        break;
+    }
 
     // Set the appropriate suggested index and related properties unless the
     // feature did it already.
@@ -443,30 +478,36 @@ export class UrlbarProviderQuickSuggest extends UrlbarProvider {
     let payload = {
       url: suggestion.url,
       originalUrl: suggestion.original_url,
-      dismissalKey: suggestion.dismissal_key,
+      isSponsored: !!suggestion.is_sponsored,
       isBlockable: true,
       isManageable: true,
     };
 
+    let titleHighlights;
     if (suggestion.full_keyword) {
-      payload.title = suggestion.title;
-      payload.qsSuggestion = [
-        suggestion.full_keyword,
-        UrlbarUtils.HIGHLIGHT.SUGGESTED,
-      ];
+      let { value, highlights } =
+        lazy.QuickSuggest.getFullKeywordTitleAndHighlights({
+          tokens: queryContext.tokens,
+          highlightType: lazy.UrlbarShared.HIGHLIGHT.SUGGESTED,
+          fullKeyword: suggestion.full_keyword,
+          title: suggestion.title,
+        });
+      payload.title = value;
+      titleHighlights = highlights;
     } else {
-      payload.title = [suggestion.title, UrlbarUtils.HIGHLIGHT.TYPED];
+      payload.title = suggestion.title;
+      titleHighlights = lazy.UrlbarShared.HIGHLIGHT.TYPED;
       payload.shouldShowUrl = true;
     }
 
     return new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.URL,
-      source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.URL,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       isBestMatch: !!suggestion.is_top_pick,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(
-        queryContext.tokens,
-        payload
-      ),
+      payload,
+      highlights: {
+        title: titleHighlights,
+      },
     });
   }
 

@@ -5,6 +5,8 @@
 package org.mozilla.fenix.home.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,28 +17,32 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
-import mozilla.components.ui.icons.R
+import org.mozilla.fenix.components.components
+import org.mozilla.fenix.components.toolbar.ToolbarPosition
 import org.mozilla.fenix.home.fake.FakeHomepagePreview
 import org.mozilla.fenix.home.interactor.HomepageInteractor
 import org.mozilla.fenix.home.pocket.ui.PocketSection
 import org.mozilla.fenix.home.store.HeaderState
 import org.mozilla.fenix.home.store.HomepageState
+import org.mozilla.fenix.home.store.MiddleSearchState
+import org.mozilla.fenix.home.toolbar.HomeToolbarComposable
 import org.mozilla.fenix.home.topsites.TopSiteColors
+import org.mozilla.fenix.home.topsites.TopSiteState
 import org.mozilla.fenix.home.ui.HomepageTestTag.HOMEPAGE
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.wallpapers.WallpaperState
 
 private const val BOTTOM_PADDING = 47
 
@@ -47,6 +53,10 @@ private const val BOTTOM_PADDING = 47
  * @param interactor [HomepageInteractor] for interactions with the homepage UI.
  * @param onMiddleSearchBarVisibilityChanged Invoked when the middle search is shown/hidden.
  * @param onTopSitesItemBound Invoked during the composition of a top site item.
+ * @param onAddShortcutClicked Invoked when the user clicks on the "Add shortcut" tile.
+ * @param navigationBarContent Optional composable rendered at the bottom of the homepage when the toolbar is positioned
+ *   at the top. When the toolbar is at the bottom, the navigation bar is rendered by [HomeToolbarComposable] instead
+ *   and this content is not shown.
  */
 @Suppress("LongMethod", "CyclomaticComplexMethod", "CognitiveComplexMethod")
 @Composable
@@ -55,28 +65,28 @@ internal fun MiddleSearchHomepage(
     interactor: HomepageInteractor,
     onMiddleSearchBarVisibilityChanged: (isVisible: Boolean) -> Unit,
     onTopSitesItemBound: () -> Unit,
+    onAddShortcutClicked: () -> Unit,
+    navigationBarContent: (@Composable () -> Unit)? = null,
 ) {
     val scrollState = rememberScrollState()
 
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize(),
-    ) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .semantics {
-                    testTagsAsResourceId = true
-                    testTag = HOMEPAGE
-                }
-                .pointerInput(state.isSearchInProgress) {
-                    if (state.isSearchInProgress) {
-                        awaitPointerEventScope {
-                            interactor.onHomeContentFocusedWhileSearchIsActive()
+            modifier =
+                Modifier.fillMaxSize()
+                    .semantics {
+                        testTagsAsResourceId = true
+                        testTag = HOMEPAGE
+                    }
+                    .pointerInput(state.isSearchInProgress) {
+                        if (state.isSearchInProgress) {
+                            awaitEachGesture {
+                                awaitFirstDown(false, PointerEventPass.Initial)
+                                interactor.onHomeContentFocusedWhileSearchIsActive()
+                            }
                         }
                     }
-                }
-                .verticalScroll(scrollState),
+                    .verticalScroll(scrollState),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(modifier = Modifier.height(16.dp))
@@ -90,43 +100,41 @@ internal fun MiddleSearchHomepage(
                             }
 
                             Box(modifier = Modifier.padding(horizontal = horizontalMargin)) {
-                                PrivateBrowsingDescription(
-                                    onLearnMoreClick = interactor::onLearnMoreClicked,
-                                )
+                                PrivateBrowsingDescription(onLearnMoreClick = interactor::onLearnMoreClicked)
                             }
                         }
 
                         is HomepageState.Normal -> {
-                            if (showTopSites) {
+                            if (topSiteState != null) {
                                 TopSitesSection(
-                                    topSites = topSites,
-                                    topSiteColors = topSiteColors,
+                                    state = topSiteState,
                                     interactor = interactor,
                                     onTopSitesItemBound = onTopSitesItemBound,
+                                    onAddShortcutClicked = onAddShortcutClicked,
                                 )
                             }
 
                             Spacer(modifier = Modifier.weight(1f))
 
-                            LaunchedEffect(key1 = searchBarEnabled, key2 = searchBarVisible) {
-                                onMiddleSearchBarVisibilityChanged(searchBarEnabled && searchBarVisible)
+                            LaunchedEffect(key1 = middleSearchState) {
+                                onMiddleSearchBarVisibilityChanged(middleSearchState.isShown)
                             }
 
-                            if (searchBarEnabled && searchBarVisible) {
+                            if (middleSearchState.isShown) {
                                 SearchBar(
-                                    modifier = Modifier
-                                        .padding(horizontal = horizontalMargin)
-                                        .graphicsLayer { this.alpha = alpha },
+                                    modifier =
+                                        Modifier.padding(horizontal = horizontalMargin).graphicsLayer {
+                                            this.alpha = alpha
+                                        },
                                     onClick = interactor::onNavigateSearch,
                                 )
                             }
 
                             Spacer(modifier = Modifier.weight(1f))
 
-                            if (showPocketStories) {
+                            if (pocketState != null) {
                                 PocketSection(
                                     state = pocketState,
-                                    cardBackgroundColor = cardBackgroundColor,
                                     interactor = interactor,
                                 )
                             }
@@ -141,18 +149,22 @@ internal fun MiddleSearchHomepage(
         if (state.isSearchInProgress) {
             Scrim(onDismiss = interactor::onHomeContentFocusedWhileSearchIsActive)
         }
+
+        if (navigationBarContent != null && components.settings.toolbarPosition == ToolbarPosition.TOP) {
+            Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+                navigationBarContent()
+            }
+        }
     }
 }
 
 @Composable
 private fun Scrim(onDismiss: () -> Unit) {
     Box(
-        modifier = Modifier
-            .background(FirefoxTheme.colors.layerScrim.copy(alpha = 0.75f))
-            .fillMaxSize()
-            .pointerInput(Unit) {
+        modifier =
+            Modifier.background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.75f)).fillMaxSize().pointerInput(Unit) {
                 detectTapGestures(onTap = { onDismiss() })
-            },
+            }
     )
 }
 
@@ -162,43 +174,31 @@ private fun MiddleSearchHomepagePreview() {
     FirefoxTheme {
         MiddleSearchHomepage(
             HomepageState.Normal(
+                shouldShowPrivacyNoticeBanner = false,
                 nimbusMessage = null,
-                topSites = FakeHomepagePreview.topSites(),
-                recentTabs = FakeHomepagePreview.recentTabs(),
-                syncedTab = FakeHomepagePreview.recentSyncedTab(),
-                bookmarks = FakeHomepagePreview.bookmarks(),
+                topSiteState =
+                    TopSiteState(
+                        topSites = FakeHomepagePreview.topSites(),
+                        colors = TopSiteColors.colors(),
+                    ),
                 recentlyVisited = FakeHomepagePreview.recentHistory(),
                 collectionsState = FakeHomepagePreview.collectionState(),
                 pocketState = FakeHomepagePreview.pocketState(),
-                showTopSites = true,
-                showRecentTabs = false,
-                showRecentSyncedTab = false,
-                showBookmarks = false,
-                showRecentlyVisited = true,
-                showPocketStories = true,
-                showCollections = true,
-                headerState = HeaderState(
-                    showHeader = false,
-                    wordmarkTextColor = null,
-                    privateBrowsingButtonColor = colorResource(
-                        getAttr(
-                            R.attr.mozac_ic_private_mode_circle_fill_icon_color,
-                        ),
-                    ),
-                ),
-                searchBarVisible = true,
-                searchBarEnabled = true,
+                showPrivacyReport = true,
+                longfoxEnabled = true,
+                showLongfoxAnimation = true,
+                trackersBlockedCount = 754,
+                headerState = HeaderState.Normal,
+                middleSearchState = MiddleSearchState(searchBarVisible = true, searchBarEnabled = true),
                 firstFrameDrawn = true,
                 setupChecklistState = null,
-                topSiteColors = TopSiteColors.colors(),
-                cardBackgroundColor = WallpaperState.default.cardBackgroundColor,
-                buttonTextColor = WallpaperState.default.buttonTextColor,
-                buttonBackgroundColor = WallpaperState.default.buttonBackgroundColor,
                 isSearchInProgress = false,
                 bottomPadding = 68,
+                showTopSitesHeader = true,
             ),
             interactor = FakeHomepagePreview.homepageInteractor,
             onTopSitesItemBound = {},
+            onAddShortcutClicked = {},
             onMiddleSearchBarVisibilityChanged = {},
         )
     }

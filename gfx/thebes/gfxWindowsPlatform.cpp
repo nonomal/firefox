@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,79 +6,66 @@
 
 #include "gfxWindowsPlatform.h"
 
+#include <d2d1_1.h>
+#include <d3d10_1.h>
+#include <d3d11.h>
+#include <dwmapi.h>
+#include <dwrite.h>
+#include <winternl.h>
+
+#include "base/thread.h"
 #include "cairo.h"
-#include "mozilla/layers/CompositorBridgeChild.h"
-
+#include "d3dkmtQueryStatistics.h"
+#include "gfx2DGlue.h"
 #include "gfxBlur.h"
+#include "gfxCrashReporterUtils.h"
+#include "gfxDWriteCommon.h"
+#include "gfxDWriteFontList.h"
+#include "gfxDWriteFonts.h"
 #include "gfxImageSurface.h"
+#include "gfxTextRun.h"
+#include "gfxUserFontSet.h"
 #include "gfxWindowsSurface.h"
-
-#include "nsUnicharUtils.h"
-#include "nsUnicodeProperties.h"
-
+#include "imgLoader.h"
+#include "mozilla/Components.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/ProfilerLabels.h"
+#include "mozilla/ProfilerMarkers.h"
 #include "mozilla/ProfilerThreadSleep.h"
-#include "mozilla/Components.h"
 #include "mozilla/Sprintf.h"
+#include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/WindowsVersion.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/gfx/gfxVars.h"
+#include "mozilla/glean/GfxMetrics.h"
+#include "mozilla/layers/CanvasChild.h"
+#include "mozilla/layers/CompositorBridgeChild.h"
+#include "mozilla/layers/CompositorThread.h"
 #include "nsIGfxInfo.h"
+#include "nsIMemoryReporter.h"
+#include "nsIXULRuntime.h"
 #include "nsServiceManagerUtils.h"
 #include "nsTArray.h"
 #include "nsThreadUtils.h"
-#include "mozilla/glean/GfxMetrics.h"
-
-#include "plbase64.h"
-#include "nsIXULRuntime.h"
-#include "imgLoader.h"
-
-#include "nsIGfxInfo.h"
-
-#include "gfxCrashReporterUtils.h"
-
-#include "mozilla/layers/CanvasChild.h"
-#include "mozilla/layers/CompositorThread.h"
-
-#include "gfxDWriteFontList.h"
-#include "gfxDWriteFonts.h"
-#include "gfxDWriteCommon.h"
-#include <dwrite.h>
-
-#include "gfxTextRun.h"
-#include "gfxUserFontSet.h"
+#include "nsUnicharUtils.h"
+#include "nsUnicodeProperties.h"
 #include "nsWindowsHelpers.h"
-#include "gfx2DGlue.h"
-
-#include <d3d10_1.h>
-
-#include "mozilla/gfx/2D.h"
-#include "mozilla/gfx/gfxVars.h"
-
-#include <dwmapi.h>
-#include <d3d11.h>
-#include <d2d1_1.h>
-
-#include "nsIMemoryReporter.h"
-#include <winternl.h>
-#include "d3dkmtQueryStatistics.h"
-
-#include "base/thread.h"
-#include "mozilla/StaticPrefs_gfx.h"
+#include "plbase64.h"
 #ifdef MOZ_WMF_CDM
 #  include "mozilla/StaticPrefs_media.h"
 #endif
-#include "mozilla/StaticPrefs_layers.h"
-#include "gfxConfig.h"
-#include "VsyncSource.h"
+#include "D3D11Checks.h"
 #include "DriverCrashGuard.h"
+#include "VsyncSource.h"
+#include "gfxConfig.h"
+#include "mozilla/ScreenHelperWin.h"
+#include "mozilla/StaticPrefs_layers.h"
+#include "mozilla/WindowsProcessMitigations.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/gfx/DeviceManagerDx.h"
 #include "mozilla/gfx/DisplayConfigWindows.h"
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/layers/DeviceAttachmentsD3D11.h"
-#include "mozilla/WindowsProcessMitigations.h"
-#include "D3D11Checks.h"
-#include "mozilla/ScreenHelperWin.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
@@ -112,7 +97,7 @@ class GPUAdapterReporter final : public nsIMemoryReporter {
     return result;
   }
 
-  ~GPUAdapterReporter() {}
+  ~GPUAdapterReporter() = default;
 
  public:
   NS_DECL_ISUPPORTS
@@ -210,7 +195,7 @@ Atomic<size_t> gfxWindowsPlatform::sD3D11SharedTextures;
 Atomic<size_t> gfxWindowsPlatform::sD3D9SharedTextures;
 
 class D3DSharedTexturesReporter final : public nsIMemoryReporter {
-  ~D3DSharedTexturesReporter() {}
+  ~D3DSharedTexturesReporter() = default;
 
  public:
   NS_DECL_ISUPPORTS
@@ -236,37 +221,20 @@ class D3DSharedTexturesReporter final : public nsIMemoryReporter {
 NS_IMPL_ISUPPORTS(D3DSharedTexturesReporter, nsIMemoryReporter)
 
 gfxWindowsPlatform::gfxWindowsPlatform() {
-  // If win32k is locked down then we can't use COM STA and shouldn't need it.
-  // Also, we won't be using any GPU memory in this process.
   if (!IsWin32kLockedDown()) {
-    /*
-     * Initialize COM
-     */
-    CoInitialize(nullptr);
-
-    RegisterStrongMemoryReporter(new GPUAdapterReporter());
-    RegisterStrongMemoryReporter(new D3DSharedTexturesReporter());
+    RegisterStrongMemoryReporter(MakeAndAddRef<GPUAdapterReporter>());
+    RegisterStrongMemoryReporter(MakeAndAddRef<D3DSharedTexturesReporter>());
   }
 }
 
-gfxWindowsPlatform::~gfxWindowsPlatform() {
-  DeviceManagerDx::Shutdown();
-
-  // We don't initialize COM when win32k is locked down.
-  if (!IsWin32kLockedDown()) {
-    /*
-     * Uninitialize COM
-     */
-    CoUninitialize();
-  }
-}
+gfxWindowsPlatform::~gfxWindowsPlatform() { DeviceManagerDx::Shutdown(); }
 
 /* static */
 void gfxWindowsPlatform::InitMemoryReportersForGPUProcess() {
   MOZ_RELEASE_ASSERT(XRE_IsGPUProcess());
 
-  RegisterStrongMemoryReporter(new GPUAdapterReporter());
-  RegisterStrongMemoryReporter(new D3DSharedTexturesReporter());
+  RegisterStrongMemoryReporter(MakeAndAddRef<GPUAdapterReporter>());
+  RegisterStrongMemoryReporter(MakeAndAddRef<D3DSharedTexturesReporter>());
 }
 
 /* static */
@@ -408,7 +376,7 @@ void gfxWindowsPlatform::InitPlatformHardwareVideoConfig() {
 }
 
 #ifdef MOZ_WMF_CDM
-void gfxWindowsPlatform::InitPlatformHardwarDRMConfig() {
+void gfxWindowsPlatform::InitPlatformHardwareDRMConfig() {
   nsCString message, failureId;
   FeatureState& featureHWDRM = gfxConfig::GetFeature(Feature::WMF_HW_DRM);
   featureHWDRM.Reset();
@@ -1658,6 +1626,7 @@ class D3DVsyncSource final : public VsyncSource {
           const TimeStamp vblank_begin_wait = TimeStamp::Now();
           {
             AUTO_PROFILER_THREAD_SLEEP;
+            AUTO_PROFILER_MARKER_UNTYPED("WaitForVBlank", GRAPHICS_VSync, {});
             hr = mWaitVBlankOutput->WaitForVBlank();
           }
           if (SUCCEEDED(hr)) {
@@ -1675,10 +1644,12 @@ class D3DVsyncSource final : public VsyncSource {
         // To mitigate bug 1924932 we only want to use DwmFlush if WaitForVBlank
         // is disabled, WaitForVBlank is the standard since Vista so we should
         // probably remove this option entirely.
+        AUTO_PROFILER_MARKER_UNTYPED("DwmFlush", GRAPHICS_VSync, {});
         hr = DwmFlush();
       }
       if (!SUCCEEDED(hr)) {
         // DWMFlush isn't working, fallback to software vsync.
+        AUTO_PROFILER_MARKER_UNTYPED("SoftwareVsync", GRAPHICS_VSync, {});
         ScheduleSoftwareVsync(TimeStamp::Now());
         return;
       }
@@ -1688,6 +1659,7 @@ class D3DVsyncSource final : public VsyncSource {
       flushTime = now;
       if ((flushDiff > longVBlank) || mPrevVsync.IsNull()) {
         // Our vblank took longer than 2 intervals, readjust our timestamps
+        PROFILER_MARKER_UNTYPED("LongVBlank", GRAPHICS_VSync);
         vsync = GetVBlankTime();
         mPrevVsync = vsync;
       } else {
@@ -1699,16 +1671,19 @@ class D3DVsyncSource final : public VsyncSource {
         vsync = mPrevVsync + mVsyncRate;
         if (vsync > now) {
           // DWMFlush woke up very early, so readjust our times again
+          PROFILER_MARKER_UNTYPED("EarlyWake", GRAPHICS_VSync);
           vsync = GetVBlankTime();
         }
 
         if (vsync <= mPrevVsync) {
+          PROFILER_MARKER_UNTYPED("TimeSteppedBack", GRAPHICS_VSync);
           vsync = TimeStamp::Now();
         }
 
         if ((now - vsync).ToMilliseconds() > 2.0) {
           // Account for time drift here where vsync never quite catches up to
           // Now and we'd fall ever so slightly further behind Now().
+          PROFILER_MARKER_UNTYPED("TimeFellBehind2ms", GRAPHICS_VSync);
           vsync = GetVBlankTime();
         }
 
@@ -1844,16 +1819,39 @@ void gfxWindowsPlatform::GetPlatformDisplayInfo(
 
   ScaledResolutionSet scaled;
   GetScaledResolutions(scaled);
-  if (scaled.IsEmpty()) {
-    return;
+  if (!scaled.IsEmpty()) {
+    aObj.DefineProperty("ScaledResolutionCount", scaled.Length());
+    for (size_t i = 0; i < scaled.Length(); ++i) {
+      auto& s = scaled[i];
+      nsPrintfCString name("ScaledResolution%zu", i);
+      nsPrintfCString value("source %dx%d, target %dx%d", s.first.width,
+                            s.first.height, s.second.width, s.second.height);
+      aObj.DefineProperty(name.get(), value.get());
+    }
   }
 
-  aObj.DefineProperty("ScaledResolutionCount", scaled.Length());
-  for (size_t i = 0; i < scaled.Length(); ++i) {
-    auto& s = scaled[i];
-    nsPrintfCString name("ScaledResolution%zu", i);
-    nsPrintfCString value("source %dx%d, target %dx%d", s.first.width,
-                          s.first.height, s.second.width, s.second.height);
-    aObj.DefineProperty(name.get(), value.get());
+  nsTArray<DXGI_OUTPUT_DESC1> outputs =
+      DeviceManagerDx::Get()->EnumerateOutputs();
+  if (!outputs.IsEmpty()) {
+    nsAutoCString colorSpaces;
+    for (size_t i = 0; i < outputs.Length(); ++i) {
+      if (i > 0) {
+        colorSpaces.AppendLiteral(", ");
+      }
+      switch (outputs[i].ColorSpace) {
+        case DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709:
+          colorSpaces.AppendLiteral("DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709");
+          break;
+        case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
+          colorSpaces.AppendLiteral(
+              "DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020");
+          break;
+        default:
+          colorSpaces.AppendPrintf("DXGI_COLOR_SPACE_TYPE(%d)",
+                                   static_cast<int>(outputs[i].ColorSpace));
+          break;
+      }
+    }
+    aObj.DefineProperty("OutputColorSpaces", colorSpaces.get());
   }
 }

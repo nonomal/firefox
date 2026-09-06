@@ -4,7 +4,6 @@
 ---
 task-defaults:
     description: 'Run lint over all modules'
-    run-on-repo-type: [hg]
     run:
         using: gradlew
         gradlew: ['lint']
@@ -20,6 +19,8 @@ task-defaults:
     fetches:
         toolchain:
             - android-sdk-linux
+            - linux64-embedded-uniffi-bindgen
+            - linux64-nimbus-fml
             - android-gradle-dependencies
             - linux64-jdk-repack
         build-fat-aar:
@@ -51,6 +52,7 @@ focus:
     when:
         files-changed:
             - "mobile/android/focus-android/**"
+            - "mobile/android/shared-lint.xml"
     run:
         pre-gradlew:
             - ["cd", "mobile/android/focus-android"]
@@ -66,6 +68,7 @@ fenix:
     when:
         files-changed:
             - "mobile/android/fenix/**"
+            - "mobile/android/shared-lint.xml"
     run:
         pre-gradlew:
             - ["cd", "mobile/android/fenix"]

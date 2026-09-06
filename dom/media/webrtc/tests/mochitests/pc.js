@@ -49,7 +49,7 @@ var makeDefaultCommands = () => {
 /**
  * This class handles tests for peer connections.
  *
- * @constructor
+ * @class
  * @param {object} [options={}]
  *        Optional options for the peer connection test
  * @param {object} [options.commands=commandsPeerConnection]
@@ -85,6 +85,13 @@ function PeerConnectionTest(options) {
     // Make sure neither end tries to use bundle-only!
     options.config_local.bundlePolicy = "max-compat";
     options.config_remote.bundlePolicy = "max-compat";
+  }
+
+  if (!options.rtcpmux) {
+    // For tests that don't use rtcp-mux, we need to configure
+    // RTCPeerConnection to allow non-muxed.
+    options.config_local.rtcpMuxPolicy = "negotiate";
+    options.config_remote.rtcpMuxPolicy = "negotiate";
   }
 
   if (iceServersArray.length) {
@@ -530,8 +537,8 @@ PeerConnectionTest.prototype.updateChainSteps = function () {
     ]);
   }
   if (!this.testOptions.rtcpmux) {
-    this.chain.insertAfterEach("PC_LOCAL_CREATE_OFFER", [
-      PC_LOCAL_REMOVE_RTCPMUX_FROM_OFFER,
+    this.chain.insertAfterEach("PC_REMOTE_GET_OFFER", [
+      PC_REMOTE_REMOVE_RTCPMUX_FROM_OFFER,
     ]);
   }
   if (!this.testOptions.ssrc) {
@@ -688,7 +695,7 @@ PeerConnectionTest.prototype.getSignalingMessage = function (messageType) {
  *
  * @param dataChannel
  * @param peerConnectionWrapper
- * @constructor
+ * @class
  */
 function DataChannelWrapper(dataChannel, peerConnectionWrapper) {
   this._channel = dataChannel;
@@ -848,7 +855,7 @@ DataChannelWrapper.prototype = {
 /**
  * This class acts as a wrapper around a PeerConnection instance.
  *
- * @constructor
+ * @class
  * @param {string} label
  *        Description for the peer connection instance
  * @param {object} configuration
@@ -1031,7 +1038,7 @@ PeerConnectionWrapper.prototype = {
     // an old id (ie; the rollback tests cause the same stream to be added
     // twice)
     element.srcObject = new MediaStream([track]);
-    element.play();
+    element.play().catch(() => {});
   },
 
   addSendStream(stream) {

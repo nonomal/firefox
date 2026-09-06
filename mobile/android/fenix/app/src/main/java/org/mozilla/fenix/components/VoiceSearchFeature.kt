@@ -12,7 +12,9 @@ import android.speech.RecognizerIntent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.map
@@ -30,13 +32,14 @@ import org.mozilla.fenix.ext.components
  * - Launches voice recognition and updates AppStore with the result.
  * - Does NOT update any UI or toolbar state directly.
  *
- * Other features (such as toolbar middleware) should observe AppStore for
- * voice search results and update their own state accordingly.
+ * Other features (such as toolbar middleware) should observe AppStore for voice search results and update their own
+ * state accordingly.
  */
 class VoiceSearchFeature(
     private val context: Context,
     private val appStore: AppStore,
     private val voiceSearchLauncher: ActivityResultLauncher<Intent>,
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : LifecycleAwareFeature {
 
     private var scope: CoroutineScope? = null
@@ -51,23 +54,26 @@ class VoiceSearchFeature(
     }
 
     private fun observeVoiceSearchRequests() {
-        scope = appStore.flowScoped { flow ->
-            flow.map { state -> state.voiceSearchState }
-                .distinctUntilChangedBy { it.isRequestingVoiceInput }
-                .collect { voiceSearchState ->
-                    if (voiceSearchState.isRequestingVoiceInput) {
-                        appStore.dispatch(VoiceInputRequestCleared)
-                        launchVoiceSearch()
+        scope =
+            appStore.flowScoped(dispatcher = mainDispatcher) { flow ->
+                flow
+                    .map { state -> state.voiceSearchState }
+                    .distinctUntilChangedBy { it.isRequestingVoiceInput }
+                    .collect { voiceSearchState ->
+                        if (voiceSearchState.isRequestingVoiceInput) {
+                            appStore.dispatch(VoiceInputRequestCleared)
+                            launchVoiceSearch()
+                        }
                     }
-                }
-        }
+            }
     }
 
     private fun launchVoiceSearch() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, context.getString(R.string.voice_search_explainer))
-        }
+        val intent =
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PROMPT, context.getString(R.string.voice_search_explainer))
+            }
 
         try {
             voiceSearchLauncher.launch(intent)
@@ -78,28 +84,24 @@ class VoiceSearchFeature(
         }
     }
 
-    /**
-     * Handles the voice search result. This should be called from the ActivityResultLauncher callback.
-     */
+    /** Handles the voice search result. This should be called from the ActivityResultLauncher callback. */
     fun handleVoiceSearchResult(resultCode: Int, data: Intent?) {
-        val searchTerms = if (resultCode == Activity.RESULT_OK && data != null) {
-            data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-        } else {
-            null
-        }
+        val searchTerms =
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            } else {
+                null
+            }
 
         appStore.dispatch(VoiceInputResultReceived(searchTerms))
     }
 
-    /**
-     * Static binding for [VoiceSearchFeature].
-     */
+    /** Static binding for [VoiceSearchFeature]. */
     companion object {
 
         /**
-         * Convenient method to register [VoiceSearchFeature] with a [Fragment].
-         * Upon destruction of the fragment's view, the binding will be unregistered and all
-         * references cleared.
+         * Convenient method to register [VoiceSearchFeature] with a [Fragment]. Upon destruction of the fragment's
+         * view, the binding will be unregistered and all references cleared.
          *
          * @param fragment the [Fragment] to register with.
          * @param activityResultLauncher the [ActivityResultLauncher] to use for the result.
@@ -108,15 +110,15 @@ class VoiceSearchFeature(
             fragment: Fragment,
             activityResultLauncher: ActivityResultLauncher<Intent>,
         ): ViewBoundFeatureWrapper<VoiceSearchFeature>? {
-            var voiceSearchBinding: ViewBoundFeatureWrapper<VoiceSearchFeature>? =
-                ViewBoundFeatureWrapper()
+            var voiceSearchBinding: ViewBoundFeatureWrapper<VoiceSearchFeature>? = ViewBoundFeatureWrapper()
 
             voiceSearchBinding?.set(
-                feature = VoiceSearchFeature(
-                    context = fragment.requireContext(),
-                    appStore = fragment.requireContext().components.appStore,
-                    voiceSearchLauncher = activityResultLauncher,
-                ),
+                feature =
+                    VoiceSearchFeature(
+                        context = fragment.requireContext(),
+                        appStore = fragment.requireContext().components.appStore,
+                        voiceSearchLauncher = activityResultLauncher,
+                    ),
                 owner = fragment.viewLifecycleOwner,
                 view = fragment.requireView(),
             )
@@ -126,7 +128,7 @@ class VoiceSearchFeature(
                     override fun onDestroy(owner: LifecycleOwner) {
                         voiceSearchBinding = null
                     }
-                },
+                }
             )
 
             return voiceSearchBinding

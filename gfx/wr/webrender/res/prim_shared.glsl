@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include rect,render_task,gpu_cache,transform
+#include rect,render_task,transform,image_source
 
 #define EXTEND_MODE_CLAMP  0
 #define EXTEND_MODE_REPEAT 1
@@ -65,8 +65,8 @@ Instance decode_instance_attributes() {
 }
 
 struct PrimitiveHeader {
-    RectWithEndpoint local_rect;
-    RectWithEndpoint local_clip_rect;
+    RectWithEndpoint pattern_rect;
+    RectWithEndpoint bounds;
     float z;
     int specific_prim_address;
     int transform_id;
@@ -78,10 +78,10 @@ PrimitiveHeader fetch_prim_header(int index) {
     PrimitiveHeader ph;
 
     ivec2 uv_f = get_fetch_uv(index, VECS_PER_PRIM_HEADER_F);
-    vec4 local_rect = TEXEL_FETCH(sPrimitiveHeadersF, uv_f, 0, ivec2(0, 0));
-    vec4 local_clip_rect = TEXEL_FETCH(sPrimitiveHeadersF, uv_f, 0, ivec2(1, 0));
-    ph.local_rect = RectWithEndpoint(local_rect.xy, local_rect.zw);
-    ph.local_clip_rect = RectWithEndpoint(local_clip_rect.xy, local_clip_rect.zw);
+    vec4 pattern_rect = TEXEL_FETCH(sPrimitiveHeadersF, uv_f, 0, ivec2(0, 0));
+    vec4 bounds = TEXEL_FETCH(sPrimitiveHeadersF, uv_f, 0, ivec2(1, 0));
+    ph.pattern_rect = RectWithEndpoint(pattern_rect.xy, pattern_rect.zw);
+    ph.bounds = RectWithEndpoint(bounds.xy, bounds.zw);
 
     ivec2 uv_i = get_fetch_uv(index, VECS_PER_PRIM_HEADER_I);
     ivec4 data0 = TEXEL_FETCH(sPrimitiveHeadersI, uv_i, 0, ivec2(0, 0));

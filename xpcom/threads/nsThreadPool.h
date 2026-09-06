@@ -1,26 +1,24 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsThreadPool_h__
-#define nsThreadPool_h__
+#ifndef nsThreadPool_h_
+#define nsThreadPool_h_
 
-#include "nsITargetShutdownTask.h"
-#include "nsIThread.h"
-#include "nsIThreadPool.h"
-#include "nsIRunnable.h"
-#include "nsCOMArray.h"
-#include "nsCOMPtr.h"
-#include "nsThreadUtils.h"
-#include "mozilla/Atomics.h"
 #include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/Atomics.h"
 #include "mozilla/CondVar.h"
 #include "mozilla/EventQueue.h"
 #include "mozilla/LinkedList.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/TargetShutdownTaskSet.h"
+#include "nsCOMArray.h"
+#include "nsCOMPtr.h"
+#include "nsIRunnable.h"
+#include "nsITargetShutdownTask.h"
+#include "nsIThread.h"
+#include "nsIThreadPool.h"
+#include "nsThreadUtils.h"
 
 class nsIThread;
 
@@ -42,8 +40,6 @@ class nsThreadPool final : public mozilla::Runnable, public nsIThreadPool {
   struct MRUIdleEntry;  // forward declaration only, see nsThreadPool.cpp
 
   void ShutdownThread(nsIThread* aThread);
-  nsresult PutEvent(nsIRunnable* aEvent, mozilla::MutexAutoLock& aProofOfLock)
-      MOZ_REQUIRES(mMutex);
   nsresult PutEvent(already_AddRefed<nsIRunnable> aEvent, DispatchFlags aFlags,
                     mozilla::MutexAutoLock& aProofOfLock) MOZ_REQUIRES(mMutex);
   void NotifyChangeToAllIdleThreads() MOZ_REQUIRES(mMutex);
@@ -80,4 +76,4 @@ class nsThreadPool final : public mozilla::Runnable, public nsIThreadPool {
    0x4ec4,                                    \
    {0x88, 0x8e, 0x6e, 0x42, 0x64, 0xfe, 0x90, 0xeb}}
 
-#endif  // nsThreadPool_h__
+#endif  // nsThreadPool_h_

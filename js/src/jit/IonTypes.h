@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -16,7 +14,6 @@
 #include "NamespaceImports.h"
 
 #include "jit/ABIFunctionType.h"
-
 #include "js/ScalarType.h"  // js::Scalar::Type
 #include "js/Value.h"
 
@@ -33,17 +30,12 @@ class IonCompilationId {
  public:
   explicit IonCompilationId(uint64_t id)
       : idLo_(id & UINT32_MAX), idHi_(id >> 32) {}
-  bool operator==(const IonCompilationId& other) const {
-    return idLo_ == other.idLo_ && idHi_ == other.idHi_;
-  }
-  bool operator!=(const IonCompilationId& other) const {
-    return !operator==(other);
-  }
+  bool operator==(const IonCompilationId& other) const = default;
 };
 
 namespace jit {
 
-using RecoverOffset = uint32_t;
+using RecoverOffset = uint64_t;
 using SnapshotOffset = uint32_t;
 
 // The maximum size of any buffer associated with an assembler or code object.
@@ -54,8 +46,8 @@ static const uint32_t MAX_BUFFER_SIZE = (1 << 30) - 1;
 // Maximum number of scripted arg slots.
 static const uint32_t SNAPSHOT_MAX_NARGS = 127;
 
-static const SnapshotOffset INVALID_RECOVER_OFFSET = uint32_t(-1);
-static const SnapshotOffset INVALID_SNAPSHOT_OFFSET = uint32_t(-1);
+static const RecoverOffset INVALID_RECOVER_OFFSET = RecoverOffset(-1);
+static const SnapshotOffset INVALID_SNAPSHOT_OFFSET = SnapshotOffset(-1);
 
 /*
  * [SMDOC] Avoiding repeated bailouts / invalidations
@@ -157,6 +149,11 @@ enum class BailoutKind : uint8_t {
   // An inevitable bailout (MBail instruction or type barrier that always bails)
   Inevitable,
 
+  // A JSOp::AfterYield Warp did not build a resume path for, because its
+  // suspend was in (or only reachable from) a catch-block. We fall back to
+  // running the generator in Baseline if this happens frequently.
+  UncompiledGeneratorResume,
+
   // Bailing out during a VM call. Many possible causes that are hard
   // to distinguish statically at snapshot construction time.
   // We just lump them together.
@@ -225,6 +222,8 @@ inline const char* BailoutKindString(BailoutKind kind) {
       return "UnboxFolding";
     case BailoutKind::Inevitable:
       return "Inevitable";
+    case BailoutKind::UncompiledGeneratorResume:
+      return "UncompiledGeneratorResume";
     case BailoutKind::DuringVMCall:
       return "DuringVMCall";
     case BailoutKind::TooManyArguments:
@@ -314,6 +313,7 @@ class SimdConstant {
   // Doesn't have a default constructor, as it would prevent it from being
   // included in unions.
 
+  static SimdConstant Zero() { return SimdConstant::SplatX2(int64_t(0)); }
   static SimdConstant CreateX16(const int8_t* array) {
     SimdConstant cst;
     cst.type_ = Int8x16;
@@ -511,14 +511,15 @@ enum class MIRType : uint8_t {
   MagicUninitializedLexical,  // JS_UNINITIALIZED_LEXICAL magic value.
   // Types above are specialized.
   Value,
-  None,           // Invalid, used as a placeholder.
-  Slots,          // A slots vector
-  Elements,       // An elements vector
-  Pointer,        // An opaque pointer that receives no special treatment
-  WasmAnyRef,     // Wasm Ref/AnyRef/NullRef: a raw JSObject* or a raw (void*)0
-  WasmArrayData,  // A WasmArrayObject data pointer
-  StackResults,   // Wasm multi-value stack result area, which may contain refs
-  Shape,          // A Shape pointer.
+  None,            // Invalid, used as a placeholder.
+  Slots,           // A slots vector
+  Elements,        // An elements vector
+  Pointer,         // An opaque pointer that receives no special treatment
+  WasmAnyRef,      // Wasm Ref/AnyRef/NullRef: a raw JSObject* or a raw (void*)0
+  WasmStructData,  // A WasmStructObject data pointer (to OOL storage only)
+  WasmArrayData,   // A WasmArrayObject data pointer (to IL or OOL storage)
+  StackResults,    // Wasm multi-value stack result area, which may contain refs
+  Shape,           // A Shape pointer.
   Last = Shape
 };
 
@@ -661,6 +662,8 @@ static inline const char* StringFromMIRType(MIRType type) {
       return "Pointer";
     case MIRType::WasmAnyRef:
       return "WasmAnyRef";
+    case MIRType::WasmStructData:
+      return "WasmStructData";
     case MIRType::WasmArrayData:
       return "WasmArrayData";
     case MIRType::StackResults:
@@ -793,6 +796,15 @@ enum class ResumeMode : uint8_t {
   // of a proxy get trap aligns with what the spec requires.
   ResumeAfterCheckProxyGetResult,
 
+  // Innermost frame. Resume at the next bytecode op when bailing out, but the
+  // value in the result slot is the internal PropertyIteratorObject created by
+  // the Object.keys scalar-replacement optimization instead of the keys array.
+  // On bailout we convert it back to the keys array so the internal iterator is
+  // never exposed to the baseline frame. This is used when the
+  // MObjectToIterator
+  // VM call bails out (e.g. an invalidation bailout caused by GC).
+  ResumeAfterObjectKeys,
+
   // Innermost frame. Resume at the current bytecode op when bailing out.
   ResumeAt,
 
@@ -824,6 +836,8 @@ inline const char* ResumeModeToString(ResumeMode mode) {
       return "ResumeAfterCheckIsObject";
     case ResumeMode::ResumeAfterCheckProxyGetResult:
       return "ResumeAfterCheckProxyGetResult";
+    case ResumeMode::ResumeAfterObjectKeys:
+      return "ResumeAfterObjectKeys";
   }
   MOZ_CRASH("Invalid mode");
 }
@@ -833,6 +847,7 @@ inline bool IsResumeAfter(ResumeMode mode) {
     case ResumeMode::ResumeAfter:
     case ResumeMode::ResumeAfterCheckIsObject:
     case ResumeMode::ResumeAfterCheckProxyGetResult:
+    case ResumeMode::ResumeAfterObjectKeys:
       return true;
     default:
       return false;

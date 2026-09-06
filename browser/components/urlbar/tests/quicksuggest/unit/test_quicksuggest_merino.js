@@ -214,6 +214,11 @@ add_task(async function multipleMerinoSuggestions() {
       iab_category: "22 - Shopping",
       is_sponsored: true,
       score: 0.1,
+      custom_details: {
+        amp: {
+          suggestion_id: "amp-suggestion-id",
+        },
+      },
     },
     {
       provider: "adm",
@@ -228,6 +233,11 @@ add_task(async function multipleMerinoSuggestions() {
       iab_category: "22 - Shopping",
       is_sponsored: true,
       score: 1,
+      custom_details: {
+        amp: {
+          suggestion_id: "amp-suggestion-id",
+        },
+      },
     },
     {
       provider: "adm",
@@ -242,6 +252,11 @@ add_task(async function multipleMerinoSuggestions() {
       iab_category: "22 - Shopping",
       is_sponsored: true,
       score: 0.2,
+      custom_details: {
+        amp: {
+          suggestion_id: "amp-suggestion-id",
+        },
+      },
     },
   ];
 
@@ -289,12 +304,9 @@ add_task(async function timestamps() {
     providers: [UrlbarProviderQuickSuggest.name],
     isPrivate: false,
   });
-  let controller = UrlbarTestUtils.newMockController({
+  let controller = UrlbarTestUtils.mockChildController({
     input: {
       isPrivate: context.isPrivate,
-      onFirstResult() {
-        return false;
-      },
       getSearchSource() {
         return "dummy-search-source";
       },
@@ -392,6 +404,236 @@ add_task(async function dismissals_managed() {
   merinoClient().resetSession();
 });
 
+// Tests dismissals of Merino AMP suggestions, which have special handling
+// around their dismissal keys.
+add_task(async function dismissals_amp() {
+  UrlbarPrefs.set("quicksuggest.online.available", true);
+  UrlbarPrefs.set("quicksuggest.online.enabled", true);
+
+  UrlbarPrefs.set("suggest.quicksuggest.all", true);
+  UrlbarPrefs.set("suggest.quicksuggest.sponsored", true);
+  await QuickSuggestTestUtils.forceSync();
+
+  let tests = [
+    {
+      suggestion: {
+        url: "https://example.com/0",
+      },
+      expected: {
+        // dismissal key should be the `url` value
+        dismissalKey: "https://example.com/0",
+      },
+    },
+    {
+      suggestion: {
+        url: `https://example.com/1-${TIMESTAMP_TEMPLATE}`,
+      },
+      expected: {
+        // dismissal key should be the original `url` value with the timestamp
+        // template
+        dismissalKey: `https://example.com/1-${TIMESTAMP_TEMPLATE}`,
+      },
+    },
+    {
+      suggestion: {
+        url: "https://example.com/2",
+        full_keyword: "full keyword 2",
+      },
+      expected: {
+        // dismissal key should be the `url` value
+        dismissalKey: "https://example.com/2",
+        notDismissalKeys: ["full keyword 2"],
+      },
+    },
+    {
+      suggestion: {
+        url: `https://example.com/3-${TIMESTAMP_TEMPLATE}`,
+        full_keyword: "full keyword 3",
+      },
+      expected: {
+        // dismissal key should be the `url` value
+        dismissalKey: `https://example.com/3-${TIMESTAMP_TEMPLATE}`,
+        notDismissalKeys: ["full keyword 3"],
+      },
+    },
+    {
+      suggestion: {
+        url: "https://example.com/4",
+        dismissal_key: "4-dismissal-key",
+      },
+      expected: {
+        // dismissal key should be the `dismissal_key` value
+        dismissalKey: "4-dismissal-key",
+        notDismissalKeys: ["https://example.com/4"],
+      },
+    },
+    {
+      suggestion: {
+        url: `https://example.com/5-${TIMESTAMP_TEMPLATE}`,
+        dismissal_key: "5-dismissal-key",
+      },
+      expected: {
+        // dismissal key should be the `dismissal_key` value
+        dismissalKey: "5-dismissal-key",
+        notDismissalKeys: [`https://example.com/5-${TIMESTAMP_TEMPLATE}`],
+      },
+    },
+    {
+      suggestion: {
+        url: "https://example.com/6",
+        full_keyword: "full keyword 6",
+        dismissal_key: "6-dismissal-key",
+      },
+      expected: {
+        // dismissal key should be the `dismissal_key` value
+        dismissalKey: "6-dismissal-key",
+        notDismissalKeys: ["full keyword 6", "https://example.com/6"],
+      },
+    },
+    {
+      suggestion: {
+        url: `https://example.com/7-${TIMESTAMP_TEMPLATE}`,
+        full_keyword: "full keyword 7",
+        dismissal_key: "7-dismissal-key",
+      },
+      expected: {
+        // dismissal key should be the `dismissal_key` value
+        dismissalKey: "7-dismissal-key",
+        notDismissalKeys: [
+          "full keyword 7",
+          `https://example.com/7-${TIMESTAMP_TEMPLATE}`,
+        ],
+      },
+    },
+  ];
+
+  for (let test of tests) {
+    info("Doing subtest: " + JSON.stringify(test));
+
+    let { suggestion, expected } = test;
+
+    suggestion = {
+      provider: "adm",
+      title: "title",
+      icon: null,
+      impression_url: "https://example.com/impression",
+      click_url: "https://example.com/click",
+      block_id: 1,
+      advertiser: "advertiser",
+      iab_category: "22 - Shopping",
+      is_sponsored: true,
+      request_id: "request_id",
+      score: 1,
+      custom_details: {
+        amp: {
+          suggestion_id: "amp-suggestion-id",
+        },
+      },
+      ...suggestion,
+    };
+
+    MerinoTestUtils.server.response =
+      MerinoTestUtils.server.makeDefaultResponse();
+    MerinoTestUtils.server.response.body.suggestions = [suggestion];
+
+    let expectedResult = QuickSuggestTestUtils.ampResult({
+      suggestedIndex: -1,
+      provider: suggestion.provider,
+      title: suggestion.title,
+      fullKeyword: suggestion.full_keyword,
+      url: suggestion.url,
+      originalUrl: suggestion.original_url || suggestion.url,
+      dismissalKey: suggestion.dismissal_key,
+      requestId: suggestion.request_id,
+      impressionUrl: suggestion.impression_url,
+      clickUrl: suggestion.click_url,
+      blockId: suggestion.block_id,
+      advertiser: suggestion.advertiser,
+      iabCategory: suggestion.iab_category,
+      source: "merino",
+    });
+
+    if (!suggestion.full_keyword) {
+      delete expectedResult.payload.title;
+    }
+
+    // Do a search. The Merino suggestion should be matched.
+    let context = createContext(SEARCH_STRING, {
+      providers: [UrlbarProviderQuickSuggest.name],
+      isPrivate: false,
+    });
+    await check_results({
+      context,
+      matches: [expectedResult],
+      // Ignore values related to the timestamp template. They're not important
+      // for this test.
+      conditionalPayloadProperties: {
+        url: { ignore: true },
+        urlTimestampIndex: { ignore: true },
+      },
+    });
+
+    let result = context.results[0];
+    Assert.equal(
+      QuickSuggest.getFeatureByResult(result)?.name,
+      "AmpSuggestions",
+      "Sanity check: The actual result should be managed by AmpSuggestions"
+    );
+
+    // Dismiss the Merino result.
+    await QuickSuggest.dismissResult(result);
+    Assert.ok(
+      await QuickSuggest.isResultDismissed(result),
+      "isResultDismissed should return true after dismissing result"
+    );
+
+    Assert.ok(
+      await QuickSuggest.rustBackend.isDismissedByKey(expected.dismissalKey),
+      "isDismissedByKey should return true after dismissing result"
+    );
+    if (expected.notDismissalKeys) {
+      for (let value of expected.notDismissalKeys) {
+        Assert.ok(
+          !(await QuickSuggest.rustBackend.isDismissedByKey(value)),
+          "isDismissedByKey should return false for notDismissalKey: " + value
+        );
+      }
+    }
+
+    // Do another search. The remote settings suggestion should now be matched.
+    await check_results({
+      context: createContext(SEARCH_STRING, {
+        providers: [UrlbarProviderQuickSuggest.name],
+        isPrivate: false,
+      }),
+      matches: [EXPECTED_REMOTE_SETTINGS_URLBAR_RESULT],
+    });
+
+    // Clear dismissals.
+    await QuickSuggest.clearDismissedSuggestions();
+    Assert.ok(
+      !(await QuickSuggest.isResultDismissed(result)),
+      "isResultDismissed should return false after clearing dismissals"
+    );
+
+    // The Merino suggestion should be matched again.
+    await check_results({
+      context: createContext(SEARCH_STRING, {
+        providers: [UrlbarProviderQuickSuggest.name],
+        isPrivate: false,
+      }),
+      matches: [expectedResult],
+      conditionalPayloadProperties: {
+        url: { ignore: true },
+        urlTimestampIndex: { ignore: true },
+      },
+    });
+  }
+
+  MerinoTestUtils.server.reset();
+  merinoClient().resetSession();
+});
+
 // Tests dismissals of unmanaged Merino suggestions (suggestions that are not
 // managed by a `SuggestFeature`).
 add_task(async function dismissals_unmanaged_1() {
@@ -455,15 +697,13 @@ add_task(async function dismissals_unmanaged_1() {
     MerinoTestUtils.server.response.body.suggestions = [suggestion];
 
     let expectedResult = {
-      type: UrlbarUtils.RESULT_TYPE.URL,
-      source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: UrlbarShared.RESULT_TYPE.URL,
+      source: UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: false,
       payload: {
         provider,
-        title: "example.com",
         url: suggestion.url,
         originalUrl: suggestion.original_url,
-        displayUrl: suggestion.url.replace(/^https:\/\//, ""),
         dismissalKey: suggestion.dismissal_key,
         source: "merino",
         isSponsored: false,
@@ -577,14 +817,12 @@ add_task(async function dismissals_unmanaged_2() {
   ];
 
   let expectedBaseResult = {
-    type: UrlbarUtils.RESULT_TYPE.URL,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.URL,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     heuristic: false,
     payload: {
       provider,
-      title: "example.com",
       url: "https://example.com/url",
-      displayUrl: "example.com/url",
       source: "merino",
       isSponsored: false,
       shouldShowUrl: true,
@@ -720,17 +958,17 @@ add_task(async function dismissals_unmanaged_2() {
     );
   }
 
+  await QuickSuggest.clearDismissedSuggestions();
   MerinoTestUtils.server.reset();
   merinoClient().resetSession();
 });
 
-// Tests a Merino suggestion that is a top pick/best match.
-add_task(async function bestMatch() {
+// Tests a mock `top_picks` Merino suggestion, which
+// `UrlbarProviderQuickSuggest` handles as an unmanaged suggestion type.
+add_task(async function topPicks() {
   UrlbarPrefs.set("quicksuggest.online.available", true);
   UrlbarPrefs.set("quicksuggest.online.enabled", true);
 
-  // Set up a suggestion with `is_top_pick` and the "top_picks" provider so that
-  // UrlbarProviderQuickSuggest will make a default result for it.
   let provider = "top_picks";
   MerinoTestUtils.server.response.body.suggestions = [
     {
@@ -753,19 +991,17 @@ add_task(async function bestMatch() {
     matches: [
       {
         isBestMatch: true,
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.SEARCH,
         heuristic: false,
         payload: {
           telemetryType: provider,
-          title: "title",
+          title: "full_keyword — title",
           url: "url",
           icon: null,
-          qsSuggestion: "full_keyword",
           isSponsored: false,
           isBlockable: true,
           isManageable: true,
-          displayUrl: "url",
           source: "merino",
           provider,
         },
@@ -851,13 +1087,12 @@ async function doUnmanagedTest({ pref, suggestion, shouldBeAdded }) {
   MerinoTestUtils.server.response.body.suggestions = [suggestion];
 
   let expectedResult = {
-    type: UrlbarUtils.RESULT_TYPE.URL,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.URL,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     heuristic: false,
     payload: {
       title: suggestion.title,
       url: suggestion.url,
-      displayUrl: suggestion.url.substring("https://".length),
       provider: suggestion.provider,
       telemetryType: suggestion.provider,
       isSponsored: !!suggestion.is_sponsored,
@@ -911,10 +1146,9 @@ async function doUnmanagedTest({ pref, suggestion, shouldBeAdded }) {
   let dismissalPromise = TestUtils.topicObserved(
     "quicksuggest-dismissals-changed"
   );
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
   triggerCommand({
-    feature: UrlbarProvidersManager.getProvider(
-      UrlbarProviderQuickSuggest.name
-    ),
+    feature: providersManager.getProvider(UrlbarProviderQuickSuggest.name),
     command: "dismiss",
     result: context.results[0],
     expectedCountsByCall: {

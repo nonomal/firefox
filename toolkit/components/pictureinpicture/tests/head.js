@@ -4,7 +4,7 @@
 "use strict";
 
 const { TOGGLE_POLICIES } = ChromeUtils.importESModule(
-  "resource://gre/modules/PictureInPictureControls.sys.mjs"
+  "moz-src:///toolkit/components/pictureinpicture/PictureInPictureControls.sys.mjs"
 );
 
 const TEST_ROOT = getRootDirectory(gTestPath).replace(
@@ -39,6 +39,10 @@ const SHARED_DATA_KEY = "PictureInPicture:SiteOverrides";
 // Used for clearing the size and location of the PiP window
 const PLAYER_URI = "chrome://global/content/pictureinpicture/player.xhtml";
 const ACCEPTABLE_DIFFERENCE = 2;
+const AUTO_CLOSE_ENABLED_PREF =
+  "media.videocontrols.picture-in-picture.auto-close.enabled";
+const AUTO_CLOSE_TIMEOUT_PREF =
+  "media.videocontrols.picture-in-picture.auto-close.timeoutMs";
 
 /**
  * We currently ship with a few different variations of the
@@ -112,8 +116,8 @@ const DEFAULT_TOGGLE_STYLES = {
  * @param {boolean} triggerFn Use the given function to open the pip window,
  *                  which runs in the parent process.
  *
- * @return Promise
- * @resolves With the Picture-in-Picture window when ready.
+ * @returns {Promise}
+ *   Resolves to the Picture-in-Picture window when ready.
  */
 async function triggerPictureInPicture(browser, videoID, triggerFn) {
   let domWindowOpened = BrowserTestUtils.domWindowOpenedAndLoaded(null);
@@ -167,8 +171,8 @@ async function triggerPictureInPicture(browser, videoID, triggerFn) {
  *
  * @param {bool} expected True if we expect the message to be showing.
  *
- * @return Promise
- * @resolves When the checks have completed.
+ * @returns {Promise<void>}
+ *   Resolves when the checks have completed.
  */
 async function assertShowingMessage(browser, videoID, expected) {
   let showing = await SpecialPowers.spawn(browser, [videoID], async videoID => {
@@ -214,8 +218,8 @@ function assertVideoIsBeingCloned(browser, selector) {
  *
  * @param {Element} browser The <xul:browser> hosting the <video>(s) or the browsing context
  *
- * @return Promise
- * @resolves When each <video> is in the HAVE_ENOUGH_DATA readyState.
+ * @returns {Promise<void>}
+ *   Resolves when each <video> is in the HAVE_ENOUGH_DATA readyState.
  */
 async function ensureVideosReady(browser) {
   // PictureInPictureToggleChild waits for videos to fire their "canplay"
@@ -246,8 +250,8 @@ async function ensureVideosReady(browser) {
  * @param {object} toggleStyles Optional argument. See the documentation for the
  * DEFAULT_TOGGLE_STYLES object for a sense of what styleRules is expected to be.
  *
- * @return Promise
- * @resolves When the check has completed.
+ * @returns {Promise<void>}
+ *   Resolves when the check has completed.
  */
 async function toggleOpacityReachesThreshold(
   browser,
@@ -313,8 +317,8 @@ async function toggleOpacityReachesThreshold(
  * be one of the values in the TOGGLE_POLICIES from PictureInPictureControls.sys.mjs.
  * If undefined, this function will ensure no policy attribute is set.
  *
- * @return Promise
- * @resolves When the check has completed.
+ * @returns {Promise<void>}
+ *   Resolves when the check has completed.
  */
 async function assertTogglePolicy(
   browser,
@@ -338,7 +342,7 @@ async function assertTogglePolicy(
 
     if (policy) {
       const { TOGGLE_POLICY_STRINGS } = ChromeUtils.importESModule(
-        "resource://gre/modules/PictureInPictureControls.sys.mjs"
+        "moz-src:///toolkit/components/pictureinpicture/PictureInPictureControls.sys.mjs"
       );
       let policyAttr = toggle.getAttribute("policy");
       Assert.equal(
@@ -368,8 +372,8 @@ async function assertTogglePolicy(
  * mouse button events to fire. False if we expect none of them to fire.
  * @param {bool} isExpectingClick True if the mouse events should include the
  * "click" event, which is only included when the primary mouse button is pressed.
- * @return Promise
- * @resolves When the check has completed.
+ * @returns {Promise<void>}
+ *   Resolves when the check has completed.
  */
 async function assertSawMouseEvents(
   browser,
@@ -407,8 +411,8 @@ async function assertSawMouseEvents(
  *
  * @param {Element} browser The <xul:browser> that will receive the mouse
  * events.
- * @return Promise
- * @resolves When the check has completed.
+ * @returns {Promise<void>}
+ *   Resolves when the check has completed.
  */
 async function assertSawClickEventOnly(browser) {
   let mouseEvents = await SpecialPowers.spawn(browser, [], async () => {
@@ -429,14 +433,14 @@ async function assertSawClickEventOnly(browser) {
  * @param {Element} browser The <xul:browser> that has the <video> loaded in it.
  * @param {string} videoID The ID of the video that has the toggle.
  *
- * @return Promise
- * @resolves With the following Object structure:
+ * @returns {Promise}
+ *   Resolves with the following Object structure:
  *   {
  *     controls: <Boolean>,
  *   }
  *
- * Where controls represents whether or not the video has the default control set
- * displayed.
+ *   Where controls represents whether or not the video has the default control
+ *   set displayed.
  */
 async function prepareForToggleClick(browser, videoID) {
   // Synthesize a mouse move just outside of the video to ensure that
@@ -469,7 +473,7 @@ async function prepareForToggleClick(browser, videoID) {
       // will fire, so we poll a special testing function that will tell us when
       // the video that we care about is being tracked.
       let { PictureInPictureToggleChild } = ChromeUtils.importESModule(
-        "resource://gre/actors/PictureInPictureChild.sys.mjs"
+        "moz-src:///toolkit/actors/PictureInPictureChild.sys.mjs"
       );
       await ContentTaskUtils.waitForCondition(
         () => {
@@ -506,8 +510,8 @@ async function prepareForToggleClick(browser, videoID) {
  * @param {Element} browser The <xul:browser> that has the <video> loaded in it.
  * @param {string} videoID The ID of the video that has the toggle.
  *
- * @return Promise
- * @resolves With the following Object structure:
+ * @returns {Promise}
+ *   Resolves with the following Object structure:
  *   {
  *     top: <Number>,
  *     left: <Number>,
@@ -521,7 +525,7 @@ async function getToggleClientRect(
   toggleStyles = DEFAULT_TOGGLE_STYLES
 ) {
   let args = { videoID, toggleID: toggleStyles.rootID };
-  return ContentTask.spawn(browser, args, async args => {
+  return SpecialPowers.spawn(browser, [args], async args => {
     const { Rect } = ChromeUtils.importESModule(
       "resource://gre/modules/Geometry.sys.mjs"
     );
@@ -632,9 +636,9 @@ async function hoverToggle(browser, videoID) {
  * before running the toggle test. The function is passed the opened
  * <xul:browser> as its only argument once the testURL has finished loading.
  *
- * @return Promise
- * @resolves When the test is complete and the tab with the loaded page is
- * removed.
+ * @returns {Promise<void>}
+ *   Resolves when the test is complete and the tab with the loaded page is
+ *   removed.
  */
 async function testToggle(testURL, expectations, prepFn = async () => {}) {
   await BrowserTestUtils.withNewTab(
@@ -680,8 +684,8 @@ async function testToggle(testURL, expectations, prepFn = async () => {}) {
  * @param {object} toggleStyles Optional argument. See the documentation for the
  * DEFAULT_TOGGLE_STYLES object for a sense of what styleRules is expected to be.
  *
- * @return Promise
- * @resolves When the check for the toggle is complete.
+ * @returns {Promise<void>}
+ *   Resolves when the check for the toggle is complete.
  */
 async function testToggleHelper(
   browser,
@@ -860,8 +864,8 @@ async function testToggleHelper(
  *   The window that is expected to enter fullscreen mode.
  * @param asyncFn (Async Function)
  *   The async function to run to trigger the fullscreen switch.
- * @return Promise
- * @resolves When the fullscreen entering transition completes.
+ * @returns {Promise<void>}
+ *   Resolves when the fullscreen entering transition completes.
  */
 async function promiseFullscreenEntered(window, asyncFn) {
   let entered = BrowserTestUtils.waitForEvent(
@@ -873,7 +877,7 @@ async function promiseFullscreenEntered(window, asyncFn) {
 
   await entered;
 
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return !gBrowser.selectedBrowser.browsingContext.currentWindowGlobal.getActor(
       "DOMFullscreen"
     ).timerId;
@@ -899,8 +903,8 @@ async function promiseFullscreenEntered(window, asyncFn) {
  *   The window that is expected to exit fullscreen mode.
  * @param asyncFn (Async Function)
  *   The async function to run to trigger the fullscreen switch.
- * @return Promise
- * @resolves When the fullscreen exiting transition completes.
+ * @returns {Promise<void>}
+ *   Resolves when the fullscreen exiting transition completes.
  */
 async function promiseFullscreenExited(window, asyncFn) {
   let exited = BrowserTestUtils.waitForEvent(window, "MozDOMFullscreen:Exited");
@@ -909,7 +913,7 @@ async function promiseFullscreenExited(window, asyncFn) {
 
   await exited;
 
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return !gBrowser.selectedBrowser.browsingContext.currentWindowGlobal.getActor(
       "DOMFullscreen"
     ).timerId;
@@ -1088,77 +1092,6 @@ function overrideSavedPosition(left, top, width, height) {
   xulStore.setValue(PLAYER_URI, "picture-in-picture", "top", top);
   xulStore.setValue(PLAYER_URI, "picture-in-picture", "width", width);
   xulStore.setValue(PLAYER_URI, "picture-in-picture", "height", height);
-}
-
-/**
- * Function used to filter events when waiting for the correct number
- * telemetry events.
- *
- * @param {string} expected The expected string or undefined
- * @param {string} actual The actual string
- * @returns true if the expected is undefined or if expected matches actual
- */
-function matches(expected, actual) {
-  if (expected === undefined) {
-    return true;
-  }
-  return expected === actual;
-}
-
-/**
- * Function that waits for the expected number of events aftering filtering.
- *
- * @param {object} filter An object containing optional filters
- *  {
- *    category: (optional) The category of the event. Ex. "pictureinpicture"
- *    method: (optional) The method of the event. Ex. "create"
- *    object: (optional) The object of the event. Ex. "player"
- *  }
- * @param {number} length The number of events to wait for
- * @param {string} process Should be "content" or "parent" depending on the event
- */
-async function waitForTelemeryEvents(filter, length, process) {
-  let {
-    category: filterCategory,
-    method: filterMethod,
-    object: filterObject,
-  } = filter;
-
-  let events = [];
-  await TestUtils.waitForCondition(
-    () => {
-      events = Services.telemetry.snapshotEvents(
-        Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
-        false
-      )[process];
-      if (!events) {
-        return false;
-      }
-
-      let filtered = events
-        .map(([, /* timestamp */ category, method, object, value, extra]) => {
-          // We don't care about the `timestamp` value.
-          // Tests that examine that value should use `snapshotEvents` directly.
-          return [category, method, object, value, extra];
-        })
-        .filter(([category, method, object]) => {
-          return (
-            matches(filterCategory, category) &&
-            matches(filterMethod, method) &&
-            matches(filterObject, object)
-          );
-        });
-      info(JSON.stringify(filtered, null, 2));
-      return filtered && filtered.length >= length;
-    },
-    `Waiting for ${length} pictureinpicture telemetry event(s) with filter ${JSON.stringify(
-      filter,
-      null,
-      2
-    )}`,
-    200,
-    100
-  );
 }
 
 /**

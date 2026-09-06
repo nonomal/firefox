@@ -1,5 +1,3 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
@@ -144,8 +142,8 @@ async function fileExists(path) {
 /**
  * Waits for pending events to be processed.
  *
- * @return {Promise}
- * @resolves When pending events have been processed.
+ * @returns {Promise<void>}
+ *   Resolves when pending events have been processed.
  * @rejects Never.
  */
 function promiseExecuteSoon() {
@@ -157,8 +155,8 @@ function promiseExecuteSoon() {
 /**
  * Waits for a pending events to be processed after a timeout.
  *
- * @return {Promise}
- * @resolves When pending events have been processed.
+ * @returns {Promise<void>}
+ *   Resolves when pending events have been processed.
  * @rejects Never.
  */
 function promiseTimeout(aTime) {
@@ -173,8 +171,8 @@ function promiseTimeout(aTime) {
  * @param aUrl
  *        String containing the URI that will be visited.
  *
- * @return {Promise}
- * @resolves Array [aTime, aTransitionType] from page-visited places event.
+ * @returns {Promise}
+ *   Resolves to an Array [aTime, aTransitionType] from page-visited places event.
  * @rejects Never.
  */
 function promiseWaitForVisit(aUrl) {
@@ -199,8 +197,8 @@ function promiseWaitForVisit(aUrl) {
  *        String containing the URI for the download source, or null to use
  *        httpUrl("source.txt").
  *
- * @return {Promise}
- * @resolves The newly created Download object.
+ * @returns {Promise}
+ *   Resolves to the newly created Download object.
  * @rejects JavaScript exception.
  */
 function promiseNewDownload(aSourceUrl) {
@@ -234,10 +232,10 @@ function promiseNewDownload(aSourceUrl) {
  *                        use to launch the target of the download.
  *        }
  *
- * @return {Promise}
- * @resolves The Download object created as a consequence of controlling the
- *           download through the legacy nsITransfer interface.
- * @rejects Never.  The current test fails in case of exceptions.
+ * @returns {Promise}
+ *   Resolves to the Download object created as a consequence of controlling the
+ *   download through the legacy nsITransfer interface.
+ * @rejects Never. The current test fails in case of exceptions.
  */
 function promiseStartLegacyDownload(aSourceUrl, aOptions) {
   let sourceURI = NetUtil.newURI(aSourceUrl || httpUrl("source.txt"));
@@ -331,7 +329,7 @@ function promiseStartLegacyDownload(aSourceUrl, aOptions) {
         // the Download object to be created and added to the public downloads.
         transfer.init(
           sourceURI,
-          null,
+          aOptions?.originalUrl ? NetUtil.newURI(aOptions.originalUrl) : null,
           NetUtil.newURI(targetFile),
           null,
           mimeInfo,
@@ -371,10 +369,10 @@ function promiseStartLegacyDownload(aSourceUrl, aOptions) {
  *        String containing the URI for the download source, or null to use
  *        httpUrl("interruptible_resumable.txt").
  *
- * @return {Promise}
- * @resolves The Download object created as a consequence of controlling the
- *           download through the legacy nsITransfer interface.
- * @rejects Never.  The current test fails in case of exceptions.
+ * @returns {Promise}
+ *   Resolves to rhe Download object created as a consequence of controlling the
+ *   download through the legacy nsITransfer interface.
+ * @rejects Never. The current test fails in case of exceptions.
  */
 function promiseStartExternalHelperAppServiceDownload(aSourceUrl) {
   let sourceURI = NetUtil.newURI(
@@ -441,24 +439,26 @@ function promiseStartExternalHelperAppServiceDownload(aSourceUrl) {
 }
 
 /**
- * Waits for a download to reach half of its progress, in case it has not
- * reached the expected progress already.
+ * Waits for a download to reach a specified progress value. If not
+ * specified, waits until 50% is reached.
  *
  * @param aDownload
  *        The Download object to wait upon.
+ * @param aProgress
+ *        The progress that should be reached.
  *
- * @return {Promise}
- * @resolves When the download has reached half of its progress.
+ * @returns {Promise<void>}
+ *   Resolves when the download has reached half of its progress.
  * @rejects Never.
  */
-function promiseDownloadMidway(aDownload) {
+function promiseDownloadMidway(aDownload, aProgress = 50) {
   return new Promise(resolve => {
     // Wait for the download to reach half of its progress.
     let onchange = function () {
       if (
         !aDownload.stopped &&
         !aDownload.canceled &&
-        aDownload.progress == 50
+        aDownload.progress == aProgress
       ) {
         aDownload.onchange = null;
         resolve();
@@ -478,8 +478,8 @@ function promiseDownloadMidway(aDownload) {
  * @param aDownload
  *        The Download object to wait upon.
  *
- * @return {Promise}
- * @resolves When the download has transfered any number of bytes.
+ * @returns {Promise<void>}
+ *   Resolves when the download has transfered any number of bytes.
  * @rejects Never.
  */
 function promiseDownloadStarted(aDownload) {
@@ -509,8 +509,8 @@ function promiseDownloadStarted(aDownload) {
  * @param aDownload
  *        The Download object to wait upon.
  *
- * @return {Promise}
- * @resolves When the download succeeded or errored.
+ * @returns {Promise<void>}
+ *   Resolves when the download succeeded or errored.
  * @rejects Never.
  */
 function promiseDownloadFinished(aDownload) {
@@ -536,8 +536,8 @@ function promiseDownloadFinished(aDownload) {
  * @param aDownload
  *        The Download object to wait upon.
  *
- * @return {Promise}
- * @resolves When the download has finished successfully.
+ * @returns {Promise<void>}
+ *   Resolves when the download has finished successfully.
  * @rejects JavaScript exception if the download failed.
  */
 function promiseDownloadStopped(aDownload) {
@@ -561,8 +561,8 @@ function promiseDownloadStopped(aDownload) {
  * @param aIsPrivate
  *        True for the private list, false or undefined for the public list.
  *
- * @return {Promise}
- * @resolves The newly created DownloadList object.
+ * @returns {Promise}
+ *   Resolves to the newly created DownloadList object.
  * @rejects JavaScript exception.
  */
 function promiseNewList(aIsPrivate) {
@@ -584,8 +584,8 @@ function promiseNewList(aIsPrivate) {
  * @param aExpectedContents
  *        String containing the octets that are expected in the file.
  *
- * @return {Promise}
- * @resolves When the operation completes.
+ * @returns {Promise<void>}
+ *   Resolves when the operation completes.
  * @rejects Never.
  */
 async function promiseVerifyContents(aPath, aExpectedContents) {
@@ -641,8 +641,8 @@ async function promiseVerifyContents(aPath, aExpectedContents) {
  *          useLegacySaver: Boolean indicating whether to launch a legacy download.
  *        }
  *
- * @return {Promise}
- * @resolves The newly created Download object, still in progress.
+ * @returns {Promise}
+ *   Resolves to the newly created Download object, still in progress.
  * @rejects JavaScript exception.
  */
 async function promiseStartDownload_tryToKeepPartialData({
@@ -680,8 +680,8 @@ async function promiseStartDownload_tryToKeepPartialData({
  * is received, and waits for the worker thread of BackgroundFileSaver to
  * receive the data to be written to the ".part" file on disk.
  *
- * @return {Promise}
- * @resolves When the ".part" file has been written to disk.
+ * @returns {Promise<void>}
+ *   Resolves when the ".part" file has been written to disk.
  * @rejects JavaScript exception.
  */
 async function promisePartFileReady(aDownload) {
@@ -716,8 +716,8 @@ async function promisePartFileReady(aDownload) {
  *           verdict: nsIApplicationReputationService value indicating the reason for the block,
  *           expectedError: Downloads.Error value indicating the expected error,
  *        }
- * @return {Promise}
- * @resolves The reputation blocked download.
+ * @returns {Promise}
+ *   Resolves when the reputation blocked download.
  * @rejects JavaScript exception.
  */
 async function promiseBlockedDownload({

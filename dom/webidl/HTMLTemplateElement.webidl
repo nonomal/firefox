@@ -23,5 +23,9 @@ interface HTMLTemplateElement : HTMLElement {
   [CEReactions, SetterThrows]
   attribute boolean shadowRootSerializable;
   [CEReactions, SetterThrows, Pref="dom.shadowdom.referenceTarget.enabled"]
-  attribute DOMString shadowRootReferenceTarget;
+  attribute DOMString? shadowRootReferenceTarget;
+  [CEReactions, Pref="dom.shadowdom.shadowRootSlotAssignment.enabled"]
+  attribute DOMString shadowRootSlotAssignment;
+  [CEReactions, Pref="dom.scoped-custom-element-registries.enabled"]
+  attribute DOMString shadowRootCustomElementRegistry;
 };

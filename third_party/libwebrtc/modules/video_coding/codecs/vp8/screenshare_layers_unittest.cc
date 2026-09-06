@@ -21,18 +21,18 @@
 
 #include "api/environment/environment.h"
 #include "api/units/time_delta.h"
+#include "api/units/timestamp.h"
 #include "api/video_codecs/vp8_frame_buffer_controller.h"
 #include "api/video_codecs/vp8_frame_config.h"
 #include "modules/video_coding/codecs/interface/common_constants.h"
 #include "modules/video_coding/codecs/vp8/libvpx_vp8_encoder.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "rtc_base/checks.h"
-#include "rtc_base/fake_clock.h"
-#include "rtc_base/time_utils.h"
 #include "system_wrappers/include/metrics.h"
 #include "test/create_test_environment.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
+#include "test/time_controller/simulated_time_controller.h"
 #include "third_party/libvpx/source/libvpx/vpx/vp8cx.h"
 
 using ::testing::_;
@@ -120,7 +120,11 @@ class ScreenshareLayerTest : public ::testing::Test {
 
   Vp8FrameConfig NextFrameConfig(size_t stream_index, uint32_t timestamp) {
     int64_t timestamp_ms = timestamp / 90;
-    clock_.AdvanceTime(TimeDelta::Millis(timestamp_ms - TimeMillis()));
+    TimeDelta delta = Timestamp::Millis(timestamp_ms) -
+                      time_controller_.GetClock()->CurrentTime();
+    if (delta > TimeDelta::Zero()) {
+      time_controller_.AdvanceTime(delta);
+    }
     return layers_->NextFrameConfig(stream_index, timestamp);
   }
 
@@ -196,11 +200,11 @@ class ScreenshareLayerTest : public ::testing::Test {
     return -1;
   }
 
-  const Environment env_ = CreateTestEnvironment();
+  GlobalSimulatedTimeController time_controller_{Timestamp::Zero()};
+  const Environment env_ = CreateTestEnvironment({.time = &time_controller_});
   int min_qp_;
   uint32_t max_qp_;
   int frame_size_;
-  ScopedFakeClock clock_;
   std::unique_ptr<ScreenshareLayers> layers_;
 
   uint32_t timestamp_;
@@ -573,7 +577,7 @@ TEST_F(ScreenshareLayerTest, UpdatesHistograms) {
     } else {
       RTC_DCHECK_NOTREACHED() << "Unexpected flags";
     }
-    clock_.AdvanceTime(TimeDelta::Millis(1000 / 5));
+    time_controller_.AdvanceTime(TimeDelta::Millis(1000 / 5));
   }
 
   EXPECT_TRUE(overshoot);
@@ -618,7 +622,9 @@ TEST_F(ScreenshareLayerTest, UpdatesHistograms) {
                             kDefaultTl1BitrateKbps));
 }
 
-TEST_F(ScreenshareLayerTest, RespectsConfiguredFramerate) {
+// TODO(https://issues.webrtc.org/444656962): Re-enable when the test no longer
+// rewinds time.
+TEST_F(ScreenshareLayerTest, DISABLED_RespectsConfiguredFramerate) {
   int64_t kTestSpanMs = 2000;
   int64_t kFrameIntervalsMs = 1000 / kFrameRate;
 
@@ -636,7 +642,7 @@ TEST_F(ScreenshareLayerTest, RespectsConfiguredFramerate) {
                             IgnoredCodecSpecificInfo());
     }
     timestamp += kFrameIntervalsMs * 90;
-    clock_.AdvanceTime(TimeDelta::Millis(kFrameIntervalsMs));
+    time_controller_.AdvanceTime(TimeDelta::Millis(kFrameIntervalsMs));
 
     ++num_input_frames;
   }
@@ -654,7 +660,7 @@ TEST_F(ScreenshareLayerTest, RespectsConfiguredFramerate) {
                             IgnoredCodecSpecificInfo());
     }
     timestamp += kFrameIntervalsMs * 90 / 2;
-    clock_.AdvanceTime(TimeDelta::Millis(kFrameIntervalsMs));
+    time_controller_.AdvanceTime(TimeDelta::Millis(kFrameIntervalsMs / 2));
     ++num_input_frames;
   }
 

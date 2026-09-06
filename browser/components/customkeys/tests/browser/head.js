@@ -17,6 +17,11 @@ const consts = {
   downloadsDisplay: (isMac && "⌘J") || (isLinux && "Ctrl+Shift+Y") || "Ctrl+J",
   // key_newNavigator
   newWindowDisplay: isMac ? "⌘N" : "Ctrl+N",
+  // goBackKb
+  backDisplay: isMac ? "⌘←" : "Alt+Left Arrow",
+  backArgs: ["KEY_ArrowLeft", { accelKey: isMac, altKey: !isMac }],
+  // key_paste
+  pasteDisplay: isMac ? "⌘V" : "Ctrl+V",
 
   // The following unused* constants specify a key combination which is unused by
   // default. This will need to be updated if this key combination is assigned to

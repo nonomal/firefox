@@ -1,9 +1,7 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Expr.h"
@@ -11,7 +9,6 @@
 #include "clang/AST/Mangle.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
-#include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Version.h"
 #include "clang/Format/Format.h"
@@ -21,16 +18,13 @@
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Lex/TokenConcatenation.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
 #include <fstream>
-#include <iostream>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <stack>
 #include <string>
 #include <unordered_set>
@@ -40,28 +34,17 @@
 
 #include "BindingOperations.h"
 #include "FileOperations.h"
+#include "MozsearchAction.h"
 #include "StringOperations.h"
-#include "from-clangd/HeuristicResolver.h"
-
-#if CLANG_VERSION_MAJOR < 8
-// Starting with Clang 8.0 some basic functions have been renamed
-#define getBeginLoc getLocStart
-#define getEndLoc getLocEnd
-#endif
-// We want std::make_unique, but that's only available in c++14.  In versions
-// prior to that, we need to fall back to llvm's make_unique.  It's also the
-// case that we expect clang 10 to build with c++14 and clang 9 and earlier to
-// build with c++11, at least as suggested by the llvm-config --cxxflags on
-// non-windows platforms.  mozilla-central seems to build with -std=c++17 on
-// windows so we need to make this decision based on __cplusplus instead of
-// the CLANG_VERSION_MAJOR.
-#if __cplusplus < 201402L
-using llvm::make_unique;
-#else
-using std::make_unique;
-#endif
 
 using namespace clang;
+
+#if CLANG_VERSION_MAJOR >= 20
+#include "clang/Sema/HeuristicResolver.h"
+#else
+#include "from-clangd/HeuristicResolver.h"
+using HeuristicResolver = clangd::HeuristicResolver;
+#endif
 
 const std::string GENERATED("__GENERATED__" PATHSEP_STRING);
 
@@ -88,7 +71,8 @@ enum class FileType {
 // it's a Source or Generated file, the provided inout path argument is modified
 // in-place so that it is relative to the source dir or objdir, respectively.
 // Otherwise we strip the first include path that matches, if any.
-FileType relativizePath(std::string &path, const HeaderSearchOptions &HeaderSearchOpts) {
+FileType relativizePath(std::string &path,
+                        const HeaderSearchOptions &HeaderSearchOpts) {
   if (path.compare(0, Objdir.length(), Objdir) == 0) {
     path.replace(0, Objdir.length(), GENERATED);
     return FileType::Generated;
@@ -202,7 +186,8 @@ bool isPure(FunctionDecl *D) {
 // it's in the source dir or the objdir). We also store the analysis output
 // here.
 struct FileInfo {
-  FileInfo(std::string &Rname, const HeaderSearchOptions &HeaderSearchOptions) : Realname(Rname) {
+  FileInfo(std::string &Rname, const HeaderSearchOptions &HeaderSearchOptions)
+      : Realname(Rname) {
     switch (relativizePath(Realname, HeaderSearchOptions)) {
     case FileType::Generated:
       Interesting = true;
@@ -258,13 +243,7 @@ public:
   virtual void InclusionDirective(SourceLocation HashLoc,
                                   const Token &IncludeTok, StringRef FileName,
                                   bool IsAngled, CharSourceRange FileNameRange,
-#if CLANG_VERSION_MAJOR >= 16
                                   OptionalFileEntryRef File,
-#elif CLANG_VERSION_MAJOR >= 15
-                                  Optional<FileEntryRef> File,
-#else
-                                  const FileEntry *File,
-#endif
                                   StringRef SearchPath, StringRef RelativePath,
 #if CLANG_VERSION_MAJOR >= 19
                                   const Module *SuggestedModule,
@@ -299,7 +278,7 @@ private:
   std::map<FileID, std::unique_ptr<FileInfo>> FileMap;
   MangleContext *CurMangleContext;
   ASTContext *AstContext;
-  std::unique_ptr<clangd::HeuristicResolver> Resolver;
+  std::unique_ptr<HeuristicResolver> Resolver;
 
   // Used during a macro expansion to build the expanded string
   TokenConcatenation ConcatInfo;
@@ -326,6 +305,7 @@ private:
     AutoSetContext *Prev;
     NamedDecl *Decl;
     bool VisitImplicit;
+    unsigned nextLambdaIndex = 1;
   };
   AutoSetContext *CurDeclContext;
 
@@ -349,7 +329,8 @@ private:
           Absolute = Filename;
         }
       }
-      std::unique_ptr<FileInfo> Info = make_unique<FileInfo>(Absolute, CI.getHeaderSearchOpts());
+      std::unique_ptr<FileInfo> Info =
+          std::make_unique<FileInfo>(Absolute, CI.getHeaderSearchOpts());
       It = FileMap.insert(std::make_pair(Id, std::move(Info))).first;
     }
     return It->second.get();
@@ -374,7 +355,7 @@ private:
   // In resulting string rep, line is 1-based and zero-padded to 5 digits, while
   // column is 0-based and unpadded.
   std::string locationToString(SourceLocation Loc, size_t Length = 0) {
-    std::pair<FileID, unsigned> Pair = SM.getDecomposedLoc(Loc);
+    std::pair<FileID, unsigned> Pair = SM.getDecomposedExpansionLoc(Loc);
 
     bool IsInvalid;
     unsigned Line = SM.getLineNumber(Pair.first, Pair.second, &IsInvalid);
@@ -396,8 +377,10 @@ private:
   // Convert SourceRange to "line-line" or "line".
   // In the resulting string rep, line is 1-based.
   std::string lineRangeToString(SourceRange Range, bool omitEnd = false) {
-    std::pair<FileID, unsigned> Begin = SM.getDecomposedLoc(Range.getBegin());
-    std::pair<FileID, unsigned> End = SM.getDecomposedLoc(Range.getEnd());
+    std::pair<FileID, unsigned> Begin =
+        SM.getDecomposedExpansionLoc(Range.getBegin());
+    std::pair<FileID, unsigned> End =
+        SM.getDecomposedExpansionLoc(Range.getEnd());
 
     bool IsInvalid;
     unsigned Line1 = SM.getLineNumber(Begin.first, Begin.second, &IsInvalid);
@@ -442,11 +425,34 @@ private:
     return result;
   }
 
+  bool needsNestingRangeForVarDecl(SourceRange &Range) {
+    std::pair<FileID, unsigned> Begin =
+        SM.getDecomposedExpansionLoc(Range.getBegin());
+    std::pair<FileID, unsigned> End =
+        SM.getDecomposedExpansionLoc(Range.getEnd());
+
+    bool IsInvalid;
+    unsigned Line1 = SM.getLineNumber(Begin.first, Begin.second, &IsInvalid);
+    if (IsInvalid) {
+      return false;
+    }
+    unsigned Line2 = SM.getLineNumber(End.first, End.second, &IsInvalid);
+    if (IsInvalid) {
+      return false;
+    }
+
+    static constexpr unsigned MinVarDeclNestingRangeLines = 10;
+
+    return Line2 > Line1 + MinVarDeclNestingRangeLines;
+  }
+
   // Convert SourceRange to "line:column-line:column".
   // In the resulting string rep, line is 1-based, column is 0-based.
   std::string fullRangeToString(SourceRange Range) {
-    std::pair<FileID, unsigned> Begin = SM.getDecomposedLoc(Range.getBegin());
-    std::pair<FileID, unsigned> End = SM.getDecomposedLoc(Range.getEnd());
+    std::pair<FileID, unsigned> Begin =
+        SM.getDecomposedExpansionLoc(Range.getBegin());
+    std::pair<FileID, unsigned> End =
+        SM.getDecomposedExpansionLoc(Range.getEnd());
 
     bool IsInvalid;
     unsigned Line1 = SM.getLineNumber(Begin.first, Begin.second, &IsInvalid);
@@ -473,7 +479,7 @@ private:
   // Returns the qualified name of `d` without considering template parameters.
   std::string getQualifiedName(const NamedDecl *D) {
     const DeclContext *Ctx = D->getDeclContext();
-    if (Ctx->isFunctionOrMethod()) {
+    if (Ctx->isFunctionOrMethod() && !dyn_cast<CXXRecordDecl>(D)) {
       return D->getQualifiedNameAsString();
     }
 
@@ -485,13 +491,26 @@ private:
       Ctx = Ctx->getParent();
     }
 
-    std::string Result;
-
-    std::reverse(Contexts.begin(), Contexts.end());
+    std::vector<std::string> ReversedComponents;
+    if (D->getDeclName()) {
+      ReversedComponents.push_back(D->getNameAsString());
+    } else {
+      auto cxxDecl = dyn_cast<CXXRecordDecl>(D);
+      if (cxxDecl && cxxDecl->isLambda()) {
+        char index[64];
+        sprintf(index, "%u", cxxDecl->getLambdaIndexInContext());
+        std::string Component = "(lambda class";
+        Component += index;
+        Component += ")";
+        ReversedComponents.push_back(Component);
+      } else {
+        ReversedComponents.push_back("(anonymous)");
+      }
+    }
 
     for (const DeclContext *DC : Contexts) {
       if (const auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(DC)) {
-        Result += Spec->getNameAsString();
+        std::string Component = Spec->getNameAsString();
 
         if (Spec->getSpecializationKind() == TSK_ExplicitSpecialization) {
           std::string Backing;
@@ -499,40 +518,69 @@ private:
           const TemplateArgumentList &TemplateArgs = Spec->getTemplateArgs();
           printTemplateArgumentList(Stream, TemplateArgs.asArray(),
                                     PrintingPolicy(CI.getLangOpts()));
-          Result += Stream.str();
+          Component += Stream.str();
         }
+
+        ReversedComponents.push_back(Component);
       } else if (const auto *Nd = dyn_cast<NamespaceDecl>(DC)) {
         if (Nd->isAnonymousNamespace() || Nd->isInline()) {
           continue;
         }
-        Result += Nd->getNameAsString();
+        ReversedComponents.push_back(Nd->getNameAsString());
       } else if (const auto *Rd = dyn_cast<RecordDecl>(DC)) {
-        if (!Rd->getIdentifier()) {
-          Result += "(anonymous)";
+        auto cxxDecl = dyn_cast<CXXRecordDecl>(Rd);
+        if (cxxDecl && cxxDecl->isLambda()) {
+          // Lambda functions are anonymous classes with `operator()`.
+          //
+          // We use `(lambda classN)` notation for those classes,
+          // where the `N` is the index inside the context
+          // (calculated by our own).
+          //
+          // Also we use `(lambdaN)` notation for
+          // `(lambda classN)::operator()`.
+
+          char index[64];
+          sprintf(index, "%u", cxxDecl->getLambdaIndexInContext());
+
+          std::string Component;
+          if (!ReversedComponents.empty() &&
+              ReversedComponents.back() == "operator()") {
+            ReversedComponents.pop_back();
+            Component = "(lambda";
+          } else {
+            Component = "(lambda class";
+          }
+          Component += index;
+          Component += ")";
+          ReversedComponents.push_back(Component);
+        } else if (!Rd->getIdentifier()) {
+          ReversedComponents.push_back("(anonymous)");
         } else {
-          Result += Rd->getNameAsString();
+          ReversedComponents.push_back(Rd->getNameAsString());
         }
       } else if (const auto *Fd = dyn_cast<FunctionDecl>(DC)) {
-        Result += Fd->getNameAsString();
+        ReversedComponents.push_back(Fd->getNameAsString());
       } else if (const auto *Ed = dyn_cast<EnumDecl>(DC)) {
         // C++ [dcl.enum]p10: Each enum-name and each unscoped
         // enumerator is declared in the scope that immediately contains
         // the enum-specifier. Each scoped enumerator is declared in the
         // scope of the enumeration.
-        if (Ed->isScoped() || Ed->getIdentifier())
-          Result += Ed->getNameAsString();
-        else
-          continue;
+        if (Ed->isScoped() || Ed->getIdentifier()) {
+          ReversedComponents.push_back(Ed->getNameAsString());
+        }
       } else {
-        Result += cast<NamedDecl>(DC)->getNameAsString();
+        ReversedComponents.push_back(cast<NamedDecl>(DC)->getNameAsString());
       }
-      Result += "::";
     }
 
-    if (D->getDeclName())
-      Result += D->getNameAsString();
-    else
-      Result += "(anonymous)";
+    std::string Result;
+    for (const auto &Component : ReversedComponents) {
+      if (Result.empty()) {
+        Result = Component;
+      } else {
+        Result = Component + "::" + Result;
+      }
+    }
 
     return Result;
   }
@@ -620,6 +668,23 @@ private:
       return cast<FunctionDecl>(Decl)->getNameAsString();
     }
 
+#if CLANG_VERSION_MAJOR >= 21
+    // clang 21 (commit 6d00c4297f67) sets the DeclContext of lambdas inside
+    // requires-expression bodies to RequiresExprBodyDecl, but manglePrefix
+    // has no guard for it and crashes. Use a location-based name instead.
+    // Works around https://github.com/llvm/llvm-project/issues/200336
+    if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(Decl)) {
+      if (MD->getParent()->isLambda()) {
+        for (const DeclContext *DC = MD->getParent()->getDeclContext(); DC;
+             DC = DC->getParent()) {
+          if (DC->isRequiresExprBody()) {
+            return std::string("L_") + mangleLocation(Decl->getLocation());
+          }
+        }
+      }
+    }
+#endif
+
     if (isa<FunctionDecl>(Decl) || isa<VarDecl>(Decl)) {
       const DeclContext *DC = Decl->getDeclContext();
       if (isa<TranslationUnitDecl>(DC) || isa<NamespaceDecl>(DC) ||
@@ -628,7 +693,6 @@ private:
           isa<TagDecl>(DC)) {
         llvm::SmallVector<char, 512> Output;
         llvm::raw_svector_ostream Out(Output);
-#if CLANG_VERSION_MAJOR >= 11
         // This code changed upstream in version 11:
         // https://github.com/llvm/llvm-project/commit/29e1a16be8216066d1ed733a763a749aed13ff47
         GlobalDecl GD;
@@ -641,16 +705,6 @@ private:
           GD = GlobalDecl(Decl);
         }
         Ctx->mangleName(GD, Out);
-#else
-        if (const CXXConstructorDecl *D = dyn_cast<CXXConstructorDecl>(Decl)) {
-          Ctx->mangleCXXCtor(D, CXXCtorType::Ctor_Complete, Out);
-        } else if (const CXXDestructorDecl *D =
-                       dyn_cast<CXXDestructorDecl>(Decl)) {
-          Ctx->mangleCXXDtor(D, CXXDtorType::Dtor_Complete, Out);
-        } else {
-          Ctx->mangleName(Decl, Out);
-        }
-#endif
         return Out.str().str();
       } else {
         return std::string("V_") + mangleLocation(Decl->getLocation()) +
@@ -715,7 +769,8 @@ public:
         CurMangleContext(nullptr), AstContext(nullptr),
         ConcatInfo(CI.getPreprocessor()), CurDeclContext(nullptr),
         TemplateStack(nullptr) {
-    CI.getPreprocessor().addPPCallbacks(make_unique<PreprocessorHook>(this));
+    CI.getPreprocessor().addPPCallbacks(
+        std::make_unique<PreprocessorHook>(this));
     CI.getPreprocessor().setTokenWatcher(
         [this](const auto &token) { onTokenLexed(token); });
   }
@@ -747,7 +802,7 @@ public:
         clang::ItaniumMangleContext::create(Ctx, CI.getDiagnostics());
 
     AstContext = &Ctx;
-    Resolver = std::make_unique<clangd::HeuristicResolver>(Ctx);
+    Resolver = std::make_unique<HeuristicResolver>(Ctx);
     TraverseDecl(Ctx.getTranslationUnitDecl());
 
     // Emit the JSON data for all files now.
@@ -938,8 +993,45 @@ public:
     return Super::TraverseCXXDestructorDecl(D);
   }
 
+  // While the LambdaExpr node has fields for indices, all the indices
+  // are set to 0.
+  // We calculate and set it based on the index inside the enclosing context.
+  void AddLambdaNumbering(LambdaExpr *E) {
+    if (!CurDeclContext) {
+      return;
+    }
+
+    CXXRecordDecl *cls = E->getLambdaClass();
+    if (!cls) {
+      return;
+    }
+
+    auto numbering = cls->getLambdaNumbering();
+    numbering.IndexInContext = CurDeclContext->nextLambdaIndex++;
+    cls->setLambdaNumbering(numbering);
+  }
+
+  void AddImplicitLambdaUse(LambdaExpr *E) {
+    CXXMethodDecl *Lambda = E->getCallOperator();
+    if (!Lambda) {
+      return;
+    }
+
+    SourceLocation Loc = Lambda->getLocation();
+    SourceLocation SpellingLoc = SM.getSpellingLoc(Loc);
+    std::string Mangled = getMangledName(CurMangleContext, Lambda);
+
+    visitIdentifier("use", "function", getQualifiedName(Lambda), Loc, Mangled,
+                    Lambda->getType(), getContext(SpellingLoc),
+                    NotIdentifierToken);
+  }
+
   bool TraverseLambdaExpr(LambdaExpr *E) {
+    AddLambdaNumbering(E);
+    AddImplicitLambdaUse(E);
+
     AutoSetContext Asc(this, nullptr, true);
+
     return Super::TraverseLambdaExpr(E);
   }
 
@@ -962,8 +1054,7 @@ public:
       D = F->getTemplateInstantiationPattern();
     }
 
-    return Context(D->getQualifiedNameAsString(),
-                   getMangledName(CurMangleContext, D));
+    return Context(getQualifiedName(D), getMangledName(CurMangleContext, D));
   }
 
   Context getContext(SourceLocation Loc) {
@@ -1253,12 +1344,11 @@ public:
   }
 
   // Returns true if the class has template in its entire class hierarchy.
-  bool hasTemplateInHierarchy(const CXXRecordDecl* cxxDecl) {
+  bool hasTemplateInHierarchy(const CXXRecordDecl *cxxDecl) {
     if (cxxDecl->isDependentType()) {
       // This class is templatized.
       return true;
     }
-
 
     if (dyn_cast<const ClassTemplateSpecializationDecl>(cxxDecl)) {
       // This class is template specialization.
@@ -1272,7 +1362,7 @@ public:
         return true;
       }
 
-      const Type* ty = Base.getType().getTypePtr();
+      const Type *ty = Base.getType().getTypePtr();
       if (dyn_cast<const SubstTemplateTypeParmType>(ty)) {
         // The base class is a substituted template parameter.
         return true;
@@ -1314,9 +1404,9 @@ public:
     LayoutOnly,
   };
 
-  void emitStructuredRecordInfo(llvm::json::OStream &J, SourceLocation Loc,
-                                const RecordDecl *decl,
-                                LayoutHandling layoutHandling = LayoutHandling::UseLayout) {
+  void emitStructuredRecordInfo(
+      llvm::json::OStream &J, SourceLocation Loc, const RecordDecl *decl,
+      LayoutHandling layoutHandling = LayoutHandling::UseLayout) {
     if (layoutHandling != LayoutHandling::LayoutOnly) {
       J.attribute("kind",
                   TypeWithKeyword::getTagTypeKindName(decl->getTagKind()));
@@ -1423,9 +1513,10 @@ public:
           J.attribute("sym", getMangledName(CurMangleContext, MethodDecl));
 
           // TODO: Better figure out what to do for non-isUserProvided methods
-          // which means there's potentially semantic data that doesn't correspond
-          // to a source location in the source.  Should we be emitting
-          // structured info for those when we're processing the class here?
+          // which means there's potentially semantic data that doesn't
+          // correspond to a source location in the source.  Should we be
+          // emitting structured info for those when we're processing the class
+          // here?
 
           J.attributeBegin("props");
           J.arrayBegin();
@@ -1484,8 +1575,12 @@ public:
       QualType CanonicalFieldType = FieldType.getCanonicalType();
       LangOptions langOptions;
       PrintingPolicy Policy(langOptions);
+#if CLANG_VERSION_MAJOR >= 21
+      Policy.PrintAsCanonical = true;
+#else
       Policy.PrintCanonicalTypes = true;
-      J.attribute("type", CanonicalFieldType.getAsString(Policy));
+#endif
+      J.attribute("type", typeToString(CanonicalFieldType, Policy));
 
       const TagDecl *tagDecl = CanonicalFieldType->getAsTagDecl();
       if (!tagDecl) {
@@ -1558,7 +1653,7 @@ public:
 
       J.attribute("name", param->getName());
       QualType ArgType = param->getOriginalType();
-      J.attribute("type", ArgType.getAsString());
+      J.attribute("type", typeToString(ArgType));
 
       QualType CanonicalArgType = ArgType.getCanonicalType();
       const TagDecl *canonDecl = CanonicalArgType->getAsTagDecl();
@@ -1695,8 +1790,9 @@ public:
     emitBindingAttributes(J, *decl);
   }
 
-  void emitStructuredInfo(SourceLocation Loc, const NamedDecl *decl,
-                          LayoutHandling layoutHandling = LayoutHandling::UseLayout) {
+  void emitStructuredInfo(
+      SourceLocation Loc, const NamedDecl *decl,
+      LayoutHandling layoutHandling = LayoutHandling::UseLayout) {
     std::string json_str;
     llvm::raw_string_ostream ros(json_str);
     llvm::json::OStream J(ros);
@@ -1734,6 +1830,18 @@ public:
     F->Output.push_back(std::move(ros.str()));
   }
 
+  std::string typeToString(QualType Type,
+                           PrintingPolicy policy = LangOptions{}) {
+    policy.FullyQualifiedName = true;
+
+    if (CXXRecordDecl *cxxDecl = Type->getAsCXXRecordDecl()) {
+      if (cxxDecl->isLambda()) {
+        return getQualifiedName(cxxDecl);
+      }
+    }
+    return Type.getAsString(policy);
+  }
+
   // XXX Type annotating.
   // QualType is the type class.  It has helpers like TagDecl via getAsTagDecl.
   // ValueDecl exposes a getType() method.
@@ -1760,9 +1868,11 @@ public:
     // Also visit the spelling site.
     SourceLocation SpellingLoc = SM.getSpellingLoc(Loc);
     if (SpellingLoc != Loc) {
+      // NOTE: PeekRange, NestingRange, and ArgRanges come from the
+      //       macro expansion, which shouldn't be associated with the
+      //       symbols inside the macro.
       visitIdentifier(Kind, SyntaxKind, QualName, SpellingLoc, Symbol,
-                      MaybeType, TokenContext, Flags, PeekRange, NestingRange,
-                      ArgRanges);
+                      MaybeType, TokenContext, Flags);
     }
 
     SourceLocation ExpansionLoc = SM.getExpansionLoc(Loc);
@@ -1876,7 +1986,7 @@ public:
     }
 
     if (!MaybeType.isNull()) {
-      J.attribute("type", MaybeType.getAsString());
+      J.attribute("type", typeToString(MaybeType));
       QualType canonical = MaybeType.getCanonicalType();
       const TagDecl *decl = canonical->getAsTagDecl();
       if (!decl) {
@@ -2004,12 +2114,12 @@ public:
     // By default, we end at the line containing the function's name.
     SourceLocation End = D->getLocation();
 
-    std::pair<FileID, unsigned> FuncLoc = SM.getDecomposedLoc(End);
+    std::pair<FileID, unsigned> FuncLoc = SM.getDecomposedExpansionLoc(End);
 
     // But if there are parameters, we want to include those as well.
     for (ParmVarDecl *Param : D->parameters()) {
       std::pair<FileID, unsigned> ParamLoc =
-          SM.getDecomposedLoc(Param->getLocation());
+          SM.getDecomposedExpansionLoc(Param->getLocation());
 
       // It's possible there are macros involved or something. We don't include
       // the parameters in that case.
@@ -2028,12 +2138,13 @@ public:
     // By default, we end at the line containing the name.
     SourceLocation End = D->getLocation();
 
-    std::pair<FileID, unsigned> FuncLoc = SM.getDecomposedLoc(End);
+    std::pair<FileID, unsigned> FuncLoc = SM.getDecomposedExpansionLoc(End);
 
     if (CXXRecordDecl *D2 = dyn_cast<CXXRecordDecl>(D)) {
       // But if there are parameters, we want to include those as well.
       for (CXXBaseSpecifier &Base : D2->bases()) {
-        std::pair<FileID, unsigned> Loc = SM.getDecomposedLoc(Base.getEndLoc());
+        std::pair<FileID, unsigned> Loc =
+            SM.getDecomposedExpansionLoc(Base.getEndLoc());
 
         // It's possible there are macros involved or something. We don't
         // include the parameters in that case.
@@ -2048,7 +2159,11 @@ public:
   }
 
   SourceRange getCommentRange(NamedDecl *D) {
+#if CLANG_VERSION_MAJOR >= 23
+    const RawComment *RC = AstContext->getRawCommentNoCache(D);
+#else
     const RawComment *RC = AstContext->getRawCommentForDeclNoCache(D);
+#endif
     if (!RC) {
       return SourceRange();
     }
@@ -2066,10 +2181,14 @@ public:
       return Range1;
     }
 
-    std::pair<FileID, unsigned> Begin1 = SM.getDecomposedLoc(Range1.getBegin());
-    std::pair<FileID, unsigned> End1 = SM.getDecomposedLoc(Range1.getEnd());
-    std::pair<FileID, unsigned> Begin2 = SM.getDecomposedLoc(Range2.getBegin());
-    std::pair<FileID, unsigned> End2 = SM.getDecomposedLoc(Range2.getEnd());
+    std::pair<FileID, unsigned> Begin1 =
+        SM.getDecomposedExpansionLoc(Range1.getBegin());
+    std::pair<FileID, unsigned> End1 =
+        SM.getDecomposedExpansionLoc(Range1.getEnd());
+    std::pair<FileID, unsigned> Begin2 =
+        SM.getDecomposedExpansionLoc(Range2.getBegin());
+    std::pair<FileID, unsigned> End2 =
+        SM.getDecomposedExpansionLoc(Range2.getEnd());
 
     if (End1.first != Begin2.first) {
       // Something weird is probably happening with the preprocessor. Just
@@ -2090,9 +2209,11 @@ public:
   // - The range is well ordered (end is not before begin).
   // Returns an empty range otherwise.
   SourceRange validateRange(SourceLocation Loc, SourceRange Range) {
-    std::pair<FileID, unsigned> Decomposed = SM.getDecomposedLoc(Loc);
-    std::pair<FileID, unsigned> Begin = SM.getDecomposedLoc(Range.getBegin());
-    std::pair<FileID, unsigned> End = SM.getDecomposedLoc(Range.getEnd());
+    std::pair<FileID, unsigned> Decomposed = SM.getDecomposedExpansionLoc(Loc);
+    std::pair<FileID, unsigned> Begin =
+        SM.getDecomposedExpansionLoc(Range.getBegin());
+    std::pair<FileID, unsigned> End =
+        SM.getDecomposedExpansionLoc(Range.getEnd());
 
     if (Begin.first != Decomposed.first || End.first != Decomposed.first) {
       return SourceRange();
@@ -2125,7 +2246,6 @@ public:
     int Flags = 0;
     const char *Kind = "def";
     const char *PrettyKind = "?";
-    bool wasTemplate = false;
     SourceRange PeekRange(D->getBeginLoc(), D->getEndLoc());
     // The nesting range identifies the left brace and right brace, which
     // heavily depends on the AST node type.
@@ -2133,7 +2253,6 @@ public:
     QualType qtype = QualType();
     if (FunctionDecl *D2 = dyn_cast<FunctionDecl>(D)) {
       if (D2->isTemplateInstantiation()) {
-        wasTemplate = true;
         D = D2->getTemplateInstantiationPattern();
       }
       // We treat pure virtual declarations as definitions.
@@ -2184,6 +2303,10 @@ public:
                  ? "decl"
                  : "def";
       PrettyKind = "variable";
+
+      if (needsNestingRangeForVarDecl(PeekRange)) {
+        NestingRange = PeekRange;
+      }
     } else if (isa<NamespaceDecl>(D) || isa<NamespaceAliasDecl>(D)) {
       Kind = "def";
       PrettyKind = "namespace";
@@ -2278,11 +2401,7 @@ public:
       }
     }
     if (FunctionDecl *D2 = dyn_cast<FunctionDecl>(D)) {
-      if ((D2->isThisDeclarationADefinition() || isPure(D2)) &&
-          // a clause at the top should have generalized and set wasTemplate so
-          // it shouldn't be the case that isTemplateInstantiation() is true.
-          !D2->isTemplateInstantiation() && !wasTemplate &&
-          !D2->isFunctionTemplateSpecialization() && !TemplateStack) {
+      if (D2->isThisDeclarationADefinition() || isPure(D2)) {
         if (auto *D3 = dyn_cast<CXXMethodDecl>(D2)) {
           findBindingToJavaMember(*AstContext, *D3);
         } else {
@@ -2368,6 +2487,10 @@ public:
         if (const auto *DeclRef = dyn_cast<DeclRefExpr>(CalleeExpr)) {
           return DeclRef->getLocation();
         }
+        if (const auto *UnresolvedLookup =
+                dyn_cast<UnresolvedLookupExpr>(CalleeExpr)) {
+          return UnresolvedLookup->getNameLoc();
+        }
 
         // Does the right thing for MemberExpr and UnresolvedMemberExpr at
         // least.
@@ -2381,7 +2504,8 @@ public:
       //   ForwardedTemplateLocations, convert the location to an actual Stmt*
       //   in ForwardingTemplates
       if (TemplateStack->inGatherMode()) {
-        if (CalleeExpr->isTypeDependent()) {
+        if (CalleeExpr->isTypeDependent() ||
+            isa<UnresolvedLookupExpr>(CalleeExpr)) {
           TemplateStack->visitDependent(CalleeLocation);
           ForwardedTemplateLocations.insert(CalleeLocation.getRawEncoding());
         }
@@ -2452,7 +2576,7 @@ public:
   }
 
   bool VisitTagTypeLoc(TagTypeLoc L) {
-    SourceLocation Loc = L.getBeginLoc();
+    SourceLocation Loc = L.getNameLoc();
     if (!isInterestingLocation(Loc)) {
       return true;
     }
@@ -2467,14 +2591,14 @@ public:
   }
 
   bool VisitTypedefTypeLoc(TypedefTypeLoc L) {
-    SourceLocation Loc = L.getBeginLoc();
+    SourceLocation Loc = L.getNameLoc();
     if (!isInterestingLocation(Loc)) {
       return true;
     }
 
     SourceLocation SpellingLoc = SM.getSpellingLoc(Loc);
 
-    NamedDecl *Decl = L.getTypedefNameDecl();
+    NamedDecl *Decl = L.getTypePtr()->getDecl();
     std::string Mangled = getMangledName(CurMangleContext, Decl);
     visitIdentifier("use", "type", getQualifiedName(Decl), Loc, Mangled,
                     L.getType(), getContext(SpellingLoc));
@@ -2482,7 +2606,7 @@ public:
   }
 
   bool VisitInjectedClassNameTypeLoc(InjectedClassNameTypeLoc L) {
-    SourceLocation Loc = L.getBeginLoc();
+    SourceLocation Loc = L.getNameLoc();
     if (!isInterestingLocation(Loc)) {
       return true;
     }
@@ -2497,7 +2621,7 @@ public:
   }
 
   bool VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc L) {
-    SourceLocation Loc = L.getBeginLoc();
+    SourceLocation Loc = L.getTemplateNameLoc();
     if (!isInterestingLocation(Loc)) {
       return true;
     }
@@ -2505,6 +2629,10 @@ public:
     SourceLocation SpellingLoc = SM.getSpellingLoc(Loc);
 
     TemplateDecl *Td = L.getTypePtr()->getTemplateName().getAsTemplateDecl();
+    if (!Td) {
+      return true;
+    }
+
     if (ClassTemplateDecl *D = dyn_cast<ClassTemplateDecl>(Td)) {
       NamedDecl *Decl = D->getTemplatedDecl();
       std::string Mangled = getMangledName(CurMangleContext, Decl);
@@ -2818,12 +2946,30 @@ public:
       TemplateStack->visitDependent(Loc);
 
       // Also record the dependent NestedNameSpecifier locations
+#if CLANG_VERSION_MAJOR >= 22
+      // clang 22 (commit 91cdd35008e9) turned NestedNameSpecifier into a value
+      // type and moved the prefix of a qualifier naming a type into the type
+      // itself, so a dependent name is a DependentNameType holding its own
+      // prefix rather than an Identifier specifier in the NNS chain.
+      for (auto NestedNameLoc = E->getQualifierLoc();
+           NestedNameLoc &&
+           NestedNameLoc.getNestedNameSpecifier().isDependent();) {
+        auto DNTL = NestedNameLoc.getAsTypeLoc().getAs<DependentNameTypeLoc>();
+        if (!DNTL) {
+          TemplateStack->visitDependent(NestedNameLoc.getLocalBeginLoc());
+          break;
+        }
+        TemplateStack->visitDependent(DNTL.getNameLoc());
+        NestedNameLoc = DNTL.getQualifierLoc();
+      }
+#else
       for (auto NestedNameLoc = E->getQualifierLoc();
            NestedNameLoc &&
            NestedNameLoc.getNestedNameSpecifier()->isDependent();
            NestedNameLoc = NestedNameLoc.getPrefix()) {
         TemplateStack->visitDependent(NestedNameLoc.getLocalBeginLoc());
       }
+#endif
     }
 
     return true;
@@ -2840,8 +2986,7 @@ public:
     bool isMozSrc = stringStartsWith(s, "moz-src:///");
 
     if (!stringStartsWith(s, "chrome://") &&
-        !stringStartsWith(s, "resource://") &&
-        !isMozSrc) {
+        !stringStartsWith(s, "resource://") && !isMozSrc) {
       return true;
     }
 
@@ -2855,7 +3000,8 @@ public:
     std::string symbol;
 
     if (isMozSrc) {
-      symbol = std::string("FILE_") + mangleFile(s.substr(11), FileType::Source);
+      symbol =
+          std::string("FILE_") + mangleFile(s.substr(11), FileType::Source);
     } else {
       symbol = std::string("URL_") + mangleURL(s);
     }
@@ -2884,7 +3030,8 @@ public:
                     NotIdentifierToken | LocRangeEndValid);
   }
 
-  void inclusionDirective(SourceRange FileNameRange, const FileEntry *File) {
+  void inclusionDirective(SourceLocation HashLoc, SourceRange FileNameRange,
+                          const FileEntry *File) {
     std::string includedFile(File->tryGetRealPathName());
     FileType type = relativizePath(includedFile, CI.getHeaderSearchOpts());
     if (type == FileType::Unknown) {
@@ -2909,8 +3056,16 @@ public:
       endMacroExpansion();
     }
 
+    normalizeLocation(&HashLoc);
+    FileInfo *thisFile = getFileInfo(HashLoc);
+    FileType thisType =
+        thisFile->Generated ? FileType::Generated : FileType::Source;
+    std::string thisFilePretty = thisFile->Realname;
+    std::string thisFileSym =
+        std::string("FILE_") + mangleFile(thisFile->Realname, thisType);
+
     visitIdentifier("use", "file", includedFile, FileNameRange, symbol,
-                    QualType(), Context(),
+                    QualType(), Context(thisFilePretty, thisFileSym),
                     NotIdentifierToken | LocRangeEndValid);
   }
 
@@ -3135,14 +3290,7 @@ void PreprocessorHook::FileChanged(SourceLocation Loc, FileChangeReason Reason,
 
 void PreprocessorHook::InclusionDirective(
     SourceLocation HashLoc, const Token &IncludeTok, StringRef FileName,
-    bool IsAngled, CharSourceRange FileNameRange,
-#if CLANG_VERSION_MAJOR >= 16
-    OptionalFileEntryRef File,
-#elif CLANG_VERSION_MAJOR >= 15
-    Optional<FileEntryRef> File,
-#else
-    const FileEntry *File,
-#endif
+    bool IsAngled, CharSourceRange FileNameRange, OptionalFileEntryRef File,
     StringRef SearchPath, StringRef RelativePath,
 #if CLANG_VERSION_MAJOR >= 19
     const Module *SuggestedModule, bool ModuleImported,
@@ -3150,15 +3298,11 @@ void PreprocessorHook::InclusionDirective(
     const Module *Imported,
 #endif
     SrcMgr::CharacteristicKind FileType) {
-#if CLANG_VERSION_MAJOR >= 15
   if (!File) {
     return;
   }
-  Indexer->inclusionDirective(FileNameRange.getAsRange(),
+  Indexer->inclusionDirective(HashLoc, FileNameRange.getAsRange(),
                               &File->getFileEntry());
-#else
-  Indexer->inclusionDirective(FileNameRange.getAsRange(), File);
-#endif
 }
 
 void PreprocessorHook::MacroDefined(const Token &Tok,
@@ -3192,58 +3336,52 @@ void PreprocessorHook::Ifndef(SourceLocation Loc, const Token &Tok,
   Indexer->macroUsed(Tok, Md.getMacroInfo());
 }
 
-class IndexAction : public PluginASTAction {
-protected:
-  std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
-                                                 llvm::StringRef F) {
-    return make_unique<IndexConsumer>(CI);
+std::unique_ptr<ASTConsumer>
+MozsearchAction::CreateASTConsumer(CompilerInstance &CI, llvm::StringRef F) {
+  return std::make_unique<IndexConsumer>(CI);
+}
+
+bool MozsearchAction::ParseArgs(const CompilerInstance &CI,
+                                const std::vector<std::string> &Args) {
+  if (Args.size() != 3) {
+    DiagnosticsEngine &D = CI.getDiagnostics();
+    unsigned DiagID = D.getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Need arguments for the source, output, and object directories");
+    D.Report(DiagID);
+    return false;
   }
 
-  bool ParseArgs(const CompilerInstance &CI,
-                 const std::vector<std::string> &Args) {
-    if (Args.size() != 3) {
-      DiagnosticsEngine &D = CI.getDiagnostics();
-      unsigned DiagID = D.getCustomDiagID(
-          DiagnosticsEngine::Error,
-          "Need arguments for the source, output, and object directories");
-      D.Report(DiagID);
-      return false;
-    }
-
-    // Load our directories
-    Srcdir = getAbsolutePath(Args[0]);
-    if (Srcdir.empty()) {
-      DiagnosticsEngine &D = CI.getDiagnostics();
-      unsigned DiagID = D.getCustomDiagID(
-          DiagnosticsEngine::Error, "Source directory '%0' does not exist");
-      D.Report(DiagID) << Args[0];
-      return false;
-    }
-
-    ensurePath(Args[1] + PATHSEP_STRING);
-    Outdir = getAbsolutePath(Args[1]);
-    Outdir += PATHSEP_STRING;
-
-    Objdir = getAbsolutePath(Args[2]);
-    if (Objdir.empty()) {
-      DiagnosticsEngine &D = CI.getDiagnostics();
-      unsigned DiagID = D.getCustomDiagID(DiagnosticsEngine::Error,
-                                          "Objdir '%0' does not exist");
-      D.Report(DiagID) << Args[2];
-      return false;
-    }
-    Objdir += PATHSEP_STRING;
-
-    printf("MOZSEARCH: %s %s %s\n", Srcdir.c_str(), Outdir.c_str(),
-           Objdir.c_str());
-
-    return true;
+  // Load our directories
+  Srcdir = getAbsolutePath(Args[0]);
+  if (Srcdir.empty()) {
+    DiagnosticsEngine &D = CI.getDiagnostics();
+    unsigned DiagID = D.getCustomDiagID(DiagnosticsEngine::Error,
+                                        "Source directory '%0' does not exist");
+    D.Report(DiagID) << Args[0];
+    return false;
   }
 
-  void printHelp(llvm::raw_ostream &Ros) {
-    Ros << "Help for mozsearch plugin goes here\n";
-  }
-};
+  ensurePath(Args[1] + PATHSEP_STRING);
+  Outdir = getAbsolutePath(Args[1]);
+  Outdir += PATHSEP_STRING;
 
-static FrontendPluginRegistry::Add<IndexAction>
-    Y("mozsearch-index", "create the mozsearch index database");
+  Objdir = getAbsolutePath(Args[2]);
+  if (Objdir.empty()) {
+    DiagnosticsEngine &D = CI.getDiagnostics();
+    unsigned DiagID = D.getCustomDiagID(DiagnosticsEngine::Error,
+                                        "Objdir '%0' does not exist");
+    D.Report(DiagID) << Args[2];
+    return false;
+  }
+  Objdir += PATHSEP_STRING;
+
+  printf("MOZSEARCH: %s %s %s\n", Srcdir.c_str(), Outdir.c_str(),
+         Objdir.c_str());
+
+  return true;
+}
+
+PluginASTAction::ActionType MozsearchAction::getActionType() {
+  return CmdlineBeforeMainAction;
+}

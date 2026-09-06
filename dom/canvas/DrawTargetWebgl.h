@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef _MOZILLA_GFX_DRAWTARGETWEBGL_H
-#define _MOZILLA_GFX_DRAWTARGETWEBGL_H
+#ifndef MOZILLA_GFX_DRAWTARGETWEBGL_H
+#define MOZILLA_GFX_DRAWTARGETWEBGL_H
 
 #include <deque>
 #include <memory>
@@ -236,6 +234,13 @@ class SharedContextWebgl : public mozilla::RefCounted<SharedContextWebgl>,
   // Buffer filled with zero data for initializing textures.
   RefPtr<WebGLBuffer> mZeroBuffer;
   size_t mZeroSize = 0;
+  // Buffer used for uploading surfaces. Some drivers internally allocate
+  // buffers for each upload to avoid driver stalls, but the frequent
+  // allocations show up in profiles. Using a large fixed-size buffer helps
+  // avoid allocation overhead.
+  RefPtr<WebGLBuffer> mUploadBuffer;
+  // Offset within mUploadBuffer to use for next upload.
+  size_t mUploadBufferOffset = 0;
   // 1x1 texture with solid white mask for disabling clipping
   RefPtr<WebGLTexture> mNoClipMask;
 
@@ -486,6 +491,7 @@ class SharedContextWebgl : public mozilla::RefCounted<SharedContextWebgl>,
   void RemoveTextureMemory(BackingTexture* aTexture);
 
   void ClearZeroBuffer();
+  void ClearUploadBuffer();
   void ClearAllTextures();
   void ClearEmptyTextureMemory();
   void ClearCachesIfNecessary();
@@ -784,11 +790,13 @@ class DrawTargetWebgl : public DrawTarget, public SupportsWeakPtr {
   bool SupportsDrawOptions(const DrawOptions& aOptions,
                            const Rect& aRect = Rect());
 
+  Maybe<Rect> ComputeSimpleClipRect() const;
   bool SetSimpleClipRect();
   bool GenerateComplexClipMask();
   bool PrepareContext(bool aClipped = true,
                       const RefPtr<TextureHandle>& aHandle = nullptr,
                       const IntSize& aViewportSize = IntSize());
+  bool ShouldClip();
 
   void DrawRectFallback(const Rect& aRect, const Pattern& aPattern,
                         const DrawOptions& aOptions,
@@ -868,4 +876,4 @@ class DrawTargetWebgl : public DrawTarget, public SupportsWeakPtr {
 }  // namespace gfx
 }  // namespace mozilla
 
-#endif  // _MOZILLA_GFX_DRAWTARGETWEBGL_H
+#endif  // MOZILLA_GFX_DRAWTARGETWEBGL_H

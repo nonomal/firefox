@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,19 +5,19 @@
 #include "CompositorAnimationStorage.h"
 
 #include "AnimationHelper.h"
-#include "mozilla/gfx/MatrixFwd.h"
-#include "mozilla/layers/APZSampler.h"              // for APZSampler
-#include "mozilla/layers/CompositorBridgeParent.h"  // for CompositorBridgeParent
-#include "mozilla/layers/CompositorThread.h"  // for CompositorThreadHolder
-#include "mozilla/layers/OMTAController.h"    // for OMTAController
+#include "TreeTraversal.h"  // for ForEachNode, BreadthFirstSearch
 #include "mozilla/ProfilerMarkers.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/ServoStyleConsts.h"
+#include "mozilla/gfx/MatrixFwd.h"
+#include "mozilla/layers/APZSampler.h"              // for APZSampler
+#include "mozilla/layers/CompositorBridgeParent.h"  // for CompositorBridgeParent
+#include "mozilla/layers/CompositorThread.h"   // for CompositorThreadHolder
+#include "mozilla/layers/OMTAController.h"     // for OMTAController
 #include "mozilla/webrender/WebRenderTypes.h"  // for ToWrTransformProperty, etc
 #include "nsDeviceContext.h"                   // for AppUnitsPerCSSPixel
 #include "nsDisplayList.h"                     // for nsDisplayTransform, etc
 #include "nsLayoutUtils.h"
-#include "TreeTraversal.h"  // for ForEachNode, BreadthFirstSearch
 
 namespace geckoprofiler::markers {
 
@@ -240,9 +238,10 @@ void CompositorAnimationStorage::StoreAnimatedValue(
     JankedAnimationMap& aJankedAnimationMap) {
   switch (aProperty) {
     case eCSSProperty_background_color: {
-      SetAnimatedValue(aId, aAnimatedValueEntry,
-                       Servo_AnimationValue_GetColor(aAnimationValues[0],
-                                                     NS_RGBA(0, 0, 0, 0)));
+      StyleAbsoluteColor color;
+      Servo_AnimationValue_GetColor(
+          aAnimationValues[0], &StyleAbsoluteColor::TRANSPARENT_BLACK, &color);
+      SetAnimatedValue(aId, aAnimatedValueEntry, color.ToColor());
       break;
     }
     case eCSSProperty_opacity: {

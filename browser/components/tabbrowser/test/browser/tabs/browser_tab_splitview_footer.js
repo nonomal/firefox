@@ -3,6 +3,11 @@
 
 "use strict";
 
+const TEST_PATH = getRootDirectory(gTestPath).replace(
+  "chrome://mochitests/content",
+  "https://example.com"
+);
+
 add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
     set: [["dom.security.https_first", false]],
@@ -24,12 +29,18 @@ async function setupSplitView() {
   info("Add tabs into an active split view.");
   await BrowserTestUtils.switchTab(gBrowser, tabs[0]);
   const splitView = gBrowser.addTabSplitView(tabs);
+  const tabpanels = document.getElementById("tabbrowser-tabpanels");
+  await BrowserTestUtils.waitForMutationCondition(
+    tabpanels,
+    { attributes: true },
+    () => tabpanels.hasAttribute("splitview")
+  );
   for (const tab of tabs) {
     const tabPanel = document.getElementById(tab.linkedPanel);
     await BrowserTestUtils.waitForMutationCondition(
       tabPanel,
       { attributes: true },
-      () => tabPanel.classList.contains("split-view-panel")
+      () => tabPanel.classList.contains("split-view-panel-active")
     );
   }
 
@@ -37,10 +48,18 @@ async function setupSplitView() {
 }
 
 async function activateCommand(panel, command) {
-  const footerMenu = panel.querySelector(".split-view-footer-menu");
+  const footerMenu = document.getElementById("split-view-menu");
   const promiseShown = BrowserTestUtils.waitForPopupEvent(footerMenu, "shown");
-  footerMenu.openPopup();
+  const footer = panel.querySelector("split-view-footer");
+  // Only the urlbar menu is focusable, not the footer menu.
+  AccessibilityUtils.setEnv({ focusableRule: false });
+  EventUtils.synthesizeMouseAtCenter(footer.menuButtonElement, {});
+  AccessibilityUtils.resetEnv();
   await promiseShown;
+  Assert.ok(
+    BrowserTestUtils.isVisible(footer),
+    "Footer remains present within the panel."
+  );
   const item = footerMenu.querySelector(`menuitem[command="${command}"]`);
   footerMenu.activateItem(item);
 }
@@ -106,16 +125,39 @@ add_task(async function test_security_warning() {
     "No security warning for HTTPS."
   );
 
-  info("Load an insecure website.");
+  info("Load a site with an icon.");
   let promiseLoaded = BrowserTestUtils.browserLoaded(tab2.linkedBrowser);
   BrowserTestUtils.startLoadingURIString(
     tab2.linkedBrowser,
-    "http://example.com/" // eslint-disable-line @microsoft/sdl/no-insecure-url
+    TEST_PATH + "file_withicon.html"
+  );
+  await promiseLoaded;
+  if (!BrowserTestUtils.isVisible(footer.tabImageIconElement)) {
+    await BrowserTestUtils.waitForEvent(footer.tabImageIconElement, "load");
+  }
+  Assert.ok(
+    BrowserTestUtils.isVisible(footer.tabImageIconElement),
+    "Show favicon for secure sites."
+  );
+
+  info("Load an insecure website.");
+  promiseLoaded = BrowserTestUtils.browserLoaded(tab2.linkedBrowser);
+  BrowserTestUtils.startLoadingURIString(
+    tab2.linkedBrowser,
+    "http://example.com/" // eslint-disable-line sdl/no-insecure-url
   );
   await promiseLoaded;
   Assert.ok(
     BrowserTestUtils.isVisible(footer.securityElement),
     "Security warning for HTTP."
+  );
+  Assert.ok(
+    footer.tabImageIconElement.hidden,
+    "Icon is deliberately hidden for insecure sites."
+  );
+  Assert.ok(
+    !footer.tabImageIconElement.src,
+    "Icon has no src for insecure sites."
   );
 
   info("Load a local site.");

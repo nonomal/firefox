@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,8 +10,10 @@
 
 #include "LayoutLogging.h"
 #include "RubyUtils.h"
+#include "mozilla/AbsoluteContainingBlock.h"
 #include "mozilla/ComputedStyle.h"
 #include "mozilla/SVGTextFrame.h"
+#include "mozilla/StaticPrefs_layout.h"
 #include "nsBidiPresUtils.h"
 #include "nsBlockFrame.h"
 #include "nsContainerFrame.h"
@@ -21,6 +21,7 @@
 #include "nsFontMetrics.h"
 #include "nsGkAtoms.h"
 #include "nsIContent.h"
+#include "nsInlineFrame.h"
 #include "nsLayoutUtils.h"
 #include "nsPresContext.h"
 #include "nsRubyFrame.h"
@@ -89,6 +90,18 @@ nsLineLayout::nsLineLayout(nsPresContext* aPresContext,
     mGotLineBox = true;
     mLineBox = *aLine;
   }
+}
+
+static bool ShouldApplyTextIndent(nsIFrame* aLineContainer) {
+  if (aLineContainer->IsRubyTextContainerFrame()) {
+    return false;
+  }
+  if (nsBlockFrame* block = do_QueryFrame(aLineContainer);
+      block && block->IsTextInput()) {
+    // text-indent applies to the inner text input frames individually.
+    return false;
+  }
+  return true;
 }
 
 void nsLineLayout::BeginLineReflow(nscoord aICoord, nscoord aBCoord,
@@ -162,7 +175,8 @@ void nsLineLayout::BeginLineReflow(nscoord aICoord, nscoord aBCoord,
   // Determine if this is the first line of the block (or first after a hard
   // line-break, if `each-line` is in effect).
   nsIFrame* containerFrame = LineContainerFrame();
-  if (!containerFrame->IsRubyTextContainerFrame()) {
+  if (!mStyleText->mTextIndent.length.IsDefinitelyZero() &&
+      ShouldApplyTextIndent(containerFrame)) {
     bool isFirstLineOrAfterHardBreak = [&] {
       if (mLineNumber > 0) {
         return mStyleText->mTextIndent.each_line && GetLine() &&
@@ -975,6 +989,17 @@ void nsLineLayout::ReflowFrame(nsIFrame* aFrame, nsReflowStatus& aReflowStatus,
     // a next-in-flow where it ends up).
     if (aReflowStatus.IsComplete()) {
       if (nsIFrame* kidNextInFlow = aFrame->GetNextInFlow()) {
+        if (StaticPrefs::layout_abspos_fragment_aware_inline_cb_enabled()) {
+          if (nsInlineFrame* inlineFrame = do_QueryFrame(aFrame)) {
+            // Before removing aFrame's next-in-flows, pull any absolute
+            // children's first-in-flows in the next-in-flows into aFrame to
+            // prevent those children from being destroyed.
+            if (AbsoluteContainingBlock* absCB =
+                    inlineFrame->GetAbsoluteContainingBlock()) {
+              absCB->PrepareAbsoluteFrames(inlineFrame);
+            }
+          }
+        }
         // Remove all of the childs next-in-flows. Make sure that we ask
         // the right parent to do the removal (it's possible that the
         // parent is not this because we are executing pullup code)
@@ -1493,6 +1518,7 @@ bool nsLineLayout::NotifyOptionalBreakPosition(nsIFrame* aFrame,
 #define VALIGN_OTHER 0
 #define VALIGN_TOP 1
 #define VALIGN_BOTTOM 2
+#define VALIGN_CENTER 3
 
 void nsLineLayout::SetSpanForEmptyLine(PerSpanData* aPerSpanData,
                                        WritingMode aWM,
@@ -1521,7 +1547,148 @@ void nsLineLayout::SetSpanForEmptyLine(PerSpanData* aPerSpanData,
   }
 }
 
-void nsLineLayout::VerticalAlignLine() {
+struct TextBoxEdgeMetrics {
+  nscoord mOver;
+  nscoord mUnder;
+};
+
+// Resolves the over/under metrics corresponding to the frame's text-box-edge.
+static TextBoxEdgeMetrics ResolveTextBoxEdgeMetrics(
+    const StyleTextBoxEdge& aTextBoxEdge, nsFontMetrics* aFontMetrics) {
+  TextBoxEdgeMetrics result;
+  StyleTextEdgeKeyword over, under;
+  if (aTextBoxEdge.IsTextEdge()) {
+    const StyleTextEdge& textEdge = aTextBoxEdge.AsTextEdge();
+    over = textEdge.over;
+    under = textEdge.under;
+  } else {
+    over = under = StyleTextEdgeKeyword::Text;
+  }
+
+  switch (over) {
+    case StyleTextEdgeKeyword::Cap:
+      result.mOver = aFontMetrics->CapHeight();
+      break;
+    case StyleTextEdgeKeyword::Ex:
+      result.mOver = aFontMetrics->XHeight();
+      break;
+    case StyleTextEdgeKeyword::Ideographic:
+      result.mOver = aFontMetrics->IdeographicOverBaseline();
+      break;
+    case StyleTextEdgeKeyword::IdeographicInk:
+      result.mOver = aFontMetrics->IdeographicInkOverBaseline();
+      break;
+    default:
+    case StyleTextEdgeKeyword::Text:
+      result.mOver = aFontMetrics->MaxAscent();
+      break;
+  }
+
+  switch (under) {
+    case StyleTextEdgeKeyword::Alphabetic:
+      result.mUnder = -aFontMetrics->AlphabeticBaseline();
+      break;
+    case StyleTextEdgeKeyword::Ideographic:
+      result.mUnder = -aFontMetrics->IdeographicUnderBaseline();
+      break;
+    case StyleTextEdgeKeyword::IdeographicInk:
+      result.mUnder = -aFontMetrics->IdeographicInkUnderBaseline();
+      break;
+    default:
+    case StyleTextEdgeKeyword::Text:
+      result.mUnder = aFontMetrics->MaxDescent();
+      break;
+  }
+
+  return result;
+}
+
+void nsLineLayout::ApplyBlockTextBoxTrim(PerSpanData* psd, WritingMode aLineWM,
+                                         nscoord* aLineBSize,
+                                         nscoord* aBaselineBCoord,
+                                         nsFlowAreaRect* aFlowArea,
+                                         bool aIsLastFormattedLine) {
+  MOZ_ASSERT(psd == mRootSpan);
+  MOZ_ASSERT(mBlockRS);
+  nsIFrame* blockFrame = psd->mFrame->mFrame;
+  const bool shouldApplyTrimStart =
+      mBlockRS->mFlags.mShouldApplyTextBoxTrimStart && mLineNumber == 0;
+  const bool shouldApplyTrimEnd =
+      (mBlockRS->mFlags.mShouldApplyTextBoxTrimAtBlockEnd &&
+       aIsLastFormattedLine) ||
+      mLineBox->TextBoxTrimEndForced();
+  const bool shouldComputeTrimEnd =
+      (shouldApplyTrimEnd ||
+       mBlockRS->mFlags.mShouldApplyTextBoxTrimAtFragmentEnd);
+
+  if (!shouldApplyTrimStart && !shouldComputeTrimEnd) {
+    return;
+  }
+
+  // Identify the current total height above and below the baseline,
+  // to be compared against the target text-box-edge metrics to determine
+  // how much to trim on each side.
+  nscoord totalOver = *aBaselineBCoord - mBStartEdge;
+  nscoord totalUnder = *aLineBSize - totalOver;
+
+  // The line should be trimmed to the specified font metric from the block's
+  // root inline box. Gecko doesn't construct an actual frame for the root
+  // inline box (which is generally unstyleable), so the metric normally comes
+  // from the block itself. However, a ::first-line declaration block *can*
+  // style the fragment of the root inline box that it contains and should be
+  // used to determine the trim metric.
+  nsIFrame* metricsFrame = blockFrame;
+  if (psd->mFirstFrame && psd->mFirstFrame->mFrame->Style()->GetPseudoType() ==
+                              PseudoStyleType::FirstLine) {
+    metricsFrame = psd->mFirstFrame->mFrame;
+  }
+
+  const StyleTextBoxEdge& textBoxEdge = metricsFrame->StyleText()->mTextBoxEdge;
+  RefPtr<nsFontMetrics> fm =
+      nsLayoutUtils::GetInflatedFontMetricsForFrame(metricsFrame);
+  const auto [trimmedOver, trimmedUnder] =
+      ResolveTextBoxEdgeMetrics(textBoxEdge, fm);
+
+  if (shouldApplyTrimStart) {
+    // Trim on the start side by moving the block start coordinate
+    // and the baseline coordinate up by the trim amount. Additionally
+    // move all child frames and any positioned floats on this line
+    // up by the trim amount.
+    const nscoord trimAmount = aLineWM.IsLineInverted()
+                                   ? totalUnder - trimmedUnder
+                                   : totalOver - trimmedOver;
+    mBStartEdge -= trimAmount;
+    *aBaselineBCoord -= trimAmount;
+    for (PerFrameData* pfd = psd->mFirstFrame; pfd; pfd = pfd->mNext) {
+      pfd->mBounds.BStart(aLineWM) -= trimAmount;
+      pfd->mFrame->SetRect(aLineWM, pfd->mBounds, ContainerSize());
+    }
+    if (aFlowArea) {
+      aFlowArea->mRect.BStart(aLineWM) -= trimAmount;
+    }
+    for (nsIFrame* floatFrame : mBlockRS->mCurrentLineFloats) {
+      floatFrame->MovePositionBy(
+          LogicalPoint(aLineWM, 0, -trimAmount)
+              .GetPhysicalPoint(aLineWM, ContainerSize()));
+    }
+    mLineBox->SetTextBoxTrimStartApplied();
+  }
+
+  if (shouldComputeTrimEnd) {
+    mPotentialTextBoxTrimEndAmount = aLineWM.IsLineInverted()
+                                         ? totalOver - trimmedOver
+                                         : totalUnder - trimmedUnder;
+    if (shouldApplyTrimEnd) {
+      // Trim on the end side by reducing the block size of the line box.
+      *aLineBSize -= mPotentialTextBoxTrimEndAmount;
+      mLineBox->SetTextBoxTrimEndApplied();
+      mLineBox->ClearTextBoxTrimEndForced();
+    }
+  }
+}
+
+void nsLineLayout::VerticalAlignLine(nsFlowAreaRect* aFlowArea,
+                                     bool aIsLastFormattedLine) {
   // Partially place the children of the block frame. The baseline for
   // this operation is set to zero so that the y coordinates for all
   // of the placed children will be relative to there.
@@ -1595,7 +1762,7 @@ void nsLineLayout::VerticalAlignLine() {
 
   // Now position all of the frames in the root span. We will also
   // recurse over the child spans and place any frames we find with
-  // vertical-align: top or bottom.
+  // vertical-align: top/bottom/center.
   // XXX PERFORMANCE: set a bit per-span to avoid the extra work
   // (propagate it upward too)
   WritingMode lineWM = psd->mWritingMode;
@@ -1605,10 +1772,14 @@ void nsLineLayout::VerticalAlignLine() {
       pfd->mFrame->SetRect(lineWM, pfd->mBounds, ContainerSize());
     }
   }
-  PlaceTopBottomFrames(psd, -mBStartEdge, lineBSize);
+  PlaceTopBottomCenterFrames(psd, -mBStartEdge, lineBSize);
 
-  mFinalLineBSize = lineBSize;
   if (mGotLineBox) {
+    if (mBlockRS) {
+      ApplyBlockTextBoxTrim(psd, lineWM, &lineBSize, &baselineBCoord, aFlowArea,
+                            aIsLastFormattedLine);
+    }
+
     // Fill in returned line-box and max-element-width data
     mLineBox->SetBounds(lineWM, psd->mIStart, mBStartEdge,
                         psd->mICoord - psd->mIStart, lineBSize,
@@ -1620,16 +1791,42 @@ void nsLineLayout::VerticalAlignLine() {
            mLineBox->GetBounds().IStart(lineWM),
            mLineBox->GetBounds().BStart(lineWM),
            mLineBox->GetBounds().ISize(lineWM),
-           mLineBox->GetBounds().BSize(lineWM), mFinalLineBSize,
+           mLineBox->GetBounds().BSize(lineWM), lineBSize,
            mLineBox->GetLogicalAscent());
 #endif
   }
+
+  mFinalLineBSize = lineBSize;
 }
 
-// Place frames with CSS property vertical-align: top or bottom.
-void nsLineLayout::PlaceTopBottomFrames(PerSpanData* psd,
-                                        nscoord aDistanceFromStart,
-                                        nscoord aLineBSize) {
+nscoord nsLineLayout::ComputeTopAlignFrameStart(const PerFrameData* pfd,
+                                                const WritingMode& aWM,
+                                                nscoord aDistanceFromStart,
+                                                nscoord aLineBSize) {
+  if (PerSpanData* span = pfd->mSpan) {
+    return -aDistanceFromStart - span->mMinBCoord;
+  } else {
+    return -aDistanceFromStart + pfd->mMargin.BStart(aWM);
+  }
+}
+
+nscoord nsLineLayout::ComputeBottomAlignFrameStart(const PerFrameData* pfd,
+                                                   const WritingMode& aWM,
+                                                   nscoord aDistanceFromStart,
+                                                   nscoord aLineBSize) {
+  if (PerSpanData* span = pfd->mSpan) {
+    // Compute bottom leading
+    return -aDistanceFromStart + aLineBSize - span->mMaxBCoord;
+  } else {
+    return -aDistanceFromStart + aLineBSize - pfd->mMargin.BEnd(aWM) -
+           pfd->mBounds.BSize(aWM);
+  }
+}
+
+// Place frames with CSS property vertical-align: top/bottom/center.
+void nsLineLayout::PlaceTopBottomCenterFrames(PerSpanData* psd,
+                                              nscoord aDistanceFromStart,
+                                              nscoord aLineBSize) {
   for (PerFrameData* pfd = psd->mFirstFrame; pfd; pfd = pfd->mNext) {
     PerSpanData* span = pfd->mSpan;
 #ifdef DEBUG
@@ -1639,12 +1836,8 @@ void nsLineLayout::PlaceTopBottomFrames(PerSpanData* psd,
     nsSize containerSize = ContainerSizeForSpan(psd);
     switch (pfd->mBlockDirAlign) {
       case VALIGN_TOP:
-        if (span) {
-          pfd->mBounds.BStart(lineWM) = -aDistanceFromStart - span->mMinBCoord;
-        } else {
-          pfd->mBounds.BStart(lineWM) =
-              -aDistanceFromStart + pfd->mMargin.BStart(lineWM);
-        }
+        pfd->mBounds.BStart(lineWM) = ComputeTopAlignFrameStart(
+            pfd, lineWM, aDistanceFromStart, aLineBSize);
         pfd->mFrame->SetRect(lineWM, pfd->mBounds, containerSize);
 #ifdef NOISY_BLOCKDIR_ALIGN
         printf("    ");
@@ -1656,15 +1849,8 @@ void nsLineLayout::PlaceTopBottomFrames(PerSpanData* psd,
 #endif
         break;
       case VALIGN_BOTTOM:
-        if (span) {
-          // Compute bottom leading
-          pfd->mBounds.BStart(lineWM) =
-              -aDistanceFromStart + aLineBSize - span->mMaxBCoord;
-        } else {
-          pfd->mBounds.BStart(lineWM) = -aDistanceFromStart + aLineBSize -
-                                        pfd->mMargin.BEnd(lineWM) -
-                                        pfd->mBounds.BSize(lineWM);
-        }
+        pfd->mBounds.BStart(lineWM) = ComputeBottomAlignFrameStart(
+            pfd, lineWM, aDistanceFromStart, aLineBSize);
         pfd->mFrame->SetRect(lineWM, pfd->mBounds, containerSize);
 #ifdef NOISY_BLOCKDIR_ALIGN
         printf("    ");
@@ -1672,10 +1858,18 @@ void nsLineLayout::PlaceTopBottomFrames(PerSpanData* psd,
         printf(": y=%d\n", pfd->mBounds.BStart(lineWM));
 #endif
         break;
+      case VALIGN_CENTER:
+        nscoord startTop = ComputeTopAlignFrameStart(
+            pfd, lineWM, aDistanceFromStart, aLineBSize);
+        nscoord startBottom = ComputeBottomAlignFrameStart(
+            pfd, lineWM, aDistanceFromStart, aLineBSize);
+        pfd->mBounds.BStart(lineWM) = (startTop + startBottom) / 2;
+        pfd->mFrame->SetRect(lineWM, pfd->mBounds, containerSize);
+        break;
     }
     if (span) {
       nscoord fromStart = aDistanceFromStart + pfd->mBounds.BStart(lineWM);
-      PlaceTopBottomFrames(span, fromStart, aLineBSize);
+      PlaceTopBottomCenterFrames(span, fromStart, aLineBSize);
     }
   }
 }
@@ -1795,7 +1989,7 @@ bool nsLineLayout::ShouldApplyLineHeightInPreserveWhiteSpace(
 
 // Place frames in the block direction within a given span (CSS property
 // vertical-align) Note: this doesn't place frames with vertical-align:
-// top or bottom as those have to wait until the entire line box block
+// top/bottom/center as those have to wait until the entire line box block
 // size is known. This is called after the span frame has finished being
 // reflowed so that we know its block size.
 void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
@@ -1935,7 +2129,7 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
         GetInflationForBlockDirAlignment(spanFrame, mInflationMinFontSize);
     nscoord logicalBSize = ReflowInput::CalcLineHeight(
         *spanFrame->Style(), spanFrame->PresContext(), spanFrame->GetContent(),
-        mLineContainerRI.ComputedHeight(), inflation);
+        inflation);
     nscoord contentBSize = spanFramePFD->mBounds.BSize(lineWM) -
                            spanFramePFD->mBorderPadding.BStartEnd(lineWM);
 
@@ -2025,80 +2219,205 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
       }
     }
 
-    // Get vertical-align property ("vertical-align" is the CSS name for
-    // block-direction align)
-    const auto& verticalAlign = frame->StyleDisplay()->mVerticalAlign;
-    Maybe<StyleVerticalAlignKeyword> verticalAlignEnum =
-        frame->VerticalAlignEnum();
+    // Get block-direction alignment values. For text frames, don't perform any
+    // special baseline alignment; their inline container box is responsible for
+    // performing baseline alignment.
+    StyleAlignmentBaseline alignmentBaseline = StyleAlignmentBaseline::Baseline;
+    if (!pfd->mIsTextFrame) {
+      alignmentBaseline = frame->AlignmentBaseline();
+    }
+
+    const StyleBaselineShift& baselineShift =
+        frame->StyleDisplay()->mBaselineShift;
+    Maybe<StyleBaselineShiftKeyword> baselineShiftEnum =
+        baselineShift.IsKeyword() ? Some(baselineShift.AsKeyword()) : Nothing();
+
 #ifdef NOISY_BLOCKDIR_ALIGN
     printf("  [frame]");
     frame->ListTag(stdout);
-    printf(": verticalAlignIsKw=%d (enum == %d", verticalAlign.IsKeyword(),
-           verticalAlign.IsKeyword()
-               ? static_cast<int>(verticalAlign.AsKeyword())
-               : -1);
-    if (verticalAlignEnum) {
-      printf(", after SVG dominant-baseline conversion == %d",
-             static_cast<int>(*verticalAlignEnum));
-    }
-    printf(")\n");
+    printf(": alignmentBaseline=%d baselineShiftIsKw=%d (enum == %d)\n",
+           static_cast<int>(alignmentBaseline), baselineShiftEnum ? 1 : 0,
+           baselineShiftEnum ? static_cast<int>(*baselineShiftEnum) : -1);
 #endif
 
-    if (verticalAlignEnum) {
-      StyleVerticalAlignKeyword keyword = *verticalAlignEnum;
-      if (lineWM.IsVertical()) {
-        if (keyword == StyleVerticalAlignKeyword::Middle) {
-          // For vertical writing mode where the dominant baseline is centered
-          // (i.e. text-orientation is not sideways-*), we remap 'middle' to
-          // 'middle-with-baseline' so that images align sensibly with the
-          // center-baseline-aligned text.
-          if (!lineWM.IsSideways()) {
-            keyword = StyleVerticalAlignKeyword::MozMiddleWithBaseline;
-          }
-        } else if (lineWM.IsLineInverted()) {
-          // Swap the meanings of top and bottom when line is inverted
-          // relative to block direction.
-          switch (keyword) {
-            case StyleVerticalAlignKeyword::Top:
-              keyword = StyleVerticalAlignKeyword::Bottom;
+    // Apply writing mode transforms to the alignment properties
+    if (lineWM.IsVertical()) {
+      // For vertical writing mode where the dominant baseline is centered
+      // (i.e. text-orientation is not sideways-*), we remap 'middle' to
+      // 'middle-with-baseline' so that images align sensibly with the
+      // center-baseline-aligned text.
+      if (alignmentBaseline == StyleAlignmentBaseline::Middle &&
+          !lineWM.IsSideways()) {
+        alignmentBaseline = StyleAlignmentBaseline::MozMiddleWithBaseline;
+      }
+
+      // Swap the meanings of top and bottom when line is inverted
+      // relative to block direction.
+      if (lineWM.IsLineInverted()) {
+        switch (alignmentBaseline) {
+          case StyleAlignmentBaseline::TextTop:
+            alignmentBaseline = StyleAlignmentBaseline::TextBottom;
+            break;
+          case StyleAlignmentBaseline::TextBottom:
+            alignmentBaseline = StyleAlignmentBaseline::TextTop;
+            break;
+          default:
+            break;
+        }
+
+        if (baselineShiftEnum) {
+          switch (*baselineShiftEnum) {
+            case StyleBaselineShiftKeyword::Top:
+              baselineShiftEnum = Some(StyleBaselineShiftKeyword::Bottom);
               break;
-            case StyleVerticalAlignKeyword::Bottom:
-              keyword = StyleVerticalAlignKeyword::Top;
-              break;
-            case StyleVerticalAlignKeyword::TextTop:
-              keyword = StyleVerticalAlignKeyword::TextBottom;
-              break;
-            case StyleVerticalAlignKeyword::TextBottom:
-              keyword = StyleVerticalAlignKeyword::TextTop;
+            case StyleBaselineShiftKeyword::Bottom:
+              baselineShiftEnum = Some(StyleBaselineShiftKeyword::Top);
               break;
             default:
               break;
           }
         }
       }
+    }
 
-      // baseline coord that may be adjusted for script offset
-      nscoord revisedBaselineBCoord = baselineBCoord;
+    const auto GetFontBaseline = [](nsFontMetrics* aFM,
+                                    StyleAlignmentBaseline aAlignmentBaseline) {
+      switch (aAlignmentBaseline) {
+        case StyleAlignmentBaseline::Alphabetic:
+          return aFM->AlphabeticBaseline();
+        case StyleAlignmentBaseline::Central:
+          return aFM->CentralBaseline();
+        case StyleAlignmentBaseline::Ideographic:
+          return aFM->IdeographicUnderBaseline();
+        case StyleAlignmentBaseline::Mathematical:
+          return aFM->MathBaseline();
+        case StyleAlignmentBaseline::Hanging:
+          return aFM->HangingBaseline();
+        default:
+          MOZ_ASSERT_UNREACHABLE("Unexpected alignment baseline");
+          return 0;
+      }
+    };
 
-      // For superscript and subscript, raise or lower the baseline of the box
-      // to the proper offset of the parent's box, then proceed as for BASELINE
-      if (keyword == StyleVerticalAlignKeyword::Sub ||
-          keyword == StyleVerticalAlignKeyword::Super) {
-        revisedBaselineBCoord += lineWM.FlowRelativeToLineRelativeFactor() *
-                                 (keyword == StyleVerticalAlignKeyword::Sub
-                                      ? fm->SubscriptOffset()
-                                      : -fm->SuperscriptOffset());
-        keyword = StyleVerticalAlignKeyword::Baseline;
+    // Adjust the bounds according to the given baseline.
+    switch (alignmentBaseline) {
+      case StyleAlignmentBaseline::Baseline:
+        pfd->mBounds.BStart(lineWM) = baselineBCoord - pfd->mAscent;
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
+
+      default:
+      case StyleAlignmentBaseline::Alphabetic:
+      case StyleAlignmentBaseline::Central:
+      case StyleAlignmentBaseline::Ideographic:
+      case StyleAlignmentBaseline::Mathematical:
+      case StyleAlignmentBaseline::Hanging: {
+        nscoord parentBaseline = GetFontBaseline(fm, alignmentBaseline) *
+                                 lineWM.FlowRelativeToLineRelativeFactor();
+        pfd->mBounds.BStart(lineWM) =
+            baselineBCoord - parentBaseline - pfd->mAscent;
+        // For child span frames, additional adjustment is required to align
+        // child's requested font baseline to the parent's font baseline.
+        // Non-span child frames already have the requested baseline's offset
+        // baked into their ascents, so no additional adjustment is required.
+        // See Baseline::SynthesizeBOffsetFromInnerBox.
+        if (frameSpan) {
+          RefPtr spanFm = nsLayoutUtils::GetInflatedFontMetricsForFrame(frame);
+          nscoord selfBaseline = GetFontBaseline(spanFm, alignmentBaseline) *
+                                 lineWM.FlowRelativeToLineRelativeFactor();
+          pfd->mBounds.BStart(lineWM) += selfBaseline;
+        }
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
       }
 
-      switch (keyword) {
-        default:
-        case StyleVerticalAlignKeyword::Baseline:
-          pfd->mBounds.BStart(lineWM) = revisedBaselineBCoord - pfd->mAscent;
-          pfd->mBlockDirAlign = VALIGN_OTHER;
+      case StyleAlignmentBaseline::Middle: {
+        // Align the midpoint of the frame with 1/2 the parents
+        // x-height above the baseline.
+        //
+        // TODO(bug 2030203): The css-inline-3 definition of `middle` doesn't
+        // match this existing CSS2 implementation. Per css-inline-3, this
+        // should align the x-middle baselines of the child and parent (like
+        // `alphabetic`/etc. above). But CSS2 aligned the midpoint of the child
+        // with the x-middle baseline of the parent, which can differ.
+        nscoord parentXHeight =
+            lineWM.FlowRelativeToLineRelativeFactor() * fm->XHeight();
+        if (frameSpan) {
+          pfd->mBounds.BStart(lineWM) =
+              baselineBCoord - (parentXHeight + pfd->mBounds.BSize(lineWM)) / 2;
+        } else {
+          pfd->mBounds.BStart(lineWM) = baselineBCoord -
+                                        (parentXHeight + logicalBSize) / 2 +
+                                        pfd->mMargin.BStart(lineWM);
+        }
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
+      }
+
+      case StyleAlignmentBaseline::TextTop: {
+        // The top of the logical box is aligned with the top of
+        // the parent element's text.
+        // XXX For vertical text we will need a new API to get the logical
+        //     max-ascent here
+        nscoord parentAscent =
+            lineWM.IsLineInverted() ? fm->MaxDescent() : fm->MaxAscent();
+        if (frameSpan) {
+          pfd->mBounds.BStart(lineWM) = baselineBCoord - parentAscent -
+                                        pfd->mBorderPadding.BStart(lineWM) +
+                                        frameSpan->mBStartLeading;
+        } else {
+          pfd->mBounds.BStart(lineWM) =
+              baselineBCoord - parentAscent + pfd->mMargin.BStart(lineWM);
+        }
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
+      }
+
+      case StyleAlignmentBaseline::TextBottom: {
+        // The bottom of the logical box is aligned with the
+        // bottom of the parent elements text.
+        nscoord parentDescent =
+            lineWM.IsLineInverted() ? fm->MaxAscent() : fm->MaxDescent();
+        if (frameSpan) {
+          pfd->mBounds.BStart(lineWM) =
+              baselineBCoord + parentDescent - pfd->mBounds.BSize(lineWM) +
+              pfd->mBorderPadding.BEnd(lineWM) - frameSpan->mBEndLeading;
+        } else {
+          pfd->mBounds.BStart(lineWM) = baselineBCoord + parentDescent -
+                                        pfd->mBounds.BSize(lineWM) -
+                                        pfd->mMargin.BEnd(lineWM);
+        }
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
+      }
+
+      case StyleAlignmentBaseline::MozMiddleWithBaseline: {
+        // Align the midpoint of the frame with the baseline of the parent.
+        if (frameSpan) {
+          pfd->mBounds.BStart(lineWM) =
+              baselineBCoord - pfd->mBounds.BSize(lineWM) / 2;
+        } else {
+          pfd->mBounds.BStart(lineWM) =
+              baselineBCoord - logicalBSize / 2 + pfd->mMargin.BStart(lineWM);
+        }
+        pfd->mBlockDirAlign = VALIGN_OTHER;
+        break;
+      }
+    }
+
+    // Shift from the baseline
+    if (baselineShiftEnum) {
+      switch (*baselineShiftEnum) {
+        case StyleBaselineShiftKeyword::Sub:
+        case StyleBaselineShiftKeyword::Super:
+          pfd->mBounds.BStart(lineWM) +=
+              lineWM.FlowRelativeToLineRelativeFactor() *
+              (*baselineShiftEnum == StyleBaselineShiftKeyword::Sub
+                   ? fm->SubscriptOffset()
+                   : -fm->SuperscriptOffset());
           break;
 
-        case StyleVerticalAlignKeyword::Top: {
+        case StyleBaselineShiftKeyword::Top: {
           pfd->mBlockDirAlign = VALIGN_TOP;
           nscoord subtreeBSize = logicalBSize;
           if (frameSpan) {
@@ -2112,7 +2431,7 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
           break;
         }
 
-        case StyleVerticalAlignKeyword::Bottom: {
+        case StyleBaselineShiftKeyword::Bottom: {
           pfd->mBlockDirAlign = VALIGN_BOTTOM;
           nscoord subtreeBSize = logicalBSize;
           if (frameSpan) {
@@ -2126,84 +2445,32 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
           break;
         }
 
-        case StyleVerticalAlignKeyword::Middle: {
-          // Align the midpoint of the frame with 1/2 the parents
-          // x-height above the baseline.
-          nscoord parentXHeight =
-              lineWM.FlowRelativeToLineRelativeFactor() * fm->XHeight();
+        case StyleBaselineShiftKeyword::Center:
+          pfd->mBlockDirAlign = VALIGN_CENTER;
+          nscoord subtreeBSize = logicalBSize;
           if (frameSpan) {
-            pfd->mBounds.BStart(lineWM) =
-                baselineBCoord -
-                (parentXHeight + pfd->mBounds.BSize(lineWM)) / 2;
-          } else {
-            pfd->mBounds.BStart(lineWM) = baselineBCoord -
-                                          (parentXHeight + logicalBSize) / 2 +
-                                          pfd->mMargin.BStart(lineWM);
+            subtreeBSize = frameSpan->mMaxBCoord - frameSpan->mMinBCoord;
+            NS_ASSERTION(subtreeBSize >= logicalBSize,
+                         "unexpected subtree block size");
           }
-          pfd->mBlockDirAlign = VALIGN_OTHER;
-          break;
-        }
-
-        case StyleVerticalAlignKeyword::TextTop: {
-          // The top of the logical box is aligned with the top of
-          // the parent element's text.
-          // XXX For vertical text we will need a new API to get the logical
-          //     max-ascent here
-          nscoord parentAscent =
-              lineWM.IsLineInverted() ? fm->MaxDescent() : fm->MaxAscent();
-          if (frameSpan) {
-            pfd->mBounds.BStart(lineWM) = baselineBCoord - parentAscent -
-                                          pfd->mBorderPadding.BStart(lineWM) +
-                                          frameSpan->mBStartLeading;
-          } else {
-            pfd->mBounds.BStart(lineWM) =
-                baselineBCoord - parentAscent + pfd->mMargin.BStart(lineWM);
+          if (subtreeBSize > maxStartBoxBSize) {
+            maxStartBoxBSize = subtreeBSize;
           }
-          pfd->mBlockDirAlign = VALIGN_OTHER;
-          break;
-        }
-
-        case StyleVerticalAlignKeyword::TextBottom: {
-          // The bottom of the logical box is aligned with the
-          // bottom of the parent elements text.
-          nscoord parentDescent =
-              lineWM.IsLineInverted() ? fm->MaxAscent() : fm->MaxDescent();
-          if (frameSpan) {
-            pfd->mBounds.BStart(lineWM) =
-                baselineBCoord + parentDescent - pfd->mBounds.BSize(lineWM) +
-                pfd->mBorderPadding.BEnd(lineWM) - frameSpan->mBEndLeading;
-          } else {
-            pfd->mBounds.BStart(lineWM) = baselineBCoord + parentDescent -
-                                          pfd->mBounds.BSize(lineWM) -
-                                          pfd->mMargin.BEnd(lineWM);
+          if (subtreeBSize > maxEndBoxBSize) {
+            maxEndBoxBSize = subtreeBSize;
           }
-          pfd->mBlockDirAlign = VALIGN_OTHER;
           break;
-        }
-
-        case StyleVerticalAlignKeyword::MozMiddleWithBaseline: {
-          // Align the midpoint of the frame with the baseline of the parent.
-          if (frameSpan) {
-            pfd->mBounds.BStart(lineWM) =
-                baselineBCoord - pfd->mBounds.BSize(lineWM) / 2;
-          } else {
-            pfd->mBounds.BStart(lineWM) =
-                baselineBCoord - logicalBSize / 2 + pfd->mMargin.BStart(lineWM);
-          }
-          pfd->mBlockDirAlign = VALIGN_OTHER;
-          break;
-        }
       }
     } else {
       // We have either a coord, a percent, or a calc().
-      nscoord offset = verticalAlign.AsLength().Resolve([&] {
+      nscoord offset = baselineShift.AsLength().Resolve([&] {
         // Percentages are like lengths, except treated as a percentage
         // of the elements line block size value.
         float inflation =
             GetInflationForBlockDirAlignment(frame, mInflationMinFontSize);
-        return ReflowInput::CalcLineHeight(
-            *frame->Style(), frame->PresContext(), frame->GetContent(),
-            mLineContainerRI.ComputedBSize(), inflation);
+        return ReflowInput::CalcLineHeight(*frame->Style(),
+                                           frame->PresContext(),
+                                           frame->GetContent(), inflation);
       });
 
       // According to the CSS2 spec (10.8.1), a positive value
@@ -2212,17 +2479,8 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
       // baseline). Since Y coordinates increase towards the bottom of
       // the screen we reverse the sign, unless the line orientation is
       // inverted relative to block direction.
-      nscoord revisedBaselineBCoord =
-          baselineBCoord - offset * lineWM.FlowRelativeToLineRelativeFactor();
-      if (lineWM.IsCentralBaseline()) {
-        // If we're using a dominant center baseline, we align with the center
-        // of the frame being placed (bug 1133945).
-        pfd->mBounds.BStart(lineWM) =
-            revisedBaselineBCoord - pfd->mBounds.BSize(lineWM) / 2;
-      } else {
-        pfd->mBounds.BStart(lineWM) = revisedBaselineBCoord - pfd->mAscent;
-      }
-      pfd->mBlockDirAlign = VALIGN_OTHER;
+      pfd->mBounds.BStart(lineWM) +=
+          -1 * offset * lineWM.FlowRelativeToLineRelativeFactor();
     }
 
     // Update minBCoord/maxBCoord for frames that we just placed. Do not factor
@@ -2506,6 +2764,66 @@ void nsLineLayout::VerticalAlignFrames(PerSpanData* psd) {
         spanFramePFD->mAscent, psd->mLogicalBSize, psd->mBStartLeading,
         psd->mBEndLeading);
 #endif
+  }
+
+  if (psd != mRootSpan) {
+    const StyleTextBoxTrim spanTrim = spanFrame->StyleTextReset()->mTextBoxTrim;
+    bool shouldApplyTrimStart = bool(spanTrim & StyleTextBoxTrim::TRIM_START);
+    bool shouldApplyTrimEnd = bool(spanTrim & StyleTextBoxTrim::TRIM_END);
+
+    // Trims the frame's content box to the resolved text-box-edge metrics.
+    if (shouldApplyTrimStart || shouldApplyTrimEnd) {
+      // Identify the current total height above and below the baseline,
+      // to be compared against the target text-box-edge metrics to determine
+      // how much to trim on each side.
+      nscoord contentOver =
+          spanFramePFD->mAscent - spanFramePFD->mBorderPadding.BStart(lineWM);
+      nscoord contentUnder = spanFramePFD->mBounds.BSize(lineWM) -
+                             spanFramePFD->mAscent -
+                             spanFramePFD->mBorderPadding.BEnd(lineWM);
+      const StyleTextBoxEdge& textBoxEdge =
+          spanFrame->StyleText()->mTextBoxEdge;
+      RefPtr<nsFontMetrics> fm =
+          nsLayoutUtils::GetInflatedFontMetricsForFrame(spanFrame);
+      const auto [trimmedOver, trimmedUnder] =
+          ResolveTextBoxEdgeMetrics(textBoxEdge, fm);
+
+      if (shouldApplyTrimStart) {
+        // Trim on the start side by moving the block start coordinate
+        // and the frame's ascent up by the trim amount. Additionally
+        // move all child frames up by the trim amount.
+        const nscoord trimAmount = lineWM.IsLineInverted()
+                                       ? contentUnder - trimmedUnder
+                                       : contentOver - trimmedOver;
+        spanFramePFD->mAscent -= trimAmount;
+        spanFramePFD->mBounds.BSize(lineWM) -= trimAmount;
+        for (PerFrameData* pfd = psd->mFirstFrame; pfd; pfd = pfd->mNext) {
+          pfd->mBounds.BStart(lineWM) -= trimAmount;
+          pfd->mFrame->SetRect(lineWM, pfd->mBounds, ContainerSizeForSpan(psd));
+        }
+        minBCoord -= trimAmount;
+        maxBCoord -= trimAmount;
+        *psd->mBaseline -= trimAmount;
+      }
+
+      if (shouldApplyTrimEnd) {
+        // Trim on the end side by reducing the block size of frame.
+        const nscoord trimAmount = lineWM.IsLineInverted()
+                                       ? contentOver - trimmedOver
+                                       : contentUnder - trimmedUnder;
+        spanFramePFD->mBounds.BSize(lineWM) -= trimAmount;
+
+        // In vertical-rl, trimming the block end side changes the physical
+        // left position, which requires resetting the rects of any children
+        // in order to correct their positions.
+        if (lineWM.IsVerticalRL()) {
+          for (PerFrameData* pfd = psd->mFirstFrame; pfd; pfd = pfd->mNext) {
+            pfd->mFrame->SetRect(lineWM, pfd->mBounds,
+                                 ContainerSizeForSpan(psd));
+          }
+        }
+      }
+    }
   }
 
   psd->mMinBCoord = minBCoord;
@@ -3045,7 +3363,7 @@ void nsLineLayout::ExpandRubyBoxWithAnnotations(PerFrameData* aFrame,
       // It is necessary to set the rect again because the container
       // width was unknown, and zero was used instead when we reflow
       // them. The corresponding base containers were repositioned in
-      // VerticalAlignFrames and PlaceTopBottomFrames.
+      // VerticalAlignFrames and PlaceTopBottomCenterFrames.
       MOZ_ASSERT(rtcFrame->GetLogicalSize(lineWM) ==
                  annotation->mBounds.Size(lineWM));
       rtcFrame->SetPosition(lineWM, annotation->mBounds.Origin(lineWM),

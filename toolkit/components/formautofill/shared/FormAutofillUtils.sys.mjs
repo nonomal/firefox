@@ -8,6 +8,7 @@ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
+  AutofillDataTypes: "resource://gre/modules/shared/AutofillDataTypes.sys.mjs",
   ContentDOMReference: "resource://gre/modules/ContentDOMReference.sys.mjs",
   CreditCard: "resource://gre/modules/CreditCard.sys.mjs",
   FormAutofillNameUtils:
@@ -33,6 +34,9 @@ const ADDRESSES_COLLECTION_NAME = "addresses";
 const CREDITCARDS_COLLECTION_NAME = "creditCards";
 const AUTOFILL_CREDITCARDS_OS_AUTH_LOCKED_PREF =
   FormAutofill.AUTOFILL_CREDITCARDS_OS_AUTH_LOCKED_PREF;
+const AUTOFILL_ML_SUCCESS_PREF = "extensions.formautofill.useml.successful";
+const AUTOFILL_ML_NATIVE_ONNX_PREF =
+  "extensions.formautofill.useml.nativeOnnxAvailable";
 const MANAGE_ADDRESSES_L10N_IDS = [
   "autofill-add-address-title",
   "autofill-manage-addresses-title",
@@ -76,11 +80,32 @@ const MANAGE_CREDITCARDS_L10N_IDS = [
   "autofill-manage-payment-methods-title",
 ];
 const EDIT_CREDITCARD_L10N_IDS = [
-  "autofill-card-number",
-  "autofill-card-name-on-card",
-  "autofill-card-expires-month",
-  "autofill-card-expires-year",
+  "autofill-card-number-2",
+  "autofill-card-name-on-card-2",
+  "autofill-card-expires-month-2",
+  "autofill-card-expires-year-2",
   "autofill-card-network",
+
+  // This string isn't ever displayed, but is used to make the payment methods
+  // section easier to find via the search input in about:settings.
+  "autofill-card-search-term-credit-cards",
+];
+const MANAGE_PASSPORTS_L10N_IDS = [
+  "autofill-add-passport-title",
+  "autofill-personal-info-manage-title",
+];
+const EDIT_PASSPORT_L10N_IDS = [
+  "autofill-passport-name",
+  "autofill-passport-country",
+  "autofill-passport-number",
+  "autofill-passport-issue-date",
+  "autofill-passport-expiry-date",
+  "autofill-passport-date-month",
+  "autofill-passport-date-day",
+  "autofill-passport-date-year",
+  "autofill-edit-passport-title",
+  "autofill-cancel-button",
+  "autofill-save-button",
 ];
 const FIELD_STATES = {
   NORMAL: "",
@@ -120,52 +145,13 @@ FormAutofillUtils = {
   EDIT_ADDRESS_L10N_IDS,
   MANAGE_CREDITCARDS_L10N_IDS,
   EDIT_CREDITCARD_L10N_IDS,
+  MANAGE_PASSPORTS_L10N_IDS,
+  EDIT_PASSPORT_L10N_IDS,
   MAX_FIELD_VALUE_LENGTH,
   FIELD_STATES,
   FORM_SUBMISSION_REASON,
   ELIGIBLE_ELEMENT_TYPES,
   ELIGIBLE_INPUT_TYPES,
-
-  _fieldNameInfo: {
-    name: "name",
-    "given-name": "name",
-    "additional-name": "name",
-    "family-name": "name",
-    organization: "organization",
-    "street-address": "address",
-    "address-line1": "address",
-    "address-line2": "address",
-    "address-line3": "address",
-    "address-level1": "address",
-    "address-level2": "address",
-    "address-level3": "address",
-    // DE addresses are often split into street name and house number;
-    // combined they form address-line1
-    "address-streetname": "address",
-    "address-housenumber": "address",
-    "postal-code": "address",
-    country: "address",
-    "country-name": "address",
-    tel: "tel",
-    "tel-country-code": "tel",
-    "tel-national": "tel",
-    "tel-area-code": "tel",
-    "tel-local": "tel",
-    "tel-local-prefix": "tel",
-    "tel-local-suffix": "tel",
-    "tel-extension": "tel",
-    email: "email",
-    "cc-name": "creditCard",
-    "cc-given-name": "creditCard",
-    "cc-additional-name": "creditCard",
-    "cc-family-name": "creditCard",
-    "cc-number": "creditCard",
-    "cc-exp-month": "creditCard",
-    "cc-exp-year": "creditCard",
-    "cc-exp": "creditCard",
-    "cc-type": "creditCard",
-    "cc-csc": "creditCard",
-  },
 
   // This list includes autocomplete attributes that indicate that the field
   // is an address or credit-card field, but the field name is not one we
@@ -179,12 +165,23 @@ FormAutofillUtils = {
 
   isAddressField(fieldName) {
     return (
-      !!this._fieldNameInfo[fieldName] && !this.isCreditCardField(fieldName)
+      lazy.AutofillDataTypes.typeIdForFieldName(fieldName) ==
+      lazy.AutofillDataTypes.ADDRESS
     );
   },
 
   isCreditCardField(fieldName) {
-    return this._fieldNameInfo?.[fieldName] == "creditCard";
+    return (
+      lazy.AutofillDataTypes.typeIdForFieldName(fieldName) ==
+      lazy.AutofillDataTypes.CREDIT_CARD
+    );
+  },
+
+  isPassportField(fieldName) {
+    return (
+      lazy.AutofillDataTypes.typeIdForFieldName(fieldName) ==
+      lazy.AutofillDataTypes.PASSPORT
+    );
   },
 
   // Returns true if the field is one we don't fill handle via the autocomplete
@@ -204,11 +201,53 @@ FormAutofillUtils = {
     );
   },
 
-  queryEligibleElements(element, includeIframe = false) {
+  isValidSection(fieldDetails) {
+    // If one of the fields has the autocomplete reason, the section is valid.
+    if (fieldDetails.some(f => f.reason == "autocomplete")) {
+      return true;
+    }
+
+    // Otherwise, there must be a minimum number of fields.
+    const fields = new Set(fieldDetails.map(f => f.fieldName));
+    return fields.size >= this.AUTOFILL_FIELDS_THRESHOLD;
+  },
+
+  queryEligibleElements(element, includeIframe = true) {
     const types = includeIframe
       ? [...ELIGIBLE_ELEMENT_TYPES, "iframe"]
       : ELIGIBLE_ELEMENT_TYPES;
     return Array.from(element.querySelectorAll(types.join(",")));
+  },
+
+  /**
+   * Whether the ML autofill feature is turned on. This says nothing about
+   * whether inference can actually run; use `useMLInference` to decide whether
+   * to rely on ML results.
+   */
+  get isMLAutofillEnabled() {
+    return (
+      AppConstants.platform !== "android" && FormAutofillUtils.enableMLAutofill
+    );
+  },
+
+  /**
+   * Whether ML inference should be used to classify fields. On top of the
+   * feature being enabled, this requires that we have confirmed the native ONNX
+   * runtime is available.
+   */
+  get useMLInference() {
+    return (
+      FormAutofillUtils.isMLAutofillEnabled &&
+      FormAutofillUtils.isNativeOnnxRuntimeAvailable
+    );
+  },
+
+  setMLUsedAlready() {
+    Services.prefs.setBoolPref(AUTOFILL_ML_SUCCESS_PREF, true);
+  },
+
+  setNativeOnnxRuntimeAvailable(available) {
+    Services.prefs.setBoolPref(AUTOFILL_ML_NATIVE_ONNX_PREF, available);
   },
 
   /**
@@ -280,25 +319,12 @@ FormAutofillUtils = {
     return lazy.CreditCard.getSupportedNetworks();
   },
 
-  getCategoryFromFieldName(fieldName) {
-    return this._fieldNameInfo[fieldName];
-  },
-
-  getCategoriesFromFieldNames(fieldNames) {
-    let categories = new Set();
-    for (let fieldName of fieldNames) {
-      let info = this.getCategoryFromFieldName(fieldName);
-      if (info) {
-        categories.add(info);
-      }
-    }
-    return Array.from(categories);
-  },
-
   getCollectionNameFromFieldName(fieldName) {
-    return this.isCreditCardField(fieldName)
-      ? CREDITCARDS_COLLECTION_NAME
-      : ADDRESSES_COLLECTION_NAME;
+    const typeId = lazy.AutofillDataTypes.typeIdForFieldName(fieldName);
+    return (
+      lazy.AutofillDataTypes.get(typeId)?.collectionName ??
+      ADDRESSES_COLLECTION_NAME
+    );
   },
 
   getAddressSeparator() {
@@ -419,7 +445,10 @@ FormAutofillUtils = {
     }
 
     for (let field in address) {
-      if (field != "tel" && this.getCategoryFromFieldName(field) == "tel") {
+      if (
+        field != "tel" &&
+        lazy.AutofillDataTypes.fieldToSubCategory[field] == "tel"
+      ) {
         delete address[field];
       }
     }
@@ -682,16 +711,17 @@ FormAutofillUtils = {
       names = subNames || subLnames;
     }
 
-    // Overwrite subKeys with subIsoids, when available
+    // Build the keys array using a copy to avoid mutating the cached sub_keys data
+    const keys = [...subKeys];
     if (subIsoids && subIsoids.length && subIsoids.length == subKeys.length) {
       for (let i = 0; i < subIsoids.length; i++) {
         if (subIsoids[i]) {
-          subKeys[i] = subIsoids[i];
+          keys[i] = subIsoids[i];
         }
       }
     }
 
-    return new Map(subKeys.map((key, index) => [key, names[index]]));
+    return new Map(keys.map((key, index) => [key, names[index]]));
   },
 
   /**
@@ -782,9 +812,14 @@ FormAutofillUtils = {
     return null;
   },
 
-  findSelectOption(selectEl, record, fieldName) {
+  findSelectOption(selectEl, record, fieldName, value) {
     if (this.isAddressField(fieldName)) {
-      return this.findAddressSelectOption(selectEl.options, record, fieldName);
+      return this.findAddressSelectOption(
+        selectEl.options,
+        record,
+        fieldName,
+        value || record[fieldName]
+      );
     }
     if (this.isCreditCardField(fieldName)) {
       return this.findCreditCardSelectOption(selectEl, record, fieldName);
@@ -910,16 +945,13 @@ FormAutofillUtils = {
    * @param   {Array<{text: string, value: string}>} options
    * @param   {object} address
    * @param   {string} fieldName
+   * @param   {string} value
    * @returns {DOMElement}
    */
-  findAddressSelectOption(options, address, fieldName) {
-    if (options.length > 512) {
+  findAddressSelectOption(options, address, fieldName, value) {
+    if (!value || options.length > 512) {
       // Allow enough space for all countries (roughly 300 distinct values) and all
       // timezones (roughly 400 distinct values), plus some extra wiggle room.
-      return null;
-    }
-    let value = address[fieldName];
-    if (!value) {
       return null;
     }
 
@@ -989,6 +1021,7 @@ FormAutofillUtils = {
         }
         break;
       }
+      case "tel-country-code":
       case "country": {
         if (this.getCountryAddressData(value)) {
           for (const option of options) {
@@ -997,6 +1030,20 @@ FormAutofillUtils = {
               this.identifyCountryCode(option.value, value)
             ) {
               return option;
+            }
+          }
+
+          // If the country name was not found, look for an option that
+          // matches the telephone country code next.
+          const countryCode = address["tel-country-code"];
+          if (fieldName == "tel-country-code" && countryCode) {
+            for (const option of options) {
+              if (
+                option.text.includes(countryCode) ||
+                option.value.includes(countryCode)
+              ) {
+                return option;
+              }
             }
           }
         }
@@ -1030,7 +1077,12 @@ FormAutofillUtils = {
       menuitem,
     }));
 
-    return this.findAddressSelectOption(options, address, fieldName)?.menuitem;
+    return this.findAddressSelectOption(
+      options,
+      address,
+      fieldName,
+      address[fieldName]
+    )?.menuitem;
   },
 
   findCreditCardSelectOption(selectEl, creditCard, fieldName) {
@@ -1305,7 +1357,8 @@ FormAutofillUtils = {
       ? this.findAddressSelectOption(
           addressLevel1Options,
           record,
-          "address-level1"
+          "address-level1",
+          record["address-level1"]
         )?.value
       : record["address-level1"];
 
@@ -1520,4 +1573,85 @@ XPCOMUtils.defineLazyPreferenceGetter(
   "ignoreVisibilityCheck",
   "extensions.formautofill.test.ignoreVisibilityCheck",
   false
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "enableMLAutofill",
+  "extensions.formautofill.useml",
+  false
+);
+
+// Opt-in (Nimbus-controlled): use the two-engine encoder + fusion head field
+// classifier instead of the single text-classification model.
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "enableMLAutofillTwoHead",
+  "extensions.formautofill.useml.twoHead",
+  false
+);
+
+// How long an idle ML autofill engine is kept alive, in milliseconds. Applies to
+// every engine the active classifier creates. -1 means never time out.
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "mlEngineTimeoutMS",
+  "extensions.formautofill.useml.timeoutMS",
+  2 * 60 * 1000
+);
+
+// Field types the ML model is not trusted with, parsed from the comma
+// separated pref. They are classified by the regexp-based heuristics instead.
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "mlIgnoreFieldTypes",
+  "extensions.formautofill.useml.ignoreFieldTypes",
+  "",
+  null,
+  pref =>
+    pref
+      .split(",")
+      .map(fieldType => fieldType.trim())
+      .filter(fieldType => !!fieldType)
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "isMLUsedAlready",
+  AUTOFILL_ML_SUCCESS_PREF,
+  false
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "isNativeOnnxRuntimeAvailable",
+  AUTOFILL_ML_NATIVE_ONNX_PREF,
+  false
+);
+
+// Optional mlData tokenizer features, as a JSON array of feature keys (e.g.
+// ["select_option", "input_attributes"]).
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofill,
+  "mlFeatures",
+  "extensions.formautofill.useml.features",
+  "[]",
+  null,
+  value => {
+    try {
+      const list = JSON.parse(value);
+      return new Set(Array.isArray(list) ? list : []);
+    } catch {
+      return new Set();
+    }
+  }
+);
+
+// Pin the ML model revision to load (the encoder and head engines share one
+// version).
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofill,
+  "mlModelVersion",
+  "extensions.formautofill.useml.modelVersion",
+  ""
 );

@@ -46,6 +46,10 @@ loader.lazyRequireGetter(
   "resource://devtools/client/shared/link.js",
   true
 );
+const lazy = {};
+ChromeUtils.defineESModuleGetters(lazy, {
+  getMdnLinkParams: "resource://devtools/shared/mdn.mjs",
+});
 
 const STYLE_INSPECTOR_PROPERTIES =
   "devtools/shared/locales/styleinspector.properties";
@@ -58,6 +62,9 @@ const L10N_TWISTY_COLLAPSE_LABEL = STYLE_INSPECTOR_L10N.getStr(
   "rule.twistyCollapse.label"
 );
 const L10N_EMPTY_VARIABLE = STYLE_INSPECTOR_L10N.getStr("rule.variableEmpty");
+const L10N_JUMP_DEFINITION_TITLE = STYLE_INSPECTOR_L10N.getStr(
+  "rule.jumpDeclaration.title"
+);
 
 const FILTER_CHANGED_TIMEOUT = 150;
 
@@ -265,7 +272,7 @@ class CssComputedView {
     );
 
     // The PageStyle front related to the currently selected element
-    this.viewedElementPageStyle = null;
+    this.selectedNodeFrontPageStyle = null;
     // Flag that is set when the selected element style was updated. This will force
     // clearing the page style cssLogic cache the next time we're calling getComputed().
     this.elementStyleUpdated = false;
@@ -308,7 +315,7 @@ class CssComputedView {
   #refreshProcess;
   #sourceFilter;
   // The element that we're inspecting, and the document that it comes from.
-  #viewedElement = null;
+  #selectedNodeFront = null;
 
   // Number of visible properties
   numVisibleProperties = 0;
@@ -350,8 +357,8 @@ class CssComputedView {
     );
   }
 
-  get viewedElement() {
-    return this.#viewedElement;
+  get selectedNodeFront() {
+    return this.#selectedNodeFront;
   }
 
   #handlePrefChange = () => {
@@ -370,14 +377,14 @@ class CssComputedView {
    */
   selectElement(element) {
     if (!element) {
-      if (this.viewedElementPageStyle) {
-        this.viewedElementPageStyle.off(
+      if (this.selectedNodeFrontPageStyle) {
+        this.selectedNodeFrontPageStyle.off(
           "stylesheet-updated",
           this.refreshPanel
         );
-        this.viewedElementPageStyle = null;
+        this.selectedNodeFrontPageStyle = null;
       }
-      this.#viewedElement = null;
+      this.#selectedNodeFront = null;
       this.noResults.hidden = false;
 
       if (this.#refreshProcess) {
@@ -390,19 +397,26 @@ class CssComputedView {
       return Promise.resolve(undefined);
     }
 
-    if (element === this.#viewedElement) {
+    if (element === this.#selectedNodeFront) {
       return Promise.resolve(undefined);
     }
 
-    if (this.viewedElementPageStyle) {
-      this.viewedElementPageStyle.off("stylesheet-updated", this.refreshPanel);
+    if (this.selectedNodeFrontPageStyle) {
+      this.selectedNodeFrontPageStyle.off(
+        "stylesheet-updated",
+        this.refreshPanel
+      );
     }
-    this.viewedElementPageStyle = element.inspectorFront.pageStyle;
-    this.viewedElementPageStyle.on("stylesheet-updated", this.refreshPanel, {
-      signal: this.#abortController.signal,
-    });
+    this.selectedNodeFrontPageStyle = element.inspectorFront.pageStyle;
+    this.selectedNodeFrontPageStyle.on(
+      "stylesheet-updated",
+      this.refreshPanel,
+      {
+        signal: this.#abortController.signal,
+      }
+    );
 
-    this.#viewedElement = element;
+    this.#selectedNodeFront = element;
 
     this.refreshSourceFilter();
 
@@ -583,13 +597,13 @@ class CssComputedView {
    * we avoid the extra processing unless the panel is visible.
    */
   async refreshPanel() {
-    if (!this.#viewedElement || !this.isPanelVisible()) {
+    if (!this.#selectedNodeFront || !this.isPanelVisible()) {
       return;
     }
 
     // Capture the current viewed element to return from the promise handler
     // early if it changed
-    const viewedElement = this.#viewedElement;
+    const selectedNodeFront = this.#selectedNodeFront;
 
     try {
       // Create the properties views only once for the whole lifecycle of the inspector
@@ -601,7 +615,7 @@ class CssComputedView {
       // Also note that PropertyView/PropertyView are refreshed via their refresh method
       // which will ultimately query `CssComputedView._computed`, which we update in this method.
       const [computed] = await Promise.all([
-        this.viewedElementPageStyle.getComputed(this.#viewedElement, {
+        this.selectedNodeFrontPageStyle.getComputed(this.#selectedNodeFront, {
           filter: this.#sourceFilter,
           onlyMatched: !this.includeBrowserStyles,
           markMatched: true,
@@ -612,7 +626,7 @@ class CssComputedView {
 
       this.elementStyleUpdated = false;
 
-      if (viewedElement !== this.#viewedElement) {
+      if (selectedNodeFront !== this.#selectedNodeFront) {
         return;
       }
 
@@ -938,12 +952,12 @@ class CssComputedView {
    * Destructor for CssComputedView.
    */
   destroy() {
-    this.#viewedElement = null;
+    this.#selectedNodeFront = null;
     this.#abortController.abort();
     this.#abortController = null;
 
-    if (this.viewedElementPageStyle) {
-      this.viewedElementPageStyle = null;
+    if (this.selectedNodeFrontPageStyle) {
+      this.selectedNodeFrontPageStyle = null;
     }
     this.#outputParser = null;
 
@@ -1040,7 +1054,7 @@ class PropertyView {
     this.isCustomProperty = isCustomProperty;
 
     if (!this.isCustomProperty) {
-      this.link = "https://developer.mozilla.org/docs/Web/CSS/" + name;
+      this.link = `https://developer.mozilla.org/docs/Web/CSS/Reference/Properties/${name}?${lazy.getMdnLinkParams("computed-panel")}`;
     }
 
     this.#propertyInfo = new PropertyInfo(tree, name);
@@ -1073,7 +1087,7 @@ class PropertyView {
   #matchedSelectorViews = null;
 
   // The previously selected element used for the selector view caches
-  #prevViewedElement = null;
+  #prevSelectedNodeFront = null;
 
   // PropertyInfo
   #propertyInfo = null;
@@ -1108,7 +1122,7 @@ class PropertyView {
    * Should this property be visible?
    */
   get visible() {
-    if (!this.#tree.viewedElement) {
+    if (!this.#tree.selectedNodeFront) {
       return false;
     }
 
@@ -1297,12 +1311,12 @@ class PropertyView {
       this.element.className = className;
     }
 
-    if (this.#prevViewedElement !== this.#tree.viewedElement) {
+    if (this.#prevSelectedNodeFront !== this.#tree.selectedNodeFront) {
       this.#matchedSelectorViews = null;
-      this.#prevViewedElement = this.#tree.viewedElement;
+      this.#prevSelectedNodeFront = this.#tree.selectedNodeFront;
     }
 
-    if (!this.#tree.viewedElement || !this.visible) {
+    if (!this.#tree.selectedNodeFront || !this.visible) {
       this.valueNode.textContent = this.valueNode.title = "";
       this.matchedSelectorsContainer.parentNode.hidden = true;
       this.matchedSelectorsContainer.textContent = "";
@@ -1338,8 +1352,8 @@ class PropertyView {
     }
 
     if (this.matchedExpanded && hasMatchedSelectors) {
-      return this.#tree.viewedElementPageStyle
-        .getMatchedSelectors(this.#tree.viewedElement, this.name)
+      return this.#tree.selectedNodeFrontPageStyle
+        .getMatchedSelectors(this.#tree.selectedNodeFront, this.name)
         .then(matched => {
           if (!this.matchedExpanded) {
             return;
@@ -1450,7 +1464,7 @@ class PropertyView {
       valueDiv.appendChild(
         this.#parseValue(
           selector.selectorInfo.value,
-          selector.selectorInfo.rule.href
+          selector.selectorInfo.rule.href || selector.selectorInfo.rule.nodeHref
         )
       );
 
@@ -1464,6 +1478,16 @@ class PropertyView {
             `"${selector.selectorInfo.registeredPropertySyntax}"`
           ),
         });
+      }
+
+      // We only want to show the "Jump to definition" icon if the declaration is in
+      // the RuleView
+      if (selector.isInRuleView()) {
+        const ruleLink = createChild(status, "button", {
+          class: "computed-other-property-ruleview-link jump-definition",
+          title: L10N_JUMP_DEFINITION_TITLE,
+        });
+        ruleLink.addEventListener("click", selector.focusPropertyInRuleView);
       }
     }
 
@@ -1604,6 +1628,7 @@ class SelectorView {
     this.#cacheStatusNames();
 
     this.openStyleEditor = this.openStyleEditor.bind(this);
+    this.focusPropertyInRuleView = this.focusPropertyInRuleView.bind(this);
 
     const rule = this.selectorInfo.rule;
     if (rule?.parentStyleSheet) {
@@ -1757,8 +1782,33 @@ class SelectorView {
 
     const { sheet, line, column } = this.#generatedLocation;
     if (ToolDefinitions.styleEditor.isToolSupported(inspector.toolbox)) {
-      inspector.toolbox.viewSourceInStyleEditorByResource(sheet, line, column);
+      inspector.toolbox.viewStyleSourceByResource(sheet, line, column);
     }
+  }
+
+  /**
+   * Returns whether or not the underlying rule is in the rules view
+   *
+   * @returns {boolean}
+   */
+  isInRuleView() {
+    const rule = this.selectorInfo.rule;
+    if (!rule) {
+      return false;
+    }
+
+    return this.#tree.ruleView.hasRule(rule);
+  }
+
+  /**
+   * Open the RuleView and highlight the property represented by this SelectorView
+   */
+  focusPropertyInRuleView() {
+    const ruleFront = this.selectorInfo.rule;
+    this.#tree.ruleView.highlightProperty(this.selectorInfo.name, {
+      ruleFront,
+      focusValue: true,
+    });
   }
 
   /**
@@ -1865,7 +1915,7 @@ class ComputedViewTool {
 
   onPanelSelected() {
     if (
-      this.inspector.selection.nodeFront === this.computedView.viewedElement
+      this.inspector.selection.nodeFront === this.computedView.selectedNodeFront
     ) {
       this.refresh();
     } else {

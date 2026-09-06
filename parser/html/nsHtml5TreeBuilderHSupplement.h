@@ -23,7 +23,6 @@ int32_t mHandlesUsed;
 nsTArray<mozilla::UniquePtr<nsIContent*[]>> mOldHandles;
 nsHtml5TreeOpStage* mSpeculativeLoadStage;
 nsresult mBroken;
-int32_t isInSVGOddPCData = 0;
 // Controls whether the current HTML script goes through the more complex
 // path that accommodates the possibility of the script becoming a
 // parser-blocking script and the possibility of the script inserting
@@ -48,6 +47,16 @@ bool mPreventScriptExecution;
 bool mGenerateSpeculativeLoads;
 
 bool mHasSeenImportMap;
+
+/**
+ * A temporary ptr to the CustomElementRegistry for scoped registries.
+ * We hold this RefPtr during parsing, which avoids having to pass further
+ * into the parser internals. Whenever SetFragmentContext is called, we
+ * want to set this, then clear it out once finished.
+ */
+mozilla::Maybe<RefPtr<mozilla::dom::CustomElementRegistry>>
+    mCustomElementRegistry;
+
 #ifdef DEBUG
 bool mActive;
 #endif
@@ -66,6 +75,8 @@ nsIContentHandle* getShadowRootFromHost(
     nsIContentHandle* aHost, nsIContentHandle* aTemplateNode,
     nsHtml5String aShadowRootMode, bool aShadowRootIsClonable,
     bool aShadowRootIsSerializable, bool aShadowRootDelegatesFocus,
+    bool aShadowRootCustomElementRegistry,
+    nsHtml5String aShadowRootSlotAssignment,
     nsHtml5String aShadowRootReferenceTarget);
 
 nsIContentHandle* getFormPointerForContext(nsIContentHandle* aContext);
@@ -182,6 +193,11 @@ void DropHandles();
 
 void SetPreventScriptExecution(bool aPrevent) {
   mPreventScriptExecution = aPrevent;
+}
+
+void SetCustomElementRegistry(
+    mozilla::Maybe<RefPtr<mozilla::dom::CustomElementRegistry>> aRegistry) {
+  mCustomElementRegistry = std::move(aRegistry);
 }
 
 bool HasBuilder() { return mBuilder; }

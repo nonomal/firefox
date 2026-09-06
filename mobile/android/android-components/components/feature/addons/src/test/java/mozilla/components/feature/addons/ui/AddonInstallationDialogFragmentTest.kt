@@ -18,12 +18,10 @@ import mozilla.components.feature.addons.Addon
 import mozilla.components.feature.addons.R
 import mozilla.components.support.test.mock
 import mozilla.components.support.test.robolectric.testContext
-import mozilla.components.support.test.rule.MainCoroutineRule
 import mozilla.components.support.utils.ext.getParcelableCompat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.doNothing
@@ -35,17 +33,14 @@ import org.mockito.Mockito.`when`
 @RunWith(AndroidJUnit4::class)
 class AddonInstallationDialogFragmentTest {
 
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
-    private val scope = coroutinesTestRule.scope
-
     @Test
     fun `build dialog`() {
-        val addon = Addon(
-            "id",
-            translatableName = mapOf(Addon.DEFAULT_LOCALE to "my_addon"),
-            permissions = listOf("privacy", "<all_urls>", "tabs"),
-        )
+        val addon =
+            Addon(
+                "id",
+                translatableName = mapOf(Addon.DEFAULT_LOCALE to "my_addon"),
+                permissions = listOf("privacy", "<all_urls>", "tabs"),
+            )
         val fragment = createAddonInstallationDialogFragment(addon)
         assertSame(addon, fragment.arguments?.getParcelableCompat(KEY_INSTALLED_ADDON, Addon::class.java))
 
@@ -140,10 +135,11 @@ class AddonInstallationDialogFragmentTest {
             assertEquals(addon, it)
             onExtensionSettingsLinkClickedCalled = true
         }
-        val fragment = createAddonInstallationDialogFragment(
-            addon = addon,
-            onExtensionSettingsLinkClicked = onExtensionSettingsLinkClicked,
-        )
+        val fragment =
+            createAddonInstallationDialogFragment(
+                addon = addon,
+                onExtensionSettingsLinkClicked = onExtensionSettingsLinkClicked,
+            )
         doReturn(testContext).`when`(fragment).requireContext()
         val dialog = fragment.onCreateDialog(null)
         dialog.show()
@@ -176,14 +172,15 @@ class AddonInstallationDialogFragmentTest {
         onExtensionSettingsLinkClicked: ((Addon) -> Unit)? = null,
     ): AddonInstallationDialogFragment {
         return spy(
-            AddonInstallationDialogFragment.newInstance(
-                addon,
-                promptsStyling = promptsStyling,
-                onExtensionSettingsLinkClicked = onExtensionSettingsLinkClicked,
-            ),
-        ).apply {
-            doNothing().`when`(this).dismiss()
-        }
+                AddonInstallationDialogFragment.newInstance(
+                    addon,
+                    promptsStyling = promptsStyling,
+                    onExtensionSettingsLinkClicked = onExtensionSettingsLinkClicked,
+                )
+            )
+            .apply {
+                doNothing().`when`(this).dismiss()
+            }
     }
 
     private fun mockFragmentManager(): FragmentManager {

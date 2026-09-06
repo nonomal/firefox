@@ -146,6 +146,7 @@ it works for our purposes.
 mod conv;
 mod help;
 mod keywords;
+mod mesh_shader;
 mod ray;
 mod storage;
 mod writer;
@@ -155,7 +156,10 @@ use core::fmt::Error as FmtError;
 
 use thiserror::Error;
 
-use crate::{back, ir, proc};
+use crate::{
+    back::{self, TaskDispatchLimits},
+    ir, proc, Handle,
+};
 
 /// Direct3D 12 binding information for a global variable.
 ///
@@ -177,15 +181,15 @@ use crate::{back, ir, proc};
 ///
 /// The [`back::hlsl::Options`] structure provides `BindTarget`s for various
 /// situations in which Naga may need to generate an HLSL global variable, like
-/// [`binding_map`] for Naga global variables, or [`push_constants_target`] for
-/// a module's sole [`PushConstant`] variable. See those fields' documentation
+/// [`binding_map`] for Naga global variables, or [`immediates_target`] for
+/// a module's sole [`Immediate`] variable. See those fields' documentation
 /// for details.
 ///
 /// [`Storage`]: crate::ir::AddressSpace::Storage
 /// [`back::hlsl::Options`]: Options
 /// [`binding_map`]: Options::binding_map
-/// [`push_constants_target`]: Options::push_constants_target
-/// [`PushConstant`]: crate::ir::AddressSpace::PushConstant
+/// [`immediates_target`]: Options::immediates_target
+/// [`Immediate`]: crate::ir::AddressSpace::Immediate
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
@@ -216,9 +220,8 @@ pub struct OffsetsBindTarget {
     pub size: u32,
 }
 
-#[cfg(any(feature = "serialize", feature = "deserialize"))]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+#[cfg(feature = "deserialize")]
+#[derive(serde::Deserialize)]
 struct BindingMapSerialization {
     resource_binding: crate::ResourceBinding,
     bind_target: BindTarget,
@@ -243,7 +246,6 @@ where
 pub type BindingMap = alloc::collections::BTreeMap<crate::ResourceBinding, BindTarget>;
 
 /// A HLSL shader model version.
-#[allow(non_snake_case, non_camel_case_types)]
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
@@ -258,6 +260,8 @@ pub enum ShaderModel {
     V6_5,
     V6_6,
     V6_7,
+    V6_8,
+    V6_9,
 }
 
 impl ShaderModel {
@@ -273,19 +277,23 @@ impl ShaderModel {
             Self::V6_5 => "6_5",
             Self::V6_6 => "6_6",
             Self::V6_7 => "6_7",
+            Self::V6_8 => "6_8",
+            Self::V6_9 => "6_9",
         }
     }
 }
 
-impl crate::ShaderStage {
-    pub const fn to_hlsl_str(self) -> &'static str {
-        match self {
-            Self::Vertex => "vs",
-            Self::Fragment => "ps",
-            Self::Compute => "cs",
-            Self::Task => "as",
-            Self::Mesh => "ms",
-        }
+pub const fn shader_stage_to_hlsl_str(st: nt::ShaderStage) -> &'static str {
+    match st {
+        nt::ShaderStage::Vertex => "vs",
+        nt::ShaderStage::Fragment => "ps",
+        nt::ShaderStage::Compute => "cs",
+        nt::ShaderStage::Task => "as",
+        nt::ShaderStage::Mesh => "ms",
+        nt::ShaderStage::RayGeneration
+        | nt::ShaderStage::AnyHit
+        | nt::ShaderStage::ClosestHit
+        | nt::ShaderStage::Miss => "lib",
     }
 }
 
@@ -337,9 +345,8 @@ impl Default for SamplerHeapBindTargets {
     }
 }
 
-#[cfg(any(feature = "serialize", feature = "deserialize"))]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+#[cfg(feature = "deserialize")]
+#[derive(serde::Deserialize)]
 struct SamplerIndexBufferBindingSerialization {
     group: u32,
     bind_target: BindTarget,
@@ -369,9 +376,8 @@ where
 pub type SamplerIndexBufferBindingMap =
     alloc::collections::BTreeMap<SamplerIndexBufferKey, BindTarget>;
 
-#[cfg(any(feature = "serialize", feature = "deserialize"))]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+#[cfg(feature = "deserialize")]
+#[derive(serde::Deserialize)]
 struct DynamicStorageBufferOffsetTargetSerialization {
     index: u32,
     bind_target: OffsetsBindTarget,
@@ -425,9 +431,8 @@ pub struct ExternalTextureBindTarget {
     pub params: BindTarget,
 }
 
-#[cfg(any(feature = "serialize", feature = "deserialize"))]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+#[cfg(feature = "deserialize")]
+#[derive(serde::Deserialize)]
 struct ExternalTextureBindingMapSerialization {
     resource_binding: crate::ResourceBinding,
     bind_target: ExternalTextureBindTarget,
@@ -498,16 +503,16 @@ pub struct Options {
     /// to make them work like in Vulkan/Metal, with help of the host.
     pub special_constants_binding: Option<BindTarget>,
 
-    /// HLSL binding information for the [`PushConstant`] global, if present.
+    /// HLSL binding information for the [`Immediate`] global, if present.
     ///
-    /// If a module contains a global in the [`PushConstant`] address space, the
+    /// If a module contains a global in the [`Immediate`] address space, the
     /// `dx12` backend stores its value directly in the root signature as a
     /// series of [`D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`], whose binding
     /// information is given here.
     ///
-    /// [`PushConstant`]: crate::ir::AddressSpace::PushConstant
+    /// [`Immediate`]: crate::ir::AddressSpace::Immediate
     /// [`D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`]: https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_root_parameter_type
-    pub push_constants_target: Option<BindTarget>,
+    pub immediates_target: Option<BindTarget>,
 
     /// HLSL binding information for the sampler heap and comparison sampler heap.
     pub sampler_heap_target: SamplerHeapBindTargets,
@@ -543,6 +548,20 @@ pub struct Options {
     /// If set, loops will have code injected into them, forcing the compiler
     /// to think the number of iterations is bounded.
     pub force_loop_bounding: bool,
+
+    /// Limits to the mesh shader dispatch group a task workgroup can dispatch.
+    ///
+    /// Metal for example limits to 1024 workgroups per task shader dispatch. Dispatching more is
+    /// undefined behavior, so this would validate that to dispatch zero workgroups.
+    pub task_dispatch_limits: Option<TaskDispatchLimits>,
+
+    /// If true, naga may generate checks that the primitive indices are valid in the output.
+    ///
+    /// Currently this validation is unimplemented.
+    pub mesh_shader_primitive_indices_clamp: bool,
+    /// if set, ray queries will get a variable to track their state to prevent
+    /// misuse.
+    pub ray_query_initialization_tracking: bool,
 }
 
 impl Default for Options {
@@ -554,12 +573,15 @@ impl Default for Options {
             special_constants_binding: None,
             sampler_heap_target: SamplerHeapBindTargets::default(),
             sampler_buffer_binding_map: alloc::collections::BTreeMap::default(),
-            push_constants_target: None,
+            immediates_target: None,
             dynamic_storage_buffer_offsets_targets: alloc::collections::BTreeMap::new(),
             external_texture_binding_map: ExternalTextureBindingMap::default(),
             zero_initialize_workgroup_memory: true,
             restrict_indexing: true,
             force_loop_bounding: true,
+            task_dispatch_limits: None,
+            mesh_shader_primitive_indices_clamp: true,
+            ray_query_initialization_tracking: true,
         }
     }
 }
@@ -607,7 +629,7 @@ impl Options {
 }
 
 /// Reflection info for entry point names.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ReflectionInfo {
     /// Mapping of the entry point names.
     ///
@@ -698,6 +720,7 @@ impl Wrapped {
 /// If this is provided, vertex outputs will be removed if they are not inputs of this fragment
 /// entry point. This is necessary for generating correct HLSL when some of the vertex shader
 /// outputs are not consumed by the fragment shader.
+#[derive(Debug)]
 pub struct FragmentEntryPoint<'a> {
     module: &'a crate::Module,
     func: &'a crate::Function,
@@ -719,6 +742,7 @@ impl<'a> FragmentEntryPoint<'a> {
     }
 }
 
+#[expect(missing_debug_implementations, reason = "would be way too verbose?")]
 pub struct Writer<'a, W> {
     out: W,
     names: crate::FastHashMap<proc::NameKey, String>,
@@ -755,4 +779,56 @@ pub struct Writer<'a, W> {
     /// [`AccessIndex`]: crate::Expression::AccessIndex
     temp_access_chain: Vec<storage::SubAccess>,
     need_bake_expressions: back::NeedBakeExpressions,
+
+    function_task_payload_var:
+        crate::FastHashMap<Handle<crate::Function>, Handle<crate::GlobalVariable>>,
+}
+
+pub fn supported_capabilities() -> crate::valid::Capabilities {
+    use crate::valid::Capabilities as Caps;
+    Caps::IMMEDIATES
+        | Caps::FLOAT64 // Unsupported by wgpu but supported by naga
+        | Caps::PRIMITIVE_INDEX
+        | Caps::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+        // No BUFFER_BINDING_ARRAY
+        | Caps::STORAGE_TEXTURE_BINDING_ARRAY
+        // No STORAGE_BUFFER_BINDING_ARRAY
+        | Caps::ACCELERATION_STRUCTURE_BINDING_ARRAY
+        // No CLIP_DISTANCES
+        // No CULL_DISTANCE
+        | Caps::STORAGE_TEXTURE_16BIT_NORM_FORMATS
+        | Caps::MULTIVIEW
+        // No EARLY_DEPTH_TEST
+        | Caps::MULTISAMPLED_SHADING
+        | Caps::RAY_QUERY
+        | Caps::DUAL_SOURCE_BLENDING
+        | Caps::CUBE_ARRAY_TEXTURES
+        | Caps::SHADER_INT64
+        | Caps::SUBGROUP
+        // No SUBGROUP_BARRIER
+        // No SUBGROUP_VERTEX_STAGE
+        | Caps::SHADER_INT64_ATOMIC_MIN_MAX
+        | Caps::SHADER_INT64_ATOMIC_ALL_OPS
+        // No SHADER_FLOAT32_ATOMIC
+        | Caps::TEXTURE_ATOMIC
+        | Caps::TEXTURE_INT64_ATOMIC
+        // No RAY_HIT_VERTEX_POSITION
+        | Caps::SHADER_FLOAT16
+        | Caps::SHADER_INT16
+        | Caps::TEXTURE_EXTERNAL
+        | Caps::SHADER_FLOAT16_IN_FLOAT32
+        | Caps::SHADER_BARYCENTRICS
+        | Caps::MESH_SHADER
+        // No MESH_SHADER_POINT_TOPOLOGY
+        | Caps::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+        // No BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+        | Caps::STORAGE_TEXTURE_BINDING_ARRAY_NON_UNIFORM_INDEXING
+        | Caps::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+        // No COOPERATIVE_MATRIX
+        | Caps::PER_VERTEX
+        // No RAY_TRACING_PIPELINE
+        // No DRAW_INDEX
+        // No MEMORY_DECORATION_VOLATILE
+        | Caps::MEMORY_DECORATION_COHERENT
+        | Caps::LINEAR_INTERPOLATION
 }

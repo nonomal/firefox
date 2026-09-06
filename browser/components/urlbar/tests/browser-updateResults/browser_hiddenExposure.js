@@ -11,16 +11,17 @@
 add_task(async function rowCanUpdateToResult() {
   // Create a provider that returns two non-hidden results.
   let provider = new UrlbarTestUtils.TestProvider({ priority: Infinity });
-  UrlbarProvidersManager.registerProvider(provider);
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
+  providersManager.registerProvider(provider);
   registerCleanupFunction(() => {
-    UrlbarProvidersManager.unregisterProvider(provider);
+    providersManager.unregisterProvider(provider);
   });
 
   for (let i = 0; i < 2; i++) {
     provider.results.push(
       new UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        type: UrlbarShared.RESULT_TYPE.URL,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         payload: {
           url: "https://example.com/" + i,
         },
@@ -55,9 +56,9 @@ add_task(async function rowCanUpdateToResult() {
   // make sure the two results are the exact same type.
   provider.results = [
     new UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.URL,
-      source: UrlbarUtils.RESULT_SOURCE.HISTORY,
-      exposureTelemetry: UrlbarUtils.EXPOSURE_TELEMETRY.HIDDEN,
+      type: UrlbarShared.RESULT_TYPE.URL,
+      source: UrlbarShared.RESULT_SOURCE.HISTORY,
+      exposureTelemetry: UrlbarShared.EXPOSURE_TELEMETRY.HIDDEN,
       payload: {
         url: "https://example.com/hidden-exposure",
       },
@@ -80,5 +81,5 @@ add_task(async function rowCanUpdateToResult() {
   await UrlbarTestUtils.promisePopupClose(window);
   gURLBar.handleRevert();
 
-  UrlbarProvidersManager.unregisterProvider(provider);
+  providersManager.unregisterProvider(provider);
 });

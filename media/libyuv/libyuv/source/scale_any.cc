@@ -8,6 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <assert.h>
 #include <string.h>  // For memset/memcpy
 
 #include "libyuv/scale.h"
@@ -30,8 +31,9 @@ extern "C" {
     if (n > 0) {                                                               \
       SCALEROWDOWN_SIMD(src_ptr, src_stride, dst_ptr, n);                      \
     }                                                                          \
-    SCALEROWDOWN_C(src_ptr + (n * FACTOR) * BPP, src_stride,                   \
-                   dst_ptr + n * BPP, r);                                      \
+    ptrdiff_t np = n;                                                          \
+    SCALEROWDOWN_C(src_ptr + (np * FACTOR) * BPP, src_stride,                  \
+                   dst_ptr + np * BPP, r);                                     \
   }
 
 // Fixed scale down for odd source width.  Used by I420Blend subsampling.
@@ -45,8 +47,9 @@ extern "C" {
     if (n > 0) {                                                               \
       SCALEROWDOWN_SIMD(src_ptr, src_stride, dst_ptr, n);                      \
     }                                                                          \
-    SCALEROWDOWN_C(src_ptr + (n * FACTOR) * BPP, src_stride,                   \
-                   dst_ptr + n * BPP, r + 1);                                  \
+    ptrdiff_t np = n;                                                          \
+    SCALEROWDOWN_C(src_ptr + (np * FACTOR) * BPP, src_stride,                  \
+                   dst_ptr + np * BPP, r + 1);                                 \
   }
 
 #ifdef HAS_SCALEROWDOWN2_SSSE3
@@ -152,22 +155,6 @@ SDANY(ScaleUVRowDown2Box_Any_NEON,
       2,
       7)
 #endif
-
-#ifdef HAS_SCALEROWDOWN2_MSA
-SDANY(ScaleRowDown2_Any_MSA, ScaleRowDown2_MSA, ScaleRowDown2_C, 2, 1, 31)
-SDANY(ScaleRowDown2Linear_Any_MSA,
-      ScaleRowDown2Linear_MSA,
-      ScaleRowDown2Linear_C,
-      2,
-      1,
-      31)
-SDANY(ScaleRowDown2Box_Any_MSA,
-      ScaleRowDown2Box_MSA,
-      ScaleRowDown2Box_C,
-      2,
-      1,
-      31)
-#endif
 #ifdef HAS_SCALEROWDOWN2_LSX
 SDANY(ScaleRowDown2_Any_LSX, ScaleRowDown2_LSX, ScaleRowDown2_C, 2, 1, 31)
 SDANY(ScaleRowDown2Linear_Any_LSX,
@@ -209,15 +196,6 @@ SDANY(ScaleRowDown4Box_Any_NEON,
       4,
       1,
       7)
-#endif
-#ifdef HAS_SCALEROWDOWN4_MSA
-SDANY(ScaleRowDown4_Any_MSA, ScaleRowDown4_MSA, ScaleRowDown4_C, 4, 1, 15)
-SDANY(ScaleRowDown4Box_Any_MSA,
-      ScaleRowDown4Box_MSA,
-      ScaleRowDown4Box_C,
-      4,
-      1,
-      15)
 #endif
 #ifdef HAS_SCALEROWDOWN4_LSX
 SDANY(ScaleRowDown4_Any_LSX, ScaleRowDown4_LSX, ScaleRowDown4_C, 4, 1, 15)
@@ -289,26 +267,6 @@ SDANY(ScaleRowDown34_1_Box_Any_NEON,
       23)
 #endif
 #endif
-#ifdef HAS_SCALEROWDOWN34_MSA
-SDANY(ScaleRowDown34_Any_MSA,
-      ScaleRowDown34_MSA,
-      ScaleRowDown34_C,
-      4 / 3,
-      1,
-      47)
-SDANY(ScaleRowDown34_0_Box_Any_MSA,
-      ScaleRowDown34_0_Box_MSA,
-      ScaleRowDown34_0_Box_C,
-      4 / 3,
-      1,
-      47)
-SDANY(ScaleRowDown34_1_Box_Any_MSA,
-      ScaleRowDown34_1_Box_MSA,
-      ScaleRowDown34_1_Box_C,
-      4 / 3,
-      1,
-      47)
-#endif
 #ifdef HAS_SCALEROWDOWN34_LSX
 SDANY(ScaleRowDown34_Any_LSX,
       ScaleRowDown34_LSX,
@@ -364,26 +322,6 @@ SDANY(ScaleRowDown38_3_Box_Any_NEON,
       11)
 SDANY(ScaleRowDown38_2_Box_Any_NEON,
       ScaleRowDown38_2_Box_NEON,
-      ScaleRowDown38_2_Box_C,
-      8 / 3,
-      1,
-      11)
-#endif
-#ifdef HAS_SCALEROWDOWN38_MSA
-SDANY(ScaleRowDown38_Any_MSA,
-      ScaleRowDown38_MSA,
-      ScaleRowDown38_C,
-      8 / 3,
-      1,
-      11)
-SDANY(ScaleRowDown38_3_Box_Any_MSA,
-      ScaleRowDown38_3_Box_MSA,
-      ScaleRowDown38_3_Box_C,
-      8 / 3,
-      1,
-      11)
-SDANY(ScaleRowDown38_2_Box_Any_MSA,
-      ScaleRowDown38_2_Box_MSA,
       ScaleRowDown38_2_Box_C,
       8 / 3,
       1,
@@ -450,26 +388,6 @@ SDANY(ScaleARGBRowDown2Box_Any_NEON,
       4,
       7)
 #endif
-#ifdef HAS_SCALEARGBROWDOWN2_MSA
-SDANY(ScaleARGBRowDown2_Any_MSA,
-      ScaleARGBRowDown2_MSA,
-      ScaleARGBRowDown2_C,
-      2,
-      4,
-      3)
-SDANY(ScaleARGBRowDown2Linear_Any_MSA,
-      ScaleARGBRowDown2Linear_MSA,
-      ScaleARGBRowDown2Linear_C,
-      2,
-      4,
-      3)
-SDANY(ScaleARGBRowDown2Box_Any_MSA,
-      ScaleARGBRowDown2Box_MSA,
-      ScaleARGBRowDown2Box_C,
-      2,
-      4,
-      3)
-#endif
 #ifdef HAS_SCALEARGBROWDOWN2_LSX
 SDANY(ScaleARGBRowDown2_Any_LSX,
       ScaleARGBRowDown2_LSX,
@@ -501,8 +419,9 @@ SDANY(ScaleARGBRowDown2Box_Any_LSX,
     if (n > 0) {                                                            \
       SCALEROWDOWN_SIMD(src_ptr, src_stride, src_stepx, dst_ptr, n);        \
     }                                                                       \
-    SCALEROWDOWN_C(src_ptr + (n * src_stepx) * BPP, src_stride, src_stepx,  \
-                   dst_ptr + n * BPP, r);                                   \
+    ptrdiff_t np = n;                                                       \
+    SCALEROWDOWN_C(src_ptr + (np * src_stepx) * BPP, src_stride, src_stepx, \
+                   dst_ptr + np * BPP, r);                                  \
   }
 
 #ifdef HAS_SCALEARGBROWDOWNEVEN_SSE2
@@ -525,18 +444,6 @@ SDAANY(ScaleARGBRowDownEven_Any_NEON,
        3)
 SDAANY(ScaleARGBRowDownEvenBox_Any_NEON,
        ScaleARGBRowDownEvenBox_NEON,
-       ScaleARGBRowDownEvenBox_C,
-       4,
-       3)
-#endif
-#ifdef HAS_SCALEARGBROWDOWNEVEN_MSA
-SDAANY(ScaleARGBRowDownEven_Any_MSA,
-       ScaleARGBRowDownEven_MSA,
-       ScaleARGBRowDownEven_C,
-       4,
-       3)
-SDAANY(ScaleARGBRowDownEvenBox_Any_MSA,
-       ScaleARGBRowDownEvenBox_MSA,
        ScaleARGBRowDownEvenBox_C,
        4,
        3)
@@ -567,18 +474,23 @@ SDAANY(ScaleUVRowDownEven_Any_NEON,
 // Add rows box filter scale down.  Using macro from row_any
 #define SAROW(NAMEANY, ANY_SIMD, SBPP, BPP, MASK)                      \
   void NAMEANY(const uint8_t* src_ptr, uint16_t* dst_ptr, int width) { \
-    SIMD_ALIGNED(uint16_t dst_temp[32]);                               \
     SIMD_ALIGNED(uint8_t src_temp[32]);                                \
-    memset(dst_temp, 0, 32 * 2); /* for msan */                        \
+    static_assert((MASK + 1) * SBPP <= sizeof(src_temp),               \
+                  "src_temp buffer too small");                        \
+    SIMD_ALIGNED(uint16_t dst_temp[32]);                               \
+    static_assert((MASK + 1) * BPP <= sizeof(dst_temp),                \
+                  "dst_temp buffer too small");                        \
+    memset(src_temp, 0, sizeof(src_temp)); /* for msan */              \
     int r = width & MASK;                                              \
     int n = width & ~MASK;                                             \
     if (n > 0) {                                                       \
       ANY_SIMD(src_ptr, dst_ptr, n);                                   \
     }                                                                  \
-    memcpy(src_temp, src_ptr + n * SBPP, r * SBPP);                    \
-    memcpy(dst_temp, dst_ptr + n * BPP, r * BPP);                      \
+    ptrdiff_t np = n;                                                  \
+    memcpy(src_temp, src_ptr + np * SBPP, r * SBPP);                   \
+    memcpy(dst_temp, dst_ptr + np * BPP, r * BPP);                     \
     ANY_SIMD(src_temp, dst_temp, MASK + 1);                            \
-    memcpy(dst_ptr + n * BPP, dst_temp, r * BPP);                      \
+    memcpy(dst_ptr + np * BPP, dst_temp, r * BPP);                     \
   }
 
 #ifdef HAS_SCALEADDROW_SSE2
@@ -589,9 +501,6 @@ SAROW(ScaleAddRow_Any_AVX2, ScaleAddRow_AVX2, 1, 2, 31)
 #endif
 #ifdef HAS_SCALEADDROW_NEON
 SAROW(ScaleAddRow_Any_NEON, ScaleAddRow_NEON, 1, 2, 15)
-#endif
-#ifdef HAS_SCALEADDROW_MSA
-SAROW(ScaleAddRow_Any_MSA, ScaleAddRow_MSA, 1, 2, 15)
 #endif
 #ifdef HAS_SCALEADDROW_LSX
 SAROW(ScaleAddRow_Any_LSX, ScaleAddRow_LSX, 1, 2, 15)
@@ -619,9 +528,6 @@ SAANY(ScaleAddRow_Any_AVX2, ScaleAddRow_AVX2, ScaleAddRow_C, 31)
 #ifdef HAS_SCALEADDROW_NEON
 SAANY(ScaleAddRow_Any_NEON, ScaleAddRow_NEON, ScaleAddRow_C, 15)
 #endif
-#ifdef HAS_SCALEADDROW_MSA
-SAANY(ScaleAddRow_Any_MSA, ScaleAddRow_MSA, ScaleAddRow_C, 15)
-#endif
 #ifdef HAS_SCALEADDROW_LSX
 SAANY(ScaleAddRow_Any_LSX, ScaleAddRow_LSX, ScaleAddRow_C, 15)
 #endif
@@ -638,23 +544,18 @@ SAANY(ScaleAddRow_Any_LSX, ScaleAddRow_LSX, ScaleAddRow_C, 15)
     if (n > 0) {                                                               \
       TERP_SIMD(dst_ptr, src_ptr, n, x, dx);                                   \
     }                                                                          \
-    TERP_C(dst_ptr + n * BPP, src_ptr, r, x + n * dx, dx);                     \
+    ptrdiff_t np = n;                                                          \
+    TERP_C(dst_ptr + np * BPP, src_ptr, r, x + np * dx, dx);                   \
   }
 
 #ifdef HAS_SCALEFILTERCOLS_NEON
 CANY(ScaleFilterCols_Any_NEON, ScaleFilterCols_NEON, ScaleFilterCols_C, 1, 7)
-#endif
-#ifdef HAS_SCALEFILTERCOLS_MSA
-CANY(ScaleFilterCols_Any_MSA, ScaleFilterCols_MSA, ScaleFilterCols_C, 1, 15)
 #endif
 #ifdef HAS_SCALEFILTERCOLS_LSX
 CANY(ScaleFilterCols_Any_LSX, ScaleFilterCols_LSX, ScaleFilterCols_C, 1, 15)
 #endif
 #ifdef HAS_SCALEARGBCOLS_NEON
 CANY(ScaleARGBCols_Any_NEON, ScaleARGBCols_NEON, ScaleARGBCols_C, 4, 7)
-#endif
-#ifdef HAS_SCALEARGBCOLS_MSA
-CANY(ScaleARGBCols_Any_MSA, ScaleARGBCols_MSA, ScaleARGBCols_C, 4, 3)
 #endif
 #ifdef HAS_SCALEARGBCOLS_LSX
 CANY(ScaleARGBCols_Any_LSX, ScaleARGBCols_LSX, ScaleARGBCols_C, 4, 3)
@@ -665,13 +566,6 @@ CANY(ScaleARGBFilterCols_Any_NEON,
      ScaleARGBFilterCols_C,
      4,
      3)
-#endif
-#ifdef HAS_SCALEARGBFILTERCOLS_MSA
-CANY(ScaleARGBFilterCols_Any_MSA,
-     ScaleARGBFilterCols_MSA,
-     ScaleARGBFilterCols_C,
-     4,
-     7)
 #endif
 #ifdef HAS_SCALEARGBFILTERCOLS_LSX
 CANY(ScaleARGBFilterCols_Any_LSX,
@@ -935,7 +829,8 @@ SU2BLANY(ScaleRowUp2_Bilinear_16_Any_NEON,
       if (n != 0) {                                                   \
         SIMD(src_ptr, dst_ptr + 2, n);                                \
       }                                                               \
-      C(src_ptr + n, dst_ptr + 2 * n + 2, r);                         \
+      ptrdiff_t np = n;                                               \
+      C(src_ptr + np, dst_ptr + 2 * np + 2, r);                       \
     }                                                                 \
     dst_ptr[2 * dst_width - 2] = src_ptr[((dst_width + 1) & ~1) - 2]; \
     dst_ptr[2 * dst_width - 1] = src_ptr[((dst_width + 1) & ~1) - 1]; \
@@ -1023,7 +918,8 @@ SBUH2LANY(ScaleUVRowUp2_Linear_16_Any_NEON,
       if (n != 0) {                                                     \
         SIMD(sa, sb - sa, da + 2, db - da, n);                          \
       }                                                                 \
-      C(sa + n, sb - sa, da + 2 * n + 2, db - da, r);                   \
+      ptrdiff_t np = n;                                                 \
+      C(sa + np, sb - sa, da + 2 * np + 2, db - da, r);                 \
     }                                                                   \
     da[2 * dst_width - 2] = (3 * sa[((dst_width + 1) & ~1) - 2] +       \
                              sb[((dst_width + 1) & ~1) - 2] + 2) >>     \

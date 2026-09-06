@@ -16,7 +16,7 @@ const lazy = /** @type {any} */ ({});
 
 /**
  * @typedef {{ flowId: string, randomRoll: number }} FlowContext
- * @typedef {"default" | "nightly" | "beta" | "esr" | "release" | "unofficial"} UpdateChannel
+ * @typedef {"default" | "nightly" | "beta" | "aurora" | "esr" | "release" | "unofficial"} UpdateChannel
  * @typedef {Partial<Record<UpdateChannel, number>> & { applyInAutomation?: boolean }} SampleRates
  */
 
@@ -56,6 +56,7 @@ export class TranslationsTelemetry {
   static #PAGE_LOAD_RATE_LIMITS = {
     nightly: 1 /   1_000,
        beta: 1 /  10_000,
+     aurora: 1 /  10_000,
         esr: 1 /  10_000,
     release: 1 / 100_000,
   };
@@ -70,6 +71,7 @@ export class TranslationsTelemetry {
   // prettier-ignore
   static #ENGINE_PERFORMANCE_RATE_LIMITS = {
        beta: 1 /   100,
+     aurora: 1 /   100,
         esr: 1 /   100,
     release: 1 / 1_000,
   };
@@ -273,9 +275,7 @@ export class TranslationsTelemetry {
    * @param {boolean | null} [data.langTagsMatch]
    * @param {boolean | null} [data.isLangAttributeValid]
    * @param {number} data.extractedCodeUnits
-   * @param {number} data.extractionTime
    * @param {number} data.identificationTime
-   * @param {number} data.totalTime
    * @param {boolean} data.confident
    */
   static onIdentifyPageLanguage(data) {
@@ -288,9 +288,7 @@ export class TranslationsTelemetry {
           langTagsMatch,
           isLangAttributeValid,
           extractedCodeUnits,
-          extractionTime,
           identificationTime,
-          totalTime,
           confident,
         } = data;
 
@@ -300,9 +298,7 @@ export class TranslationsTelemetry {
           lang_tags_match: langTagsMatch,
           is_lang_attribute_valid: isLangAttributeValid,
           extracted_code_units: extractedCodeUnits,
-          extraction_time: extractionTime,
           identification_time: identificationTime,
-          total_time: totalTime,
           confident,
         });
         TranslationsTelemetry.logEventToConsole(
@@ -329,17 +325,16 @@ export class TranslationsTelemetry {
   }
 
   /**
-   * Records a telemetry event when a full-page translation request is sent.
+   * Records a telemetry event when a translation request is sent.
    *
    * @param {object} data
    * @param {boolean} data.autoTranslate
-   * @param {string} data.docLangTag
+   * @param {string} [data.docLangTag]
    * @param {string} data.sourceLanguage
    * @param {string} data.targetLanguage
-   * @param {string} data.topPreferredLanguage
    * @param {string} data.requestTarget
    * @param {number} data.sourceTextCodeUnits
-   * @param {number} data.sourceTextWordCount
+   * @param {number} [data.sourceTextWordCount]
    */
   static onTranslate(data) {
     const {
@@ -348,7 +343,6 @@ export class TranslationsTelemetry {
       sourceLanguage,
       requestTarget,
       targetLanguage,
-      topPreferredLanguage,
       sourceTextCodeUnits,
       sourceTextWordCount,
     } = data;
@@ -359,7 +353,6 @@ export class TranslationsTelemetry {
       to_language: targetLanguage,
       auto_translate: autoTranslate,
       document_language: docLangTag,
-      top_preferred_language: topPreferredLanguage,
       request_target: requestTarget ?? "full_page",
       source_text_code_units: sourceTextCodeUnits,
       source_text_word_count: sourceTextWordCount,
@@ -430,6 +423,27 @@ export class TranslationsTelemetry {
       }
     );
   }
+
+  static onFeatureEnable() {
+    Glean.translationsFeature.enable.record();
+    TranslationsTelemetry.logEventToConsole(
+      TranslationsTelemetry.onFeatureEnable
+    );
+  }
+
+  static onFeatureDisable() {
+    Glean.translationsFeature.disable.record();
+    TranslationsTelemetry.logEventToConsole(
+      TranslationsTelemetry.onFeatureDisable
+    );
+  }
+
+  static onFeatureReset() {
+    Glean.translationsFeature.reset.record();
+    TranslationsTelemetry.logEventToConsole(
+      TranslationsTelemetry.onFeatureReset
+    );
+  }
 }
 
 /**
@@ -445,7 +459,11 @@ class FullPageTranslationsPanelTelemetry {
    */
   // prettier-ignore
   static #FULL_PAGE_PANEL_RATE_LIMITS = {
-    release: 1 / 100,
+    nightly: 1 /    10,
+       beta: 1 /    50,
+     aurora: 1 /    50,
+        esr: 1 /   100,
+    release: 1 / 1_000,
   };
 
   /**
@@ -783,7 +801,6 @@ class SelectTranslationsPanelTelemetry {
    * @param {boolean} data.maintainFlow
    * @param {string} data.sourceLanguage
    * @param {string} data.targetLanguage
-   * @param {string} data.topPreferredLanguage
    * @param {string} data.textSource
    */
   static onOpen(data) {
@@ -799,7 +816,6 @@ class SelectTranslationsPanelTelemetry {
         document_language: data.docLangTag,
         from_language: data.sourceLanguage,
         to_language: data.targetLanguage,
-        top_preferred_language: data.topPreferredLanguage,
         text_source: data.textSource,
       });
       TranslationsTelemetry.logEventToConsole(
@@ -1043,6 +1059,24 @@ class AboutTranslationsPageTelemetry {
   }
 
   /**
+   * Records when a translation request is sent from about:translations.
+   *
+   * @param {object} data
+   * @param {boolean} data.autoTranslate
+   * @param {string} data.sourceLanguage
+   * @param {string} data.targetLanguage
+   * @param {number} data.sourceTextCodeUnits
+   * @param {number} [data.sourceTextWordCount]
+   */
+  static onTranslate(data) {
+    // Translation requests are explicitly excluded from rate limiting.
+    TranslationsTelemetry.onTranslate({
+      ...data,
+      requestTarget: "about_translations",
+    });
+  }
+
+  /**
    * Records when the about:translations page is opened.
    *
    * @param {object} data
@@ -1061,6 +1095,157 @@ class AboutTranslationsPageTelemetry {
       });
       TranslationsTelemetry.logEventToConsole(
         AboutTranslationsPageTelemetry.onOpen,
+        data
+      );
+    });
+  }
+
+  /**
+   * Records when the try-again button is invoked in about:translations.
+   */
+  static onTryAgainButton() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.tryAgainButton.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onTryAgainButton
+      );
+    });
+  }
+
+  /**
+   * Records when the copy button is invoked in about:translations.
+   */
+  static onCopyButton() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.copyButton.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onCopyButton
+      );
+    });
+  }
+
+  /**
+   * Records when the clear source text button is invoked in about:translations.
+   */
+  static onClearSourceTextButton() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.clearSourceTextButton.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onClearSourceTextButton
+      );
+    });
+  }
+
+  /**
+   * Records when the swap button is invoked in about:translations.
+   */
+  static onSwapButton() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.swapButton.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onSwapButton
+      );
+    });
+  }
+
+  /**
+   * Records when the language-load-error message is shown in about:translations.
+   */
+  static onLanguageLoadErrorMessage() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.languageLoadErrorMessage.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onLanguageLoadErrorMessage
+      );
+    });
+  }
+
+  /**
+   * Records when the unsupported-info message is shown in about:translations.
+   */
+  static onUnsupportedInfoMessage() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.unsupportedInfoMessage.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onUnsupportedInfoMessage
+      );
+    });
+  }
+
+  /**
+   * Records when the policy-disabled-info message is shown in about:translations.
+   */
+  static onPolicyDisabledInfoMessage() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.policyDisabledInfoMessage.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onPolicyDisabledInfoMessage
+      );
+    });
+  }
+
+  /**
+   * Records when the feature-blocked-info message is shown in about:translations.
+   */
+  static onFeatureBlockedInfoMessage() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.featureBlockedInfoMessage.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onFeatureBlockedInfoMessage
+      );
+    });
+  }
+
+  /**
+   * Records when unblock-feature is invoked in about:translations.
+   */
+  static onUnblockFeature() {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.unblockFeature.record({
+        flow_id: flowId,
+      });
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onUnblockFeature
+      );
+    });
+  }
+
+  /**
+   * Records when the unsupported-language message is shown in about:translations.
+   *
+   * @param {object} data
+   * @param {string} data.detectedLanguage
+   * @param {number} data.sourceTextCodeUnits
+   * @param {number | null} [data.sourceTextWordCount]
+   */
+  static onUnsupportedLanguageMessage(data) {
+    AboutTranslationsPageTelemetry.#withRateLimits(({ flowId }) => {
+      Glean.translationsAboutTranslationsPage.unsupportedLanguageMessage.record(
+        {
+          flow_id: flowId,
+          detected_language: data.detectedLanguage,
+          source_text_code_units: data.sourceTextCodeUnits,
+          source_text_word_count: data.sourceTextWordCount,
+        }
+      );
+      TranslationsTelemetry.logEventToConsole(
+        AboutTranslationsPageTelemetry.onUnsupportedLanguageMessage,
         data
       );
     });

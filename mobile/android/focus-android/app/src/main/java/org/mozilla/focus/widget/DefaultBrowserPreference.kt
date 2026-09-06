@@ -18,15 +18,16 @@ import org.mozilla.focus.GleanMetrics.SetDefaultBrowser
 import org.mozilla.focus.R
 import org.mozilla.focus.ext.tryAsActivity
 
-class DefaultBrowserPreference @JvmOverloads constructor(
+/** A custom preference for setting the application as the default browser. */
+class DefaultBrowserPreference
+@JvmOverloads
+constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0,
 ) : Preference(context, attrs, defStyleAttr) {
 
     private var switchView: SwitchMaterial? = null
-    private val browsers
-        get() = Browsers.all(context)
 
     init {
         widgetLayoutResource = R.layout.preference_default_browser
@@ -41,35 +42,32 @@ class DefaultBrowserPreference @JvmOverloads constructor(
         update()
     }
 
+    /** Updates the checked state of the switch based on whether the app is the default browser. */
     fun update() {
-        switchView?.isChecked = browsers.isDefaultBrowser
+        switchView?.isChecked = Browsers.isDefaultBrowser(context)
     }
 
     public override fun onClick() {
-        val isDefault = browsers.isDefaultBrowser
+        val isDefault = Browsers.isDefaultBrowser(context)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             context.getSystemService(RoleManager::class.java).also {
                 if (it.isRoleAvailable(RoleManager.ROLE_BROWSER) && !it.isRoleHeld(RoleManager.ROLE_BROWSER)) {
-                    context.tryAsActivity()?.startActivityForResult(
-                        it.createRequestRoleIntent(RoleManager.ROLE_BROWSER),
-                        REQUEST_CODE_BROWSER_ROLE,
-                    )
-                    SetDefaultBrowser.fromAppSettings.record(
-                        SetDefaultBrowser.FromAppSettingsExtra(isDefault),
-                    )
+                    context
+                        .tryAsActivity()
+                        ?.startActivityForResult(
+                            it.createRequestRoleIntent(RoleManager.ROLE_BROWSER),
+                            REQUEST_CODE_BROWSER_ROLE,
+                        )
+                    SetDefaultBrowser.fromAppSettings.record(SetDefaultBrowser.FromAppSettingsExtra(isDefault))
                 } else {
                     context.navigateToDefaultBrowserAppsSettings(BuildManufacturerChecker())
-                    SetDefaultBrowser.fromOsSettings.record(
-                        SetDefaultBrowser.FromOsSettingsExtra(isDefault),
-                    )
+                    SetDefaultBrowser.fromOsSettings.record(SetDefaultBrowser.FromOsSettingsExtra(isDefault))
                 }
             }
         } else {
             context.navigateToDefaultBrowserAppsSettings(BuildManufacturerChecker())
-            SetDefaultBrowser.fromOsSettings.record(
-                SetDefaultBrowser.FromOsSettingsExtra(isDefault),
-            )
+            SetDefaultBrowser.fromOsSettings.record(SetDefaultBrowser.FromOsSettingsExtra(isDefault))
         }
     }
 

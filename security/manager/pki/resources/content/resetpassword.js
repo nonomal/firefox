@@ -6,15 +6,16 @@
 
 document.addEventListener("dialogaccept", resetPassword);
 
-function resetPassword() {
-  var pk11db = Cc["@mozilla.org/security/pk11tokendb;1"].getService(
-    Ci.nsIPK11TokenDB
+async function resetPassword(event) {
+  event.preventDefault();
+
+  let token = Cc["@mozilla.org/security/internalkeytoken;1"].createInstance(
+    Ci.nsIPKCS11Token
   );
-  var token = pk11db.getInternalKeyToken();
-  token.reset();
+  await token.reset();
 
   try {
-    Services.logins.removeAllUserFacingLogins();
+    await Services.logins.removeAllUserFacingLoginsAsync();
   } catch (e) {}
 
   let l10n = new Localization(["security/pippki/pippki.ftl"], true);
@@ -25,4 +26,6 @@ function resetPassword() {
       l10n.formatValueSync("pippki-reset-password-confirmation-message")
     );
   }
+
+  window.close();
 }

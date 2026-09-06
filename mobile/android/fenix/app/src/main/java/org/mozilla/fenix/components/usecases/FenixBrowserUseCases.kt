@@ -21,7 +21,7 @@ import org.mozilla.fenix.components.AppStore
  * Use cases for handling loading a URL and performing a search.
  *
  * @param appStore [AppStore] used to fetch the appstore
- * @param addNewTabUseCase [TabsUseCases.AddNewTabUseCase] used for adding new tabs.
+ * @param tabsUseCases [TabsUseCases] used for adding new tabs.
  * @param loadUrlUseCase [SessionUseCases.DefaultLoadUrlUseCase] used for loading a URL.
  * @param searchUseCases [SearchUseCases] used for performing a search.
  * @param homepageTitle The title of the new homepage tab.
@@ -29,7 +29,7 @@ import org.mozilla.fenix.components.AppStore
  */
 class FenixBrowserUseCases(
     private val appStore: AppStore,
-    private val addNewTabUseCase: TabsUseCases.AddNewTabUseCase,
+    private val tabsUseCases: TabsUseCases,
     private val loadUrlUseCase: SessionUseCases.DefaultLoadUrlUseCase,
     private val searchUseCases: SearchUseCases,
     private val homepageTitle: String,
@@ -44,8 +44,7 @@ class FenixBrowserUseCases(
      * @param forceSearch Whether or not to force performing a search.
      * @param searchEngine Optional [SearchEngine] to use when performing a search.
      * @param flags Flags that will be used when loading the URL (not applied to searches).
-     * @param historyMetadata The [HistoryMetadataKey] of the new tab in case this tab
-     * was opened from history.
+     * @param historyMetadata The [HistoryMetadataKey] of the new tab in case this tab was opened from history.
      * @param additionalHeaders The extra headers to use when loading the URL.
      */
     @Suppress("CognitiveComplexMethod")
@@ -66,7 +65,7 @@ class FenixBrowserUseCases(
         // and let it try to load whatever was entered.
         if (searchEngine == null || (!forceSearch && searchTermOrURL.isUrl())) {
             if (newTab) {
-                addNewTabUseCase.invoke(
+                tabsUseCases.addTab.invoke(
                     url = searchTermOrURL.toNormalizedUrl(),
                     flags = flags,
                     private = private,
@@ -82,11 +81,12 @@ class FenixBrowserUseCases(
             }
         } else {
             if (newTab) {
-                val searchUseCase = if (private) {
-                    searchUseCases.newPrivateTabSearch
-                } else {
-                    searchUseCases.newTabSearch
-                }
+                val searchUseCase =
+                    if (private) {
+                        searchUseCases.newPrivateTabSearch
+                    } else {
+                        searchUseCases.newTabSearch
+                    }
                 searchUseCase.invoke(
                     searchTerms = searchTermOrURL,
                     source = SessionState.Source.Internal.UserEntered,
@@ -121,19 +121,25 @@ class FenixBrowserUseCases(
      * Adds a new homepage ("about:home") tab.
      *
      * @param private Whether or not the new homepage tab should be private.
+     * @param startLoading Whether the new tab should start loading immediately.
+     * @param selectTab Whether the new tab should become the selected tab.
      * @return The ID of the created tab.
      */
-    fun addNewHomepageTab(private: Boolean = appStore.state.mode.isPrivate): String {
-        return addNewTabUseCase.invoke(
+    fun addNewHomepageTab(
+        private: Boolean = appStore.state.mode.isPrivate,
+        startLoading: Boolean = true,
+        selectTab: Boolean = true,
+    ): String {
+        return tabsUseCases.addTab.invoke(
             url = ABOUT_HOME_URL,
             title = homepageTitle,
+            selectTab = selectTab,
+            startLoading = startLoading,
             private = private,
         )
     }
 
-    /**
-     * Loads the homepage ("about:home").
-     */
+    /** Loads the homepage ("about:home"). */
     fun navigateToHomepage() {
         loadUrlUseCase.invoke(url = ABOUT_HOME_URL)
     }

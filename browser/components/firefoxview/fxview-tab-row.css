@@ -35,10 +35,10 @@
   text-decoration: none;
 
   :host([compact]) & {
-    grid-template-columns: min-content auto;
+    grid-template-columns: min-content minmax(0, 1fr);
   }
 
-  &[disabled="true"] {
+  &[disabled] {
     pointer-events: none;
     color: var(--text-color-disabled);
   }

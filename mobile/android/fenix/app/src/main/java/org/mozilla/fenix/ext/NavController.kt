@@ -15,10 +15,14 @@ import mozilla.components.support.base.log.logger.Logger
 import org.mozilla.fenix.R
 
 /**
- * Navigate from the fragment with [id] using the given [directions].
- * If the id doesn't match the current destination, an error is recorded.
+ * Navigate from the fragment with [id] using the given [directions]. If the id doesn't match the current destination,
+ * an error is recorded.
  */
-fun NavController.nav(@IdRes id: Int?, directions: NavDirections, navOptions: NavOptions? = null) {
+fun NavController.nav(
+    @IdRes id: Int?,
+    directions: NavDirections,
+    navOptions: NavOptions? = null,
+) {
     if (id == null || this.currentDestination?.id == id) {
         this.navigate(directions, navOptions)
     } else {
@@ -39,10 +43,7 @@ fun NavController.navigateSafe(
     }
 }
 
-/**
- * Navigates using the given [directions], and submit a Breadcrumb
- * when an [IllegalArgumentException] happens.
- */
+/** Navigates using the given [directions], and submit a Breadcrumb when an [IllegalArgumentException] happens. */
 fun NavController.navigateWithBreadcrumb(
     directions: NavDirections,
     navigateFrom: String,
@@ -55,28 +56,30 @@ fun NavController.navigateWithBreadcrumb(
         crashReporter.recordCrashBreadcrumb(
             Breadcrumb(
                 "Navigation - " +
-                    "where we are: $currentDestination," + "where we are going: $navigateTo, " +
-                    "where we thought we were: $navigateFrom",
-            ),
+                    "where we are: $currentDestination," +
+                    "where we are going: $navigateTo, " +
+                    "where we thought we were: $navigateFrom"
+            )
         )
         crashReporter.submitCaughtException(e)
     }
 }
 
-/**
- * Checks if the Fragment with a [fragmentClassName] is on top of the back queue.
- */
+/** Checks if the Fragment with a [fragmentClassName] is on top of the back queue. */
 @SuppressLint("RestrictedApi")
 fun NavController.hasTopDestination(fragmentClassName: String): Boolean {
-    return this.currentBackStackEntry?.destination?.displayName?.contains(
-        fragmentClassName,
-        true,
-    ) == true
+    return this.currentBackStackEntry
+        ?.destination
+        ?.displayName
+        ?.contains(
+            fragmentClassName,
+            true,
+        ) == true
 }
 
 /**
- * Navigate into the Browser destination without casting to HomeActivity.
- * Fragments can call: findNavController().openToBrowser(direction)
+ * Navigate into the Browser destination without casting to HomeActivity. Fragments can call:
+ * findNavController().openToBrowser(direction)
  */
 fun NavController.openToBrowser() {
     if (alreadyOnDestination(R.id.browserFragment)) return

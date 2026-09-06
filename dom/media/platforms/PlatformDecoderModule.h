@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -216,6 +214,7 @@ struct MOZ_STACK_CLASS CreateDecoderParams final {
                      mError ? mError->Description().get() : "null");
     str.AppendPrintf(", mKnowsCompositor = %p", mKnowsCompositor);
     str.AppendPrintf(", mCrashHelper = %p", mCrashHelper);
+    str.AppendPrintf(", mCDM = %p", mCDM);
     str.AppendPrintf(", mUseNullDecoder = %s",
                      mUseNullDecoder.mUse ? "yes" : "no");
     str.AppendPrintf(", mWrappers = %s", EnumSetToString(mWrappers).get());
@@ -451,6 +450,20 @@ class PlatformDecoderModule {
 
   using CreateDecoderPromise = MozPromise<RefPtr<MediaDataDecoder>, MediaResult,
                                           /* IsExclusive = */ true>;
+
+  using SupportsDecoderPromise =
+      MozPromise<media::DecodeSupportSet, nsresult, /* IsExclusive = */ true>;
+
+  // Asynchronous variant of Supports(). The default simply resolves with the
+  // synchronous result; modules that proxy to a remote process override this
+  // to first wait until that process has reported its codec support, so the
+  // answer reflects accurate hardware capabilities rather than a conservative
+  // guess. Must be called off the main thread.
+  virtual RefPtr<SupportsDecoderPromise> SupportsAsync(
+      const SupportDecoderParams& aParams) const {
+    return SupportsDecoderPromise::CreateAndResolve(Supports(aParams, nullptr),
+                                                    __func__);
+  }
 
  protected:
   PlatformDecoderModule() = default;

@@ -1,6 +1,5 @@
-/* -*- Mode: Java; c-basic-offset: 4; tab-width: 4; indent-tabs-mode: nil; -*-
- * Any copyright is dedicated to the Public Domain.
-   http://creativecommons.org/publicdomain/zero/1.0/ */
+/* Any copyright is dedicated to the Public Domain.
+http://creativecommons.org/publicdomain/zero/1.0/ */
 
 package org.mozilla.geckoview.test
 
@@ -23,12 +22,8 @@ class FissionTest : BaseSessionTest() {
         assumeThat(sessionRule.env.isFission, equalTo(true))
 
         // Check preference with Gecko
-        val fissionAutostart = sessionRule.getPrefs(
-            "fission.autostart",
-        )
-        assertTrue(
-            fissionAutostart[0] as Boolean,
-        )
+        val fissionAutostart = sessionRule.getPrefs("fission.autostart")
+        assertTrue(fissionAutostart[0] as Boolean)
 
         // Check preference with GeckoView
         assertNull(
@@ -48,12 +43,8 @@ class FissionTest : BaseSessionTest() {
         assumeThat(sessionRule.env.isFission, equalTo(false))
 
         // Check preference with Gecko
-        val fissionAutostart = sessionRule.getPrefs(
-            "fission.autostart",
-        )
-        assertFalse(
-            fissionAutostart[0] as Boolean,
-        )
+        val fissionAutostart = sessionRule.getPrefs("fission.autostart")
+        assertFalse(fissionAutostart[0] as Boolean)
 
         // Check preference with GeckoView
         assertNull(
@@ -70,17 +61,13 @@ class FissionTest : BaseSessionTest() {
 
     @Test
     fun testFissionSettingsBuilder() {
-        val settingFissionEnabled = GeckoRuntimeSettings.Builder()
-            .fissionEnabled(true)
-            .build()
+        val settingFissionEnabled = GeckoRuntimeSettings.Builder().fissionEnabled(true).build()
         assertTrue(
             "Fission setting should be set to true.",
             settingFissionEnabled.fissionEnabled!!,
         )
 
-        val settingFissionDisabled = GeckoRuntimeSettings.Builder()
-            .fissionEnabled(false)
-            .build()
+        val settingFissionDisabled = GeckoRuntimeSettings.Builder().fissionEnabled(false).build()
         assertFalse(
             "Fission setting should be set to false.",
             settingFissionDisabled.fissionEnabled!!,

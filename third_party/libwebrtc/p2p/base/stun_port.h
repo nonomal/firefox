@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 
 #include "absl/memory/memory.h"
 #include "absl/strings/string_view.h"
@@ -31,6 +32,7 @@
 #include "p2p/base/stun_request.h"
 #include "rtc_base/async_packet_socket.h"
 #include "rtc_base/dscp.h"
+#include "rtc_base/net_helper.h"
 #include "rtc_base/network/received_packet.h"
 #include "rtc_base/network/sent_packet.h"
 #include "rtc_base/network_constants.h"
@@ -51,7 +53,7 @@ class RTC_EXPORT UDPPort : public Port {
       const PortParametersRef& args,
       AsyncPacketSocket* socket,
       bool emit_local_for_anyaddress,
-      std::optional<int> stun_keepalive_interval) {
+      std::optional<TimeDelta> stun_keepalive_interval) {
     // Using `new` to access a non-public constructor.
     auto port = absl::WrapUnique(new UDPPort(
         args, IceCandidateType::kHost, socket, emit_local_for_anyaddress));
@@ -67,7 +69,7 @@ class RTC_EXPORT UDPPort : public Port {
       uint16_t min_port,
       uint16_t max_port,
       bool emit_local_for_anyaddress,
-      std::optional<int> stun_keepalive_interval) {
+      std::optional<TimeDelta> stun_keepalive_interval) {
     // Using `new` to access a non-public constructor.
     auto port =
         absl::WrapUnique(new UDPPort(args, IceCandidateType::kHost, min_port,
@@ -104,10 +106,8 @@ class RTC_EXPORT UDPPort : public Port {
 
   void GetStunStats(std::optional<StunStats>* stats) override;
 
-  void set_stun_keepalive_delay(const std::optional<int>& delay);
-  TimeDelta stun_keepalive_delay() const {
-    return TimeDelta::Millis(stun_keepalive_delay_);
-  }
+  void set_stun_keepalive_delay(const std::optional<TimeDelta>& delay);
+  TimeDelta stun_keepalive_delay() const { return stun_keepalive_delay_; }
 
   // Visible for testing.
   TimeDelta stun_keepalive_lifetime() const { return stun_keepalive_lifetime_; }
@@ -129,14 +129,11 @@ class RTC_EXPORT UDPPort : public Port {
           bool emit_local_for_anyaddress);
   bool Init();
 
-  int SendTo(const void* data,
-             size_t size,
+  int SendTo(std::span<const uint8_t> data,
              const SocketAddress& addr,
              const AsyncSocketPacketOptions& options,
              bool payload) override;
-
   void UpdateNetworkCost() override;
-
   DiffServCodePoint StunDscpValue() const override;
 
   void OnLocalAddressReady(AsyncPacketSocket* socket,
@@ -212,7 +209,7 @@ class RTC_EXPORT UDPPort : public Port {
       absl::string_view reason);
 
   // Sends STUN requests to the server.
-  void OnSendPacket(const void* data, size_t size, StunRequest* req);
+  void SendStunRequest(std::span<const uint8_t> data, StunRequest* req);
 
   // TODO(mallinaht): Move this up to Port when SignalAddressReady is
   // changed to SignalPortReady.
@@ -232,12 +229,14 @@ class RTC_EXPORT UDPPort : public Port {
   ServerAddresses bind_request_succeeded_servers_;
   ServerAddresses bind_request_failed_servers_;
   StunRequestManager request_manager_;
+
   AsyncPacketSocket* socket_;
+  std::unique_ptr<AsyncPacketSocket> owned_socket_;
   int error_;
   int send_error_count_ = 0;
   std::unique_ptr<AddressResolver> resolver_;
   bool ready_;
-  int stun_keepalive_delay_;
+  TimeDelta stun_keepalive_delay_;
   TimeDelta stun_keepalive_lifetime_ = TimeDelta::PlusInfinity();
   DiffServCodePoint dscp_;
 
@@ -257,7 +256,7 @@ class StunPort : public UDPPort {
       uint16_t min_port,
       uint16_t max_port,
       const ServerAddresses& servers,
-      std::optional<int> stun_keepalive_interval);
+      std::optional<TimeDelta> stun_keepalive_interval);
 
   void PrepareAddress() override;
 

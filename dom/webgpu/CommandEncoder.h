@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,7 +11,6 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/Span.h"
 #include "mozilla/WeakPtr.h"
-#include "mozilla/dom/TypedArray.h"
 #include "mozilla/webgpu/WebGPUTypes.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
 #include "nsTArrayForwardDeclare.h"
@@ -47,8 +45,6 @@ class ExternalTexture;
 class RenderPassEncoder;
 class WebGPUChild;
 
-enum class CommandEncoderState { Open, Locked, Ended };
-
 class CommandEncoder final : public nsWrapperCache,
                              public ObjectBase,
                              public ChildOf<Device> {
@@ -60,7 +56,7 @@ class CommandEncoder final : public nsWrapperCache,
 
   static void ConvertTextureDataLayoutToFFI(
       const dom::GPUTexelCopyBufferLayout& aLayout,
-      ffi::WGPUTexelCopyBufferLayout* aLayoutFFI);
+      ffi::WGPUFfiTexelCopyBufferLayout* aLayoutFFI);
   static void ConvertTextureCopyViewToFFI(
       const dom::GPUTexelCopyTextureInfo& aCopy,
       ffi::WGPUTexelCopyTextureInfo_TextureId* aViewFFI);
@@ -68,22 +64,16 @@ class CommandEncoder final : public nsWrapperCache,
  private:
   virtual ~CommandEncoder();
 
-  CommandEncoderState mState;
-
   CanvasContextArray mPresentationContexts;
   nsTArray<RefPtr<ExternalTexture>> mExternalTextures;
 
   void TrackPresentationContext(WeakPtr<CanvasContext> aTargetContext);
 
  public:
-  const auto& GetDevice() const { return mParent; };
-
-  CommandEncoderState GetState() const { return mState; };
-
-  void EndComputePass(ffi::WGPURecordedComputePass& aPass,
+  void EndComputePass(RawId aComputePassEncoderId,
                       CanvasContextArray& aCanvasContexts,
                       Span<RefPtr<ExternalTexture>> aExternalTextures);
-  void EndRenderPass(ffi::WGPURecordedRenderPass& aPass,
+  void EndRenderPass(RawId aRenderPassEncoderId,
                      CanvasContextArray& aCanvasContexts,
                      Span<RefPtr<ExternalTexture>> aExternalTextures);
 
@@ -126,19 +116,31 @@ template <typename T>
 void AssignPassTimestampWrites(const T& src,
                                ffi::WGPUPassTimestampWrites& dest) {
   if (src.mBeginningOfPassWriteIndex.WasPassed()) {
-    dest.beginning_of_pass_write_index =
-        &src.mBeginningOfPassWriteIndex.Value();
+    dest.beginning_of_pass_write_index.tag = ffi::WGPUFfiOption_u32_Some_u32;
+    dest.beginning_of_pass_write_index.some =
+        src.mBeginningOfPassWriteIndex.Value();
   } else {
-    dest.beginning_of_pass_write_index = nullptr;
+    dest.beginning_of_pass_write_index.tag = ffi::WGPUFfiOption_u32_None_u32;
   }
 
   if (src.mEndOfPassWriteIndex.WasPassed()) {
-    dest.end_of_pass_write_index = &src.mEndOfPassWriteIndex.Value();
+    dest.end_of_pass_write_index.tag = ffi::WGPUFfiOption_u32_Some_u32;
+    dest.end_of_pass_write_index.some = src.mEndOfPassWriteIndex.Value();
   } else {
-    dest.end_of_pass_write_index = nullptr;
+    dest.end_of_pass_write_index.tag = ffi::WGPUFfiOption_u32_None_u32;
   }
 
   dest.query_set = src.mQuerySet->GetId();
+}
+
+// Metal imposes a limit on the number of outstanding command buffers.
+// Attempting to create another command buffer after reaching that limit
+// will block, which can result in a deadlock if GC is required to
+// recover old command buffers. To encourage garbage collection of
+// command buffers before that happens, we associate some additional
+// memory with each command buffer.
+inline size_t BindingJSObjectMallocBytes(CommandEncoder* aEncoder) {
+  return 16384;
 }
 
 }  // namespace webgpu

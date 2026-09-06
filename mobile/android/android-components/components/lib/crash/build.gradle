@@ -4,30 +4,20 @@
 
 buildscript {
     repositories {
-        gradle.mozconfig.substs.GRADLE_MAVEN_REPOSITORIES.each { repository ->
-            maven {
-                url = repository
-                if (gradle.mozconfig.substs.ALLOW_INSECURE_GRADLE_REPOSITORIES) {
-                    allowInsecureProtocol = true
-                }
-            }
-        }
+        gradle.configureMavenRepositories(delegate)
     }
 
     dependencies {
-        classpath libs.kotlin.serialization
         classpath libs.mozilla.glean.gradle.plugin
     }
 }
 
 plugins {
-    alias(libs.plugins.python.envs.plugin)
+    id 'com.android.library'
+    alias(libs.plugins.dependency.analysis)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
-
-apply plugin: 'com.android.library'
-apply plugin: 'com.google.devtools.ksp'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlinx-serialization'
 
 android {
     defaultConfig {
@@ -36,14 +26,15 @@ android {
                 arguments += ["room.incremental": "true"]
             }
         }
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    sourceSets {
-        main {
-            java {
-                // Generated files are output in the objdir
-                srcDir "${gradle.mozconfig.topobjdir}/mobile/android/android-components/components/lib/crash/src/main/java"
-            }
+    buildTypes {
+        debug {
+            // We use this in androidTest to disable tests which will fail without the crashreporter
+            // enabled (since they rely on the crashtools binary).
+            buildConfigField 'boolean', 'MOZ_CRASHREPORTER', gradle.mozconfig.substs.MOZ_CRASHREPORTER ? 'true' : 'false';
         }
     }
 
@@ -59,6 +50,16 @@ android {
     namespace = 'mozilla.components.lib.crash'
 }
 
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        // CrashReport.kt and friends are generated into the objdir by the build system (not a
+        // Gradle task), so register the directory as a static source.
+        variant.sources.java.addStaticSourceDirectory(
+            "${gradle.mozconfig.topobjdir}/mobile/android/android-components/components/lib/crash/src/main/java".toString()
+        )
+    }
+}
+
 dependencies {
     // We only compile against GeckoView and Glean. It's up to the app to add those dependencies if it wants to
     // send crash reports to Socorro (GV).
@@ -70,7 +71,7 @@ dependencies {
 
     implementation libs.androidx.appcompat
     implementation libs.androidx.constraintlayout
-    implementation libs.androidx.core.ktx
+    implementation libs.androidx.core
     implementation libs.androidx.recyclerview
     implementation libs.androidx.room.runtime
     ksp libs.androidx.room.compiler
@@ -82,11 +83,23 @@ dependencies {
     testImplementation libs.androidx.test.core
     testImplementation libs.androidx.test.junit
     testImplementation libs.androidx.work.testing
+    testImplementation libs.kotlin.test
     testImplementation libs.kotlinx.coroutines.test
     testImplementation libs.mockwebserver
     testImplementation libs.mozilla.glean
     testImplementation libs.mozilla.glean.forUnitTests
+    testImplementation libs.okhttp
+    testImplementation libs.okio
     testImplementation libs.robolectric
+
+    androidTestImplementation project(':components:support-android-test')
+    androidTestImplementation libs.androidx.test.junit
+    androidTestImplementation libs.kotlin.test
+    androidTestImplementation libs.mozilla.glean
+
+    // Depend on browser-engine-gecko to get the libcrashtools.so binary for tests. We don't use jniLibs because it
+    // is only available as part of the geckoview APK artifact in CI.
+    androidTestRuntimeOnly project(':components:browser-engine-gecko')
 }
 
 ext {

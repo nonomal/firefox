@@ -12,12 +12,18 @@ var { XPCOMUtils } = ChromeUtils.importESModule(
 
 const lazy = {};
 
+ChromeUtils.defineESModuleGetters(lazy, {
+  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+});
+
 XPCOMUtils.defineLazyServiceGetter(
   lazy,
   "contentBlockingAllowList",
   "@mozilla.org/content-blocking-allow-list;1",
   Ci.nsIContentBlockingAllowList
 );
+
+const DEFAULT_FAVICON = "chrome://global/skin/icons/defaultFavicon.svg";
 
 const permissionExceptionsL10n = {
   trackingprotection: {
@@ -47,6 +53,10 @@ const permissionExceptionsL10n = {
   "ipp-vpn": {
     window: "ip-protection-exceptions-dialog-window",
     description: "ip-protection-exclusions-desc",
+  },
+  "persist-data-on-shutdown": {
+    window: "permissions-exceptions-shutdown-clearing-window",
+    description: "permissions-exceptions-shutdown-clearing-desc",
   },
 };
 
@@ -83,6 +93,7 @@ var gPermissionManager = {
    * @param {boolean} params.sessionVisible Display the "Allow for Session" button in the dialog (Only for Cookie & HTTPS-Only permissions)
    * @param {boolean} params.allowVisible Display the "Allow" button in the dialog
    * @param {boolean} params.disableETPVisible Display the "Add Exception" button in the dialog (Only for ETP permissions)
+   * @param {boolean} params.addVisible Display the "Add" button in the dialog (Only for ipp-vpn permissions)
    * @param {boolean} params.hideStatusColumn Hide the "Status" column in the dialog
    * @param {boolean} params.forcedHTTP Save inputs whose URI has a HTTPS scheme with a HTTP scheme (Used by HTTPS-Only)
    * @param {number} params.capabilityFilter Display permissions that have the specified capability only. See Ci.nsIPermissionManager.
@@ -106,30 +117,13 @@ var gPermissionManager = {
     this._btnAllow = document.getElementById("btnAllow");
     this._btnHttpsOnlyOff = document.getElementById("btnHttpsOnlyOff");
     this._btnHttpsOnlyOffTmp = document.getElementById("btnHttpsOnlyOffTmp");
+    this._btnAdd = document.getElementById("btnAdd");
 
     this._capabilityFilter = params.capabilityFilter;
 
     let permissionsText = document.getElementById("permissionsText");
 
-    let l10n;
-
-    // For ipp-vpn, we want to override strings based on capability.
-    // Valid capabilities for this permission are ALLOW and DENY.
-    if (this._type === "ipp-vpn") {
-      if (params.capabilityFilter === Ci.nsIPermissionManager.ALLOW_ACTION) {
-        l10n = {
-          window: "ip-protection-exceptions-dialog-window",
-          description: "ip-protection-inclusions-desc",
-        };
-      } else {
-        l10n = {
-          window: "ip-protection-exceptions-dialog-window",
-          description: "ip-protection-exclusions-desc",
-        };
-      }
-    } else {
-      l10n = permissionExceptionsL10n[this._type];
-    }
+    let l10n = permissionExceptionsL10n[this._type];
 
     document.l10n.setAttributes(permissionsText, l10n.description);
     document.l10n.setAttributes(document.documentElement, l10n.window);
@@ -138,7 +132,8 @@ var gPermissionManager = {
       params.blockVisible ||
       params.sessionVisible ||
       params.allowVisible ||
-      params.disableETPVisible;
+      params.disableETPVisible ||
+      params.addVisible;
 
     this._urlField = document.getElementById("url");
     this._urlField.value = params.prefilledHost;
@@ -146,10 +141,7 @@ var gPermissionManager = {
 
     this._forcedHTTP = params.forcedHTTP;
 
-    await document.l10n.translateElements([
-      permissionsText,
-      document.documentElement,
-    ]);
+    await document.l10n.translateElements([permissionsText]);
 
     document.getElementById("btnDisableETP").hidden = !params.disableETPVisible;
     document.getElementById("btnBlock").hidden = !params.blockVisible;
@@ -163,11 +155,11 @@ var gPermissionManager = {
       params.sessionVisible && this._type == "https-only-load-insecure"
     );
     document.getElementById("btnAllow").hidden = !params.allowVisible;
+    document.getElementById("btnAdd").hidden = !params.addVisible;
 
     this.onHostInput(this._urlField);
 
-    let urlLabel = document.getElementById("urlLabel");
-    urlLabel.hidden = !urlFieldVisible;
+    document.getElementById("urlLabel").hidden = !urlFieldVisible;
 
     this._hideStatusColumn = params.hideStatusColumn;
     let statusCol = document.getElementById("statusCol");
@@ -218,7 +210,7 @@ var gPermissionManager = {
   },
 
   addCommandListeners() {
-    window.addEventListener("command", event => {
+    window.addEventListener("click", event => {
       switch (event.target.id) {
         case "removePermission":
           gPermissionManager.onPermissionDelete();
@@ -254,6 +246,10 @@ var gPermissionManager = {
             Ci.nsIHttpsOnlyModePermission.LOAD_INSECURE_ALLOW_SESSION
           );
           break;
+        case "btnAdd":
+          // This button is for ipp-vpn, which only supports
+          // site exclusions at this time.
+          gPermissionManager.addPermission(Ci.nsIPermissionManager.DENY_ACTION);
       }
     });
   },
@@ -392,6 +388,9 @@ var gPermissionManager = {
   },
 
   _addNewPrincipalToList(list, uri) {
+    if (uri.host?.includes("*")) {
+      throw new Error("Wildcard in host");
+    }
     list.push(Services.scriptSecurityManager.createContentPrincipal(uri, {}));
     // If we have ended up with an unknown scheme, the following will throw.
     list[list.length - 1].origin;
@@ -411,6 +410,11 @@ var gPermissionManager = {
       // permissions from being entered by the user.
       try {
         let uri = Services.io.newURI(input_url);
+        // nsIURI.host throws for schemes without an authority (e.g. about:),
+        // so only reject wildcards for URIs that actually have a host.
+        if (uri instanceof Ci.nsIURL && uri.host.includes("*")) {
+          throw new Error("Wildcard in host");
+        }
         if (this._forcedHTTP && uri.schemeIs("https")) {
           uri = uri.mutate().setScheme("http").finalize();
         }
@@ -512,9 +516,15 @@ var gPermissionManager = {
     let row = document.createXULElement("hbox");
     row.setAttribute("style", "flex: 1");
 
+    let icon = document.createXULElement("image");
+    icon.setAttribute("class", "website-icon");
+    icon.setAttribute("src", DEFAULT_FAVICON);
+    row.appendChild(icon);
+    this._setSiteIcon(permission.origin, icon);
+
     let hbox = document.createXULElement("hbox");
     let website = document.createXULElement("label");
-    website.setAttribute("disabled", disabledByPolicy);
+    website.toggleAttribute("disabled", disabledByPolicy);
     website.setAttribute("class", "website-name-value");
     website.setAttribute("value", permission.origin);
     hbox.setAttribute("class", "website-name");
@@ -525,7 +535,7 @@ var gPermissionManager = {
     if (!this._hideStatusColumn) {
       hbox = document.createXULElement("hbox");
       let capability = document.createXULElement("label");
-      capability.setAttribute("disabled", disabledByPolicy);
+      capability.toggleAttribute("disabled", disabledByPolicy);
       capability.setAttribute("class", "website-capability-value");
       document.l10n.setAttributes(
         capability,
@@ -539,6 +549,21 @@ var gPermissionManager = {
 
     richlistitem.appendChild(row);
     return richlistitem;
+  },
+
+  async _setSiteIcon(origin, icon) {
+    let iconURI;
+    try {
+      iconURI = Services.io.newURI(origin);
+    } catch {
+      return;
+    }
+    let favicon = await lazy.PlacesUtils.favicons
+      .getFaviconForPage(iconURI)
+      .catch(() => null);
+    if (favicon) {
+      icon.setAttribute("src", `page-icon:${origin}`);
+    }
   },
 
   onWindowKeyPress(event) {
@@ -577,6 +602,8 @@ var gPermissionManager = {
         document.getElementById("btnHttpsOnlyOff").click();
       } else if (!document.getElementById("btnDisableETP").hidden) {
         document.getElementById("btnDisableETP").click();
+      } else if (!document.getElementById("btnAdd").hidden) {
+        document.getElementById("btnAdd").click();
       }
     }
   },
@@ -592,6 +619,7 @@ var gPermissionManager = {
     this._btnDisableETP.disabled =
       this._btnDisableETP.hidden || !siteField.value;
     this._btnAllow.disabled = this._btnAllow.hidden || !siteField.value;
+    this._btnAdd.disabled = this._btnAdd.hidden || !siteField.value;
   },
 
   _setRemoveButtonState() {

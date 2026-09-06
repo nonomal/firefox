@@ -1,28 +1,26 @@
-/* -*- Mode: C++; tab-width: 20; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "gfxMacFont.h"
 
+#include <algorithm>
+
+#include "AppleUtils.h"
+#include "CoreTextFontList.h"
+#include "cairo-quartz.h"
+#include "gfxContext.h"
+#include "gfxCoreTextShaper.h"
+#include "gfxFontConstants.h"
+#include "gfxFontUtils.h"
+#include "gfxHarfBuzzShaper.h"
+#include "gfxPlatformMac.h"
+#include "gfxTextRun.h"
+#include "gfxUtils.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/Sprintf.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/gfx/ScaledFontMac.h"
-
-#include <algorithm>
-
-#include "CoreTextFontList.h"
-#include "gfxCoreTextShaper.h"
-#include "gfxPlatformMac.h"
-#include "gfxContext.h"
-#include "gfxFontUtils.h"
-#include "gfxHarfBuzzShaper.h"
-#include "gfxFontConstants.h"
-#include "gfxTextRun.h"
-#include "gfxUtils.h"
-#include "AppleUtils.h"
-#include "cairo-quartz.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
@@ -143,10 +141,9 @@ gfxMacFont::~gfxMacFont() {
   }
 }
 
-bool gfxMacFont::ShapeText(DrawTarget* aDrawTarget, const char16_t* aText,
-                           uint32_t aOffset, uint32_t aLength, Script aScript,
-                           nsAtom* aLanguage, bool aVertical,
-                           RoundingFlags aRounding,
+bool gfxMacFont::ShapeText(const char16_t* aText, uint32_t aOffset,
+                           uint32_t aLength, Script aScript, nsAtom* aLanguage,
+                           bool aVertical, RoundingFlags aRounding,
                            gfxShapedText* aShapedText) {
   if (!mIsValid) {
     NS_WARNING("invalid font! expect incorrect text rendering");
@@ -161,11 +158,9 @@ bool gfxMacFont::ShapeText(DrawTarget* aDrawTarget, const char16_t* aText,
     if (!mCoreTextShaper) {
       mCoreTextShaper = MakeUnique<gfxCoreTextShaper>(this);
     }
-    if (mCoreTextShaper->ShapeText(aDrawTarget, aText, aOffset, aLength,
-                                   aScript, aLanguage, aVertical, aRounding,
-                                   aShapedText)) {
-      PostShapingFixup(aDrawTarget, aText, aOffset, aLength, aVertical,
-                       aShapedText);
+    if (mCoreTextShaper->ShapeText(aText, aOffset, aLength, aScript, aLanguage,
+                                   aVertical, aRounding, aShapedText)) {
+      PostShapingFixup(aText, aOffset, aLength, aVertical, aShapedText);
       if (ctFontEntry->HasTrackingTable()) {
         // Convert font size from device pixels back to CSS px
         // to use in selecting tracking value
@@ -184,8 +179,8 @@ bool gfxMacFont::ShapeText(DrawTarget* aDrawTarget, const char16_t* aText,
     }
   }
 
-  return gfxFont::ShapeText(aDrawTarget, aText, aOffset, aLength, aScript,
-                            aLanguage, aVertical, aRounding, aShapedText);
+  return gfxFont::ShapeText(aText, aOffset, aLength, aScript, aLanguage,
+                            aVertical, aRounding, aShapedText);
 }
 
 gfxFont::RunMetrics gfxMacFont::Measure(const gfxTextRun* aTextRun,
@@ -193,10 +188,11 @@ gfxFont::RunMetrics gfxMacFont::Measure(const gfxTextRun* aTextRun,
                                         BoundingBoxType aBoundingBoxType,
                                         DrawTarget* aRefDrawTarget,
                                         Spacing* aSpacing,
+                                        nscoord aLetterSpacing,
                                         gfx::ShapedTextFlags aOrientation) {
   gfxFont::RunMetrics metrics =
       gfxFont::Measure(aTextRun, aStart, aEnd, aBoundingBoxType, aRefDrawTarget,
-                       aSpacing, aOrientation);
+                       aSpacing, aLetterSpacing, aOrientation);
 
   // if aBoundingBoxType is not TIGHT_HINTED_OUTLINE_EXTENTS then we need to add
   // a pixel column each side of the bounding box in case of antialiasing
@@ -208,6 +204,34 @@ gfxFont::RunMetrics gfxMacFont::Measure(const gfxTextRun* aTextRun,
   }
 
   return metrics;
+}
+
+void gfxMacFont::InitMetricsByGlyphMeasurement(CFDataRef aCmap,
+                                               gfxFloat aConvFactor) {
+  uint32_t glyphID;
+  // Measure/calculate additional metrics, independent of whether we used
+  // the tables directly or ATS metrics APIs
+  if (mMetrics.aveCharWidth <= 0) {
+    mMetrics.aveCharWidth = GetCharWidth(aCmap, 'x', &glyphID, aConvFactor);
+    if (glyphID == 0) {
+      // we didn't find 'x', so use maxAdvance rather than zero
+      mMetrics.aveCharWidth = mMetrics.maxAdvance;
+    }
+  }
+
+  mMetrics.spaceWidth = GetCharWidth(aCmap, ' ', &glyphID, aConvFactor);
+  if (glyphID == 0) {
+    // no space glyph?!
+    mMetrics.spaceWidth = mMetrics.aveCharWidth;
+  }
+  mSpaceGlyph = glyphID;
+
+  mMetrics.ideographicWidth =
+      GetCharWidth(aCmap, kWaterIdeograph, &glyphID, aConvFactor);
+  if (glyphID == 0) {
+    // Indicate "not found".
+    mMetrics.ideographicWidth = -1.0;
+  }
 }
 
 void gfxMacFont::InitMetrics() {
@@ -263,7 +287,11 @@ void gfxMacFont::InitMetrics() {
 
   // Try to read 'sfnt' metrics; for local, non-sfnt fonts ONLY, fall back to
   // platform APIs. The InitMetrics...() functions will set mIsValid on success.
-  if (!InitMetricsFromSfntTables(mMetrics) &&
+  if (
+#if MOZ_FONTATIONS
+      !InitMetricsFromSkrifa(mMetrics) &&
+#endif
+      !InitMetricsFromSfntTables(mMetrics) &&
       (!mFontEntry->IsUserFont() || mFontEntry->IsLocalUserFont())) {
     InitMetricsFromPlatform();
   }
@@ -271,20 +299,33 @@ void gfxMacFont::InitMetrics() {
     return;
   }
 
-  if (mMetrics.xHeight == 0.0) {
-    mMetrics.xHeight = ::CGFontGetXHeight(mCGFont) * cgConvFactor;
-  }
-  if (mMetrics.capHeight == 0.0) {
-    mMetrics.capHeight = ::CGFontGetCapHeight(mCGFont) * cgConvFactor;
-  }
+  // Helper to get glyph measurements that font-size-adjust may depend on.
+  // (InitMetricsFromSkrifa handles these, so this is only called if we don't
+  // have a skrifa font.)
+  AutoCFTypeRef<CFDataRef> cmap;
+  auto MeasureGlyphsForFontSizeAdjust = [&]() {
+    if (mMetrics.xHeight == 0.0) {
+      mMetrics.xHeight = ::CGFontGetXHeight(mCGFont) * cgConvFactor;
+    }
+    if (mMetrics.capHeight == 0.0) {
+      mMetrics.capHeight = ::CGFontGetCapHeight(mCGFont) * cgConvFactor;
+    }
+    if (!cmap) {
+      cmap.Reset(
+          ::CGFontCopyTableForTag(mCGFont, TRUETYPE_TAG('c', 'm', 'a', 'p')));
+    }
+    uint32_t glyphID;
+    mMetrics.zeroWidth = GetCharWidth(cmap, '0', &glyphID, cgConvFactor);
+    if (glyphID == 0) {
+      mMetrics.zeroWidth = -1.0;  // indicates not found
+    }
+  };
 
-  AutoCFTypeRef<CFDataRef> cmap(
-      ::CGFontCopyTableForTag(mCGFont, TRUETYPE_TAG('c', 'm', 'a', 'p')));
-
-  uint32_t glyphID;
-  mMetrics.zeroWidth = GetCharWidth(cmap, '0', &glyphID, cgConvFactor);
-  if (glyphID == 0) {
-    mMetrics.zeroWidth = -1.0;  // indicates not found
+#if MOZ_FONTATIONS
+  if (!mFontEntry->GetSkrifaFont())
+#endif
+  {
+    MeasureGlyphsForFontSizeAdjust();
   }
 
   if (FontSizeAdjust::Tag(mStyle.sizeAdjustBasis) !=
@@ -328,7 +369,11 @@ void gfxMacFont::InitMetrics() {
         cgConvFactor = mFUnitsConvFactor;
       }
       mMetrics.xHeight = 0.0;
-      if (!InitMetricsFromSfntTables(mMetrics) &&
+      if (
+#if MOZ_FONTATIONS
+          !InitMetricsFromSkrifa(mMetrics) &&
+#endif
+          !InitMetricsFromSfntTables(mMetrics) &&
           (!mFontEntry->IsUserFont() || mFontEntry->IsLocalUserFont())) {
         InitMetricsFromPlatform();
       }
@@ -337,16 +382,12 @@ void gfxMacFont::InitMetrics() {
         // the size-adjust factor! But check anyway, for paranoia's sake.
         return;
       }
-      // Update metrics from the re-scaled font.
-      if (mMetrics.xHeight == 0.0) {
-        mMetrics.xHeight = ::CGFontGetXHeight(mCGFont) * cgConvFactor;
-      }
-      if (mMetrics.capHeight == 0.0) {
-        mMetrics.capHeight = ::CGFontGetCapHeight(mCGFont) * cgConvFactor;
-      }
-      mMetrics.zeroWidth = GetCharWidth(cmap, '0', &glyphID, cgConvFactor);
-      if (glyphID == 0) {
-        mMetrics.zeroWidth = -1.0;  // indicates not found
+#if MOZ_FONTATIONS
+      if (!mFontEntry->GetSkrifaFont())
+#endif
+      {
+        // Update metrics from the re-scaled font.
+        MeasureGlyphsForFontSizeAdjust();
       }
     }
   }
@@ -357,29 +398,13 @@ void gfxMacFont::InitMetrics() {
 
   mMetrics.emHeight = mAdjustedSize;
 
-  // Measure/calculate additional metrics, independent of whether we used
-  // the tables directly or ATS metrics APIs
-
-  if (mMetrics.aveCharWidth <= 0) {
-    mMetrics.aveCharWidth = GetCharWidth(cmap, 'x', &glyphID, cgConvFactor);
-    if (glyphID == 0) {
-      // we didn't find 'x', so use maxAdvance rather than zero
-      mMetrics.aveCharWidth = mMetrics.maxAdvance;
-    }
-  }
-
-  mMetrics.spaceWidth = GetCharWidth(cmap, ' ', &glyphID, cgConvFactor);
-  if (glyphID == 0) {
-    // no space glyph?!
-    mMetrics.spaceWidth = mMetrics.aveCharWidth;
-  }
-  mSpaceGlyph = glyphID;
-
-  mMetrics.ideographicWidth =
-      GetCharWidth(cmap, kWaterIdeograph, &glyphID, cgConvFactor);
-  if (glyphID == 0) {
-    // Indicate "not found".
-    mMetrics.ideographicWidth = -1.0;
+#if MOZ_FONTATIONS
+  if (!mFontEntry->GetSkrifaFont())
+#endif
+  {
+    // InitMetricsFromSkrifa would have handled these, but if we're not using
+    // it then take the Core Text-based path.
+    InitMetricsByGlyphMeasurement(cmap, cgConvFactor);
   }
 
   CalculateDerivedMetrics(mMetrics);

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -135,9 +134,10 @@ already_AddRefed<dom::Promise> Queue::OnSubmittedWorkDone(ErrorResult& aRv) {
     return nullptr;
   }
 
-  ffi::wgpu_client_on_submitted_work_done(GetClient(), GetId());
+  ffi::wgpu_client_on_submitted_work_done(GetClient(), mParent->GetId(),
+                                          GetId());
 
-  GetChild()->mPendingOnSubmittedWorkDonePromises[GetId()].push_back(promise);
+  GetChild()->EnqueueOnSubmittedWorkDonePromise(GetId(), promise);
 
   return promise.forget();
 }
@@ -207,8 +207,7 @@ void Queue::WriteBuffer(
       bb.Allocate(size);
       memcpy(bb.mData, aData.Elements() + offset, size);
       auto data_buffer_index = GetChild()->QueueDataBuffer(std::move(bb));
-      ffi::wgpu_queue_write_buffer_inline(GetClient(), mParent->GetId(),
-                                          GetId(), aBuffer.GetId(),
+      ffi::wgpu_queue_write_buffer_inline(GetClient(), GetId(), aBuffer.GetId(),
                                           aBufferOffset, data_buffer_index);
       return;
     }
@@ -225,9 +224,9 @@ void Queue::WriteBuffer(
       memcpy(mapping.DataAs<uint8_t>(), aData.Elements() + offset, size);
     }
     auto shmem_handle_index = GetChild()->QueueShmemHandle(std::move(handle));
-    ffi::wgpu_queue_write_buffer_via_shmem(GetClient(), mParent->GetId(),
-                                           GetId(), aBuffer.GetId(),
-                                           aBufferOffset, shmem_handle_index);
+    ffi::wgpu_queue_write_buffer_via_shmem(GetClient(), GetId(),
+                                           aBuffer.GetId(), aBufferOffset,
+                                           shmem_handle_index);
   });
 }
 
@@ -277,7 +276,7 @@ void Queue::WriteTexture(
     const dom::GPUExtent3D& aSize, ErrorResult& aRv) {
   ffi::WGPUTexelCopyTextureInfo copyView = {};
   CommandEncoder::ConvertTextureCopyViewToFFI(aDestination, &copyView);
-  ffi::WGPUTexelCopyBufferLayout dataLayout = {};
+  ffi::WGPUFfiTexelCopyBufferLayout dataLayout = {};
   CommandEncoder::ConvertTextureDataLayoutToFFI(aDataLayout, &dataLayout);
   dataLayout.offset = 0;  // our Shmem has the contents starting from 0.
   ffi::WGPUExtent3d extent = {};
@@ -329,9 +328,8 @@ void Queue::WriteTexture(
     }
 
     auto shmem_handle_index = GetChild()->QueueShmemHandle(std::move(handle));
-    ffi::wgpu_queue_write_texture_via_shmem(GetClient(), mParent->GetId(),
-                                            GetId(), copyView, dataLayout,
-                                            extent, shmem_handle_index);
+    ffi::wgpu_queue_write_texture_via_shmem(
+        GetClient(), GetId(), copyView, dataLayout, extent, shmem_handle_index);
   });
 }
 
@@ -445,7 +443,7 @@ void Queue::CopyExternalImageToTexture(
   }
 
   if (!sfeResult.mCORSUsed) {
-    nsIGlobalObject* global = mParent->GetOwnerGlobal();
+    nsIGlobalObject* global = mParent->GetRelevantGlobal();
     nsIPrincipal* dstPrincipal = global ? global->PrincipalOrNull() : nullptr;
     if (!sfeResult.mPrincipal || !dstPrincipal ||
         !dstPrincipal->Subsumes(sfeResult.mPrincipal)) {
@@ -595,14 +593,13 @@ void Queue::CopyExternalImageToTexture(
     return;
   }
 
-  ffi::WGPUTexelCopyBufferLayout dataLayout = {0, &dstStrideVal, &dstHeight};
+  ffi::WGPUFfiTexelCopyBufferLayout dataLayout = {0, &dstStrideVal, &dstHeight};
   ffi::WGPUTexelCopyTextureInfo copyView = {};
   CommandEncoder::ConvertTextureCopyViewToFFI(aDestination, &copyView);
 
   auto shmem_handle_index = GetChild()->QueueShmemHandle(std::move(handle));
-  ffi::wgpu_queue_write_texture_via_shmem(GetClient(), mParent->GetId(),
-                                          GetId(), copyView, dataLayout, extent,
-                                          shmem_handle_index);
+  ffi::wgpu_queue_write_texture_via_shmem(
+      GetClient(), GetId(), copyView, dataLayout, extent, shmem_handle_index);
 }
 
 }  // namespace mozilla::webgpu

@@ -14,14 +14,13 @@ import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.engine.translate.TranslationError
 import mozilla.components.lib.state.ext.observeAsComposableState
 import org.mozilla.fenix.R
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
 import org.mozilla.fenix.ext.requireComponents
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.theme.FirefoxTheme
 
-/**
- * A fragment displaying never translate site items list.
- */
-class NeverTranslateSitesPreferenceFragment : Fragment() {
+/** A fragment displaying never translate site items list. */
+class NeverTranslateSitesPreferenceFragment : Fragment(), SystemInsetsPaddedFragment {
 
     private val browserStore: BrowserStore by lazy { requireComponents.core.store }
 
@@ -36,28 +35,33 @@ class NeverTranslateSitesPreferenceFragment : Fragment() {
         savedInstanceState: Bundle?,
     ) = content {
         FirefoxTheme {
-            val neverTranslateSites = browserStore.observeAsComposableState { state ->
-                state.translationEngine.neverTranslateSites
-            }.value
+            val neverTranslateSites =
+                browserStore
+                    .observeAsComposableState { state ->
+                        state.translationEngine.neverTranslateSites
+                    }
+                    .value
 
-            val engineError = browserStore.observeAsComposableState { state ->
-                state.translationEngine.engineError
-            }.value
+            val engineError =
+                browserStore
+                    .observeAsComposableState { state ->
+                        state.translationEngine.engineError
+                    }
+                    .value
 
-            val couldNotLoadNeverTranslateSites =
-                engineError as? TranslationError.CouldNotLoadNeverTranslateSites
+            val couldNotLoadNeverTranslateSites = engineError as? TranslationError.CouldNotLoadNeverTranslateSites
 
             NeverTranslateSitesPreference(
                 neverTranslateSitesListPreferences = neverTranslateSites,
-                hasNeverTranslateSitesError = couldNotLoadNeverTranslateSites != null ||
-                    neverTranslateSites == null,
+                hasNeverTranslateSitesError = couldNotLoadNeverTranslateSites != null || neverTranslateSites == null,
                 onItemClick = {
-                    findNavController().navigate(
-                        NeverTranslateSitesPreferenceFragmentDirections
-                            .actionNeverTranslateSitePreferenceToNeverTranslateSiteDialogPreference(
-                                neverTranslateSiteUrl = it,
-                            ),
-                    )
+                    findNavController()
+                        .navigate(
+                            NeverTranslateSitesPreferenceFragmentDirections
+                                .actionNeverTranslateSitePreferenceToNeverTranslateSiteDialogPreference(
+                                    neverTranslateSiteUrl = it
+                                )
+                        )
                 },
             )
         }

@@ -6,7 +6,6 @@ import functools
 import itertools
 import json
 import os
-import sys
 import tempfile
 from os import path
 
@@ -80,10 +79,7 @@ class AggregatedGTestReport(dict):
     __slots__ = ["result_dir"]
 
     def __init__(self):
-        tmpdir_kwargs = {}
-        if sys.version_info >= (3, 10):
-            tmpdir_kwargs["ignore_cleanup_errors"] = True
-        self.result_dir = tempfile.TemporaryDirectory(**tmpdir_kwargs)
+        self.result_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         super().__init__()
         self.reset()
 
@@ -96,7 +92,7 @@ class AggregatedGTestReport(dict):
         if exc_info[0] is None:
             d = self.result_dir.name
             result_files = filter(
-                lambda f: path.isfile(f), map(lambda f: path.join(d, f), os.listdir(d))
+                path.isfile, map(lambda f: path.join(d, f), os.listdir(d))
             )
 
             def json_from_file(file):
@@ -113,9 +109,13 @@ class AggregatedGTestReport(dict):
     def reset(self):
         """Clear all results."""
         self.clear()
-        self.update(
-            {"tests": 0, "failures": 0, "disabled": 0, "errors": 0, "testsuites": []}
-        )
+        self.update({
+            "tests": 0,
+            "failures": 0,
+            "disabled": 0,
+            "errors": 0,
+            "testsuites": [],
+        })
 
     def gtest_output(self, job_id):
         """

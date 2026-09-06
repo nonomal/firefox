@@ -6,23 +6,22 @@ package org.mozilla.fenix.library
 
 import android.content.Context
 import android.view.ViewGroup
+import androidx.appcompat.R as appcompatR
 import androidx.appcompat.widget.Toolbar
-import androidx.core.content.ContextCompat
+import com.google.android.material.R as materialR
 import mozilla.components.support.ktx.android.content.getColorFromAttr
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.ext.asActivity
 import org.mozilla.fenix.ext.setToolbarColors
-import com.google.android.material.R as materialR
 
-open class LibraryPageView(
-    val containerView: ViewGroup,
-) {
-    protected val context: Context inline get() = containerView.context
+open class LibraryPageView(val containerView: ViewGroup) {
+    protected val context: Context
+        inline get() = containerView.context
+
     protected val activity = context.asActivity()
 
-    protected fun setUiForNormalMode(
-        title: String?,
-    ) {
+    protected fun setUiForNormalMode(title: String?) {
         updateToolbar(
             title = title,
             foregroundColor = context.getColorFromAttr(materialR.attr.colorOnSurface),
@@ -30,16 +29,11 @@ open class LibraryPageView(
         )
     }
 
-    protected fun setUiForSelectingMode(
-        title: String?,
-    ) {
+    protected fun setUiForSelectingMode(title: String?) {
         updateToolbar(
             title = title,
-            foregroundColor = ContextCompat.getColor(
-                context,
-                R.color.fx_mobile_text_color_oncolor_primary,
-            ),
-            backgroundColor = context.getColorFromAttr(R.attr.accent),
+            foregroundColor = context.getColorFromAttr(materialR.attr.colorOnPrimary),
+            backgroundColor = context.getColorFromAttr(appcompatR.attr.colorPrimary),
         )
     }
 
@@ -47,7 +41,7 @@ open class LibraryPageView(
         activity?.title = title
         val toolbar = activity?.findViewById<Toolbar>(R.id.navigationToolbar)
         toolbar?.setToolbarColors(foregroundColor, backgroundColor)
-        toolbar?.setNavigationIcon(R.drawable.ic_back_button)
+        toolbar?.setNavigationIcon(iconsR.drawable.mozac_ic_back_24)
         toolbar?.navigationIcon?.setTint(foregroundColor)
     }
 }

@@ -8,6 +8,11 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   AboutReaderParent: "resource:///actors/AboutReaderParent.sys.mjs",
+  AIWindow:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
+  AppProvidedConfigEngine:
+    "moz-src:///toolkit/components/search/ConfigSearchEngine.sys.mjs",
+  ASRouter: "resource:///modules/asrouter/ASRouter.sys.mjs",
   BrowserUsageTelemetry: "resource:///modules/BrowserUsageTelemetry.sys.mjs",
   CustomizableUI:
     "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs",
@@ -16,6 +21,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/customizableui/PanelMultiView.sys.mjs",
   ProfileAge: "resource://gre/modules/ProfileAge.sys.mjs",
   ResetProfile: "resource://gre/modules/ResetProfile.sys.mjs",
+  SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
   UIState: "resource://services-sync/UIState.sys.mjs",
   UpdateUtils: "resource://gre/modules/UpdateUtils.sys.mjs",
 });
@@ -141,7 +147,9 @@ export var UITour = {
       {
         infoPanelOffsetX: 18,
         infoPanelPosition: "after_start",
-        query: "#searchbar",
+        query: Services.prefs.getBoolPref("browser.search.widget.new")
+          ? "#searchbar-new"
+          : "#searchbar",
         widgetName: "search-container",
       },
     ],
@@ -149,8 +157,12 @@ export var UITour = {
       "searchIcon",
       {
         query: aDocument => {
-          let searchbar = aDocument.getElementById("searchbar");
-          return searchbar.querySelector(".searchbar-search-button");
+          if (!Services.prefs.getBoolPref("browser.search.widget.new")) {
+            let searchbar = aDocument.getElementById("searchbar");
+            return searchbar.querySelector(".searchbar-search-button");
+          }
+          let searchbar = aDocument.getElementById("searchbar-new");
+          return searchbar.querySelector(".searchmode-switcher");
         },
         widgetName: "search-container",
       },
@@ -171,7 +183,7 @@ export var UITour = {
     [
       "urlbar",
       {
-        query: "#urlbar",
+        query: "#urlbar-container",
         widgetName: "urlbar-container",
       },
     ],
@@ -231,7 +243,7 @@ export var UITour = {
 
   onPageEvent(aEvent, aBrowser) {
     let browser = aBrowser;
-    let window = browser.ownerGlobal;
+    let window = browser.documentGlobal;
 
     // Does the window have tabs? We need to make sure since windowless browsers do
     // not have tabs.
@@ -454,9 +466,11 @@ export var UITour = {
             return data.email
               ? lazy.FxAccounts.config.promiseEmailURI(
                   data.email,
+                  "sync",
                   data.entrypoint || "uitour"
                 )
               : lazy.FxAccounts.config.promiseConnectAccountURI(
+                  "sync",
                   data.entrypoint || "uitour"
                 );
           })
@@ -481,9 +495,29 @@ export var UITour = {
         break;
       }
 
+      case "showFirefoxAccountsForAIWindow": {
+        // if user "Blocked" Smart Window feature from AI Control or global AI Control default
+        // override Smart Window feature to "available"
+        if (lazy.AIWindow.isBlocked) {
+          Services.prefs.setStringPref(
+            "browser.ai.control.smartWindow",
+            "available"
+          );
+        }
+
+        lazy.AIWindow.launchWindow(browser, false, "bedrock").then(success => {
+          if (!success) {
+            lazy.log.warn(
+              "showFirefoxAccountsForAIWindow: Failed to launch Smart Window"
+            );
+          }
+        });
+        break;
+      }
+
       case "showConnectAnotherDevice": {
         lazy.FxAccounts.config
-          .promiseConnectDeviceURI(data.entrypoint || "uitour")
+          .promiseConnectDeviceURI("sync", data.entrypoint || "uitour")
           .then(uri => {
             const url = new URL(uri);
             // Call our helper to validate extraURLParams and populate URLSearchParams
@@ -528,6 +562,22 @@ export var UITour = {
         break;
       }
 
+      case "pinToTaskbar": {
+        let shell = window.getShellService();
+        if (shell) {
+          shell.pinToTaskbar().catch(console.error);
+        }
+        break;
+      }
+
+      case "setNewtabWallpaper": {
+        let prefix = "browser.newtabpage.activity-stream.newtabWallpapers.";
+        Services.prefs.setStringPref(prefix + "wallpaper", data.wallpaper);
+        Services.prefs.setStringPref(prefix + "initialWallpaper", "");
+        Services.prefs.setBoolPref(prefix + "user.enabled", true);
+        break;
+      }
+
       case "setTreatmentTag": {
         let name = data.name;
         let value = data.value;
@@ -552,36 +602,10 @@ export var UITour = {
         targetPromise.then(target => {
           let searchbar = target.node;
           searchbar.value = data.term;
-          searchbar.updateGoButtonVisibility();
+          if (!Services.prefs.getBoolPref("browser.search.widget.new")) {
+            searchbar.updateGoButtonVisibility();
+          }
         });
-        break;
-      }
-
-      case "openSearchPanel": {
-        let targetPromise = this.getTarget(window, "search");
-        targetPromise
-          .then(target => {
-            let searchbar = target.node;
-
-            if (searchbar.textbox.open) {
-              this.sendPageCallback(browser, data.callbackID);
-            } else {
-              let onPopupShown = () => {
-                searchbar.textbox.popup.removeEventListener(
-                  "popupshown",
-                  onPopupShown
-                );
-                this.sendPageCallback(browser, data.callbackID);
-              };
-
-              searchbar.textbox.popup.addEventListener(
-                "popupshown",
-                onPopupShown
-              );
-              searchbar.openSuggestionsPanel();
-            }
-          })
-          .catch(console.error);
         break;
       }
 
@@ -610,7 +634,7 @@ export var UITour = {
         // was generated originally. If the browser where the UI tour is loaded
         // is windowless, just ignore the request to close the tab. The request
         // is also ignored if this is the only tab in the window.
-        let tabBrowser = browser.ownerGlobal.gBrowser;
+        let tabBrowser = browser.documentGlobal.gBrowser;
         if (tabBrowser && tabBrowser.browsers.length > 1) {
           tabBrowser.removeTab(tabBrowser.getTabForBrowser(browser));
         }
@@ -657,7 +681,7 @@ export var UITour = {
     lazy.log.debug("handleEvent: type =", aEvent.type, "event =", aEvent);
     switch (aEvent.type) {
       case "TabSelect": {
-        let window = aEvent.target.ownerGlobal;
+        let window = aEvent.target.documentGlobal;
 
         // Teardown the browser of the tab we just switched away from.
         if (aEvent.detail && aEvent.detail.previousTab) {
@@ -895,7 +919,7 @@ export var UITour = {
   },
 
   isElementVisible(aElement) {
-    let targetStyle = aElement.ownerGlobal.getComputedStyle(aElement);
+    let targetStyle = aElement.documentGlobal.getComputedStyle(aElement);
     return (
       !aElement.ownerDocument.hidden &&
       targetStyle.display != "none" &&
@@ -956,7 +980,7 @@ export var UITour = {
     let targetElement = aTarget.node;
     // Use the widget for filtering if it exists since the target may be the icon inside.
     if (aTarget.widgetName) {
-      let doc = aTarget.node.ownerGlobal.document;
+      let doc = aTarget.node.documentGlobal.document;
       targetElement =
         doc.getElementById(aTarget.widgetName) ||
         lazy.PanelMultiView.getViewNode(doc, aTarget.widgetName);
@@ -1492,7 +1516,7 @@ export var UITour = {
   },
 
   _hideAnnotationsForPanel(aEvent, aShouldClosePanel, aTargetPositionCallback) {
-    let win = aEvent.target.ownerGlobal;
+    let win = aEvent.target.documentGlobal;
     let hideHighlightMethod = null;
     let hideInfoMethod = null;
     if (aShouldClosePanel) {
@@ -1571,16 +1595,18 @@ export var UITour = {
         break;
       case "search":
       case "selectedSearchEngine":
-        Services.search
-          .getVisibleEngines()
+        lazy.SearchService.getVisibleEngines()
           .then(engines => {
-            let { defaultEngine } = Services.search;
+            let { defaultEngine } = lazy.SearchService;
             this.sendPageCallback(aBrowser, aCallbackID, {
-              searchEngineIdentifier: defaultEngine.isAppProvided
-                ? defaultEngine.id
-                : null,
+              searchEngineIdentifier:
+                defaultEngine instanceof lazy.AppProvidedConfigEngine
+                  ? defaultEngine.id
+                  : null,
               engines: engines
-                .filter(engine => engine.isAppProvided)
+                .filter(
+                  engine => engine instanceof lazy.AppProvidedConfigEngine
+                )
                 .map(engine => TARGET_SEARCHENGINE_PREFIX + engine.id),
             });
           })
@@ -1625,6 +1651,42 @@ export var UITour = {
           lazy.ResetProfile.resetSupported()
         );
         break;
+      case "aiControls":
+        this.sendPageCallback(aBrowser, aCallbackID, {
+          default: Services.prefs.getStringPref(
+            "browser.ai.control.default",
+            "available"
+          ),
+          translations: Services.prefs.getStringPref(
+            "browser.ai.control.translations",
+            "default"
+          ),
+          pdfjsAltText: Services.prefs.getStringPref(
+            "browser.ai.control.pdfjsAltText",
+            "default"
+          ),
+          smartTabGroups: Services.prefs.getStringPref(
+            "browser.ai.control.smartTabGroups",
+            "default"
+          ),
+          linkPreviewKeyPoints: Services.prefs.getStringPref(
+            "browser.ai.control.linkPreviewKeyPoints",
+            "default"
+          ),
+          sidebarChatbot: Services.prefs.getStringPref(
+            "browser.ai.control.sidebarChatbot",
+            "default"
+          ),
+          smartWindow: Services.prefs.getStringPref(
+            "browser.ai.control.smartWindow",
+            "default"
+          ),
+          speechRecognition: Services.prefs.getStringPref(
+            "browser.ai.control.speechRecognition",
+            "default"
+          ),
+        });
+        break;
       default:
         lazy.log.error(
           "getConfiguration: Unknown configuration requested: " + aConfiguration
@@ -1636,7 +1698,7 @@ export var UITour = {
   async setConfiguration(aWindow, aConfiguration, _aValue) {
     switch (aConfiguration) {
       case "defaultBrowser":
-        // Ignore aValue in this case because the default browser can only
+        // Ignore _aValue in this case because the default browser can only
         // be set, not unset.
         try {
           let shell = aWindow.getShellService();
@@ -1782,6 +1844,13 @@ export var UITour = {
       } catch (e) {}
       appinfo.defaultBrowser = isDefaultBrowser;
 
+      try {
+        let shell = aWindow.getShellService();
+        if (shell) {
+          appinfo.needsPin = await shell.doesAppNeedPin();
+        }
+      } catch (e) {}
+
       let canSetDefaultBrowserInBackground = true;
       if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
         canSetDefaultBrowserInBackground = false;
@@ -1809,6 +1878,11 @@ export var UITour = {
       }
       appinfo.profileCreatedWeeksAgo = createdWeeksAgo;
       appinfo.profileResetWeeksAgo = resetWeeksAgo;
+
+      try {
+        await lazy.ASRouter.waitForInitialized;
+        appinfo.previousSessionEnd = lazy.ASRouter.state.previousSessionEnd;
+      } catch (e) {}
 
       this.sendPageCallback(aBrowser, aCallbackID, appinfo);
     })().catch(err => {
@@ -1897,7 +1971,7 @@ export var UITour = {
       if (observer) {
         return;
       }
-      let win = aPanelEl.ownerGlobal;
+      let win = aPanelEl.documentGlobal;
       observer = new win.MutationObserver(this._annotationMutationCallback);
       this._annotationPanelMutationObservers.set(aPanelEl, observer);
       let observerOptions = {
@@ -1933,13 +2007,13 @@ export var UITour = {
   },
 
   async selectSearchEngine(id) {
-    let engine = Services.search.getEngineById(id);
+    let engine = lazy.SearchService.getEngineById(id);
     if (!engine || engine.hidden) {
       throw new Error("selectSearchEngine could not find engine with given ID");
     }
-    return Services.search.setDefault(
+    return lazy.SearchService.setDefault(
       engine,
-      Ci.nsISearchService.CHANGE_REASON_UITOUR
+      lazy.SearchService.CHANGE_REASON.UITOUR
     );
   },
 

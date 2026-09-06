@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,7 +13,10 @@
 // A helper object to generate of different YUV planes.
 class YUVBufferGenerator {
  public:
-  void Init(const mozilla::gfx::IntSize& aSize);
+  // aLuma/aChroma set the fill values for the generated planes. The defaults
+  // produce a black frame (limited-range Y=0x10, Cb=Cr=0x80).
+  void Init(const mozilla::gfx::IntSize& aSize, uint8_t aLuma = 0x10,
+            uint8_t aChroma = 0x80);
   mozilla::gfx::IntSize GetSize() const;
   already_AddRefed<mozilla::layers::Image> GenerateI420Image();
   already_AddRefed<mozilla::layers::Image> GenerateNV12Image();

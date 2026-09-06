@@ -8,11 +8,11 @@ ChromeUtils.defineESModuleGetters(this, {
   TaskbarTabsUtils: "resource:///modules/taskbartabs/TaskbarTabsUtils.sys.mjs",
 });
 
-const registry = new TaskbarTabsRegistry();
+const registry = createInMemoryRegistry();
 
 const url1 = Services.io.newURI("https://example.com");
 const userContextId1 = 0;
-const taskbarTab1 = registry.findOrCreateTaskbarTab(url1, userContextId1);
+const taskbarTab1 = createTaskbarTab(registry, url1, userContextId1);
 const id1 = taskbarTab1.id;
 
 const checkMedia = (aBrowser, aMode) =>

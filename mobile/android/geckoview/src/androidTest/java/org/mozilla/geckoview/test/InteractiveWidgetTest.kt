@@ -1,6 +1,5 @@
-/* -*- Mode: Java; c-basic-offset: 4; tab-width: 4; indent-tabs-mode: nil; -*-
- * Any copyright is dedicated to the Public Domain.
-   http://creativecommons.org/publicdomain/zero/1.0/ */
+/* Any copyright is dedicated to the Public Domain.
+http://creativecommons.org/publicdomain/zero/1.0/ */
 
 package org.mozilla.geckoview.test
 
@@ -17,6 +16,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.MediumTest
 import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
+import org.hamcrest.Matchers.notNullValue
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -41,8 +42,7 @@ class InteractiveWidgetTest : BaseSessionTest() {
     private lateinit var imm: InputMethodManager
     private lateinit var view: GeckoView
 
-    @get:Rule
-    override val rules: RuleChain = RuleChain.outerRule(activityRule).around(sessionRule)
+    @get:Rule override val rules: RuleChain = RuleChain.outerRule(activityRule).around(sessionRule)
 
     @Before
     fun setup() {
@@ -68,15 +68,17 @@ class InteractiveWidgetTest : BaseSessionTest() {
     private fun ensureKeyboardOpen() {
         view.requestFocus()
 
-        var promise = mainSession.evaluatePromiseJS(
-            """
-              new Promise(resolve => {
-                visualViewport.addEventListener('resize', () => {
-                  resolve(true);
-                }, { once: true });
-              });
-            """.trimIndent(),
-        )
+        var promise =
+            mainSession.evaluatePromiseJS(
+                """
+                new Promise(resolve => {
+                  visualViewport.addEventListener('resize', () => {
+                    resolve(true);
+                  }, { once: true });
+                });
+                """
+                    .trimIndent()
+            )
         // Explicitly call `waitForRoundTrip()` to make sure the above event listener
         // has set up in the content.
         mainSession.waitForRoundTrip()
@@ -237,11 +239,11 @@ class InteractiveWidgetTest : BaseSessionTest() {
         mainSession.flushApzRepaints()
         mainSession.promiseAllPaintsDone()
 
-        mainSession.waitUntilCalled(object : ContentDelegate {
-            @AssertCalled(count = 1)
-            override fun onHideDynamicToolbar(session: GeckoSession) {
+        mainSession.waitUntilCalled(
+            object : ContentDelegate {
+                @AssertCalled(count = 1) override fun onHideDynamicToolbar(session: GeckoSession) {}
             }
-        })
+        )
 
         // Close the software keyboard.
         imm.hideSoftInputFromWindow(view.getWindowToken(), 0)
@@ -280,20 +282,22 @@ class InteractiveWidgetTest : BaseSessionTest() {
 
         // Now the layout scroll offset is different from the visual scroll offset.
         assertThat(
-              "The layout scroll offset hasn't reached the destination",
-              scrollY,
-              not(equalTo(viewportHeight)),
-            )
-
-        var resizeEventPromise = mainSession.evaluatePromiseJS(
-            """
-              new Promise(resolve => {
-                visualViewport.addEventListener('resize', () => {
-                  resolve(true);
-                }, { once: true });
-              });
-            """.trimIndent(),
+            "The layout scroll offset hasn't reached the destination",
+            scrollY,
+            not(equalTo(viewportHeight)),
         )
+
+        var resizeEventPromise =
+            mainSession.evaluatePromiseJS(
+                """
+                new Promise(resolve => {
+                  visualViewport.addEventListener('resize', () => {
+                    resolve(true);
+                  }, { once: true });
+                });
+                """
+                    .trimIndent()
+            )
         // Explicitly call `waitForRoundTrip()` to make sure the above event listener
         // has set up in the content.
         mainSession.waitForRoundTrip()
@@ -325,9 +329,114 @@ class InteractiveWidgetTest : BaseSessionTest() {
         scrollY = mainSession.evaluateJS("window.scrollY") as Double
 
         assertThat(
-              "Now the layout scroll offset is equal to the visual scroll destination",
-              scrollY,
-              equalTo(viewportHeight),
+            "Now the layout scroll offset is equal to the visual scroll destination",
+            scrollY,
+            equalTo(viewportHeight),
+        )
+    }
+
+    @GeckoSessionTestRule.NullDelegate(Autofill.Delegate::class)
+    @Test
+    fun bug1993407() {
+        mainSession.setActive(true)
+
+        mainSession.loadTestPath(BaseSessionTest.BUG1993407_HTML_PATH)
+        mainSession.waitForPageStop()
+        mainSession.promiseAllPaintsDone()
+        mainSession.flushApzRepaints()
+
+        val caretRect =
+            mainSession.evaluateJS(
+                """
+                const inputRect = document.querySelector('input').getBoundingClientRect();
+                document.caretPositionFromPoint(0, inputRect.y)?.getClientRect();
+                """
+                    .trimIndent()
             )
+        assertThat("The caretRect should not be null", caretRect, notNullValue())
+
+        val caretRectObject = caretRect as JSONObject
+        val caretY = caretRectObject.getDouble("y")
+        val caretHeight = caretRectObject.getDouble("height")
+        val caretBottom = caretRectObject.getDouble("bottom")
+
+        // Open the software keyboard.
+        ensureKeyboardOpen()
+
+        mainSession.evaluateJS("document.querySelector('input').focus();")
+        mainSession.zoomToFocusedInput()
+
+        mainSession.flushApzRepaints()
+        mainSession.promiseAllPaintsDone()
+
+        val scrollY = mainSession.evaluateJS("window.scrollY") as Double
+        val offsetTop = mainSession.evaluateJS("window.visualViewport.offsetTop") as Double
+        val pageTop = mainSession.evaluateJS("window.visualViewport.pageTop") as Double
+        val visualViewportHeight = mainSession.evaluateJS("window.visualViewport.height") as Double
+
+        assertThat(
+            "The offsetTop and pageTop of visual viewport is not diverged",
+            offsetTop,
+            equalTo(pageTop),
+        )
+        assertThat("The offsetTop is not 0", offsetTop, not(equalTo(0.0)))
+        assertThat("The offsetTop is ", offsetTop, equalTo(caretBottom - visualViewportHeight))
+
+        assertThat(
+            "The layout scroll offset stays at 0",
+            scrollY,
+            equalTo(0.0),
+        )
+
+        // Close the software keyboard.
+        imm.hideSoftInputFromWindow(view.getWindowToken(), 0)
+    }
+
+    @GeckoSessionTestRule.NullDelegate(Autofill.Delegate::class)
+    @Test
+    fun scrollIntoViewToPositionFixed() {
+        mainSession.setActive(true)
+
+        mainSession.loadTestPath(BaseSessionTest.BUG2028072_HTML_PATH)
+        mainSession.waitForPageStop()
+        mainSession.promiseAllPaintsDone()
+        mainSession.flushApzRepaints()
+
+        ensureKeyboardOpen()
+
+        // Hide the dynamic toolbar.
+        view.setVerticalClipping(-dynamicToolbarMaxHeight)
+
+        // To make sure the dynamic toolbar height has been reflected into APZ.
+        mainSession.flushApzRepaints()
+        // Also to make sure the dynamic toolbar height has been reflected on the main-thread.
+        mainSession.promiseAllPaintsDone()
+
+        mainSession.evaluateJS("document.querySelector('#fixed').scrollIntoView()")
+
+        mainSession.flushApzRepaints()
+        mainSession.promiseAllPaintsDone()
+
+        val scrollY = mainSession.evaluateJS("window.scrollY") as Double
+        val pageTop = mainSession.evaluateJS("window.visualViewport.pageTop") as Double
+
+        mainSession.evaluateJS("document.querySelector('#fixed').scrollIntoView()")
+
+        mainSession.flushApzRepaints()
+        mainSession.promiseAllPaintsDone()
+
+        assertThat(
+            "scrollIntoView should not change the layout scroll position when the target is already in the visual viewport",
+            mainSession.evaluateJS("window.scrollY") as Double,
+            equalTo(scrollY),
+        )
+        assertThat(
+            "scrollIntoView should not change the visual scroll position when the target is already in the visual viewport",
+            mainSession.evaluateJS("window.visualViewport.pageTop") as Double,
+            equalTo(pageTop),
+        )
+
+        // Close the software keyboard.
+        imm.hideSoftInputFromWindow(view.getWindowToken(), 0)
     }
 }

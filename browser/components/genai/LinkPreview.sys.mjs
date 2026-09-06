@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
+import { AIFeature } from "chrome://global/content/ml/AIFeature.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const lazy = {};
@@ -12,6 +13,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   PrefUtils: "moz-src:///toolkit/modules/PrefUtils.sys.mjs",
   Region: "resource://gre/modules/Region.sys.mjs",
+  MLUninstallService: "chrome://global/content/ml/Utils.sys.mjs",
 });
 
 export const LABS_STATE = Object.freeze({
@@ -19,6 +21,10 @@ export const LABS_STATE = Object.freeze({
   ENROLLED: 1,
   ROLLOUT_ENDED: 2,
 });
+
+ChromeUtils.defineLazyGetter(lazy, "canUseLlamaCpp", () =>
+  Cc["@mozilla.org/ml-utils;1"].getService(Ci.nsIMLUtils).canUseLlamaCpp()
+);
 
 XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
@@ -147,6 +153,102 @@ export const LinkPreview = {
   _windowStates: new Map(),
   linkPreviewPanelId: "link-preview-panel",
 
+  get id() {
+    return lazy.LinkPreviewModel.id;
+  },
+
+  get hasDistinctEnabledState() {
+    // Link Preview key points has a distinct opt-in flow in the card UI.
+    // It is not immediately enabled when the feature is "Available" and must
+    // still be manually enabled by the user.
+    return true;
+  },
+
+  async enable() {
+    Services.prefs.setBoolPref("browser.ml.linkPreview.enabled", true);
+    Services.prefs.setBoolPref("browser.ml.linkPreview.optin", true);
+  },
+
+  async block() {
+    // Disable both feature and opt-in prefs (triggers onEnabledPref to remove listeners)
+    Services.prefs.setBoolPref("browser.ml.linkPreview.enabled", false);
+    Services.prefs.setBoolPref("browser.ml.linkPreview.optin", false);
+
+    // Uninstall models and wait for completion
+    try {
+      await this.uninstallModel();
+    } catch (error) {
+      console.error("Failed to uninstall model during disable:", error);
+    }
+  },
+
+  async makeAvailable() {
+    // Set explicitly rather than clearing, so that a non-locked policy default
+    // of "blocked" does not prevent the user from switching back to "available".
+    Services.prefs.setStringPref(
+      "browser.ai.control.linkPreviewKeyPoints",
+      "available"
+    );
+    Services.prefs.setBoolPref("browser.ml.linkPreview.enabled", true);
+    // Clear all related prefs (returns to default values, triggers onEnabledPref if enabled was true)
+    const prefs = [
+      "browser.ml.linkPreview.optin",
+      "browser.ml.linkPreview.collapsed",
+      "browser.ml.linkPreview.shift",
+      "browser.ml.linkPreview.shiftAlt",
+      "browser.ml.linkPreview.longPress",
+      "browser.ml.linkPreview.labs",
+      "browser.ml.linkPreview.onboardingTimes",
+      "browser.ml.linkPreview.nimbus",
+    ];
+
+    for (const pref of prefs) {
+      if (Services.prefs.prefHasUserValue(pref)) {
+        Services.prefs.clearUserPref(pref);
+      }
+    }
+
+    // Uninstall models and wait for completion
+    try {
+      await this.uninstallModel();
+    } catch (error) {
+      console.error("Failed to uninstall model during reset:", error);
+    }
+  },
+
+  get isEnabled() {
+    const enabled = Services.prefs.getBoolPref(
+      "browser.ml.linkPreview.enabled",
+      false
+    );
+    const optin = Services.prefs.getBoolPref(
+      "browser.ml.linkPreview.optin",
+      false
+    );
+
+    return enabled && optin;
+  },
+
+  get isAllowed() {
+    return this._isRegionSupported() && this._isLocaleSupported();
+  },
+
+  get canRunOnDevice() {
+    // Key points generation requires the native llama.cpp backend.
+    return lazy.canUseLlamaCpp;
+  },
+
+  get isBlocked() {
+    return !Services.prefs.getBoolPref("browser.ml.linkPreview.enabled", false);
+  },
+
+  get isManagedByPolicy() {
+    return (
+      Services.prefs.prefIsLocked("browser.ml.linkPreview.enabled") ||
+      this._isDisabledByPolicy()
+    );
+  },
+
   /**
    * Gets the context value for the current tab.
    * For about: pages, returns the URI's filePath (e.g., "home", "newtab", "preferences").
@@ -167,6 +269,7 @@ export const LinkPreview = {
 
   get canShowKeyPoints() {
     return (
+      this.canRunOnDevice &&
       this._isRegionSupported() &&
       this._isLocaleSupported() &&
       !this._isDisabledByPolicy()
@@ -251,7 +354,7 @@ export const LinkPreview = {
     }
 
     // Prefetch the model when enabling by simulating a request.
-    if (enabled && lazy.prefetchOnEnable && this._isRegionSupported()) {
+    if (enabled && lazy.prefetchOnEnable && this.canShowKeyPoints) {
       this.generateKeyPoints();
     }
 
@@ -706,11 +809,15 @@ export const LinkPreview = {
     }
 
     // Check for the start of a long unmodified primary button press on a link.
+    // A mousedown that doesn't report the primary button as held is synthesized
+    // to activate an element, e.g. keyboard activation of a panel button, and
+    // no mouseup will follow to end the press.
     const win = event.currentTarget;
     const stateObject = this._windowStates.get(win);
     if (
       event.type == "mousedown" &&
       !event.button &&
+      event.buttons & 1 &&
       !event.altKey &&
       !event.ctrlKey &&
       !event.metaKey &&
@@ -808,7 +915,7 @@ export const LinkPreview = {
       ogCard.progress = this.progress;
       // If we are still downloading, update the progress again.
       if (this.progress >= 0) {
-        doc.ownerGlobal.setTimeout(
+        doc.documentGlobal.setTimeout(
           () => ogCard.isConnected && updateProgress(),
           250
         );
@@ -862,7 +969,7 @@ export const LinkPreview = {
     const previous = this.lastRequest;
     const { promise, resolve } = Promise.withResolvers();
     this.lastRequest = promise;
-    await previous;
+    await Promise.allSettled([previous]); // Wait on previous without failing current
     const delay = Date.now() - startTime;
 
     // No need to generate if already removed.
@@ -1081,7 +1188,7 @@ export const LinkPreview = {
    * @param {object} nsContextMenu - The context menu object containing browser information.
    */
   async handleContextMenuClick(url, nsContextMenu) {
-    let win = nsContextMenu.browser.ownerGlobal;
+    let win = nsContextMenu.browser.documentGlobal;
     this.renderLinkPreviewPanel(win, url, "context");
   },
 
@@ -1104,4 +1211,31 @@ export const LinkPreview = {
     }
     Glean.genaiLinkpreview.shortcut.set(activeShortcuts.join(","));
   },
+
+  /**
+   * Remove all model files created by the Link Preview feature.
+   *
+   * This triggers removal of all ML Engine artifacts associated with
+   * the feature's engine ID. Link Preview does not cache engine instances, so
+   * no additional in-memory cleanup is required.
+   *
+   * @returns {Promise<void>}
+   */
+  async uninstallModel() {
+    // Remove all ML Engine files associated with this feature.
+    await lazy.MLUninstallService.uninstall({
+      engineIds: [lazy.LinkPreviewModel.engineId],
+      // Used only for attribution/telemetry; the specific value is not significant.
+      actor: "LinkPreview",
+    });
+
+    // No cached engine cleanup is required for Link Preview.
+    // All engine file and artifact cleanup is fully handled by MLUninstallService above.
+    //
+    // IMPORTANT: After uninstall completes, any cached engine instance must be
+    // considered invalid and MUST NOT be reused. No methods may be called on it;
+    // the only permitted action is to drop the reference (e.g. set it to null).
+  },
 };
+
+Object.setPrototypeOf(LinkPreview, AIFeature);

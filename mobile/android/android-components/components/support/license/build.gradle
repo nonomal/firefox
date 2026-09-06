@@ -2,8 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
+plugins {
+    id 'com.android.library'
+    alias(libs.plugins.dependency.analysis)
+}
 
 android {
     buildFeatures {
@@ -19,6 +21,10 @@ dependencies {
     implementation libs.androidx.fragment
     implementation libs.kotlinx.coroutines
     implementation libs.google.material
+    implementation project(':components:ui-widgets')
+
+    testImplementation libs.androidx.test.junit
+    testImplementation libs.kotlin.test
 }
 
 apply from: '../../../common-config.gradle'

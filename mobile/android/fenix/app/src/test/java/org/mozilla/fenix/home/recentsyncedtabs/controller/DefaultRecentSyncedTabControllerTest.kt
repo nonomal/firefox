@@ -34,60 +34,64 @@ import org.mozilla.fenix.components.usecases.FenixBrowserUseCases
 import org.mozilla.fenix.helpers.FenixGleanTestRule
 import org.mozilla.fenix.home.HomeFragmentDirections
 import org.mozilla.fenix.home.recentsyncedtabs.RecentSyncedTab
-import org.mozilla.fenix.tabstray.Page
-import org.mozilla.fenix.tabstray.TabsTrayAccessPoint
+import org.mozilla.fenix.tabstray.redux.state.Page
+import org.mozilla.fenix.tabstray.ui.AccessPoint
 import org.mozilla.fenix.utils.Settings
 
 @RunWith(AndroidJUnit4::class)
 class DefaultRecentSyncedTabControllerTest {
 
-    @get:Rule
-    val gleanTestRule = FenixGleanTestRule(testContext)
+    @get:Rule val gleanTestRule = FenixGleanTestRule(testContext)
 
     private val fenixBrowserUseCases: FenixBrowserUseCases = mockk(relaxed = true)
     private val tabsUseCases: TabsUseCases = mockk()
     private val navController: NavController = mockk()
     private val appStore: AppStore = mockk(relaxed = true)
     private val settings: Settings = mockk(relaxed = true)
-    private val accessPoint = TabsTrayAccessPoint.HomeRecentSyncedTab
+    private val accessPoint = AccessPoint.HomeRecentSyncedTab
 
     private lateinit var controller: RecentSyncedTabController
 
     @Before
     fun setup() {
-        controller = DefaultRecentSyncedTabController(
-            fenixBrowserUseCases = fenixBrowserUseCases,
-            tabsUseCase = tabsUseCases,
-            navController = navController,
-            accessPoint = accessPoint,
-            appStore = appStore,
-            settings = settings,
-        )
+        controller =
+            DefaultRecentSyncedTabController(
+                fenixBrowserUseCases = fenixBrowserUseCases,
+                tabsUseCase = tabsUseCases,
+                navController = navController,
+                accessPoint = accessPoint,
+                appStore = appStore,
+                settings = settings,
+            )
     }
 
     @Test
     fun `WHEN synced tab clicked THEN new tab added and navigate to browser`() {
         val url = "url"
         val nonSyncId = "different id"
-        val tab = RecentSyncedTab(
-            deviceDisplayName = "display",
-            deviceType = DeviceType.DESKTOP,
-            title = "title",
-            url = url,
-            previewImageUrl = null,
-        )
-        val store = BrowserStore(
-            initialState = BrowserState(
-                tabs = listOf(
-                    TabSessionState(
-                        id = nonSyncId,
-                        content = ContentState(url = "different url", private = false),
+        val tab =
+            RecentSyncedTab(
+                deviceDisplayName = "display",
+                deviceType = DeviceType.DESKTOP,
+                title = "title",
+                url = url,
+                previewImageUrl = null,
+            )
+        val store =
+            BrowserStore(
+                initialState =
+                    BrowserState(
+                        tabs =
+                            listOf(
+                                TabSessionState(
+                                    id = nonSyncId,
+                                    content = ContentState(url = "different url", private = false),
+                                )
+                            ),
+                        selectedTabId = nonSyncId,
                     ),
-                ),
-                selectedTabId = nonSyncId,
-            ),
-            middleware = EngineMiddleware.create(engine = mockk(relaxed = true)),
-        )
+                middleware = EngineMiddleware.create(engine = mockk(relaxed = true)),
+            )
         val selectOrAddTabUseCase = TabsUseCases.SelectOrAddUseCase(store)
 
         every { tabsUseCases.selectOrAddTab } returns selectOrAddTabUseCase
@@ -103,13 +107,14 @@ class DefaultRecentSyncedTabControllerTest {
     @Test
     fun `GIVEN homepage as a new tab is enabled WHEN synced tab clicked THEN open synced tab in the existing tab`() {
         val url = "url"
-        val tab = RecentSyncedTab(
-            deviceDisplayName = "display",
-            deviceType = DeviceType.DESKTOP,
-            title = "title",
-            url = url,
-            previewImageUrl = null,
-        )
+        val tab =
+            RecentSyncedTab(
+                deviceDisplayName = "display",
+                deviceType = DeviceType.DESKTOP,
+                title = "title",
+                url = url,
+                previewImageUrl = null,
+            )
 
         every { settings.enableHomepageAsNewTab } returns true
         every { navController.navigate(any<Int>()) } just runs
@@ -131,28 +136,32 @@ class DefaultRecentSyncedTabControllerTest {
         val url = "url"
         val syncId = "id"
         val nonSyncId = "different id"
-        val tab = RecentSyncedTab(
-            deviceDisplayName = "display",
-            deviceType = DeviceType.DESKTOP,
-            title = "title",
-            url = url,
-            previewImageUrl = null,
-        )
-        val store = BrowserStore(
-            initialState = BrowserState(
-                tabs = listOf(
-                    TabSessionState(
-                        id = syncId,
-                        content = ContentState(url = url, private = false),
-                    ),
-                    TabSessionState(
-                        id = nonSyncId,
-                        content = ContentState(url = "different url", private = false),
-                    ),
-                ),
-                selectedTabId = nonSyncId,
-            ),
-        )
+        val tab =
+            RecentSyncedTab(
+                deviceDisplayName = "display",
+                deviceType = DeviceType.DESKTOP,
+                title = "title",
+                url = url,
+                previewImageUrl = null,
+            )
+        val store =
+            BrowserStore(
+                initialState =
+                    BrowserState(
+                        tabs =
+                            listOf(
+                                TabSessionState(
+                                    id = syncId,
+                                    content = ContentState(url = url, private = false),
+                                ),
+                                TabSessionState(
+                                    id = nonSyncId,
+                                    content = ContentState(url = "different url", private = false),
+                                ),
+                            ),
+                        selectedTabId = nonSyncId,
+                    )
+            )
         val selectOrAddTabUseCase = TabsUseCases.SelectOrAddUseCase(store)
 
         every { tabsUseCases.selectOrAddTab } returns selectOrAddTabUseCase
@@ -173,10 +182,10 @@ class DefaultRecentSyncedTabControllerTest {
 
         verify {
             navController.navigate(
-                HomeFragmentDirections.actionGlobalTabsTrayFragment(
+                HomeFragmentDirections.actionGlobalTabManagementFragment(
                     page = Page.SyncedTabs,
                     accessPoint = accessPoint,
-                ),
+                )
             )
         }
     }
@@ -185,13 +194,14 @@ class DefaultRecentSyncedTabControllerTest {
     fun `WHEN synced tab clicked THEN metric counter labeled by device type is incremented`() {
         val url = "https://mozilla.org"
         val deviceType = DeviceType.DESKTOP
-        val tab = RecentSyncedTab(
-            deviceDisplayName = "display",
-            deviceType = deviceType,
-            title = "title",
-            url = url,
-            previewImageUrl = null,
-        )
+        val tab =
+            RecentSyncedTab(
+                deviceDisplayName = "display",
+                deviceType = deviceType,
+                title = "title",
+                url = url,
+                previewImageUrl = null,
+            )
 
         every { tabsUseCases.selectOrAddTab } returns mockk(relaxed = true)
         every { navController.navigate(any<Int>()) } just runs
@@ -212,13 +222,14 @@ class DefaultRecentSyncedTabControllerTest {
 
     @Test
     fun `WHEN synced tab is removed from homescreen THEN RemoveRecentSyncedTab action is dispatched`() {
-        val tab = RecentSyncedTab(
-            deviceDisplayName = "display",
-            deviceType = DeviceType.DESKTOP,
-            title = "title",
-            url = "https://mozilla.org",
-            previewImageUrl = null,
-        )
+        val tab =
+            RecentSyncedTab(
+                deviceDisplayName = "display",
+                deviceType = DeviceType.DESKTOP,
+                title = "title",
+                url = "https://mozilla.org",
+                previewImageUrl = null,
+            )
 
         controller.handleRecentSyncedTabRemoved(tab)
 

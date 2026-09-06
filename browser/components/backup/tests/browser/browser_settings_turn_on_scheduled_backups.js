@@ -26,11 +26,55 @@ async function setup_mockFilePicker(mockParentDir) {
 }
 
 add_setup(async () => {
-  MockFilePicker.init(window.browsingContext);
-  registerCleanupFunction(() => {
+  MockFilePicker.init();
+
+  // The default backup location comes from the machine's OneDrive or Documents
+  // folder. Point it somewhere we control so no task depends on what the
+  // machine has.
+  let defaultParentPath = await IOUtils.createUniqueDirectory(
+    PathUtils.tempDir,
+    "turn-on-scheduled-backups-default-parent"
+  );
+  let defaultParent = await IOUtils.getFile(defaultParentPath);
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(BackupService, "oneDriveFolderPath").get(() => null);
+  sandbox.stub(BackupService, "docsDirFolderPath").get(() => defaultParent);
+  getAndMaybeInitBackupService().resetDefaultParentInternalState();
+
+  registerCleanupFunction(async () => {
     MockFilePicker.cleanup();
+    sandbox.restore();
+    getAndMaybeInitBackupService().resetDefaultParentInternalState();
+    await IOUtils.remove(defaultParentPath, { recursive: true });
   });
 });
+
+/**
+ * Asserts that the location label and the "choose location" button both point
+ * at the file path input that is actually rendered, so the input stays labelled
+ * whether the default or custom input is shown.
+ *
+ * @param {Element} turnOnScheduledBackups the turn-on-scheduled-backups element
+ * @param {Element} expectedInput the file path input expected to be rendered
+ */
+function assertLocationInputLabelled(turnOnScheduledBackups, expectedInput) {
+  let shadow = turnOnScheduledBackups.shadowRoot;
+  let label = shadow.getElementById("backup-location-label");
+  let button = shadow.getElementById("backup-location-filepicker-button");
+
+  Assert.ok(expectedInput, "Expected file path input should be rendered");
+  Assert.ok(expectedInput.id, "Rendered file path input should have an id");
+  Assert.equal(
+    label.getAttribute("for"),
+    expectedInput.id,
+    "Location label should be associated with the rendered input"
+  );
+  Assert.equal(
+    button.getAttribute("aria-controls"),
+    expectedInput.id,
+    "Choose location button should control the rendered input"
+  );
+}
 
 /**
  * Tests that the turn on scheduled backups dialog can set
@@ -41,9 +85,12 @@ add_task(async function test_turn_on_scheduled_backups_confirm() {
   Services.fog.testResetFOG();
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    let sandbox = sinon.createSandbox();
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
 
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
 
     let turnOnButton = settings.scheduledBackupsButtonEl;
 
@@ -52,9 +99,7 @@ add_task(async function test_turn_on_scheduled_backups_confirm() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
 
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
 
@@ -81,20 +126,18 @@ add_task(async function test_turn_on_scheduled_backups_confirm() {
     );
     Assert.ok(scheduledPrefVal, "Scheduled backups pref should be true");
 
-    let legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "toggle_on",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(legacyEvents.length, 1, "Found the toggle_on legacy event.");
     let events = Glean.browserBackup.toggleOn.testGetValue();
     Assert.equal(events.length, 1, "Found the toggleOn Glean event.");
 
+    Assert.equal(
+      Glean.browserBackup.schedulerToggleSource.testGetValue(),
+      "preferences",
+      "scheduler_toggle_source is credited to 'preferences' when enabled from the settings page."
+    );
+
     // Reset scheduled backups again for subsequent tests.
     Services.prefs.clearUserPref(SCHEDULED_BACKUPS_ENABLED_PREF);
+    sandbox.restore();
   });
 });
 
@@ -108,6 +151,12 @@ add_task(async function test_turn_on_custom_location_filepicker() {
   Services.fog.testResetFOG();
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let sandbox = sinon.createSandbox();
+    sandbox.stub(BackupService.prototype, "createBackup").resolves(true);
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
+
     const mockCustomParentDir = await IOUtils.createUniqueDirectory(
       PathUtils.tempDir,
       "settings-custom-dir-test"
@@ -118,7 +167,7 @@ add_task(async function test_turn_on_custom_location_filepicker() {
 
     // After setting up mocks, start testing components
     /** @type {import("../../content/backup-settings.mjs").default} */
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    let settings = await waitForBackupSettings(browser);
     let turnOnButton = settings.scheduledBackupsButtonEl;
 
     Assert.ok(
@@ -126,9 +175,7 @@ add_task(async function test_turn_on_custom_location_filepicker() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
 
     Assert.ok(
@@ -154,9 +201,10 @@ add_task(async function test_turn_on_custom_location_filepicker() {
       filePathButton,
       "Button for choosing a file path should be found"
     );
+    assertLocationInputLabelled(turnOnScheduledBackups, filePathInputDefault);
 
     // Next, verify the filepicker and updated dialog
-    let inputUpdatePromise = BrowserTestUtils.waitForCondition(
+    let inputUpdatePromise = TestUtils.waitForCondition(
       () => turnOnScheduledBackups.filePathInputCustomEl
     );
 
@@ -175,6 +223,7 @@ add_task(async function test_turn_on_custom_location_filepicker() {
       PathUtils.filename(mockCustomParentDir),
       "Input should display file path from filepicker"
     );
+    assertLocationInputLabelled(turnOnScheduledBackups, filePathInputCustom);
 
     // Now close the dialog by confirming choices and verify that backup settings are saved
     let confirmButton = turnOnScheduledBackups.confirmButtonEl;
@@ -205,36 +254,15 @@ add_task(async function test_turn_on_custom_location_filepicker() {
       recursive: true,
     });
 
-    let legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "toggle_on",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(legacyEvents.length, 1, "Found the toggle_on legacy event.");
     let events = Glean.browserBackup.toggleOn.testGetValue();
     Assert.equal(events.length, 1, "Found the toggleOn Glean event.");
 
-    legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "change_location",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(
-      legacyEvents.length,
-      1,
-      "Found the change_location legacy event."
-    );
     events = Glean.browserBackup.changeLocation.testGetValue();
     Assert.equal(events.length, 1, "Found the changeLocation Glean event.");
 
     // Reset scheduled backups again for subsequent tests.
     Services.prefs.clearUserPref(SCHEDULED_BACKUPS_ENABLED_PREF);
+    sandbox.restore();
   });
 });
 
@@ -248,9 +276,11 @@ add_task(async function test_turn_on_scheduled_backups_encryption() {
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
     let sandbox = sinon.createSandbox();
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
 
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
 
     let turnOnButton = settings.scheduledBackupsButtonEl;
     Assert.ok(
@@ -258,8 +288,7 @@ add_task(async function test_turn_on_scheduled_backups_encryption() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
 
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
     Assert.ok(
@@ -315,31 +344,9 @@ add_task(async function test_turn_on_scheduled_backups_encryption() {
       "BackupService was called to enable encryption and received the expected argument"
     );
 
-    let legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "toggle_on",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(legacyEvents.length, 1, "Found the toggle_on legacy event.");
     let events = Glean.browserBackup.toggleOn.testGetValue();
     Assert.equal(events.length, 1, "Found the toggleOn Glean event.");
 
-    legacyEvents = TelemetryTestUtils.getEvents(
-      {
-        category: "browser.backup",
-        method: "password_added",
-        object: "BackupService",
-      },
-      { process: "parent" }
-    );
-    Assert.equal(
-      legacyEvents.length,
-      1,
-      "Found the password_added legacy event."
-    );
     events = Glean.browserBackup.passwordAdded.testGetValue();
     Assert.equal(events.length, 1, "Found the passwordAdded Glean event.");
 
@@ -355,9 +362,11 @@ add_task(async function test_turn_on_scheduled_backups_encryption() {
 add_task(async function test_turn_on_scheduled_backups_encryption_error() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
     let sandbox = sinon.createSandbox();
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
 
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
 
     let turnOnButton = settings.scheduledBackupsButtonEl;
     Assert.ok(
@@ -365,8 +374,7 @@ add_task(async function test_turn_on_scheduled_backups_encryption_error() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
 
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
     Assert.ok(
@@ -435,7 +443,7 @@ add_task(async function test_turn_on_scheduled_backups_encryption_error() {
       "Scheduled backups pref should still be false"
     );
 
-    await BrowserTestUtils.waitForCondition(
+    await TestUtils.waitForCondition(
       () => !!turnOnScheduledBackups.errorEl,
       "Error should be displayed to the user"
     );
@@ -455,9 +463,7 @@ add_task(async function test_turn_on_scheduled_backups_encryption_error() {
  */
 add_task(async function test_turn_on_scheduled_backups_encryption_error() {
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    let settings = browser.contentDocument.querySelector("backup-settings");
-
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
 
     let turnOnButton = settings.scheduledBackupsButtonEl;
     Assert.ok(
@@ -465,8 +471,7 @@ add_task(async function test_turn_on_scheduled_backups_encryption_error() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
 
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
     Assert.ok(
@@ -521,38 +526,48 @@ add_task(async function test_turn_on_scheduled_backups_encryption_error() {
 });
 
 /**
- * Tests that a backup will go into the default directory unless the user
- * specifically selects a folder. (Before, the directory previously selected
- * would be used.)
+ * Tests that confirming the dialog without choosing a custom folder does not
+ * change the backup location pref.
  */
 add_task(async function test_default_location_selected() {
+  const INITIAL_LOCATION = "backup dir path";
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.backup.location", "backup dir path"]],
+    set: [["browser.backup.location", INITIAL_LOCATION]],
   });
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    let settings = browser.contentDocument.querySelector("backup-settings");
-    await settings.updateComplete;
+    let sandbox = sinon.createSandbox();
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
 
-    let turnOnButton = settings.scheduledBackupsButtonEl;
-    turnOnButton.click();
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
+
+    await openTurnOnScheduledBackupsDialog(settings);
 
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
+
     let promise = BrowserTestUtils.waitForEvent(
-      turnOnScheduledBackups,
+      window,
       "BackupUI:EnableScheduledBackups"
     );
     turnOnScheduledBackups.confirmButtonEl.click();
-    let event = await promise;
+    await promise;
+    await settings.updateComplete;
 
-    is(
-      event.detail.parentDirPath,
-      settings.backupServiceState.defaultParent.path,
-      "Default path was used when nothing was explicitly selected"
+    let locationPrefVal = Services.prefs.getStringPref(
+      "browser.backup.location"
     );
+    Assert.equal(
+      locationPrefVal,
+      INITIAL_LOCATION,
+      "Backup location pref should not change when no custom folder is chosen"
+    );
+
+    sandbox.restore();
   });
 
+  Services.prefs.clearUserPref(SCHEDULED_BACKUPS_ENABLED_PREF);
   await SpecialPowers.popPrefEnv();
 });
 
@@ -576,6 +591,11 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
     await waitInitialRequestStateSettled();
+    let sandbox = sinon.createSandbox();
+    let probeStub = sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
+
     const mockCustomParentDir = await IOUtils.createUniqueDirectory(
       PathUtils.tempDir,
       "our-dummy-folder"
@@ -583,7 +603,7 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
     let { filePickerShownPromise } =
       await setup_mockFilePicker(mockCustomParentDir);
 
-    let settings = browser.contentDocument.querySelector("backup-settings");
+    let settings = await waitForBackupSettings(browser);
     let turnOnButton = settings.scheduledBackupsButtonEl;
 
     Assert.ok(
@@ -591,9 +611,7 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
       "Button to turn on scheduled backups should be found"
     );
 
-    turnOnButton.click();
-
-    await settings.updateComplete;
+    await openTurnOnScheduledBackupsDialog(settings);
     let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
 
     // for the purposes of this test, we will act like we are an embedded component
@@ -601,10 +619,6 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
 
     // First verify the default input value and dir path button
     let filePathButton = turnOnScheduledBackups.filePathButtonEl;
-    let stateUpdatePromise = BrowserTestUtils.waitForEvent(
-      window,
-      "BackupUI:StateWasUpdated"
-    );
     Assert.ok(
       filePathButton,
       "Button for choosing a file path should be found"
@@ -612,8 +626,15 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
     filePathButton.click();
 
     await filePickerShownPromise;
-    await stateUpdatePromise;
     await turnOnScheduledBackups.updateComplete;
+
+    await TestUtils.waitForCondition(
+      () =>
+        settings.backupServiceState.embeddedComponentPersistentData?.path !==
+        undefined,
+      "Waiting for persistent path to be set"
+    );
+
     Assert.equal(
       settings.backupServiceState.embeddedComponentPersistentData.path,
       mockCustomParentDir,
@@ -633,17 +654,89 @@ add_task(async function test_embedded_component_persistent_data_filepicker() {
 
     await promise;
     await settings.updateComplete;
+
+    Assert.ok(
+      probeStub.calledWith(mockCustomParentDir),
+      "probeDefaultDirAccess should be called with the persisted path"
+    );
+
+    sandbox.restore();
   });
 
   await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
-    let settings = browser.contentDocument.querySelector("backup-settings");
-    await settings.updateComplete;
+    let settings = await waitForBackupSettings(browser);
 
     Assert.deepEqual(
       settings.backupServiceState.embeddedComponentPersistentData,
       {},
       "Our persistent path should be flushed"
     );
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function test_create_backup_on_enable() {
+  await SpecialPowers.pushPrefEnv({
+    set: [[SCHEDULED_BACKUPS_ENABLED_PREF, false]],
+  });
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    await waitInitialRequestStateSettled();
+    let sandbox = sinon.createSandbox();
+    sandbox
+      .stub(BackupService.prototype, "probeDefaultDirAccess")
+      .resolves(true);
+    let createBackupStub = sandbox.stub(
+      BackupService.prototype,
+      "createBackup"
+    );
+
+    let { promise: backupCreatedPromise, resolve } = Promise.withResolvers();
+
+    createBackupStub.callsFake(async args => {
+      if (args?.reason === "first") {
+        resolve();
+      }
+      return true;
+    });
+
+    let settings = await waitForBackupSettings(browser);
+    let turnOnButton = settings.scheduledBackupsButtonEl;
+
+    Assert.ok(
+      turnOnButton,
+      "Button to turn on scheduled backups should be found"
+    );
+
+    await openTurnOnScheduledBackupsDialog(settings);
+
+    let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
+
+    Assert.ok(
+      turnOnScheduledBackups,
+      "turn-on-scheduled-backups should be found"
+    );
+
+    let confirmButton = turnOnScheduledBackups.confirmButtonEl;
+    let enableScheduledPromise = BrowserTestUtils.waitForEvent(
+      window,
+      "BackupUI:EnableScheduledBackups"
+    );
+
+    Assert.ok(confirmButton, "Confirm button should be found");
+
+    confirmButton.click();
+
+    await enableScheduledPromise;
+    await backupCreatedPromise;
+    await settings.updateComplete;
+    Assert.ok(
+      true,
+      "createBackup was triggered immediately with reason 'first'"
+    );
+
+    sandbox.restore();
   });
 
   await SpecialPowers.popPrefEnv();
@@ -662,6 +755,11 @@ add_task(
       "about:preferences#sync",
       async browser => {
         await waitInitialRequestStateSettled();
+        // Since we also a trigger a createBackup, there might be a bunch of state updates that we don't
+        // want to wait for, let's just stub the createBackup calls to avoid unexpected testing behavior
+        let sandbox = sinon.createSandbox();
+        sandbox.stub(BackupService.prototype, "createBackup").resolves(true);
+
         const mockCustomParentDir = await IOUtils.createUniqueDirectory(
           PathUtils.tempDir,
           "our-dummy-folder"
@@ -669,7 +767,7 @@ add_task(
         let { filePickerShownPromise } =
           await setup_mockFilePicker(mockCustomParentDir);
 
-        let settings = browser.contentDocument.querySelector("backup-settings");
+        let settings = await waitForBackupSettings(browser);
         let turnOnButton = settings.scheduledBackupsButtonEl;
 
         Assert.ok(
@@ -677,9 +775,7 @@ add_task(
           "Button to turn on scheduled backups should be found"
         );
 
-        turnOnButton.click();
-
-        await settings.updateComplete;
+        await openTurnOnScheduledBackupsDialog(settings);
         let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
 
         // for the purposes of this test, we will act like we are an embedded component
@@ -687,10 +783,6 @@ add_task(
 
         // First verify the default input value and dir path button
         let filePathButton = turnOnScheduledBackups.filePathButtonEl;
-        const waitForStateUpdate = () =>
-          BrowserTestUtils.waitForEvent(window, "BackupUI:StateWasUpdated");
-
-        let stateUpdatePromise = waitForStateUpdate();
 
         Assert.ok(
           filePathButton,
@@ -699,8 +791,14 @@ add_task(
         filePathButton.click();
 
         await filePickerShownPromise;
-        await stateUpdatePromise;
         await turnOnScheduledBackups.updateComplete;
+
+        await TestUtils.waitForCondition(
+          () =>
+            settings.backupServiceState.embeddedComponentPersistentData
+              ?.path !== undefined,
+          "Waiting for persistent path to be set"
+        );
 
         Assert.equal(
           settings.backupServiceState.embeddedComponentPersistentData.path,
@@ -708,22 +806,90 @@ add_task(
           "Our persistent path should be set correctly"
         );
 
-        stateUpdatePromise = waitForStateUpdate();
-
         let dialog = settings.turnOnScheduledBackupsDialogEl;
         let closedPromise = BrowserTestUtils.waitForEvent(dialog, "close");
         dialog.close();
         await closedPromise;
-        await stateUpdatePromise;
+
+        await TestUtils.waitForCondition(
+          () =>
+            Object.keys(
+              settings.backupServiceState.embeddedComponentPersistentData
+            ).length === 0,
+          "Waiting for persistent data to be flushed"
+        );
 
         Assert.deepEqual(
           settings.backupServiceState.embeddedComponentPersistentData,
           {},
           "Our persistent path should be flushed"
         );
+
+        sandbox.restore();
       }
     );
 
     await SpecialPowers.popPrefEnv();
   }
 );
+
+/**
+ * Tests that EnableScheduledBackups returns an error if no backup directory
+ * path has been set.
+ */
+add_task(async function test_enable_fails_without_backup_dir() {
+  await SpecialPowers.pushPrefEnv({
+    set: [[SCHEDULED_BACKUPS_ENABLED_PREF, false]],
+  });
+
+  await BrowserTestUtils.withNewTab("about:preferences#sync", async browser => {
+    let sandbox = sinon.createSandbox();
+    let bs = getAndMaybeInitBackupService();
+
+    let originalState = bs.state;
+    sandbox.stub(bs, "state").get(() => ({
+      ...originalState,
+      backupDirPath: "",
+    }));
+
+    let settings = await waitForBackupSettings(browser);
+    await settings.updateComplete;
+
+    let turnOnButton = settings.scheduledBackupsButtonEl;
+    Assert.ok(
+      turnOnButton,
+      "Button to turn on scheduled backups should be found"
+    );
+    turnOnButton.click();
+
+    await settings.updateComplete;
+    let turnOnScheduledBackups = settings.turnOnScheduledBackupsEl;
+    Assert.ok(
+      turnOnScheduledBackups,
+      "turn-on-scheduled-backups should be found"
+    );
+
+    let confirmButton = turnOnScheduledBackups.confirmButtonEl;
+    let enablePromise = BrowserTestUtils.waitForEvent(
+      window,
+      "BackupUI:EnableScheduledBackups"
+    );
+    confirmButton.click();
+    await enablePromise;
+
+    await TestUtils.waitForCondition(
+      () => turnOnScheduledBackups.enableBackupErrorCode,
+      "Waiting for error code to be set on component"
+    );
+
+    Assert.equal(
+      turnOnScheduledBackups.enableBackupErrorCode,
+      ERRORS.UNKNOWN,
+      "Error code should be set when no backup dir path exists."
+    );
+
+    sandbox.restore();
+  });
+
+  await SpecialPowers.popPrefEnv();
+});

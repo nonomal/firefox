@@ -155,6 +155,8 @@
 /* These are used internally in the pk11wrap layer as operations and should not
  * be passed to softoken or any other PKCS#11 module as actual attributes */
 #define CKA_DIGEST 0x81000000L
+#define CKA_NSS_GENERATE 0x81000001L
+#define CKA_NSS_GENERATE_KEY_PAIR 0x81000002L
 #define CKA_NSS_MESSAGE 0x82000000L
 #define CKA_NSS_SIGNATURE 0x83000000L
 #define CKA_NSS_MESSAGE_MASK 0xff000000L
@@ -435,6 +437,7 @@
 
 /* Parameter set identifiers */
 #define CKP_NSS (CKM_VENDOR_DEFINED | NSSCK_VENDOR_NSS)
+/* deprecated: round-3 Kyber removed; value retained for ABI, no longer honored */
 #define CKP_NSS_KYBER_768_ROUND3 (CKP_NSS + 1)
 #define CKP_NSS_ML_KEM_768 (CKP_NSS + 2)
 

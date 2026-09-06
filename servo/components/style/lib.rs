@@ -17,6 +17,8 @@
 //!
 //! [recalc_style_at]: traversal/fn.recalc_style_at.html
 //!
+//! A list of supported style properties can be found as [docs::supported_properties]
+//!
 //! Major dependencies are the [cssparser][cssparser] and [selectors][selectors]
 //! crates.
 //!
@@ -25,14 +27,12 @@
 
 #![deny(missing_docs)]
 
+// Needed by macros that refer to `$crate::cssparser`.
+#[allow(clippy::single_component_path_imports)]
+pub(crate) use cssparser;
+
 #[macro_use]
 extern crate bitflags;
-#[macro_use]
-extern crate cssparser;
-#[macro_use]
-extern crate debug_unreachable;
-#[macro_use]
-extern crate derive_more;
 #[macro_use]
 #[cfg(feature = "gecko")]
 extern crate gecko_profiler;
@@ -40,24 +40,7 @@ extern crate gecko_profiler;
 #[macro_use]
 pub mod gecko_string_cache;
 #[macro_use]
-extern crate lazy_static;
-#[macro_use]
 extern crate log;
-#[macro_use]
-extern crate malloc_size_of;
-#[macro_use]
-extern crate malloc_size_of_derive;
-#[cfg(feature = "servo")]
-extern crate web_atoms;
-#[allow(unused_extern_crates)]
-#[macro_use]
-extern crate matches;
-#[cfg(feature = "gecko")]
-pub use nsstring;
-#[cfg(feature = "gecko")]
-extern crate num_cpus;
-#[macro_use]
-extern crate num_derive;
 #[macro_use]
 extern crate serde;
 pub use servo_arc;
@@ -66,16 +49,20 @@ pub use servo_arc;
 extern crate stylo_atoms;
 #[macro_use]
 extern crate static_assertions;
-#[macro_use]
-extern crate style_derive;
-#[cfg(feature = "gecko")]
-#[macro_use]
-extern crate thin_vec;
-#[macro_use]
-extern crate to_shmem_derive;
 
 #[macro_use]
 mod macros;
+
+mod derives {
+    pub(crate) use derive_more::{Add, AddAssign, Deref, DerefMut, From};
+    pub(crate) use malloc_size_of_derive::MallocSizeOf;
+    pub(crate) use num_derive::FromPrimitive;
+    pub(crate) use style_derive::{
+        Animate, ComputeSquaredDistance, Parse, SpecifiedValueInfo, ToAnimatedValue,
+        ToAnimatedZero, ToComputedValue, ToCss, ToResolvedValue, ToTyped,
+    };
+    pub(crate) use to_shmem_derive::ToShmem;
+}
 
 pub mod applicable_declarations;
 pub mod author_styles;
@@ -89,6 +76,7 @@ pub mod counter_style;
 pub mod custom_properties;
 pub mod custom_properties_map;
 pub mod data;
+pub mod device;
 pub mod dom;
 pub mod dom_apis;
 pub mod driver;
@@ -107,6 +95,7 @@ pub mod media_queries;
 pub mod parallel;
 pub mod parser;
 pub mod piecewise_linear;
+pub mod prefs;
 pub mod properties_and_values;
 #[macro_use]
 pub mod queries;
@@ -128,11 +117,23 @@ pub mod stylist;
 pub mod thread_state;
 pub mod traversal;
 pub mod traversal_flags;
+pub mod typed_om;
+pub mod url;
 pub mod use_counters;
 
 #[macro_use]
 #[allow(non_camel_case_types)]
 pub mod values;
+
+#[cfg(all(doc, feature = "servo"))]
+/// Documentation
+pub mod docs {
+    /// The CSS properties supported by the style system.
+    /// Generated from the `properties.mako.rs` template by `build.rs`
+    pub mod supported_properties {
+        #![doc = include_str!(concat!(env!("OUT_DIR"), "/css-properties.html"))]
+    }
+}
 
 #[cfg(feature = "gecko")]
 pub use crate::gecko_string_cache as string_cache;
@@ -161,6 +162,7 @@ pub type Namespace = crate::values::GenericAtomIdent<web_atoms::NamespaceStaticS
 pub type Prefix = crate::values::GenericAtomIdent<web_atoms::PrefixStaticSet>;
 
 pub use style_traits::arc_slice::ArcSlice;
+pub use style_traits::owned_array::OwnedArray;
 pub use style_traits::owned_slice::OwnedSlice;
 pub use style_traits::owned_str::OwnedStr;
 
@@ -292,6 +294,19 @@ impl From<std::collections::TryReserveError> for AllocErr {
     }
 }
 
+impl From<hashbrown::TryReserveError> for AllocErr {
+    #[inline]
+    fn from(_: hashbrown::TryReserveError) -> Self {
+        Self
+    }
+}
+
+/// A hash map using the Fx hasher.
+pub type FxHashMap<K, V> = hashbrown::HashMap<K, V, rustc_hash::FxBuildHasher>;
+
+/// A hash set using the Fx hasher.
+pub type FxHashSet<T> = hashbrown::HashSet<T, rustc_hash::FxBuildHasher>;
+
 /// Shrink the capacity of the collection if needed.
 pub(crate) trait ShrinkIfNeeded {
     fn shrink_if_needed(&mut self);
@@ -306,7 +321,7 @@ fn should_shrink(len: usize, capacity: usize) -> bool {
     capacity >= CAPACITY_THRESHOLD && len + capacity / 4 < capacity
 }
 
-impl<K, V, H> ShrinkIfNeeded for std::collections::HashMap<K, V, H>
+impl<K, V, H> ShrinkIfNeeded for hashbrown::HashMap<K, V, H>
 where
     K: Eq + Hash,
     H: BuildHasher,
@@ -318,7 +333,7 @@ where
     }
 }
 
-impl<T, H> ShrinkIfNeeded for std::collections::HashSet<T, H>
+impl<T, H> ShrinkIfNeeded for hashbrown::HashSet<T, H>
 where
     T: Eq + Hash,
     H: BuildHasher,

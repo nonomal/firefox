@@ -69,7 +69,12 @@ const fxAccounts = getFxAccountsSingleton();
 function getEngineModules() {
   let result = {
     Addons: { module: "addons.sys.mjs", symbol: "AddonsEngine" },
-    Password: { module: "passwords.sys.mjs", symbol: "PasswordEngine" },
+    Passwords: {
+      module: "passwords.sys.mjs",
+      controllingPref: "signon.storage.rust.active",
+      whenTrue: "RustPasswordEngine",
+      whenFalse: "PasswordEngine",
+    },
     Prefs: { module: "prefs.sys.mjs", symbol: "PrefsEngine" },
   };
   if (AppConstants.MOZ_APP_NAME != "thunderbird") {
@@ -797,7 +802,8 @@ Sync11Service.prototype = {
         "No config or incomplete config in getMaxRecordPayloadSize." +
           " Are we running tests?"
       );
-      return 256 * 1024;
+      // should stay in sync with MAX_PAYLOAD_SIZE in the Rust tabs engine.
+      return 2 * 1024 * 1024;
     }
     let payloadMax = config.max_record_payload_bytes;
     if (config.max_post_bytes && payloadMax <= config.max_post_bytes) {
@@ -964,22 +970,6 @@ Sync11Service.prototype = {
     );
     if (keysChanged) {
       this._log.info("Downloaded keys differed, as expected.");
-    }
-  },
-
-  // Checks if sync can be configured for the current FxA user.
-  // Returns true if there is a signed-in user with sync keys available.
-  async canConfigure() {
-    let user = await fxAccounts.getSignedInUser();
-    if (!user) {
-      return false;
-    }
-    try {
-      let hasKeys = await fxAccounts.keys.hasKeysForScope(SCOPE_APP_SYNC);
-      return hasKeys;
-    } catch (err) {
-      this._log.error("Failed to check for sync keys", err);
-      return false;
     }
   },
 
@@ -1674,10 +1664,6 @@ Sync11Service.prototype = {
         await engine.resetClient();
       }
     })();
-  },
-
-  recordTelemetryEvent(object, method, value, extra = undefined) {
-    Svc.Obs.notify("weave:telemetry:event", { object, method, value, extra });
   },
 };
 

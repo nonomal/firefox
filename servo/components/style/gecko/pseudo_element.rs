@@ -8,19 +8,66 @@
 //! `pseudo_element_definition.mako.rs`. If you touch that file, you probably
 //! need to update the checked-in files for Servo.
 
-use crate::gecko_bindings::structs::{self, PseudoStyleType};
+use crate::gecko_bindings::structs::PseudoStyleType;
+use crate::pref;
 use crate::properties::longhands::display::computed_value::T as Display;
 use crate::properties::{ComputedValues, PropertyFlags};
-use crate::selector_parser::{PseudoElementCascadeType, SelectorImpl};
+use crate::selector_parser::PseudoElementCascadeType;
 use crate::str::{starts_with_ignore_ascii_case, string_as_ascii_lowercase};
 use crate::string_cache::Atom;
 use crate::values::serialize_atom_identifier;
 use crate::values::AtomIdent;
 use cssparser::{Parser, ToCss};
 use selectors::parser::PseudoElement as PseudoElementTrait;
-use static_prefs::pref;
 use std::fmt;
 use style_traits::ParseError;
+
+bitflags! {
+    /// Various pseudo-element flags, see pseudo_elements.toml and anonymous_boxes.toml for the
+    /// meaning.
+    #[derive(Clone, Copy, Default)]
+    pub struct PseudoStyleTypeFlags : u16 {
+        /// No flags
+        const NONE = 0;
+        /// Whether we're enabled in UA sheets.
+        const ENABLED_IN_UA = 1 << 0;
+        /// Whether we're enabled in chrome sheets.
+        const ENABLED_IN_CHROME = 1 << 1;
+        /// Whether we're enabled by a pref.
+        const ENABLED_BY_PREF = 1 << 2;
+        /// Whether we're an anonymous box.
+        const IS_PSEUDO_ELEMENT = 1 << 3;
+        /// Whether we're a CSS2 pseudo-element.
+        const IS_CSS2 = 1 << 4;
+        /// Whether we're an eagerly-cascaded pseudo-element.
+        const IS_EAGER = 1 << 5;
+        /// Whether we can be created by JS
+        const IS_JS_CREATED_NAC = 1 << 6;
+        /// Whether we can be a flex or grid item.
+        const IS_FLEX_OR_GRID_ITEM = 1 << 7;
+        /// Whether we're backed by a real element.
+        const IS_ELEMENT_BACKED = 1 << 8;
+        /// Whether we're a tree-abiding pseudo as per
+        /// https://drafts.csswg.org/css-pseudo-4/#treelike
+        const IS_TREE_ABIDING = 1 << 9;
+        /// Whether we support user-action state pseudo-classes after the pseudo-element.
+        const SUPPORTS_USER_ACTION_STATE = 1 << 10;
+        /// Whether we are an inheriting anon-box.
+        const IS_INHERITING_ANON_BOX = 1 << 11;
+        /// Whether we are a non-inheriting anon box.
+        const IS_NON_INHERITING_ANON_BOX = 1 << 12;
+        /// Combo of the above to cover all anon boxes.
+        const IS_ANON_BOX = Self::IS_INHERITING_ANON_BOX.bits() |
+                            Self::IS_NON_INHERITING_ANON_BOX.bits();
+        /// Whether we're a wrapping anon box.
+        const IS_WRAPPER_ANON_BOX = 1 << 13;
+        /// Whether we parse as an element-backed pseudo-element.
+        const PARSES_AS_ELEMENT_BACKED = 1 << 14;
+        /// Whether we take an argument. Such pseudo-elements share an `index()` with the other
+        /// pseudo-elements of the same kind, so they can't be told apart by it alone.
+        const HAS_ARGUMENT = 1 << 15;
+    }
+}
 
 include!(concat!(
     env!("OUT_DIR"),
@@ -57,7 +104,7 @@ pub struct PtNameAndClassSelector(thin_vec::ThinVec<Atom>);
 impl PtNameAndClassSelector {
     /// Constructs a new one from a name.
     pub fn from_name(name: Atom) -> Self {
-        Self(thin_vec![name])
+        Self(thin_vec::thin_vec![name])
     }
 
     /// Returns the name component.
@@ -83,16 +130,13 @@ impl PtNameAndClassSelector {
     // Note: We share the same type for both pseudo-element and pseudo-element selector. The
     // universal symbol (i.e. '*') and `<pt-class-selector>` are used only in the selector (for
     // matching).
-    pub fn parse<'i, 't>(
-        input: &mut Parser<'i, 't>,
-        target: Target,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse(input: &mut Parser, target: Target) -> Result<Self, ParseError> {
         use crate::values::CustomIdent;
         use cssparser::Token;
         use style_traits::StyleParseErrorKind;
 
         // <pt-name-selector> = '*' | <custom-ident>
-        let parse_pt_name = |input: &mut Parser<'i, '_>| {
+        let parse_pt_name = |input: &mut Parser| {
             // For pseudo-element string, we don't accept '*'.
             if matches!(target, Target::Selector)
                 && input.try_parse(|i| i.expect_delim('*')).is_ok()
@@ -110,18 +154,17 @@ impl PtNameAndClassSelector {
         }
 
         // <pt-class-selector> = ['.' <custom-ident>]+
-        let parse_pt_class = |input: &mut Parser<'i, '_>| {
+        let parse_pt_class = |input: &mut Parser| {
             // The white space is forbidden:
             // 1. Between <pt-name-selector> and <pt-class-selector>
             // 2. Between any of the components of <pt-class-selector>.
-            let location = input.current_source_location();
             match input.next_including_whitespace()? {
                 Token::Delim('.') => (),
-                t => return Err(location.new_unexpected_token_error(t.clone())),
+                _ => return Err(ParseError::unexpected_token()),
             }
             // Whitespace is not allowed between '.' and the class name.
-            if let Ok(token) = input.try_parse(|i| i.expect_whitespace()) {
-                return Err(input.new_unexpected_token_error(Token::WhiteSpace(token)));
+            if input.try_parse(|i| i.expect_whitespace()).is_ok() {
+                return Err(ParseError::unexpected_token());
             }
             CustomIdent::parse(input, &[]).map(|c| c.0)
         };
@@ -137,12 +180,12 @@ impl PtNameAndClassSelector {
         // If we don't have `<pt-name-selector>`, we must have `<pt-class-selector>`, per the
         // syntax: `<pt-name-selector> <pt-class-selector>? | <pt-class-selector>`.
         if name.is_err() && classes.is_empty() {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
 
         // Use the universal symbol as the first element to present the part of
         // `<pt-name-selector>` because they are equivalent (and the serialization is the same).
-        let mut result = thin_vec![name.unwrap_or(atom!("*"))];
+        let mut result = thin_vec::thin_vec![name.unwrap_or(atom!("*"))];
         result.append(&mut classes);
 
         Ok(Self(result))
@@ -172,22 +215,13 @@ impl ToCss for PtNameAndClassSelector {
 }
 
 impl PseudoElementTrait for PseudoElement {
-    type Impl = SelectorImpl;
-
     // ::slotted() should support all tree-abiding pseudo-elements, see
     // https://drafts.csswg.org/css-scoping/#slotted-pseudo
     // https://drafts.csswg.org/css-pseudo-4/#treelike
     #[inline]
     fn valid_after_slotted(&self) -> bool {
-        matches!(
-            *self,
-            Self::Before
-                | Self::After
-                | Self::Marker
-                | Self::Placeholder
-                | Self::FileSelectorButton
-                | Self::DetailsContent
-        )
+        self.flags()
+            .intersects(PseudoStyleTypeFlags::IS_TREE_ABIDING)
     }
 
     // ::before/::after should support ::marker, but no others.
@@ -216,13 +250,9 @@ impl PseudoElementTrait for PseudoElement {
         self.is_named_view_transition()
     }
 
-    /// Whether this pseudo-element is "element-backed", which means that it inherits from its regular
-    /// flat tree parent, which might not be the originating element.
-    #[inline]
-    fn is_element_backed(&self) -> bool {
-        // Note: We don't include ::view-transition here because it inherits from the originating
-        // element, instead of the snapshot containing block.
-        self.is_named_view_transition() || *self == PseudoElement::DetailsContent
+    fn parses_as_element_backed(&self) -> bool {
+        self.flags()
+            .intersects(PseudoStyleTypeFlags::PARSES_AS_ELEMENT_BACKED)
     }
 
     /// Whether the current pseudo element is ::before or ::after.
@@ -233,6 +263,14 @@ impl PseudoElementTrait for PseudoElement {
 }
 
 impl PseudoElement {
+    /// Whether this pseudo-element is "element-backed", which means that it inherits from its regular
+    /// flat tree parent, which might not be the originating element.
+    #[inline]
+    pub fn is_element_backed(&self) -> bool {
+        self.flags()
+            .intersects(PseudoStyleTypeFlags::IS_ELEMENT_BACKED)
+    }
+
     /// Returns the kind of cascade type that a given pseudo is going to use.
     ///
     /// In Gecko we only compute ::before and ::after eagerly. We save the rules
@@ -251,6 +289,43 @@ impl PseudoElement {
         }
 
         PseudoElementCascadeType::Lazy
+    }
+
+    /// Returns an index of the pseudo-element.
+    #[inline]
+    pub fn index(&self) -> usize {
+        self.discriminant() as usize
+    }
+
+    #[inline]
+    fn discriminant(&self) -> u8 {
+        // SAFETY: #[repr(u8) guarantees this, see comments in
+        // https://doc.rust-lang.org/std/mem/fn.discriminant.html
+        unsafe { *(self as *const _ as *const u8) }
+    }
+
+    /// Whether this pseudo-element is an unknown Webkit-prefixed pseudo-element.
+    #[inline]
+    pub fn is_unknown_webkit_pseudo_element(&self) -> bool {
+        matches!(*self, PseudoElement::UnknownWebkit(..))
+    }
+
+    /// Whether this pseudo-element is an anonymous box.
+    #[inline]
+    pub fn is_anon_box(&self) -> bool {
+        self.flags().intersects(PseudoStyleTypeFlags::IS_ANON_BOX)
+    }
+
+    /// Whether this pseudo-element is eagerly-cascaded.
+    #[inline]
+    pub fn is_eager(&self) -> bool {
+        self.flags().intersects(PseudoStyleTypeFlags::IS_EAGER)
+    }
+
+    /// Whether this pseudo-element takes an argument.
+    #[inline]
+    pub fn has_argument(&self) -> bool {
+        self.flags().intersects(PseudoStyleTypeFlags::HAS_ARGUMENT)
     }
 
     /// Gets the canonical index of this eagerly-cascaded pseudo-element.
@@ -272,7 +347,10 @@ impl PseudoElement {
     /// parent element.
     #[inline]
     pub fn animations_stored_in_parent(&self) -> bool {
-        matches!(*self, Self::Before | Self::After | Self::Marker)
+        matches!(
+            *self,
+            Self::Before | Self::After | Self::Marker | Self::Backdrop
+        )
     }
 
     /// Whether this pseudo-element is the ::before pseudo.
@@ -311,12 +389,6 @@ impl PseudoElement {
         *self == PseudoElement::FirstLine
     }
 
-    /// Whether this pseudo-element is the ::-moz-color-swatch pseudo.
-    #[inline]
-    pub fn is_color_swatch(&self) -> bool {
-        *self == PseudoElement::MozColorSwatch
-    }
-
     /// Whether this pseudo-element is lazily-cascaded.
     #[inline]
     pub fn is_lazy(&self) -> bool {
@@ -340,6 +412,14 @@ impl PseudoElement {
     #[inline]
     pub fn is_target_text(&self) -> bool {
         *self == PseudoElement::TargetText
+    }
+
+    /// Whether this is a highlight pseudo-element that is styled lazily during
+    /// painting rather than during the restyle traversal. These pseudos need
+    /// explicit repaint triggering when their styles change.
+    #[inline]
+    pub fn is_lazy_painted_highlight_pseudo(&self) -> bool {
+        self.is_selection() || self.is_highlight() || self.is_target_text()
     }
 
     /// Whether this pseudo-element is a named view transition pseudo-element.
@@ -377,69 +457,71 @@ impl PseudoElement {
 
     /// Whether this pseudo-element supports user action selectors.
     pub fn supports_user_action_state(&self) -> bool {
-        (self.flags() & structs::CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE) != 0
+        self.flags()
+            .intersects(PseudoStyleTypeFlags::SUPPORTS_USER_ACTION_STATE)
+    }
+
+    /// Returns true if the given pseudo-element is enabled for the document
+    /// represented by `url_data`, according to its `enabled_domains_pref` toml
+    /// setting. A pseudo-element without such a pref is enabled everywhere, an
+    /// empty list is enabled nowhere, and `*` is enabled everywhere.
+    fn is_pseudo_enabled_for_url(&self, url_data: &crate::stylesheets::UrlExtraData) -> bool {
+        let Some(list) = self.enabled_domains() else {
+            return true;
+        };
+        if list == "*" {
+            return true;
+        }
+        unsafe { crate::gecko_bindings::bindings::Gecko_IsURIInList(url_data.ptr(), &*list) }
     }
 
     /// Whether this pseudo-element is enabled for all content.
-    pub fn enabled_in_content(&self) -> bool {
-        match *self {
-            Self::Highlight(..) => pref!("dom.customHighlightAPI.enabled"),
-            Self::TargetText => pref!("dom.text_fragments.enabled"),
-            Self::SliderFill | Self::SliderTrack | Self::SliderThumb => {
-                pref!("layout.css.modern-range-pseudos.enabled")
-            },
-            Self::DetailsContent => {
-                pref!("layout.css.details-content.enabled")
-            },
-            Self::ViewTransition
-            | Self::ViewTransitionGroup(..)
-            | Self::ViewTransitionImagePair(..)
-            | Self::ViewTransitionOld(..)
-            | Self::ViewTransitionNew(..) => pref!("dom.viewTransitions.enabled"),
-            // If it's not explicitly enabled in UA sheets or chrome, then we're enabled for
-            // content.
-            _ => (self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS_AND_CHROME) == 0,
+    pub fn enabled_in_content(
+        &self,
+        url_data: &crate::stylesheets::UrlExtraData,
+        for_supports_rule: bool,
+    ) -> bool {
+        if !Self::type_enabled_in_content(self.pseudo_type()) {
+            return false;
         }
+        if !self.is_pseudo_enabled_for_url(url_data) {
+            return false;
+        }
+        if for_supports_rule && matches!(*self, Self::WebkitScrollbar) {
+            // ::-webkit-scrollbar remains false in @supports even when we "support" it, like
+            // other unknown webkit pseudo-elements.
+            return false;
+        }
+        true
     }
 
     /// Whether this pseudo is enabled explicitly in UA sheets.
     pub fn enabled_in_ua_sheets(&self) -> bool {
-        (self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS) != 0
+        self.flags().intersects(PseudoStyleTypeFlags::ENABLED_IN_UA)
     }
 
     /// Whether this pseudo is enabled explicitly in chrome sheets.
     pub fn enabled_in_chrome(&self) -> bool {
-        (self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_CHROME) != 0
+        self.flags()
+            .intersects(PseudoStyleTypeFlags::ENABLED_IN_CHROME)
     }
 
     /// Whether this pseudo-element skips flex/grid container display-based
     /// fixup.
     #[inline]
     pub fn skip_item_display_fixup(&self) -> bool {
-        (self.flags() & structs::CSS_PSEUDO_ELEMENT_IS_FLEX_OR_GRID_ITEM) == 0
+        !self
+            .flags()
+            .intersects(PseudoStyleTypeFlags::IS_FLEX_OR_GRID_ITEM)
     }
 
     /// Whether this pseudo-element is precomputed.
     #[inline]
     pub fn is_precomputed(&self) -> bool {
-        self.is_anon_box() && !self.is_tree_pseudo_element()
+        self.is_anon_box()
     }
 
-    /// Property flag that properties must have to apply to this pseudo-element.
     #[inline]
-    pub fn property_restriction(&self) -> Option<PropertyFlags> {
-        Some(match *self {
-            PseudoElement::FirstLetter => PropertyFlags::APPLIES_TO_FIRST_LETTER,
-            PseudoElement::FirstLine => PropertyFlags::APPLIES_TO_FIRST_LINE,
-            PseudoElement::Placeholder => PropertyFlags::APPLIES_TO_PLACEHOLDER,
-            PseudoElement::Cue => PropertyFlags::APPLIES_TO_CUE,
-            PseudoElement::Marker if static_prefs::pref!("layout.css.marker.restricted") => {
-                PropertyFlags::APPLIES_TO_MARKER
-            },
-            _ => return None,
-        })
-    }
-
     /// Whether this pseudo-element should actually exist if it has
     /// the given styles.
     pub fn should_exist(&self, style: &ComputedValues) -> bool {
@@ -459,9 +541,7 @@ impl PseudoElement {
     /// Parse the pseudo-element string without the check of enabled state. This may includes
     /// all possible PseudoElement, including tree pseudo-elements and anonymous box.
     // TODO: Bug 1845712. Merge this with the pseudo element part in parse_one_simple_selector().
-    pub fn parse_ignore_enabled_state<'i, 't>(
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse_ignore_enabled_state(input: &mut Parser) -> Result<Self, ParseError> {
         use crate::gecko::selector_parser;
         use cssparser::Token;
         use selectors::parser::{is_css2_pseudo_element, SelectorParseErrorKind};
@@ -470,16 +550,15 @@ impl PseudoElement {
         // The pseudo-element string should start with ':'.
         input.expect_colon()?;
 
-        let location = input.current_source_location();
         let next = input.next_including_whitespace()?;
         if !matches!(next, Token::Colon) {
             // Parse a CSS2 pseudo-element.
             let name = match next {
-                Token::Ident(name) if is_css2_pseudo_element(&name) => name,
-                _ => return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
+                Token::Ident(name) if is_css2_pseudo_element(name) => name,
+                _ => return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError)),
             };
-            return PseudoElement::from_slice(&name, false).ok_or(location.new_custom_error(
-                SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name.clone()),
+            return PseudoElement::from_slice(name).ok_or(ParseError::custom(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
             ));
         }
 
@@ -487,8 +566,8 @@ impl PseudoElement {
         match input.next_including_whitespace()?.clone() {
             Token::Ident(name) => {
                 // We don't need to parse unknown ::-webkit-* pseudo-elements in this function.
-                PseudoElement::from_slice(&name, false).ok_or(input.new_custom_error(
-                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+                PseudoElement::from_slice(&name).ok_or(ParseError::custom(
+                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
                 ))
             },
             Token::Function(name) => {
@@ -496,13 +575,13 @@ impl PseudoElement {
                 // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
                 input.parse_nested_block(|input| {
                     selector_parser::parse_functional_pseudo_element_with_name(
-                        name,
+                        &name,
                         input,
                         Target::Cssom,
                     )
                 })
             },
-            t => return Err(input.new_unexpected_token_error(t)),
+            _ => Err(ParseError::unexpected_token()),
         }
     }
 

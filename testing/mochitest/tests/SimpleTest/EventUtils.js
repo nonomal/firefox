@@ -153,6 +153,32 @@ function _EU_roundDevicePixels(aMaybeFractionalPixels) {
 }
 
 /**
+ * Return the additional version details of Windows, e.g., "7309" of build
+ * number "6100.7309".
+ */
+function _EU_getWindowsUBR() {
+  try {
+    const { WindowsRegistry } = _EU_ChromeUtils.importESModule(
+      "resource://gre/modules/WindowsRegistry.sys.mjs"
+    );
+    const ubr = WindowsRegistry.readRegKey(
+      _EU_Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE,
+      "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+      "UBR",
+      _EU_Ci.nsIWindowsRegKey.WOW64_64
+    );
+    if (Number.isInteger(ubr)) {
+      return ubr;
+    }
+  } catch (ex) {
+    if (typeof info == "function") {
+      info(`Error: ${ex}`);
+    }
+  }
+  return NaN;
+}
+
+/**
  * promiseElementReadyForUserInput() dispatches mousemove events to aElement
  * and waits one of them for a while.  Then, returns "resolved" state when it's
  * successfully received.  Otherwise, if it couldn't receive mousemove event on
@@ -723,7 +749,6 @@ function synthesizeMouseAtPoint(
     var button = computeButton(aEvent);
     var clickCount = aEvent.clickCount || 1;
     var modifiers = _parseModifiers(aEvent, aWindow);
-    var pressure = "pressure" in aEvent ? aEvent.pressure : 0;
 
     // aWindow might be cross-origin from us.
     var MouseEvent = _EU_maybeWrap(aWindow).MouseEvent;
@@ -766,7 +791,7 @@ function synthesizeMouseAtPoint(
           buttons: aEvent.buttons,
           clickCount,
           modifiers,
-          pressure,
+          pressure: aEvent.pressure,
           inputSource,
         },
         {
@@ -787,7 +812,7 @@ function synthesizeMouseAtPoint(
           buttons: aEvent.buttons,
           clickCount,
           modifiers,
-          pressure,
+          pressure: aEvent.pressure,
           inputSource,
         },
         {
@@ -807,7 +832,7 @@ function synthesizeMouseAtPoint(
           buttons: aEvent.buttons,
           clickCount,
           modifiers,
-          pressure,
+          pressure: aEvent.pressure,
           inputSource,
         },
         {
@@ -853,48 +878,53 @@ function synthesizeMouseAtCenter(aTarget, aEvent, aWindow, aCallback) {
 
 /**
  * @typedef {object} TouchEventData
- * @property {boolean} [aEvent.asyncEnabled] - If `true`, the event is
- * dispatched to the parent process through APZ, without being injected
- * into the OS event queue.
- * @property {string} [aEvent.type] - The touch event type. If undefined,
- * "touchstart" and "touchend" will be synthesized at same point.
- * @property {number | number[]} [aEvent.id] - The touch id. If you don't specify this,
- * default touch id will be used for first touch and further touch ids
- * are the values incremented from the first id.
- * @property {number | number[]} [aEvent.ry] - The X radius in CSS pixels of the touch
- * @property {number | number[]} [aEvent.ry] - The Y radius in CSS pixels of the touch
- * @property {number | number[]} [aEvent.angle] - The angle in degrees
- * @property {number | number[]} [aEvent.force] - The force of the touch
- * @property {number | number[]} [aEvent.tiltX] - The X tilt of the touch
- * @property {number | number[]} [aEvent.tiltY] - The Y tilt of the touch
- * @property {number | number[]} [aEvent.twist] - The twist of the touch
+ *
+ * @property {string} [type] - The touch event type. If undefined,
+ *     "touchstart" and "touchend" will be synthesized at same point.
+ * @property {number | Array<number>} [id] - The touch id. If you don't specify this,
+ *     default touch id will be used for first touch and further touch ids
+ *     are the values incremented from the first id.
+ * @property {boolean} [asyncEnabled] - If `true`, the event is
+ *     dispatched to the parent process through APZ, without being injected
+ *     into the OS event queue.
+ * @property {number | Array<number>} [rx] - The X radius in CSS pixels of the touch
+ * @property {number | Array<number>} [ry] - The Y radius in CSS pixels of the touch
+ * @property {number | Array<number>} [angle] - The angle in degrees
+ * @property {number | Array<number>} [force] - The force of the touch
+ * @property {number | Array<number>} [tiltX] - The X tilt of the touch
+ * @property {number | Array<number>} [tiltY] - The Y tilt of the touch
+ * @property {number | Array<number>} [twist] - The twist of the touch
+ * @property {number | Array<number>} [altitudeAngle] - The altitude angle of the touch
+ * @property {number | Array<number>} [azimuthAngle] - The azimuth angle of the touch
  */
 
 /**
- * Synthesize one or more touches on aTarget. aTarget can be either Element
- * or Array of Elements.  aOffsetX, aOffsetY, aEvent.id, aEvent.rx, aEvent.ry,
- * aEvent.angle, aEvent.force, aEvent.tiltX, aEvent.tiltY and aEvent.twist can
- * be either number or array of numbers (can be mixed).  If you specify array
- * to synthesize a multi-touch, you need to specify same length arrays.  If
- * you don't specify array to them, same values (or computed default values for
- * aEvent.id) are used for all touches.
+ * Synthesize one or more touches on aTarget.
  *
- * @param {Element | Element[]} aTarget - The target element which you specify
- * relative offset from its top-left.
- * @param {number | number[]} aOffsetX - The relative offset from left of aTarget.
- * @param {number | number[]} aOffsetY - The relative offset from top of aTarget.
+ * Parameters except `aWindow`, `aCallback`, `aEvent.type` and
+ * `aEvent.asyncEnabled` can be either number or an array of
+ * numbers (can be mixed). If you specify an array to synthesize
+ * a multi-touch, all arrays need the same length. If you don't
+ * specify array to them, same values are used for all touches.
+ *
+ * @param {Element | Array<Element>} aTarget - DOM element(s) to dispatch the event on.
+ * @param {number | Array<number>} aOffsetX - The relative offset from left of `aTarget`.
+ * @param {number | Array<number>} aOffsetY - The relative offset from top of `aTarget`.
  * @param {TouchEventData} aEvent - Details of the touch event to dispatch
  * @param {DOMWindow} [aWindow=window] - DOM window used to dispatch the event.
+ * @param {Function} [aCallback] - A callback function that is invoked when the
+ *                                 touch event is dispatched.
  *
- * @returns true if and only if aEvent.type is specified and default of the
- * event is prevented.
+ * @returns true if and only if aEvent.type is specified
+ *          and default of the event is prevented.
  */
 function synthesizeTouch(
   aTarget,
   aOffsetX,
   aOffsetY,
   aEvent = {},
-  aWindow = window
+  aWindow = window,
+  aCallback
 ) {
   let rectX, rectY;
   if (Array.isArray(aTarget)) {
@@ -912,6 +942,7 @@ function synthesizeTouch(
     rectX = [rect.left];
     rectY = [rect.top];
   }
+
   const offsetX = (() => {
     if (Array.isArray(aOffsetX)) {
       let ret = [];
@@ -922,6 +953,7 @@ function synthesizeTouch(
     }
     return aOffsetX + rectX[0];
   })();
+
   const offsetY = (() => {
     if (Array.isArray(aOffsetY)) {
       let ret = [];
@@ -932,26 +964,66 @@ function synthesizeTouch(
     }
     return aOffsetY + rectY[0];
   })();
-  return synthesizeTouchAtPoint(offsetX, offsetY, aEvent, aWindow);
+
+  return synthesizeTouchAtPoint(offsetX, offsetY, aEvent, aWindow, aCallback);
 }
 
 /**
- * Synthesize one or more touches at the points. aLeft, aTop, aEvent.id,
- * aEvent.rx, aEvent.ry, aEvent.angle, aEvent.force, aEvent.tiltX, aEvent.tiltY
- * and aEvent.twist can be either number or array of numbers (can be mixed).
- * If you specify array to synthesize a multi-touch, you need to specify same
- * length arrays.  If you don't specify array to them, same values are used for
- * all touches.
+ * Synthesize a touch event at the center of `aTarget`.
  *
- * @param {number | number[]} aLeft - The relative offset from left of aTarget.
- * @param {number | number[]} aTop - The relative offset from top of aTarget.
- * @param {TouchEventData} aEvent - Details of the touch event to dispatch
+ * Parameters except `aTarget`, `aWindow`, `aCallback`, `aEvent.type`
+ * and `aEvent.asyncEnabled` can be either number or an array of
+ * numbers (can be mixed). If you specify an array to synthesize
+ * a multi-touch, all arrays need the same length. If you don't
+ * specify array to them, same values are used for all touches.
+ *
+ * @param {Element} aTarget - DOM element to dispatch the event on.
+ * @param {TouchEventData} aEvent - Details of the touch event to dispatch.
  * @param {DOMWindow} [aWindow=window] - DOM window used to dispatch the event.
+ * @param {Function} [aCallback] - A callback function that is invoked when the
+ *     touch event is dispatched.
  *
- * @returns true if and only if aEvent.type is specified and default of the
- * event is prevented.
+ * @returns true if and only if aEvent.type is specified
+ *          and default of the event is prevented.
  */
-function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
+function synthesizeTouchAtCenter(aTarget, aEvent, aWindow, aCallback) {
+  const rect = aTarget.getBoundingClientRect();
+
+  return synthesizeTouchAtPoint(
+    rect.left + rect.width / 2,
+    rect.top + rect.height / 2,
+    aEvent,
+    aWindow,
+    aCallback
+  );
+}
+
+/**
+ * Synthesize one or more touches at the points.
+ *
+ * Parameters except `aWindow`, `aCallback`, `aEvent.type` and
+ * `aEvent.asyncEnabled` can be either number or an array of
+ * numbers (can be mixed). If you specify an array to synthesize
+ * a multi-touch, all arrays need the same length. If you don't
+ * specify array to them, same values are used for all touches.
+ *
+ * @param {number | Array<number>} aLeft - Floating-point value for the X offset in CSS pixels.
+ * @param {number | Array<number>} aTop - Floating-point value for the Y offset in CSS pixels.
+ * @param {TouchEventData} aEvent - Details of the touch event to dispatch.
+ * @param {DOMWindow} [aWindow=window] - DOM window used to dispatch the event.
+ * @param {Function} [aCallback] - A callback function that is invoked when the
+ *                                 touch event is dispatched.
+ *
+ * @returns true if and only if aEvent.type is specified
+ *          and default of the event is prevented.
+ */
+function synthesizeTouchAtPoint(
+  aLeft,
+  aTop,
+  aEvent = {},
+  aWindow = window,
+  aCallback
+) {
   let utils = _getDOMWindowUtils(aWindow);
   if (!utils) {
     return false;
@@ -976,6 +1048,7 @@ function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
       throw new Error(`${aName} is different length array`);
     }
   }
+
   const leftArray = (() => {
     if (Array.isArray(aLeft)) {
       for (let i = 0; i < aLeft.length; i++) {
@@ -985,6 +1058,7 @@ function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
     }
     return new Array(arrayLength).fill(_EU_roundDevicePixels(aLeft));
   })();
+
   const topArray = (() => {
     if (Array.isArray(aTop)) {
       throwExceptionIfDifferentLengthArray(aTop, "aTop");
@@ -995,6 +1069,7 @@ function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
     }
     return new Array(arrayLength).fill(_EU_roundDevicePixels(aTop));
   })();
+
   const idArray = (() => {
     if ("id" in aEvent && Array.isArray(aEvent.id)) {
       throwExceptionIfDifferentLengthArray(aEvent.id, "aEvent.id");
@@ -1007,6 +1082,7 @@ function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
     }
     return ret;
   })();
+
   function getSameLengthArrayOfEventProperty(aProperty, aDefaultValue) {
     if (aProperty in aEvent && Array.isArray(aEvent[aProperty])) {
       throwExceptionIfDifferentLengthArray(
@@ -1018,111 +1094,109 @@ function synthesizeTouchAtPoint(aLeft, aTop, aEvent = {}, aWindow = window) {
     }
     return new Array(arrayLength).fill(aEvent[aProperty] || aDefaultValue);
   }
+
   const rxArray = getSameLengthArrayOfEventProperty("rx", 1);
   const ryArray = getSameLengthArrayOfEventProperty("ry", 1);
   const angleArray = getSameLengthArrayOfEventProperty("angle", 0);
-  const forceArray = getSameLengthArrayOfEventProperty(
-    "force",
-    aEvent.type === "touchend" ? 0 : 1
-  );
+  const forceArray = getSameLengthArrayOfEventProperty("force");
   const tiltXArray = getSameLengthArrayOfEventProperty("tiltX", 0);
   const tiltYArray = getSameLengthArrayOfEventProperty("tiltY", 0);
   const twistArray = getSameLengthArrayOfEventProperty("twist", 0);
+  const altitudeAngleArray = getSameLengthArrayOfEventProperty(
+    "altitudeAngle",
+    undefined
+  );
+  const azimuthAngleArray = getSameLengthArrayOfEventProperty(
+    "azimuthAngle",
+    undefined
+  );
 
-  const modifiers = _parseModifiers(aEvent, aWindow);
-
-  const asyncOption = aEvent.asyncEnabled
-    ? utils.ASYNC_ENABLED
-    : utils.ASYNC_DISABLED;
-
-  const args = [
-    idArray,
-    leftArray,
-    topArray,
-    rxArray,
-    ryArray,
-    angleArray,
-    forceArray,
-    tiltXArray,
-    tiltYArray,
-    twistArray,
-    modifiers,
-    asyncOption,
-  ];
-
-  const sender =
-    aEvent.mozInputSource === "pen" ? "sendTouchEventAsPen" : "sendTouchEvent";
-
-  if ("type" in aEvent && aEvent.type) {
-    return utils[sender](aEvent.type, ...args);
+  const touches = [];
+  for (let i = 0; i < arrayLength; i++) {
+    touches.push({
+      identifier: idArray[i],
+      offsetX: leftArray[i],
+      offsetY: topArray[i],
+      radiiX: rxArray[i],
+      radiiY: ryArray[i],
+      rotationAngle: angleArray[i],
+      pressure: forceArray[i],
+      tiltX: tiltXArray[i],
+      tiltY: tiltYArray[i],
+      twist: twistArray[i],
+      altitudeAngle: altitudeAngleArray[i],
+      azimuthAngle: azimuthAngleArray[i],
+    });
   }
 
-  utils[sender]("touchstart", ...args);
-  utils[sender]("touchend", ...args);
+  const args = [
+    touches,
+    _parseModifiers(aEvent, aWindow),
+    {
+      isAsyncEnabled: aEvent.asyncEnabled || false,
+      isPen: aEvent.mozInputSource === "pen",
+      isDOMEventSynthesized: aEvent.isSynthesized,
+    },
+  ];
+
+  if ("type" in aEvent && aEvent.type) {
+    return _EU_maybeWrap(aWindow).synthesizeTouchEvent(
+      aEvent.type,
+      ...args,
+      aCallback
+    );
+  }
+
+  _EU_maybeWrap(aWindow).synthesizeTouchEvent("touchstart", ...args);
+  _EU_maybeWrap(aWindow).synthesizeTouchEvent("touchend", ...args, aCallback);
+
   return false;
 }
 
 /**
- * Synthesize one or more touches at the center of your target
- *
- * @param {Element | Element[]} aTarget - The target element
- * @param {TouchEventData} aEvent - Details of the touch event to dispatch
- * @param {DOMWindow} [aWindow=window] - DOM window used to dispatch the event.
- */
-function synthesizeTouchAtCenter(aTarget, aEvent = {}, aWindow = window) {
-  var rect = aTarget.getBoundingClientRect();
-  synthesizeTouchAtPoint(
-    rect.left + rect.width / 2,
-    rect.top + rect.height / 2,
-    aEvent,
-    aWindow
-  );
-}
-
-/**
  * @typedef {object} WheelEventData
- * @property {string} [aEvent.accessKey] - The character or key associated with
+ * @property {string} [accessKey] - The character or key associated with
  *     the access key event. Typically a single character used to activate a UI
  *     element via keyboard shortcuts (e.g., Alt + accessKey).
- * @property {boolean} [aEvent.altKey] - If set to `true`, the Alt key will be
+ * @property {boolean} [altKey] - If set to `true`, the Alt key will be
  *     considered pressed.
- * @property {boolean} [aEvent.asyncEnabled] - If `true`, the event is
+ * @property {boolean} [asyncEnabled] - If `true`, the event is
  *     dispatched to the parent process through APZ, without being injected
  *     into the OS event queue.
- * @property {boolean} [aEvent.ctrlKey] - If set to `true`, the Ctrl key will
+ * @property {boolean} [ctrlKey] - If set to `true`, the Ctrl key will
  *     be considered pressed.
- * @property {number} [aEvent.deltaMode=WheelEvent.DOM_DELTA_PIXEL] - Delta Mode
+ * @property {number} [deltaMode=WheelEvent.DOM_DELTA_PIXEL] - Delta Mode
  *     for scrolling (pixel, line, or page), which must be one of the
  *     `WheelEvent.DOM_DELTA_*` constants.
- * @property {number} [aEvent.deltaX=0] - Floating-point value in CSS pixels to
+ * @property {number} [deltaX=0] - Floating-point value in CSS pixels to
  *     scroll in the x direction.
- * @property {number} [aEvent.deltaY=0] - Floating-point value in CSS pixels to
+ * @property {number} [deltaY=0] - Floating-point value in CSS pixels to
  *     scroll in the y direction.
- * @property {number} [aEvent.deltaZ=0] - Floating-point value in CSS pixels to
+ * @property {number} [deltaZ=0] - Floating-point value in CSS pixels to
  *     scroll in the z direction.
- * @property {number} [aEvent.expectedOverflowDeltaX] - Decimal value
+ * @property {number} [expectedOverflowDeltaX] - Decimal value
  *     indicating horizontal scroll overflow. Only the sign is checked: `0`,
  *     positive, or negative.
- * @property {number} [aEvent.expectedOverflowDeltaY] - Decimal value
+ * @property {number} [expectedOverflowDeltaY] - Decimal value
  *     indicating vertical scroll overflow. Only the sign is checked: `0`,
  *     positive, or negative.
- * @property {boolean} [aEvent.isCustomizedByPrefs] - If set to `true` the
+ * @property {boolean} [isCustomizedByPrefs] - If set to `true` the
  *     delta values are computed from preferences.
- * @property {boolean} [aEvent.isMomentum] - If set to `true` the event will be
+ * @property {boolean} [isMomentum] - If set to `true` the event will be
  *     caused by momentum.
- * @property {boolean} [aEvent.isNoLineOrPageDelta] - If `true`, the creator
+ * @property {boolean} [isNoLineOrPageDelta] - If `true`, the creator
  *     does not set `lineOrPageDeltaX/Y`. When a widget wheel event is
  *     generated from this object, those fields will be automatically
  *     calculated during dispatch by the `EventStateManager`.
- * @property {number} [aEvent.lineOrPageDeltaX] - If set to a non-zero value
+ * @property {number} [lineOrPageDeltaX] - If set to a non-zero value
  *      for a `DOM_DELTA_PIXEL` event, the EventStateManager will dispatch a
  *     `NS_MOUSE_SCROLL` event for a horizontal scroll.
- * @property {number} [aEvent.lineOrPageDeltaY] - If set to a non-zero value
+ * @property {number} [lineOrPageDeltaY] - If set to a non-zero value
  *     for a `DOM_DELTA_PIXEL` event, the EventStateManager will dispatch a
  *     `NS_MOUSE_SCROLL` event for a vertical scroll.
- * @property {boolean} [aEvent.metaKey] - If set to `true`, the Meta key will
+ * @property {boolean} [metaKey] - If set to `true`, the Meta key will
  *     be considered pressed.
- * @property {boolean} [aEvent.shiftKey] - If set to `true`, the Shift key will
+ * @property {boolean} [shiftKey] - If set to `true`, the Shift key will
  *     be considered pressed.
  */
 
@@ -1678,6 +1752,8 @@ function synthesizeAndWaitNativeMouseMove(
       resolve();
     });
   });
+  // TODO: Switch to SpecialPowers.spawn
+  // eslint-disable-next-line mozilla/reject-contenttask-spawn
   let eventReceivedPromise = ContentTask.spawn(
     browser,
     [aOffsetX, aOffsetY],
@@ -1849,6 +1925,8 @@ function synthesizeAndWaitKey(
     });
   });
   // eslint-disable-next-line no-shadow
+  // TODO: Switch to SpecialPowers.spawn
+  // eslint-disable-next-line mozilla/reject-contenttask-spawn
   let keyReceivedPromise = ContentTask.spawn(browser, keyCode, keyCode => {
     return new Promise(resolve => {
       addEventListener("keyup", function onKeyEvent(e) {
@@ -1947,7 +2025,14 @@ const KEYBOARD_LAYOUT_ARABIC = {
   name: "Arabic",
   Mac: 6,
   Win: 0x00000401,
-  hasAltGrOnWin: false,
+  get hasAltGrOnWin() {
+    // KB5070311 added AltGr to Arabic keyboard layouts on
+    // Windows 11 24H2 and 25H2 (build 26100 and build 26200) 7309.
+    return (
+      parseInt(Services.sysinfo.getProperty("build"), 10) >= 26100 &&
+      _EU_getWindowsUBR() >= 7309
+    );
+  },
 };
 _defineConstant("KEYBOARD_LAYOUT_ARABIC", KEYBOARD_LAYOUT_ARABIC);
 const KEYBOARD_LAYOUT_ARABIC_PC = {
@@ -2981,9 +3066,6 @@ function synthesizeCompositionChange(aEvent, aWindow = window, aCallback) {
 }
 
 // Must be synchronized with nsIDOMWindowUtils.
-const QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK = 0x0000;
-const QUERY_CONTENT_FLAG_USE_XP_LINE_BREAK = 0x0001;
-
 const QUERY_CONTENT_FLAG_SELECTION_NORMAL = 0x0000;
 const QUERY_CONTENT_FLAG_SELECTION_SPELLCHECK = 0x0002;
 const QUERY_CONTENT_FLAG_SELECTION_IME_RAWINPUT = 0x0004;
@@ -2997,8 +3079,6 @@ const QUERY_CONTENT_FLAG_SELECTION_URLSTRIKEOUT = 0x0200;
 
 const QUERY_CONTENT_FLAG_OFFSET_RELATIVE_TO_INSERTION_POINT = 0x0400;
 
-const SELECTION_SET_FLAG_USE_NATIVE_LINE_BREAK = 0x0000;
-const SELECTION_SET_FLAG_USE_XP_LINE_BREAK = 0x0001;
 const SELECTION_SET_FLAG_REVERSE = 0x0002;
 
 /**
@@ -3019,7 +3099,7 @@ function synthesizeQueryTextContent(aOffset, aLength, aIsRelative, aWindow) {
   if (!utils) {
     return null;
   }
-  var flags = QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK;
+  let flags = 0;
   if (aIsRelative === true) {
     flags |= QUERY_CONTENT_FLAG_OFFSET_RELATIVE_TO_INSERTION_POINT;
   }
@@ -3045,7 +3125,7 @@ function synthesizeQueryTextContent(aOffset, aLength, aIsRelative, aWindow) {
  */
 function synthesizeQuerySelectedText(aSelectionType, aWindow) {
   var utils = _getDOMWindowUtils(aWindow);
-  var flags = QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK;
+  let flags = 0;
   if (aSelectionType) {
     flags |= aSelectionType;
   }
@@ -3074,14 +3154,7 @@ function synthesizeQueryCaretRect(aOffset, aWindow) {
   if (!utils) {
     return null;
   }
-  return utils.sendQueryContentEvent(
-    utils.QUERY_CARET_RECT,
-    aOffset,
-    0,
-    0,
-    0,
-    QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK
-  );
+  return utils.sendQueryContentEvent(utils.QUERY_CARET_RECT, aOffset, 0, 0, 0);
 }
 
 /**
@@ -3094,13 +3167,15 @@ function synthesizeQueryCaretRect(aOffset, aWindow) {
  * @param aReverse If true, the selection is from |aOffset + aLength| to
  *                 |aOffset|.  Otherwise, from |aOffset| to |aOffset + aLength|.
  * @param aWindow  Optional (If null, current |window| will be used)
+ * @param aFlags   Additional eSetSelection event flags.
  * @return         True, if succeeded.  Otherwise false.
  */
 async function synthesizeSelectionSet(
   aOffset,
   aLength,
   aReverse,
-  aWindow = window
+  aWindow = window,
+  aFlags = 0
 ) {
   const utils = _getDOMWindowUtils(aWindow);
   if (!utils) {
@@ -3112,7 +3187,7 @@ async function synthesizeSelectionSet(
   await new Promise(resolve =>
     aWindow.requestAnimationFrame(() => aWindow.requestAnimationFrame(resolve))
   );
-  const flags = aReverse ? SELECTION_SET_FLAG_REVERSE : 0;
+  const flags = aFlags | (aReverse ? SELECTION_SET_FLAG_REVERSE : 0);
   return utils.sendSelectionSetEvent(aOffset, aLength, flags);
 }
 
@@ -3136,7 +3211,7 @@ function synthesizeQueryTextRect(aOffset, aLength, aIsRelative, aWindow) {
     );
   }
   var utils = _getDOMWindowUtils(aWindow);
-  let flags = QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK;
+  let flags = 0;
   if (aIsRelative === true) {
     flags |= QUERY_CONTENT_FLAG_OFFSET_RELATIVE_TO_INSERTION_POINT;
   }
@@ -3168,8 +3243,7 @@ function synthesizeQueryTextRectArray(aOffset, aLength, aWindow) {
     aOffset,
     aLength,
     0,
-    0,
-    QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK
+    0
   );
 }
 
@@ -3182,14 +3256,7 @@ function synthesizeQueryTextRectArray(aOffset, aLength, aWindow) {
  */
 function synthesizeQueryEditorRect(aWindow) {
   var utils = _getDOMWindowUtils(aWindow);
-  return utils.sendQueryContentEvent(
-    utils.QUERY_EDITOR_RECT,
-    0,
-    0,
-    0,
-    0,
-    QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK
-  );
+  return utils.sendQueryContentEvent(utils.QUERY_EDITOR_RECT, 0, 0, 0, 0);
 }
 
 /**
@@ -3207,8 +3274,7 @@ function synthesizeCharAtPoint(aX, aY, aWindow) {
     0,
     0,
     aX,
-    aY,
-    QUERY_CONTENT_FLAG_USE_NATIVE_LINE_BREAK
+    aY
   );
 }
 
@@ -3442,14 +3508,16 @@ function synthesizeDropAfterDragOver(
     );
     sendDragEvent(event, aDestElement, aDestWindow);
   }
-  // Don't run accessibility checks for this click, since we're not actually
+  // Don't run the click checks for this click, since we're not actually
   // clicking. It's just generated as part of the drop.
-  // this.AccessibilityUtils might not be set if this isn't a browser test or
-  // if a browser test has loaded its own copy of EventUtils for some reason.
-  // In the latter case, the test probably shouldn't do that.
+  // this.ClickChecks and this.AccessibilityUtils might not be set if this isn't
+  // a browser test or if a browser test has loaded its own copy of EventUtils
+  // for some reason. In the latter case, the test probably shouldn't do that.
   this.AccessibilityUtils?.suppressClickHandling(true);
+  this.ClickChecks?.suppressClickHandling(true);
   synthesizeMouse(aDestElement, 2, 2, { type: "mouseup" }, aDestWindow);
   this.AccessibilityUtils?.suppressClickHandling(false);
+  this.ClickChecks?.suppressClickHandling(false);
 
   return effect;
 }
@@ -4164,14 +4232,10 @@ function _checkDataTransferItems(aDataTransfer, aExpectedDragData) {
 }
 
 /**
- * This callback type is used with ``synthesizePlainDragAndCancel()``.
- * It should compare ``actualData`` and ``expectedData`` and return
- * true if the two should be considered equal, false otherwise.
- *
- * @callback eqTest
- * @param {*} actualData
- * @param {*} expectedData
- * @return {boolean}
+ * @typedef {(actualData: any, expectedData: any) -> boolean} eqTest
+ *   This callback type is used with ``synthesizePlainDragAndCancel()``.
+ *   It should compare ``actualData`` and ``expectedData`` and return
+ *   true if the two should be considered equal, false otherwise.
  */
 
 /**
@@ -4188,14 +4252,14 @@ function _checkDataTransferItems(aDataTransfer, aExpectedDragData) {
  *
  *        [
  *          [
- *            {"type": value, "data": value, eqTest: function}
+ *            {"type": value, "data": value, "eqTest": eqTest}
  *            ...,
  *          ],
  *          ...
  *        ]
  *
  *        This can also be null.
- *        You can optionally provide ``eqTest`` {@type eqTest} if the
+ *        You can optionally provide ``eqTest`` if the
  *        comparison to the expected data transfer items can't be done
  *        with x == y;
  * @return {boolean}
@@ -4526,8 +4590,8 @@ async function synthesizeMockDragAndDrop(aParams) {
   let dragServiceCid;
   let sourceCxt;
   let targetCxt;
-  let srcWindowUtils = _getDOMWindowUtils(sourceBrowsingCxt.ownerGlobal);
-  let targetWindowUtils = _getDOMWindowUtils(targetBrowsingCxt.ownerGlobal);
+  let srcWindowUtils = _getDOMWindowUtils(sourceBrowsingCxt.documentGlobal);
+  let targetWindowUtils = _getDOMWindowUtils(targetBrowsingCxt.documentGlobal);
 
   try {
     // Disable native mouse events to avoid external interference while the test

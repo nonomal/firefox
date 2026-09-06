@@ -5,14 +5,12 @@
 package org.mozilla.fenix.bookmarks
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlin.test.assertNotNull
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
-import mozilla.components.support.test.rule.MainCoroutineRule
+import mozilla.components.lib.state.Store
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.components.AppStore
@@ -20,9 +18,6 @@ import org.mozilla.fenix.components.appstate.AppState
 
 @RunWith(AndroidJUnit4::class)
 class PrivateBrowsingLockMiddlewareTest {
-
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
 
     // Locked cases
 
@@ -32,17 +27,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.Bookmark.OpenInPrivateTabClicked(generateBookmark())
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -61,17 +58,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.MultiSelect.OpenInPrivateTabsClicked
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -90,17 +89,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.Folder.OpenAllInPrivateTabClicked(generateFolder())
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -121,17 +122,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.Bookmark.OpenInPrivateTabClicked(generateBookmark())
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -150,17 +153,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.MultiSelect.OpenInPrivateTabsClicked
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -179,17 +184,19 @@ class PrivateBrowsingLockMiddlewareTest {
         var verificationRequested = false
         var testMiddlewareInvoked = false
         val action = BookmarksListMenuAction.Folder.OpenAllInPrivateTabClicked(generateFolder())
-        val middleware = PrivateBrowsingLockMiddleware(
-            AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked)),
-        ) {
-            verificationRequested = true
-        }
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val middleware =
+            PrivateBrowsingLockMiddleware(
+                AppStore(initialState = AppState(isPrivateScreenLocked = isPrivateScreenLocked))
+            ) {
+                verificationRequested = true
+            }
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(verificationRequested)
         assertFalse(testMiddlewareInvoked)
@@ -208,16 +215,19 @@ class PrivateBrowsingLockMiddlewareTest {
     fun `WHEN action PrivateBrowsingAuthorized THEN evoke cached action and null it`() {
         var testMiddlewareInvoked = false
         val action = PrivateBrowsingAuthorized
-        val middleware = PrivateBrowsingLockMiddleware(AppStore()) {}.apply {
-            pendingAction = BookmarksListMenuAction.MultiSelect.OpenInPrivateTabsClicked
-        }
+        val middleware =
+            PrivateBrowsingLockMiddleware(AppStore()) {}
+                .apply {
+                    pendingAction = BookmarksListMenuAction.MultiSelect.OpenInPrivateTabsClicked
+                }
 
-        val store = middleware.makeStore(
-            testMiddlewareExpectedAction = action,
-            onTestMiddlewareInvoked = {
-                testMiddlewareInvoked = true
-            },
-        )
+        val store =
+            middleware.makeStore(
+                testMiddlewareExpectedAction = action,
+                onTestMiddlewareInvoked = {
+                    testMiddlewareInvoked = true
+                },
+            )
 
         assertFalse(testMiddlewareInvoked)
         assertNotNull(middleware.pendingAction)
@@ -231,13 +241,15 @@ class PrivateBrowsingLockMiddlewareTest {
     private fun PrivateBrowsingLockMiddleware.makeStore(
         testMiddlewareExpectedAction: BookmarksAction? = null,
         onTestMiddlewareInvoked: () -> Unit = {},
-    ) = BookmarksStore(
-        initialState = BookmarksState.default,
-        middleware = listOf(
-            this,
-            TestMiddleware(testMiddlewareExpectedAction, onTestMiddlewareInvoked),
-        ),
-    )
+    ) =
+        BookmarksStore(
+            initialState = BookmarksState.default,
+            middleware =
+                listOf(
+                    this,
+                    TestMiddleware(testMiddlewareExpectedAction, onTestMiddlewareInvoked),
+                ),
+        )
 
     private fun generateBookmark(
         num: Int = 0,
@@ -261,7 +273,7 @@ private class TestMiddleware(
     private val onExpectedActionProcessed: () -> Unit,
 ) : Middleware<BookmarksState, BookmarksAction> {
     override fun invoke(
-        context: MiddlewareContext<BookmarksState, BookmarksAction>,
+        store: Store<BookmarksState, BookmarksAction>,
         next: (BookmarksAction) -> Unit,
         action: BookmarksAction,
     ) {

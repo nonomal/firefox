@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -38,7 +36,7 @@ namespace detail {
  * power-of-two as possible. growStorageBy() is responsible for ensuring this.
  */
 template <size_t EltSize>
-static bool CapacityHasExcessSpace(size_t aCapacity) {
+bool CapacityHasExcessSpace(size_t aCapacity) {
   size_t size = aCapacity * EltSize;
   return RoundUpPow2(size) - size >= EltSize;
 }
@@ -123,14 +121,14 @@ inline size_t GrowEltsByDoubling(size_t aOldElts, size_t aIncr) {
 
 // Fallback version.
 template <typename AP, size_t EltSize>
-static size_t ComputeGrowth(size_t aOldElts, size_t aIncr, int) {
+size_t ComputeGrowth(size_t aOldElts, size_t aIncr, int) {
   return GrowEltsByDoubling<EltSize>(aOldElts, aIncr);
 }
 
 // If the AllocPolicy provides its own computeGrowth<EltSize> implementation,
 // use that.
 template <typename AP, size_t EltSize>
-static size_t ComputeGrowth(
+size_t ComputeGrowth(
     size_t aOldElts, size_t aIncr,
     decltype(std::declval<AP>().template computeGrowth<EltSize>(0, 0),
              bool()) aOverloadSelector) {
@@ -561,6 +559,22 @@ class MOZ_NON_PARAM MOZ_GSL_OWNER Vector final : private AllocPolicy {
 
   size_t capacity() const { return mTail.mCapacity; }
 
+#ifdef DEBUG
+  /**
+   * True unless mBegin is stale relative to this vector's own address.
+   * usingInlineStorage() reports whether mBegin points at this vector's own
+   * embedded storage; that self-reference goes stale if a struct embedding this
+   * vector is relocated via a raw byte copy that skips the struct's move
+   * constructor, e.g. by nsTArray's default (memmove) element-relocation
+   * strategy. (To fix that particular case, use
+   * MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR on the element type so nsTArray
+   * uses its move constructor instead.)
+   */
+  bool isStorageConsistent() const {
+    return usingInlineStorage() == (mTail.mCapacity == kInlineCapacity);
+  }
+#endif
+
   T* begin() {
     MOZ_ASSERT(!mEntered);
     return mBegin;
@@ -926,6 +940,21 @@ class MOZ_NON_PARAM MOZ_GSL_OWNER Vector final : private AllocPolicy {
   size_t sizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const;
 
   void swap(Vector& aOther);
+
+  /**
+   * For internal use by allocation policies that provide garbage collected
+   * memory.
+   *
+   * Trace any allocations owned by this object that were made with AllocPolicy.
+   * Call the supplied closure |aTraceFunc| for each of them, passing a double
+   * pointer to the memory held (e.g. a void** pointer).
+   */
+  template <typename F>
+  void traceOwnedAllocs(F&& aTraceFunc) {
+    if (!usingInlineStorage()) {
+      aTraceFunc(&mBegin);
+    }
+  }
 
  private:
   Vector(const Vector&) = delete;

@@ -8,6 +8,7 @@ import android.view.View
 import androidx.annotation.LayoutRes
 import androidx.recyclerview.widget.RecyclerView
 import mozilla.components.browser.state.state.recover.TabState
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.databinding.HistoryListItemBinding
 import org.mozilla.fenix.ext.hideAndDisable
@@ -26,7 +27,7 @@ class RecentlyClosedItemViewHolder(
 
     init {
         binding.historyLayout.overflowView.apply {
-            setImageResource(R.drawable.ic_close)
+            setImageResource(iconsR.drawable.mozac_ic_cross_24)
             contentDescription = view.context.getString(R.string.history_delete_item)
             setOnClickListener {
                 val item = item ?: return@setOnClickListener
@@ -36,8 +37,7 @@ class RecentlyClosedItemViewHolder(
     }
 
     fun bind(item: TabState) {
-        binding.historyLayout.titleView.text =
-            item.title.ifEmpty { item.url }
+        binding.historyLayout.titleView.text = item.title.ifEmpty { item.url }
         binding.historyLayout.urlView.text = item.url
 
         binding.historyLayout.setSelectionInteractor(
@@ -61,7 +61,6 @@ class RecentlyClosedItemViewHolder(
     }
 
     companion object {
-        @LayoutRes
-        val LAYOUT_ID = R.layout.history_list_item
+        @LayoutRes val LAYOUT_ID = R.layout.history_list_item
     }
 }

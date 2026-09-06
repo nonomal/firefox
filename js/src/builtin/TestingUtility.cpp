@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -160,6 +158,36 @@ bool js::ParseCompileOptions(JSContext* cx, JS::CompileOptions& options,
     options.setEagerDelazificationStrategy(strategy);
   }
 
+  if (!JS_GetProperty(cx, opts, "eagerBaselineStrategy", &v)) {
+    return false;
+  }
+  if (v.isString()) {
+    s = JS::ToString(cx, v);
+    if (!s) {
+      return false;
+    }
+
+    JSLinearString* str = JS_EnsureLinearString(cx, s);
+    if (!str) {
+      return false;
+    }
+
+    JS::EagerBaselineOption strategy;
+    if (JS_LinearStringEqualsLiteral(str, "None")) {
+      strategy = JS::EagerBaselineOption::None;
+    } else if (JS_LinearStringEqualsLiteral(str, "JitHints")) {
+      strategy = JS::EagerBaselineOption::JitHints;
+    } else if (JS_LinearStringEqualsLiteral(str, "Aggressive")) {
+      strategy = JS::EagerBaselineOption::Aggressive;
+    } else {
+      JS_ReportErrorASCII(cx,
+                          "eagerBaselineStrategy must be 'None', 'JitHints', "
+                          "or 'Aggressive'");
+      return false;
+    }
+    options.setEagerBaselineStrategy(strategy);
+  }
+
   return true;
 }
 
@@ -219,7 +247,7 @@ bool js::SetSourceOptions(JSContext* cx, FrontendContext* fc,
 
 JSObject* js::CreateScriptPrivate(JSContext* cx,
                                   JS::Handle<JSString*> path /* = nullptr */) {
-  JS::Rooted<JSObject*> info(cx, JS_NewPlainObject(cx));
+  JS::Rooted<JSObject*> info(cx, NewPlainObjectWithProto(cx, nullptr));
   if (!info) {
     return nullptr;
   }
@@ -255,7 +283,7 @@ bool js::ParseDebugMetadata(JSContext* cx, JS::Handle<JSObject*> opts,
     if (!JS_DefineProperty(cx, infoObject, "element", elementValue, 0)) {
       return false;
     }
-    privateValue.set(JS::ObjectValue(*infoObject));
+    privateValue.setObject(*infoObject);
   }
 
   if (!JS_GetProperty(cx, opts, "elementAttributeName", &v)) {

@@ -1,6 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:expandtab:shiftwidth=2:tabstop=2:
- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -23,7 +20,7 @@ namespace mozilla::dom {
 
 // Keep tracks of the number of same-event-loop-high-priority-queues
 // (User_blocking or User_visible) that have at least one task scheduled.
-MOZ_CONSTINIT extern uint32_t
+constinit extern uint32_t
     gNumNormalOrHighPriorityQueuesHaveTaskScheduledMainThread;
 
 // https://wicg.github.io/scheduling-apis/#scheduling-state
@@ -340,7 +337,7 @@ class DelayedWebTaskHandler final : public TimeoutHandler {
                         WebTask* aTask, EventQueuePriority aPriority)
       : TimeoutHandler(aCx), mScheduler(aScheduler), mWebTask(aTask) {}
 
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_CYCLE_COLLECTION_CLASS(DelayedWebTaskHandler)
 
   MOZ_CAN_RUN_SCRIPT bool Call(const char* /* unused */) override {

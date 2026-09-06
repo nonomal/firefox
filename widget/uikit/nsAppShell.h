@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,8 +13,8 @@
 #include "nsBaseAppShell.h"
 #include "nsTArray.h"
 
-#include <Foundation/NSAutoreleasePool.h>
 #include <CoreFoundation/CFRunLoop.h>
+#include <Foundation/NSAutoreleasePool.h>
 #include <UIKit/UIWindow.h>
 
 @class AppShellDelegate;
@@ -34,8 +33,6 @@ class nsAppShell : public nsBaseAppShell {
 
   NS_IMETHOD Run(void) override;
   NS_IMETHOD Exit(void) override;
-  // Called by the application delegate
-  void WillTerminate(void);
 
   static nsAppShell* gAppShell;
 
@@ -51,9 +48,9 @@ class nsAppShell : public nsBaseAppShell {
   CFRunLoopRef mCFRunLoop;
   CFRunLoopSourceRef mCFRunLoopSource;
 
+  bool mUsingNativeEventLoop;
   bool mRunningEventLoop;
   bool mTerminated;
-  bool mNotifiedWillTerminate;
 };
 
 #endif  // nsAppShell_h_

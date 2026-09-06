@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -68,6 +66,8 @@ void ReportSinkTypeMismatchViolations(nsIContentSecurityPolicy* aCSP,
                                       const nsAString& aSink,
                                       const nsAString& aSinkGroup,
                                       const nsAString& aSource);
+
+bool CanSkipTrustedTypesEnforcement(const nsINode& aNode);
 
 // https://w3c.github.io/trusted-types/dist/spec/#get-trusted-type-compliant-string-algorithm
 //
@@ -145,8 +145,7 @@ MOZ_CAN_RUN_SCRIPT const nsAString*
 GetTrustedTypesCompliantStringForTrustedScript(
     const nsAString& aInput, const nsAString& aSink,
     const nsAString& aSinkGroup, const nsINode& aNode,
-    nsIPrincipal* aPrincipalOrNull, Maybe<nsAutoString>& aResultHolder,
-    ErrorResult& aError);
+    Maybe<nsAutoString>& aResultHolder, ErrorResult& aError);
 
 // https://w3c.github.io/trusted-types/dist/spec/#abstract-opdef-process-value-with-a-default-policy
 template <typename ExpectedType>

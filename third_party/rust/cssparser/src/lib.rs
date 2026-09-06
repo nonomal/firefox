@@ -68,23 +68,55 @@ fn parse_border_spacing(_context: &ParserContext, input: &mut Parser)
 #![recursion_limit = "200"] // For color::parse_color_keyword
 
 pub use crate::cow_rc_str::CowRcStr;
-pub use crate::from_bytes::{stylesheet_encoding, EncodingSupport};
+pub use crate::from_bytes::{EncodingSupport, stylesheet_encoding};
 #[doc(hidden)]
-pub use crate::macros::{
-    _cssparser_internal_create_uninit_array, _cssparser_internal_to_lowercase,
-};
+pub use crate::macros::_cssparser_internal_to_lowercase;
 pub use crate::nth::parse_nth;
 pub use crate::parser::{BasicParseError, BasicParseErrorKind, ParseError, ParseErrorKind};
-pub use crate::parser::{Delimiter, Delimiters, Parser, ParserInput, ParserState};
-pub use crate::rules_and_declarations::{parse_important, parse_one_declaration};
-pub use crate::rules_and_declarations::{parse_one_rule, StyleSheetParser};
+pub use crate::parser::{Delimiter, Delimiters, Parser, ParserState};
 pub use crate::rules_and_declarations::{AtRuleParser, QualifiedRuleParser};
 pub use crate::rules_and_declarations::{DeclarationParser, RuleBodyItemParser, RuleBodyParser};
-pub use crate::serializer::{serialize_identifier, serialize_name, serialize_string};
+pub use crate::rules_and_declarations::{StyleSheetParser, parse_one_rule};
+pub use crate::rules_and_declarations::{parse_important, parse_one_declaration};
 pub use crate::serializer::{CssStringWriter, ToCss, TokenSerializationType};
+pub use crate::serializer::{serialize_identifier, serialize_name, serialize_string};
 pub use crate::tokenizer::{SourceLocation, SourcePosition, Token};
 pub use crate::unicode_range::UnicodeRange;
-pub use cssparser_macros::*;
+
+#[cfg(feature = "fast_match_byte")]
+pub use cssparser_macros::match_byte;
+
+#[cfg(not(feature = "fast_match_byte"))]
+#[macro_use]
+mod mac {
+    /// Expand a TokenStream corresponding to the `match_byte` macro.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// match_byte! { tokenizer.next_byte_unchecked(),
+    ///     b'a'..b'z' => { ... }
+    ///     b'0'..b'9' => { ... }
+    ///     b'\n' | b'\\' => { ... }
+    ///     foo => { ... }
+    ///  }
+    ///  ```
+    ///
+    #[macro_export]
+    macro_rules! match_byte {
+      ($value:expr, $($rest:tt)* ) => {
+          match $value {
+              $(
+                  $rest
+              )+
+          }
+      };
+  }
+}
+
+// Re-exporting phf here means that the crate using the ascii_case_insensitive_phf_map macro do
+// do not have to depend on phf directly.
+#[cfg(feature = "fast_match_color")]
 #[doc(hidden)]
 pub use phf as _cssparser_internal_phf;
 

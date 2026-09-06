@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -13,6 +11,7 @@
 
 namespace js::temporal {
 enum class TemporalUnit {
+  Unset,
   Auto,
   Year,
   Month,
@@ -43,6 +42,7 @@ constexpr int64_t ToNanoseconds(TemporalUnit unit) {
     case TemporalUnit::Nanosecond:
       return 1;
 
+    case TemporalUnit::Unset:
     case TemporalUnit::Auto:
     case TemporalUnit::Year:
     case TemporalUnit::Month:
@@ -67,6 +67,7 @@ constexpr int64_t ToMicroseconds(TemporalUnit unit) {
     case TemporalUnit::Microsecond:
       return 1;
 
+    case TemporalUnit::Unset:
     case TemporalUnit::Auto:
     case TemporalUnit::Year:
     case TemporalUnit::Month:
@@ -90,6 +91,7 @@ constexpr int64_t ToMilliseconds(TemporalUnit unit) {
     case TemporalUnit::Millisecond:
       return 1;
 
+    case TemporalUnit::Unset:
     case TemporalUnit::Auto:
     case TemporalUnit::Year:
     case TemporalUnit::Month:
@@ -112,6 +114,7 @@ constexpr int64_t ToSeconds(TemporalUnit unit) {
     case TemporalUnit::Second:
       return 1;
 
+    case TemporalUnit::Unset:
     case TemporalUnit::Auto:
     case TemporalUnit::Year:
     case TemporalUnit::Month:
@@ -141,6 +144,7 @@ constexpr int64_t UnitsPerDay(TemporalUnit unit) {
     case TemporalUnit::Nanosecond:
       return 86'400'000'000'000;
 
+    case TemporalUnit::Unset:
     case TemporalUnit::Auto:
     case TemporalUnit::Year:
     case TemporalUnit::Month:
@@ -152,6 +156,8 @@ constexpr int64_t UnitsPerDay(TemporalUnit unit) {
 
 constexpr const char* TemporalUnitToString(TemporalUnit unit) {
   switch (unit) {
+    case TemporalUnit::Unset:
+      return "unset";
     case TemporalUnit::Auto:
       return "auto";
     case TemporalUnit::Year:

@@ -14,7 +14,7 @@
 /// The opaque alpha value of 1.0.
 pub const OPAQUE: f32 = 1.0;
 
-use crate::{BasicParseError, Parser, ToCss, Token};
+use crate::{BasicParseError, Parser, ToCss};
 use std::fmt;
 
 /// Clamp a 0..1 number to a 0..255 range to u8.
@@ -101,9 +101,7 @@ pub enum PredefinedColorSpace {
 
 impl PredefinedColorSpace {
     /// Parse a PredefinedColorSpace from the given input.
-    pub fn parse<'i>(input: &mut Parser<'i, '_>) -> Result<Self, BasicParseError<'i>> {
-        let location = input.current_source_location();
-
+    pub fn parse(input: &mut Parser) -> Result<Self, BasicParseError> {
         let ident = input.expect_ident()?;
         Ok(match_ignore_ascii_case! { ident,
             "srgb" => Self::Srgb,
@@ -115,7 +113,7 @@ impl PredefinedColorSpace {
             "rec2020" => Self::Rec2020,
             "xyz-d50" => Self::XyzD50,
             "xyz" | "xyz-d65" => Self::XyzD65,
-            _ => return Err(location.new_basic_unexpected_token_error(Token::Ident(ident.clone()))),
+            _ => return Err(BasicParseError::unexpected_token()),
         })
     }
 }
@@ -172,7 +170,7 @@ pub fn parse_hash_color(value: &[u8]) -> Result<(u8, u8, u8, f32), ()> {
     })
 }
 
-ascii_case_insensitive_phf_map! {
+ascii_case_insensitive_map! {
     named_colors -> (u8, u8, u8) = {
         "black" => (0, 0, 0),
         "silver" => (192, 192, 192),

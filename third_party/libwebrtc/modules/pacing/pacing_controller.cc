@@ -16,12 +16,12 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/string_view.h"
-#include "api/array_view.h"
 #include "api/field_trials_view.h"
 #include "api/transport/network_types.h"
 #include "api/units/data_rate.h"
@@ -68,18 +68,23 @@ PacingController::PacingController(Clock* clock,
           field_trials.IsEnabled("WebRTC-Pacer-IgnoreTransportOverhead")),
       fast_retransmissions_(
           field_trials.IsEnabled("WebRTC-Pacer-FastRetransmissions")),
-      keyframe_flushing_(
-          configuration.keyframe_flushing ||
-          field_trials.IsEnabled("WebRTC-Pacer-KeyframeFlushing")),
       transport_overhead_per_packet_(DataSize::Zero()),
-      send_burst_interval_(configuration.send_burst_interval),
+      send_burst_interval_(configuration.initial_pacer_config
+                               ? configuration.initial_pacer_config->time_window
+                               : configuration.send_burst_interval),
       last_timestamp_(clock_->CurrentTime()),
       paused_(false),
       media_debt_(DataSize::Zero()),
       padding_debt_(DataSize::Zero()),
-      pacing_rate_(DataRate::Zero()),
-      adjusted_media_rate_(DataRate::Zero()),
-      padding_rate_(DataRate::Zero()),
+      pacing_rate_(configuration.initial_pacer_config
+                       ? configuration.initial_pacer_config->data_rate()
+                       : DataRate::Zero()),
+      adjusted_media_rate_(pacing_rate_),
+      padding_rate_(
+          configuration.initial_pacer_config
+              ? std::min(configuration.initial_pacer_config->pad_rate(),
+                         configuration.initial_pacer_config->data_rate())
+              : DataRate::Zero()),
       prober_(field_trials),
       probing_send_failure_(false),
       last_process_time_(clock->CurrentTime()),
@@ -102,7 +107,7 @@ PacingController::PacingController(Clock* clock,
 PacingController::~PacingController() = default;
 
 void PacingController::CreateProbeClusters(
-    ArrayView<const ProbeClusterConfig> probe_cluster_configs) {
+    std::span<const ProbeClusterConfig> probe_cluster_configs) {
   for (const ProbeClusterConfig probe_cluster_config : probe_cluster_configs) {
     prober_.CreateProbeCluster(probe_cluster_config);
   }
@@ -165,28 +170,28 @@ void PacingController::SetProbingEnabled(bool enabled) {
 
 void PacingController::SetPacingRates(DataRate pacing_rate,
                                       DataRate padding_rate) {
-  RTC_CHECK_GT(pacing_rate, DataRate::Zero());
-  RTC_CHECK_GE(padding_rate, DataRate::Zero());
-  if (padding_rate > pacing_rate) {
-    RTC_LOG(LS_WARNING) << "Padding rate " << padding_rate.kbps()
+  SetPacerConfig(PacerConfig::Create(Timestamp::Zero(), pacing_rate,
+                                     padding_rate, send_burst_interval_));
+}
+
+void PacingController::SetPacerConfig(PacerConfig pacer_config) {
+  RTC_DCHECK(pacer_config.time_window.IsFinite());
+  if (pacer_config.pad_rate() > pacer_config.data_rate()) {
+    RTC_LOG(LS_WARNING) << "Padding rate " << pacer_config.pad_rate().kbps()
                         << "kbps is higher than the pacing rate "
-                        << pacing_rate.kbps() << "kbps, capping.";
-    padding_rate = pacing_rate;
+                        << padding_rate_.kbps() << "kbps, capping.";
+    padding_rate_ = pacer_config.data_rate();
+  } else {
+    padding_rate_ = pacer_config.pad_rate();
   }
 
-  if (pacing_rate > max_rate || padding_rate > max_rate) {
-    RTC_LOG(LS_WARNING) << "Very high pacing rates ( > " << max_rate.kbps()
-                        << " kbps) configured: pacing = " << pacing_rate.kbps()
-                        << " kbps, padding = " << padding_rate.kbps()
-                        << " kbps.";
-    max_rate = std::max(pacing_rate, padding_rate) * 1.1;
-  }
-  pacing_rate_ = pacing_rate;
-  padding_rate_ = padding_rate;
+  pacing_rate_ = pacer_config.data_rate();
+  send_burst_interval_ = pacer_config.time_window;
+
   MaybeUpdateMediaRateDueToLongQueue(CurrentTime());
 
   RTC_LOG(LS_VERBOSE) << "bwe:pacer_updated pacing_kbps=" << pacing_rate_.kbps()
-                      << " padding_budget_kbps=" << padding_rate.kbps();
+                      << " padding_budget_kbps=" << padding_rate_.kbps();
 }
 
 void PacingController::EnqueuePacket(std::unique_ptr<RtpPacketToSend> packet) {
@@ -194,8 +199,7 @@ void PacingController::EnqueuePacket(std::unique_ptr<RtpPacketToSend> packet) {
       << "SetPacingRate must be called before InsertPacket.";
   RTC_CHECK(packet->packet_type());
 
-  if (keyframe_flushing_ &&
-      packet->packet_type() == RtpPacketMediaType::kVideo &&
+  if (packet->packet_type() == RtpPacketMediaType::kVideo &&
       packet->is_key_frame() && packet->is_first_packet_of_frame() &&
       !packet_queue_.HasKeyframePackets(packet->Ssrc())) {
     // First packet of a keyframe (and no keyframe packets currently in the

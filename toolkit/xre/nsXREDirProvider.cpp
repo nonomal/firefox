@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -59,11 +58,11 @@
 #include "nsPrintfCString.h"
 
 #ifdef MOZ_THUNDERBIRD
-#  include "nsIPK11TokenDB.h"
-#  include "nsIPK11Token.h"
 #  ifdef XP_MACOSX
 #    include "MacApplicationDelegate.h"
 #  endif
+#  include "ScopedNSSTypes.h"
+#  include "nsNSSComponent.h"
 #endif
 
 #include <stdlib.h>
@@ -74,13 +73,13 @@
 #  include "WinUtils.h"
 #endif
 #ifdef XP_MACOSX
+#  ifdef NIGHTLY_BUILD
+#    include "AppGroupPath.h"
+#  endif
 #  include "nsILocalFileMac.h"
 // for chflags()
 #  include <sys/stat.h>
 #  include <unistd.h>
-#endif
-#ifdef XP_UNIX
-#  include <ctype.h>
 #endif
 #ifdef XP_IOS
 #  include "UIKitDirProvider.h"
@@ -99,8 +98,8 @@
 nsXREDirProvider* gDirServiceProvider = nullptr;
 nsIFile* gDataDirHomeLocal = nullptr;
 nsIFile* gDataDirHome = nullptr;
-MOZ_CONSTINIT nsCOMPtr<nsIFile> gDataDirProfileLocal{};
-MOZ_CONSTINIT nsCOMPtr<nsIFile> gDataDirProfile{};
+constinit nsCOMPtr<nsIFile> gDataDirProfileLocal{};
+constinit nsCOMPtr<nsIFile> gDataDirProfile{};
 
 #if defined(MOZ_WIDGET_GTK)
 nsXREDirProvider::legacyOrXDGHomeTelemetry gXdgTelemetry =
@@ -223,9 +222,26 @@ nsXREDirProvider::Release() { return 0; }
 
 nsresult nsXREDirProvider::GetUserProfilesRootDir(nsIFile** aResult) {
   nsCOMPtr<nsIFile> file;
-  nsresult rv = GetUserDataDirectory(getter_AddRefs(file), false);
-
-  if (NS_SUCCEEDED(rv)) {
+  nsresult rv = NS_OK;
+#if defined(XP_MACOSX) && defined(NIGHTLY_BUILD)
+  const char* appGroup = PR_GetEnv("MOZ_APP_GROUP");
+  if (appGroup && *appGroup && strcmp(appGroup, "0") != 0) {
+    nsCOMPtr<nsIFile> group;
+    rv = GetAppGroupContainerBase(getter_AddRefs(group));
+    if (NS_SUCCEEDED(rv) && group) {
+      rv = group->AppendNative("Library"_ns);
+      NS_ENSURE_SUCCESS(rv, rv);
+      rv = group->AppendNative("Application Support"_ns);
+      NS_ENSURE_SUCCESS(rv, rv);
+      rv = group->AppendNative("Profiles"_ns);
+      NS_ENSURE_SUCCESS(rv, rv);
+      file = group;
+    }
+  }
+#endif
+  if (!file) {
+    rv = GetUserDataDirectory(getter_AddRefs(file), false);
+    NS_ENSURE_SUCCESS(rv, rv);
 #if !defined(XP_UNIX) || defined(XP_MACOSX)
     rv = file->AppendNative("Profiles"_ns);
 #endif
@@ -656,15 +672,12 @@ nsXREDirProvider::DoStartup() {
       // to avoid the race that triggers multiple prompts (see bug 177175).
       // We use this code until we have a better solution, possibly as
       // described in bug 177175 comment 384.
-      nsCOMPtr<nsIPK11TokenDB> db =
-          do_GetService("@mozilla.org/security/pk11tokendb;1");
-      if (db) {
-        nsCOMPtr<nsIPK11Token> token;
-        if (NS_SUCCEEDED(db->GetInternalKeyToken(getter_AddRefs(token)))) {
-          (void)token->Login(false);
-        }
-      } else {
-        NS_WARNING("Failed to get nsIPK11TokenDB service.");
+      // Ensure NSS is initialized; it may not be this early in startup.
+      nsCOMPtr<nsINSSComponent> nssComponent(
+          do_GetService(NS_NSSCOMPONENT_CID));
+      mozilla::UniquePK11SlotInfo slot(PK11_GetInternalKeySlot());
+      if (slot) {
+        (void)PK11_Authenticate(slot.get(), true, nullptr);
       }
     }
 #endif
@@ -1184,8 +1197,13 @@ nsresult nsXREDirProvider::GetSysUserExtensionsDirectory(nsIFile** aFile) {
   rv = AppendSysUserExtensionPath(localDir);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = EnsureDirectoryExists(localDir);
-  NS_ENSURE_SUCCESS(rv, rv);
+  // We used to unconditionally create the directory here, but that results in
+  // an unwanted ~/.mozilla/extensions/ in violation of the XDG basedir spec,
+  // which expresses a preference for ~/.config/mozilla/.
+  //
+  // Since we no longer support sideloading from this directory, unless
+  // MOZ_ALLOW_ADDON_SIDELOAD is set, the creation of the directory is almost
+  // always redundant, so skip the creation of the directory.
 
   localDir.forget(aFile);
   return NS_OK;
@@ -1319,7 +1337,12 @@ nsresult nsXREDirProvider::AppendFromAppData(nsIFile* aFile, bool aIsDotted) {
   // future?
   if (gAppData->profile) {
     nsAutoCString profile;
-    profile = gAppData->profile;
+#  if defined(MOZ_THUNDERBIRD)
+    if (gAppData->profile[0] != '.') {
+      profile.Assign('.');
+    }
+#  endif
+    profile.Append(gAppData->profile);
     MOZ_TRY(aFile->AppendRelativeNativePath(profile));
   } else {
     nsAutoCString vendor;
@@ -1340,7 +1363,8 @@ nsresult nsXREDirProvider::AppendFromAppData(nsIFile* aFile, bool aIsDotted) {
 /*
  * Check if legacy directory exists, which can be:
  *  (1) $HOME/.<gAppData->vendor>/<gAppData->appName>
- *  (2) $HOME/<gAppData->profile>
+ *  (2) $HOME/<gAppData->profile> on Firefox or
+ *      $HOME/.<gAppData->profile> on Thunderbird
  *  (3) $HOME/<MOZ_USER_DIR>
  *
  * The MOZ_USER_DIR will also be defined in case (1), so first check the deeper
@@ -1498,7 +1522,20 @@ nsresult nsXREDirProvider::GetLegacyOrXDGHomePath(const char* aHomeDir,
 
     // If the build was made against a specific profile name, MOZ_APP_PROFILE=
     // then make sure we respect this and dont move to XDG directory
-    if (gAppData->profile) {
+    //
+    // Only do this on Firefox.
+    //
+    // For Thunderbird, it always defines MOZ_APP_PROFILE=thunderbird. Hence,
+    // check if the gAppData->profile value is set to something else, indicating
+    // of a specific build where legacy needs to be forced, similar to the
+    // Firefox handling. Both casing are verified to account for systems where
+    // that matters.
+    if (gAppData->profile
+#  if defined(MOZ_THUNDERBIRD)
+        && strcmp(gAppData->profile, "thunderbird") != 0 &&
+        strcmp(gAppData->profile, "Thunderbird") != 0
+#  endif
+    ) {
       MOZ_TRY(NS_NewNativeLocalFile(nsDependentCString(aHomeDir),
                                     getter_AddRefs(localDir)));
     } else {
@@ -1601,7 +1638,7 @@ nsresult nsXREDirProvider::AppendProfilePath(nsIFile* aFile, bool aLocal) {
     folder.Append(profileStart);
     ToLowerCase(folder);
 
-    rv = AppendProfileString(aFile, folder.BeginReading());
+    rv = AppendProfileString(aFile, folder.get());
   } else {
     if (!vendor.IsEmpty()) {
       folder.Append(vendor);

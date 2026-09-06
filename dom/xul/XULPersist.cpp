@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -171,13 +169,13 @@ nsresult XULPersist::ApplyPersistentAttributes() {
 
     // We want to hold strong refs to the elements while applying
     // persistent attributes, just in case.
-    const nsTArray<Element*>* allElements = mDocument->GetAllElementsForId(id);
-    if (!allElements) {
+    const Span allElements = mDocument->GetAllElementsForId(id);
+    if (allElements.IsEmpty()) {
       continue;
     }
     elements.Clear();
-    elements.SetCapacity(allElements->Length());
-    for (Element* element : *allElements) {
+    elements.SetCapacity(allElements.Length());
+    for (Element* element : allElements) {
       elements.AppendObject(element);
     }
 
@@ -215,6 +213,11 @@ nsresult XULPersist::ApplyPersistentAttributesToElements(
     RefPtr<nsAtom> attr = NS_Atomize(attrstr);
     if (NS_WARN_IF(!attr)) {
       return NS_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (NS_WARN_IF(
+            nsContentUtils::IsEventAttributeName(attr, EventNameType_All))) {
+      continue;
     }
 
     uint32_t cnt = aElements.Length();

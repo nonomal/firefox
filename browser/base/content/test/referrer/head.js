@@ -21,16 +21,16 @@ var _referrerTests = [
   // 1. Normal cases - no referrer policy, no special attributes.
   //    We expect a full referrer normally, and no referrer on downgrade.
   {
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     fromScheme: "http://",
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     toScheme: "http://",
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     result: "http://test1.example.com/browser", // full referrer
   },
   {
     fromScheme: "https://",
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     toScheme: "http://",
     result: "", // no referrer when downgrade
   },
@@ -38,14 +38,14 @@ var _referrerTests = [
   //    even on downgrade.  But rel=noreferrer trumps this.
   {
     fromScheme: "https://",
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     toScheme: "http://",
     policy: "origin",
     result: "https://test1.example.com/", // origin, even on downgrade
   },
   {
     fromScheme: "https://",
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     toScheme: "http://",
     policy: "origin",
     rel: "noreferrer",
@@ -62,7 +62,7 @@ var _referrerTests = [
     result: "", // same origin https://test1.example.com/browser
   },
   {
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     fromScheme: "http://",
     toScheme: "https://",
     policy: "no-referrer",
@@ -137,8 +137,8 @@ function clickTheLink(aWindow, aLinkId, aOptions) {
  * Extracts the referrer result from the target window.
  *
  * @param aWindow The window where the referrer target has loaded.
- * @return {Promise}
- * @resolves When extacted, with the text of the (trimmed) referrer.
+ * @returns {Promise<string>}
+ *   Resolves to the text of the (trimmed) referrer when extracted.
  */
 function referrerResultExtracted(aWindow) {
   return SpecialPowers.spawn(aWindow.gBrowser.selectedBrowser, [], function () {
@@ -150,8 +150,8 @@ function referrerResultExtracted(aWindow) {
  * Waits for browser delayed startup to finish.
  *
  * @param aWindow The window to wait for.
- * @return {Promise}
- * @resolves When the window is loaded.
+ * @returns {Promise<void>}
+ *   Resolves when the window is loaded.
  */
 function delayedStartupFinished(aWindow) {
   return new Promise(function (resolve) {
@@ -168,8 +168,8 @@ function delayedStartupFinished(aWindow) {
  * Waits for some (any) tab to load. The caller triggers the load.
  *
  * @param aWindow The window where to wait for a tab to load.
- * @return {Promise}
- * @resolves With the tab once it's loaded.
+ * @returns {Promise}
+ *   Resolves to the tab once it's loaded.
  */
 function someTabLoaded() {
   return BrowserTestUtils.waitForNewTab(gTestWindow.gBrowser, null, true);
@@ -178,8 +178,8 @@ function someTabLoaded() {
 /**
  * Waits for a new window to open and load. The caller triggers the open.
  *
- * @return {Promise}
- * @resolves With the new window once it's open and loaded.
+ * @returns {Promise<Window>}
+ *   Resolves to the new window once it's open and loaded.
  */
 function newWindowOpened() {
   return TestUtils.topicObserved("browser-delayed-startup-finished").then(
@@ -192,8 +192,8 @@ function newWindowOpened() {
  *
  * @param aWindow The window to open the context menu in.
  * @param aLinkId The id of the link to open the context menu on.
- * @return {Promise}
- * @resolves With the menu popup when the context menu is open.
+ * @returns {Promise}
+ *   Resolves with the menu popup when the context menu is open.
  */
 function contextMenuOpened(aWindow, aLinkId) {
   let popupShownPromise = BrowserTestUtils.waitForEvent(
@@ -222,8 +222,8 @@ function doContextMenuCommand(aWindow, aMenu, aItemId) {
  * Loads a single test case, i.e., a source url into gTestWindow.
  *
  * @param aTestNumber The test case number - 0, 1, 2...
- * @return {Promise}
- * @resolves When the source url for this test case is loaded.
+ * @returns {Promise<void>}
+ *   Resolves when the source url for this test case is loaded.
  */
 function referrerTestCaseLoaded(aTestNumber, aParams) {
   let test = getReferrerTest(aTestNumber);

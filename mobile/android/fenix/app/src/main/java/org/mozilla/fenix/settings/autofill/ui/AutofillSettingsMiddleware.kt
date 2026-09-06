@@ -12,7 +12,6 @@ import mozilla.components.concept.sync.AccountObserver
 import mozilla.components.concept.sync.AuthType
 import mozilla.components.concept.sync.OAuthAccount
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
 import mozilla.components.lib.state.Store
 import mozilla.components.service.fxa.manager.FxaAccountManager
 import mozilla.components.service.sync.autofill.AutofillCreditCardsAddressesStorage
@@ -44,7 +43,7 @@ internal class AutofillSettingsMiddleware(
     private lateinit var observer: AccountObserver
 
     override fun invoke(
-        context: MiddlewareContext<AutofillSettingsState, AutofillSettingsAction>,
+        store: Store<AutofillSettingsState, AutofillSettingsAction>,
         next: (AutofillSettingsAction) -> Unit,
         action: AutofillSettingsAction,
     ) {
@@ -52,8 +51,8 @@ internal class AutofillSettingsMiddleware(
 
         when (action) {
             is InitializeAddressesAndCreditCards -> {
-                context.store.registerObserverForAccountChanges(accountManager)
-                context.store.loadAddressesAndCreditCards()
+                store.registerObserverForAccountChanges(accountManager)
+                store.loadAddressesAndCreditCards()
             }
             is AddAddressClicked -> {
                 goToScreen(AutofillScreenDestination.ADD_ADDRESS)
@@ -98,25 +97,23 @@ internal class AutofillSettingsMiddleware(
             is UpdateCreditCards,
             is AccountAuthenticationAction.Authenticated,
             is AccountAuthenticationAction.Failed,
-            is AccountAuthenticationAction.NotAuthenticated,
-                -> Unit
+            is AccountAuthenticationAction.NotAuthenticated -> Unit
         }
     }
 
-    private fun Store<AutofillSettingsState, AutofillSettingsAction>.loadAddressesAndCreditCards() =
-        scope.launch {
-            val addresses = autofillSettingsStorage.getAllAddresses()
-            val creditCards = autofillSettingsStorage.getAllCreditCards()
+    private fun Store<AutofillSettingsState, AutofillSettingsAction>.loadAddressesAndCreditCards() = scope.launch {
+        val addresses = autofillSettingsStorage.getAllAddresses()
+        val creditCards = autofillSettingsStorage.getAllCreditCards()
 
-            dispatch(UpdateAddresses(addresses = addresses))
-            dispatch(UpdateCreditCards(creditCards = creditCards))
-        }
+        dispatch(UpdateAddresses(addresses = addresses))
+        dispatch(UpdateCreditCards(creditCards = creditCards))
+    }
 
     private fun Store<AutofillSettingsState, AutofillSettingsAction>.registerObserverForAccountChanges(
-        accountManager: FxaAccountManager,
-    ) =
-        scope.launch {
-            observer = object : AccountObserver {
+        accountManager: FxaAccountManager
+    ) = scope.launch {
+        observer =
+            object : AccountObserver {
                 override fun onAuthenticated(account: OAuthAccount, authType: AuthType) {
                     dispatch(AccountAuthenticationAction.Authenticated)
                 }
@@ -130,6 +127,6 @@ internal class AutofillSettingsMiddleware(
                 }
             }
 
-            accountManager.register(observer)
-        }
+        accountManager.register(observer)
+    }
 }

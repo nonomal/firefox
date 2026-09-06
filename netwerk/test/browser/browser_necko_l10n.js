@@ -54,10 +54,7 @@ function waitForStatusChange(browser, expectedMessage) {
 
 add_task(async function test_domain_change() {
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["test.wait300msAfterTabSwitch", true],
-      [HTTPS_FIRST, false],
-    ],
+    set: [[HTTPS_FIRST, false]],
   });
 
   gOverride.addIPOverride(DOMAIN_NAME, "127.0.0.1");
@@ -68,7 +65,7 @@ add_task(async function test_domain_change() {
     gOverride.clearOverrides();
   });
 
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   let serverURL = `http://${DOMAIN_NAME}:${server.identity.primaryPort}/`;
   server.identity.add("http", DOMAIN_NAME, server.identity.primaryPort);
 
@@ -95,10 +92,10 @@ add_task(async function test_domain_change() {
   // There's a delay in the status label being updated, so by the time the
   // progress listener sees waiting for, the statuspanel is still on
   // looking up. This may be racy.
-  is(
-    statuspanelLabel.value,
-    `Looking up ${DOMAIN_NAME}…`,
-    "statuspanel has expected value"
+  ok(
+    statuspanelLabel.value.startsWith(`Looking up`) ||
+      statuspanelLabel.value.startsWith(`Transferring data`),
+    `statuspanel has expected value. got ${statuspanelLabel.value}`
   );
   is(message, expectedMessage, "Status message was received correctly");
 });

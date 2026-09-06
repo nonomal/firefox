@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,6 +9,7 @@
 #include "nsDocShell.h"
 #include "nsGlobalWindowInner.h"
 #include "nsIWebBrowserChrome.h"
+#include "nsPIDOMWindowInlines.h"
 
 namespace mozilla::dom {
 
@@ -35,6 +34,12 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(BarProp)
   NS_WRAPPERCACHE_INTERFACE_MAP_ENTRY
   NS_INTERFACE_MAP_ENTRY(nsISupports)
 NS_INTERFACE_MAP_END
+
+void BarProp::SetVisible(bool, CallerType aCallerType, ErrorResult& aRv) {
+  if (aCallerType == CallerType::System) {
+    aRv.ThrowNotAllowedError("BarProps are readonly, effectively");
+  }
+}
 
 bool BarProp::GetVisibleByIsPopup() {
   // For web content, return the value defined by the spec, instead of
@@ -72,32 +77,6 @@ bool BarProp::GetVisibleByFlag(uint32_t aChromeFlag, CallerType aCallerType,
   return (chromeFlags & aChromeFlag);
 }
 
-void BarProp::SetVisibleByFlag(bool aVisible, uint32_t aChromeFlag,
-                               CallerType aCallerType, ErrorResult& aRv) {
-  nsCOMPtr<nsIWebBrowserChrome> browserChrome = GetBrowserChrome();
-  NS_ENSURE_TRUE_VOID(browserChrome);
-
-  if (aCallerType != CallerType::System) {
-    return;
-  }
-
-  uint32_t chromeFlags;
-
-  if (NS_FAILED(browserChrome->GetChromeFlags(&chromeFlags))) {
-    aRv.Throw(NS_ERROR_FAILURE);
-    return;
-  }
-
-  if (aVisible)
-    chromeFlags |= aChromeFlag;
-  else
-    chromeFlags &= ~aChromeFlag;
-
-  if (NS_FAILED(browserChrome->SetChromeFlags(chromeFlags))) {
-    aRv.Throw(NS_ERROR_FAILURE);
-  }
-}
-
 already_AddRefed<nsIWebBrowserChrome> BarProp::GetBrowserChrome() {
   if (!mDOMWindow) {
     return nullptr;
@@ -123,14 +102,8 @@ MenubarProp::MenubarProp(nsGlobalWindowInner* aWindow) : BarProp(aWindow) {}
 MenubarProp::~MenubarProp() = default;
 
 bool MenubarProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
-  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_MENUBAR,
+  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_TOOLBAR,
                                    aCallerType, aRv);
-}
-
-void MenubarProp::SetVisible(bool aVisible, CallerType aCallerType,
-                             ErrorResult& aRv) {
-  BarProp::SetVisibleByFlag(aVisible, nsIWebBrowserChrome::CHROME_MENUBAR,
-                            aCallerType, aRv);
 }
 
 //
@@ -146,12 +119,6 @@ bool ToolbarProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
                                    aCallerType, aRv);
 }
 
-void ToolbarProp::SetVisible(bool aVisible, CallerType aCallerType,
-                             ErrorResult& aRv) {
-  BarProp::SetVisibleByFlag(aVisible, nsIWebBrowserChrome::CHROME_TOOLBAR,
-                            aCallerType, aRv);
-}
-
 //
 // LocationbarProp class implementation
 //
@@ -162,14 +129,10 @@ LocationbarProp::LocationbarProp(nsGlobalWindowInner* aWindow)
 LocationbarProp::~LocationbarProp() = default;
 
 bool LocationbarProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
-  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_LOCATIONBAR,
-                                   aCallerType, aRv);
-}
-
-void LocationbarProp::SetVisible(bool aVisible, CallerType aCallerType,
-                                 ErrorResult& aRv) {
-  BarProp::SetVisibleByFlag(aVisible, nsIWebBrowserChrome::CHROME_LOCATIONBAR,
-                            aCallerType, aRv);
+  if (aCallerType != CallerType::System) {
+    return GetVisibleByIsPopup();
+  }
+  return true;
 }
 
 //
@@ -182,14 +145,8 @@ PersonalbarProp::PersonalbarProp(nsGlobalWindowInner* aWindow)
 PersonalbarProp::~PersonalbarProp() = default;
 
 bool PersonalbarProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
-  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_PERSONAL_TOOLBAR,
+  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_TOOLBAR,
                                    aCallerType, aRv);
-}
-
-void PersonalbarProp::SetVisible(bool aVisible, CallerType aCallerType,
-                                 ErrorResult& aRv) {
-  BarProp::SetVisibleByFlag(
-      aVisible, nsIWebBrowserChrome::CHROME_PERSONAL_TOOLBAR, aCallerType, aRv);
 }
 
 //
@@ -200,15 +157,8 @@ StatusbarProp::StatusbarProp(nsGlobalWindowInner* aWindow) : BarProp(aWindow) {}
 
 StatusbarProp::~StatusbarProp() = default;
 
-bool StatusbarProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
-  return BarProp::GetVisibleByFlag(nsIWebBrowserChrome::CHROME_STATUSBAR,
-                                   aCallerType, aRv);
-}
-
-void StatusbarProp::SetVisible(bool aVisible, CallerType aCallerType,
-                               ErrorResult& aRv) {
-  return BarProp::SetVisibleByFlag(
-      aVisible, nsIWebBrowserChrome::CHROME_STATUSBAR, aCallerType, aRv);
+bool StatusbarProp::GetVisible(CallerType, ErrorResult&) {
+  return BarProp::GetVisibleByIsPopup();
 }
 
 //
@@ -236,10 +186,6 @@ bool ScrollbarsProp::GetVisible(CallerType aCallerType, ErrorResult& aRv) {
 
   ScrollbarPreference pref = nsDocShell::Cast(ds)->ScrollbarPreference();
   return pref != ScrollbarPreference::Never;
-}
-
-void ScrollbarsProp::SetVisible(bool aVisible, CallerType, ErrorResult&) {
-  /* Do nothing */
 }
 
 }  // namespace mozilla::dom

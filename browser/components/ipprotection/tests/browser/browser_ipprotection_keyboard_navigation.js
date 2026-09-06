@@ -4,29 +4,98 @@
 
 "use strict";
 
-// Borrowed from browser_PanelMultiView_keyboard.js
-async function expectFocusAfterKey(aKey, aFocus) {
-  let res = aKey.match(/^(Shift\+)?(.+)$/);
-  let shift = Boolean(res[1]);
-  let key;
-  if (res[2].length == 1) {
-    key = res[2]; // Character.
-  } else {
-    key = "KEY_" + res[2]; // Tab, ArrowRight, etc.
-  }
-  info("Waiting for focus on " + aFocus.id);
-  let focused = BrowserTestUtils.waitForEvent(aFocus, "focus");
-  EventUtils.synthesizeKey(key, { shiftKey: shift });
-  await focused;
-  ok(true, aFocus.id + " focused after " + aKey + " pressed");
-}
+/**
+ * Tests that focus remains on the action button after the VPN toggle is activated.
+ */
+add_task(async function test_focus_preserved_after_toggle() {
+  let content = await openPanel({
+    isEnrolledAndEntitled: true,
+    isProtectionEnabled: false,
+  });
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(content),
+    "ipprotection-content component should be present"
+  );
+
+  await BrowserTestUtils.waitForMutationCondition(
+    content.shadowRoot,
+    { childList: true, subtree: true },
+    () => content.statusCardEl
+  );
+
+  let statusCard = content.statusCardEl;
+  let actionButton = statusCard.actionButtonEl;
+
+  actionButton.focus();
+  actionButton.click();
+
+  // Simulate the service responding with the updated state.
+  statusCard.protectionEnabled = true;
+  await statusCard.updateComplete;
+  await statusCard.actionButtonEl.updateComplete;
+
+  Assert.ok(
+    actionButton.matches(":focus-within"),
+    "Focus stays on the action button after toggled"
+  );
+
+  await closePanel();
+  cleanupService();
+});
 
 /**
- * Tests that the panel can be navigated with Tab and Arrow keys.
+ * Tests that focus is restored to the action button after the VPN goes through
+ * the activating state (button disabled then re-enabled).
+ */
+add_task(async function test_focus_restored_after_activating() {
+  let content = await openPanel({
+    isEnrolledAndEntitled: true,
+    isProtectionEnabled: false,
+  });
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(content),
+    "ipprotection-content component should be present"
+  );
+
+  await BrowserTestUtils.waitForMutationCondition(
+    content.shadowRoot,
+    { childList: true, subtree: true },
+    () => content.statusCardEl
+  );
+
+  let statusCard = content.statusCardEl;
+  let actionButton = statusCard.actionButtonEl;
+
+  actionButton.focus();
+  actionButton.click();
+
+  statusCard.isActivating = true;
+  await statusCard.updateComplete;
+
+  statusCard.isActivating = false;
+  statusCard.protectionEnabled = true;
+  await statusCard.updateComplete;
+  await statusCard.actionButtonEl.updateComplete;
+
+  Assert.ok(
+    actionButton.matches(":focus-within"),
+    "Focus moves back to the action button after activating completes"
+  );
+
+  await closePanel();
+  cleanupService();
+});
+
+/**
+ * Tests that the panel can be navigated with Tab and Arrow keys
+ * and that the help button responds to the Enter key
  */
 add_task(async function test_keyboard_navigation_in_panel() {
+  const openLinkStub = sinon.stub(window, "openWebLinkIn");
   let content = await openPanel({
-    isSignedOut: false,
+    isReady: true,
   });
 
   Assert.ok(
@@ -40,46 +109,59 @@ add_task(async function test_keyboard_navigation_in_panel() {
       `#${IPProtectionPanel.HEADER_BUTTON_ID}`
     )
   );
+
+  await BrowserTestUtils.waitForMutationCondition(
+    content.shadowRoot,
+    { childList: true, subtree: true },
+    () => content.statusCardEl
+  );
+
   let statusCard = content.statusCardEl;
+  let turnOnButton = statusCard.actionButtonEl;
+  let locationButton = statusCard.locationButtonEl;
 
-  await expectFocusAfterKey("Tab", statusCard.connectionToggleEl);
-  await expectFocusAfterKey("Tab", content.upgradeEl.querySelector("a"));
-  await expectFocusAfterKey(
-    "Tab",
-    content.upgradeEl.querySelector("#upgrade-vpn-button")
-  );
+  await expectFocusAfterKey("Tab", turnOnButton);
 
-  // Loop back around
-  await expectFocusAfterKey(
-    "Tab",
-    content.ownerDocument.querySelector(
-      `#${IPProtectionPanel.HEADER_BUTTON_ID}`
-    )
-  );
-  await expectFocusAfterKey("Tab", statusCard.connectionToggleEl);
+  await expectFocusAfterKey("Tab", locationButton);
 
-  await expectFocusAfterKey("ArrowDown", content.upgradeEl.querySelector("a"));
-  await expectFocusAfterKey(
-    "ArrowDown",
-    content.upgradeEl.querySelector("#upgrade-vpn-button")
-  );
+  await expectFocusAfterKey("Tab", content.settingsButtonEl);
 
   // Loop back around
   await expectFocusAfterKey(
-    "ArrowDown",
+    "Tab",
     content.ownerDocument.querySelector(
       `#${IPProtectionPanel.HEADER_BUTTON_ID}`
     )
   );
-  await expectFocusAfterKey("ArrowDown", statusCard.connectionToggleEl);
+  await expectFocusAfterKey("Tab", turnOnButton);
 
-  // Loop backwards
-  await expectFocusAfterKey(
-    "Shift+Tab",
-    content.ownerDocument.querySelector(
-      `#${IPProtectionPanel.HEADER_BUTTON_ID}`
-    )
+  await expectFocusAfterKey("Tab", locationButton);
+
+  await expectFocusAfterKey("Tab", content.settingsButtonEl);
+
+  // Loop back around with ArrowDown
+  let headerButton = content.ownerDocument.querySelector(
+    `#${IPProtectionPanel.HEADER_BUTTON_ID}`
   );
+  await expectFocusAfterKey("ArrowDown", headerButton);
+  await expectFocusAfterKey("ArrowDown", turnOnButton);
+  await expectFocusAfterKey("ArrowDown", locationButton);
 
-  await closePanel();
+  // Test ArrowUp (backward)
+  await expectFocusAfterKey("ArrowUp", turnOnButton);
+  await expectFocusAfterKey("ArrowUp", headerButton);
+
+  // Navigate forward to turnOnButton to set up for Shift+Tab test
+  await expectFocusAfterKey("ArrowDown", turnOnButton);
+
+  // Loop backwards with Shift+Tab
+  await expectFocusAfterKey("Shift+Tab", headerButton);
+
+  // Check that header button responds to enter key
+  let panelHiddenPromise = waitForPanelEvent(document, "popuphidden");
+  EventUtils.synthesizeKey("KEY_Enter", {}, window);
+  await panelHiddenPromise;
+  Assert.ok(openLinkStub.calledOnce, "help button should open a link");
+  openLinkStub.restore();
+  cleanupService();
 });

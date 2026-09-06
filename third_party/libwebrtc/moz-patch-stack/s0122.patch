@@ -1,42 +1,31 @@
-From: Michael Froman <mjfroman@mac.com>
-Date: Tue, 16 Sep 2025 09:26:22 -0500
-Subject: Bug 1985396 - Cherry-pick upstream libwebrtc commit 73898ac18b
+From: Michael Froman <mfroman@mozilla.com>
+Date: Mon, 29 Dec 2025 13:18:00 -0600
+Subject: Bug 2006933 - (fix-932f274e86) don't include rtc_error.h, forward
+ declare RTCError
 
-Upstream commit: https://webrtc.googlesource.com/src/+/73898ac18b498c3322f71b9543a2b77f465a47af
-       APM data dumpers: add missing include
-
-       Currently, audioproc_f fails to build with apm_debug_dump enabled.
-
-       Bug: webrtc:442745059
-       Change-Id: I349468891d798341abdaea32042cbe23c4722f75
-       Reviewed-on: https://webrtc-review.googlesource.com/c/src/+/407641
-       Commit-Queue: Sam Zackrisson <saza@webrtc.org>
-       Commit-Queue: Lionel Koenig <lionelk@webrtc.org>
-       Reviewed-by: Lionel Koenig <lionelk@webrtc.org>
-       Cr-Commit-Position: refs/heads/main@{#45547}
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/fb61f91d422c3d77545d0d10778314eb958fc8c6
 ---
- modules/audio_processing/logging/apm_data_dumper.cc | 5 ++++-
- 1 file changed, 4 insertions(+), 1 deletion(-)
+ api/rtp_parameters.h | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
 
-diff --git a/modules/audio_processing/logging/apm_data_dumper.cc b/modules/audio_processing/logging/apm_data_dumper.cc
-index b26d90fbc8..d86d8d8d3b 100644
---- a/modules/audio_processing/logging/apm_data_dumper.cc
-+++ b/modules/audio_processing/logging/apm_data_dumper.cc
-@@ -10,13 +10,16 @@
+diff --git a/api/rtp_parameters.h b/api/rtp_parameters.h
+index 08cbb43597..1d044d341e 100644
+--- a/api/rtp_parameters.h
++++ b/api/rtp_parameters.h
+@@ -35,7 +35,6 @@
+ #include "absl/strings/string_view.h"
+ #include "api/media_types.h"
+ #include "api/priority.h"
+-#include "api/rtc_error.h"
+ #include "api/rtp_header_extension_id.h"
+ #include "api/rtp_transceiver_direction.h"
+ #include "api/video/resolution.h"
+@@ -45,7 +44,7 @@
+ #include "rtc_base/system/rtc_export.h"
  
- #include "modules/audio_processing/logging/apm_data_dumper.h"
- 
--
- // Check to verify that the define is properly set.
- #if !defined(WEBRTC_APM_DEBUG_DUMP) || \
-     (WEBRTC_APM_DEBUG_DUMP != 0 && WEBRTC_APM_DEBUG_DUMP != 1)
- #error "Set WEBRTC_APM_DEBUG_DUMP to either 0 or 1"
- #endif
- 
-+#if WEBRTC_APM_DEBUG_DUMP == 1
-+#include "rtc_base/strings/string_builder.h"
-+#endif
-+
  namespace webrtc {
- namespace {
+-
++class RTCError;
+ class StringBuilder;
  
+ struct RTC_EXPORT CodecParameterMap

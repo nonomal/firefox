@@ -399,17 +399,13 @@ class TestInfoReport(TestInfo):
     def get_testinfoall_index_url(self):
         import taskcluster
 
-        index = taskcluster.Index(
-            {
-                "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
-            }
-        )
+        index = taskcluster.Index({
+            "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
+        })
         route = "gecko.v2.mozilla-central.latest.source.test-info-all"
-        queue = taskcluster.Queue(
-            {
-                "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
-            }
-        )
+        queue = taskcluster.Queue({
+            "rootUrl": "https://firefox-ci-tc.services.mozilla.com",
+        })
 
         task_id = index.findTask(route)["taskId"]
         artifacts = queue.listLatestArtifacts(task_id)["artifacts"]
@@ -643,10 +639,14 @@ class TestInfoReport(TestInfo):
             show_summary = True
 
         trunk = False
-        if os.environ.get("GECKO_HEAD_REPOSITORY", "") in [
-            "https://hg.mozilla.org/mozilla-central",
-            "https://hg.mozilla.org/try",
-        ]:
+        if (
+            os.environ.get("GECKO_HEAD_REPOSITORY", "")
+            in [
+                "https://hg.mozilla.org/mozilla-central",
+                "https://hg.mozilla.org/try",
+            ]
+            or os.environ.get("GECKO_HEAD_REF", "") == "refs/heads/main"
+        ):
             trunk = True
         else:
             show_testruns = False
@@ -1063,7 +1063,8 @@ class TestInfoReport(TestInfo):
 
             # skip tier-3
             if (
-                task.get("task", {})
+                task
+                .get("task", {})
                 .get("extra", {})
                 .get("treeherder", {})
                 .get("tier", 3)

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -33,9 +31,11 @@ mozilla::ipc::IPCResult WebIdentityParent::RecvGetIdentityCredential(
     IdentityCredentialRequestOptions&& aOptions,
     const CredentialMediationRequirement& aMediationRequirement,
     bool aHasUserActivation, const GetIdentityCredentialResolver& aResolver) {
-  WindowGlobalParent* manager = static_cast<WindowGlobalParent*>(Manager());
+  WindowGlobalParent* manager =
+      mozilla::ipc::ActorCast<WindowGlobalParent>(Manager());
   if (!manager) {
     aResolver(NS_ERROR_FAILURE);
+    return IPC_OK();
   }
   identity::GetCredentialInMainProcess(
       manager->DocumentPrincipal(), this, std::move(aOptions),
@@ -52,9 +52,11 @@ mozilla::ipc::IPCResult WebIdentityParent::RecvGetIdentityCredential(
 mozilla::ipc::IPCResult WebIdentityParent::RecvDisconnectIdentityCredential(
     const IdentityCredentialDisconnectOptions& aOptions,
     const DisconnectIdentityCredentialResolver& aResolver) {
-  WindowGlobalParent* manager = static_cast<WindowGlobalParent*>(Manager());
+  WindowGlobalParent* manager =
+      mozilla::ipc::ActorCast<WindowGlobalParent>(Manager());
   if (!manager) {
     aResolver(NS_ERROR_FAILURE);
+    return IPC_OK();
   }
   identity::DisconnectInMainProcess(manager->DocumentPrincipal(), aOptions)
       ->Then(
@@ -66,9 +68,11 @@ mozilla::ipc::IPCResult WebIdentityParent::RecvDisconnectIdentityCredential(
 
 mozilla::ipc::IPCResult WebIdentityParent::RecvPreventSilentAccess(
     const PreventSilentAccessResolver& aResolver) {
-  WindowGlobalParent* manager = static_cast<WindowGlobalParent*>(Manager());
+  WindowGlobalParent* manager =
+      mozilla::ipc::ActorCast<WindowGlobalParent>(Manager());
   if (!manager) {
     aResolver(NS_ERROR_FAILURE);
+    return IPC_OK();
   }
   nsIPrincipal* principal = manager->DocumentPrincipal();
   if (principal) {
@@ -88,7 +92,8 @@ mozilla::ipc::IPCResult WebIdentityParent::RecvPreventSilentAccess(
 
 mozilla::ipc::IPCResult WebIdentityParent::RecvSetLoginStatus(
     LoginStatus aStatus, const SetLoginStatusResolver& aResolver) {
-  WindowGlobalParent* manager = static_cast<WindowGlobalParent*>(Manager());
+  WindowGlobalParent* manager =
+      mozilla::ipc::ActorCast<WindowGlobalParent>(Manager());
   if (!manager) {
     aResolver(NS_ERROR_FAILURE);
     return IPC_OK();

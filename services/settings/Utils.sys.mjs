@@ -5,6 +5,7 @@
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { ServiceRequest } from "resource://gre/modules/ServiceRequest.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";
 
 const lazy = {};
 
@@ -50,7 +51,7 @@ ChromeUtils.defineLazyGetter(lazy, "isRunningTests", () => {
 
 // Overriding the server URL is normally disabled on Beta and Release channels,
 // except under some conditions.
-ChromeUtils.defineLazyGetter(lazy, "allowServerURLOverride", () => {
+ChromeUtils.defineLazyGetter(lazy, "allowServerURL", () => {
   if (!AppConstants.RELEASE_OR_BETA) {
     // Always allow to override the server URL on Nightly/DevEdition.
     return true;
@@ -65,13 +66,15 @@ ChromeUtils.defineLazyGetter(lazy, "allowServerURLOverride", () => {
     return true;
   }
 
-  if (lazy.gServerURL != AppConstants.REMOTE_SETTINGS_SERVER_URL) {
-    log.warn("Ignoring preference override of remote settings server");
-    log.warn(
-      "Allow by setting MOZ_REMOTE_SETTINGS_DEVTOOLS=1 in the environment"
-    );
+  // eslint-disable-next-line mozilla/valid-lazy
+  if (AppConstants.REMOTE_SETTINGS_SERVER_URLS.includes(lazy.gServerURL)) {
+    return true;
   }
 
+  log.warn("Ignoring preference override of remote settings server");
+  log.warn(
+    "Allow by setting MOZ_REMOTE_SETTINGS_DEVTOOLS=1 in the environment"
+  );
   return false;
 });
 
@@ -79,7 +82,7 @@ XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
   "gServerURL",
   "services.settings.server",
-  AppConstants.REMOTE_SETTINGS_SERVER_URL
+  AppConstants.REMOTE_SETTINGS_SERVER_URLS[0]
 );
 
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -89,17 +92,23 @@ XPCOMUtils.defineLazyPreferenceGetter(
   false
 );
 
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "gAttachmentsBaseUrl",
+  "services.settings.base_attachments_url",
+  ""
+);
+
 function _isUndefined(value) {
   return typeof value === "undefined";
 }
 
-const _cdnURLs = {};
-
 export var Utils = {
   get SERVER_URL() {
-    return lazy.allowServerURLOverride
-      ? lazy.gServerURL
-      : AppConstants.REMOTE_SETTINGS_SERVER_URL;
+    return lazy.allowServerURL
+      ? // eslint-disable-next-line mozilla/valid-lazy
+        lazy.gServerURL
+      : AppConstants.REMOTE_SETTINGS_SERVER_URLS[0];
   },
 
   CHANGES_PATH: "/buckets/monitor/collections/changes/changeset",
@@ -109,11 +118,14 @@ export var Utils = {
    */
   log,
 
-  get shouldSkipRemoteActivityDueToTests() {
-    return (
+  get shouldSkipRemoteActivity() {
+    if (
       (lazy.isRunningTests || Cu.isInAutomation) &&
       this.SERVER_URL == "data:,#remote-settings-dummy/v1"
-    );
+    ) {
+      return true;
+    }
+    return Services.policies?.isAllowed("remoteSettings") === false;
   },
 
   get CERT_CHAIN_ROOT_IDENTIFIER() {
@@ -139,15 +151,23 @@ export var Utils = {
   get LOAD_DUMPS() {
     // Load dumps only if pulling data from the production server, or in tests.
     return (
-      this.SERVER_URL == AppConstants.REMOTE_SETTINGS_SERVER_URL ||
+      AppConstants.REMOTE_SETTINGS_SERVER_URLS.includes(this.SERVER_URL) ||
       lazy.isRunningTests
     );
   },
 
   get PREVIEW_MODE() {
+    // Release and beta require dev-tools or tests to use preview
+    if (
+      AppConstants.RELEASE_OR_BETA &&
+      !lazy.isRunningTests &&
+      Services.env.get("MOZ_REMOTE_SETTINGS_DEVTOOLS") !== "1"
+    ) {
+      return false;
+    }
     // We want to offer the ability to set preview mode via a preference
     // for consumers who want to pull from the preview bucket on startup.
-    if (_isUndefined(this._previewModeEnabled) && lazy.allowServerURLOverride) {
+    if (_isUndefined(this._previewModeEnabled)) {
       return lazy.gPreviewEnabled;
     }
     return !!this._previewModeEnabled;
@@ -223,6 +243,7 @@ export var Utils = {
   async fetch(input, init = {}) {
     return new Promise(function (resolve, reject) {
       const request = new ServiceRequest();
+      const { method = "GET", headers = {}, bypassProxy = false } = init;
       function fallbackOrReject(err) {
         if (
           // At most one recursive Utils.fetch call (bypassProxy=false to true).
@@ -268,8 +289,6 @@ export var Utils = {
         resolve(new Response(request.response, responseAttributes));
       };
 
-      const { method = "GET", headers = {}, bypassProxy = false } = init;
-
       request.open(method, input, { bypassProxy });
       // By default, XMLHttpRequest converts the response based on the
       // Content-Type header, or UTF-8 otherwise. This may mangle binary
@@ -284,14 +303,21 @@ export var Utils = {
     });
   },
 
+  _baseAttachmentsURLPromise: null,
+
   /**
    * Retrieves the base URL for attachments from the server configuration.
    *
    * If the URL has been previously fetched and cached, it returns the cached URL.
    *
+   * Note: it is important to not hard-code this value in consumer code.
+   *
    * @async
    * @function baseAttachmentsURL
    * @memberof Utils
+   * @param {object} options Some download options.
+   * @param {number} options.retries Number of times server fetch should be retried (default: `0`)
+   * @param {number} options.retryWaitMsec Wait milliseconds between each retry (default: `1000`)
    * @returns {Promise<string>} A promise that resolves to the base URL for attachments.
    *
    * @throws {Error} If there is an error fetching or parsing the server response.
@@ -300,21 +326,66 @@ export var Utils = {
    * const attachmentsURL = await Downloader.baseAttachmentsURL();
    * console.log(attachmentsURL);
    */
-  async baseAttachmentsURL() {
-    if (!_cdnURLs[Utils.SERVER_URL]) {
-      const resp = await Utils.fetch(`${Utils.SERVER_URL}/`);
-      const serverInfo = await resp.json();
+  async baseAttachmentsURL(options = {}) {
+    if (Utils._baseAttachmentsURLPromise) {
+      // Wait for ongoing call to finish.
+      return Utils._baseAttachmentsURLPromise;
+    }
+
+    // We save the obtained value in a pref, so that it's only fetched from
+    // the server on first use. When the remote server changes (eg. using the DevTools for QA)
+    // the value will be fetched again from the server.
+    const [server_url = "", attachments_url = ""] =
+      lazy.gAttachmentsBaseUrl.split("|", 2);
+    if (
+      server_url == Utils.SERVER_URL &&
+      /^https?:\/\/(.+)\/$/.test(attachments_url)
+    ) {
+      return attachments_url;
+    }
+
+    // Saved attachments URL does not match current server (eg. on empty profile, or
+    // user switched remote environment), fetch it again from the server.
+    const { retries = 0, retryWaitMsec = 1000 } = options;
+    Utils._baseAttachmentsURLPromise = (async () => {
+      let retried = 0;
+      let serverInfo;
+      while (retried <= retries) {
+        try {
+          const resp = await Utils.fetch(`${Utils.SERVER_URL}/`);
+          if (!resp.ok) {
+            throw new Error(`Failed to fetch server info: ${resp.status}`);
+          }
+          serverInfo = await resp.json();
+          break;
+        } catch (error) {
+          retried++;
+          if (retried > retries) {
+            throw error;
+          }
+          await new Promise(resolve =>
+            setTimeout(resolve, retryWaitMsec * retried)
+          );
+        }
+      }
       // Server capabilities expose attachments configuration.
       const {
         capabilities: {
           attachments: { base_url },
         },
       } = serverInfo;
-      // Make sure the URL always has a trailing slash.
-      _cdnURLs[Utils.SERVER_URL] =
-        base_url + (base_url.endsWith("/") ? "" : "/");
+      Services.prefs.setStringPref(
+        "services.settings.base_attachments_url",
+        `${Utils.SERVER_URL}|${base_url}`
+      );
+      return base_url;
+    })();
+
+    try {
+      return await Utils._baseAttachmentsURLPromise;
+    } finally {
+      Utils._baseAttachmentsURLPromise = null;
     }
-    return _cdnURLs[Utils.SERVER_URL];
   },
 
   /**
@@ -490,7 +561,7 @@ export var Utils = {
 
     return {
       changes,
-      currentEtag: `"${timestamp}"`,
+      timestamp,
       serverTimeMillis,
       backoffSeconds,
       ageSeconds,

@@ -1,31 +1,31 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "TaskController.h"
-#include "IdleTaskRunner.h"
-#include "nsIIdleRunnable.h"
-#include "nsIRunnable.h"
-#include "nsThreadUtils.h"
+
 #include <algorithm>
+
 #include "GeckoProfiler.h"
+#include "IdleTaskRunner.h"
 #include "mozilla/AppShutdown.h"
 #include "mozilla/BackgroundHangMonitor.h"
 #include "mozilla/EventQueue.h"
+#include "mozilla/FlowMarkers.h"
 #include "mozilla/Hal.h"
-#include "mozilla/InputTaskManager.h"
-#include "mozilla/VsyncTaskManager.h"
 #include "mozilla/IOInterposer.h"
+#include "mozilla/InputTaskManager.h"
 #include "mozilla/Perfetto.h"
-#include "mozilla/StaticPtr.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/ScopeExit.h"
-#include "mozilla/FlowMarkers.h"
 #include "mozilla/StaticPrefs_memory.h"
+#include "mozilla/StaticPtr.h"
+#include "mozilla/VsyncTaskManager.h"
+#include "nsIIdleRunnable.h"
+#include "nsIRunnable.h"
 #include "nsIThreadInternal.h"
 #include "nsThread.h"
+#include "nsThreadUtils.h"
 #include "prenv.h"
 #include "prsystem.h"
 
@@ -89,12 +89,20 @@ struct TaskMarker : BaseMarkerType<TaskMarker> {
 
   using MS = MarkerSchema;
   static constexpr MS::PayloadField PayloadFields[] = {
-      {"name", MS::InputType::CString, "Task Name", MS::Format::String,
-       MS::PayloadFlags::Searchable},
+      {
+          "name",
+          MS::InputType::CString,
+          "Task Name",
+          MS::Format::String,
+      },
       {"priority", MS::InputType::Uint32, "Priority level",
        MS::Format::Integer},
-      {"task", MS::InputType::Uint64, "Task", MS::Format::TerminatingFlow,
-       MS::PayloadFlags::Searchable},
+      {
+          "task",
+          MS::InputType::Uint64,
+          "Task",
+          MS::Format::TerminatingFlow,
+      },
       {"priorityName", MS::InputType::CString, "Priority Name"}};
 
   static constexpr MS::Location Locations[] = {MS::Location::MarkerChart,
@@ -144,12 +152,20 @@ struct IncompleteTaskMarker : BaseMarkerType<IncompleteTaskMarker> {
 
   using MS = MarkerSchema;
   static constexpr MS::PayloadField PayloadFields[] = {
-      {"name", MS::InputType::CString, "Task Name", MS::Format::String,
-       MS::PayloadFlags::Searchable},
+      {
+          "name",
+          MS::InputType::CString,
+          "Task Name",
+          MS::Format::String,
+      },
       {"priority", MS::InputType::Uint32, "Priority level",
        MS::Format::Integer},
-      {"task", MS::InputType::Uint64, "Task", MS::Format::Flow,
-       MS::PayloadFlags::Searchable},
+      {
+          "task",
+          MS::InputType::Uint64,
+          "Task",
+          MS::Format::Flow,
+      },
       {"priorityName", MS::InputType::CString, "Priority Name"}};
 
   static constexpr MS::Location Locations[] = {MS::Location::MarkerChart,
@@ -480,7 +496,7 @@ void TaskController::RunPoolThread(PoolThread* aThread) {
   IOInterposer::UnregisterCurrentThread();
 }
 
-void TaskController::AddTask(already_AddRefed<Task>&& aTask) {
+void TaskController::AddTask(already_AddRefed<Task> aTask) {
   RefPtr<Task> task(aTask);
 
   if (task->GetKind() == Task::Kind::OffMainThreadOnly) {
@@ -697,7 +713,7 @@ void TaskController::ReprioritizeTask(Task* aTask, uint32_t aPriority) {
 // Task that wraps a runnable.
 class RunnableTask : public Task {
  public:
-  RunnableTask(already_AddRefed<nsIRunnable>&& aRunnable, int32_t aPriority,
+  RunnableTask(already_AddRefed<nsIRunnable> aRunnable, int32_t aPriority,
                Kind aKind)
       : Task(aKind, aPriority), mRunnable(aRunnable) {}
 
@@ -734,11 +750,11 @@ class RunnableTask : public Task {
   RefPtr<nsIRunnable> mRunnable;
 };
 
-void TaskController::DispatchRunnable(already_AddRefed<nsIRunnable>&& aRunnable,
+void TaskController::DispatchRunnable(already_AddRefed<nsIRunnable> aRunnable,
                                       uint32_t aPriority,
                                       TaskManager* aManager) {
-  RefPtr<RunnableTask> task = new RunnableTask(std::move(aRunnable), aPriority,
-                                               Task::Kind::MainThreadOnly);
+  RefPtr task = MakeRefPtr<RunnableTask>(std::move(aRunnable), aPriority,
+                                         Task::Kind::MainThreadOnly);
 
   task->SetManager(aManager);
   TaskController::Get()->AddTask(task.forget());
@@ -935,7 +951,7 @@ void ScheduleIdleMemoryCleanup(uint32_t aWantsLaterDelay) {
         return RunIdleMemoryCleanup(aDeadline, aWantsLaterDelay);
       },
       "TaskController::IdlePurgeRunner"_ns, TimeDuration(), maxPurgeDelay,
-      minPurgeBudget, true, nullptr, nullptr);
+      minPurgeBudget, true, [] { return AppShutdown::IsShutdownImpending(); });
 }
 }  // namespace mozilla
 
@@ -948,12 +964,14 @@ struct IdlePurgePeekMarker : mozilla::BaseMarkerType<IdlePurgePeekMarker> {
   using String8View = mozilla::ProfilerString8View;
 
   static constexpr MS::PayloadField PayloadFields[] = {
-      {"status", MS::InputType::CString, "Status", MS::Format::String}};
+      {"status", MS::InputType::CString, "Status", MS::Format::String},
+      {"reason", MS::InputType::CString, "Reason", MS::Format::String}};
 
   static void StreamJSONMarkerData(
       mozilla::baseprofiler::SpliceableJSONWriter& aWriter,
-      const String8View& aStatus) {
+      const String8View& aStatus, const String8View& aReason) {
     aWriter.StringProperty("status", aStatus);
+    aWriter.StringProperty("reason", aReason);
   }
 
   static constexpr MS::Location Locations[] = {MS::Location::MarkerChart,
@@ -972,9 +990,11 @@ namespace mozilla {
 // to post some runnables to the main thread to find idle time before the
 // (very cheap) check actually runs.
 //
-// aTimer:   Not used
-// aClosure: Not used
+// aTimer:   Set when our one shot timer called us back, null when we are
+//           called directly.
+// aClosure: A static string describing the trigger, shown in profiler markers.
 void CheckIdleMemoryCleanupNeeded(nsITimer* aTimer, void* aClosure) {
+  const char* reason = static_cast<const char*>(aClosure);
   uint32_t reuseGracePeriod =
       StaticPrefs::memory_lazypurge_reuse_grace_period();
 
@@ -987,6 +1007,12 @@ void CheckIdleMemoryCleanupNeeded(nsITimer* aTimer, void* aClosure) {
 
   MOZ_ASSERT(!sIdleMemoryCleanupRunner ||
              !sIdleMemoryCleanupWantsLaterScheduled);
+
+  // A one shot timer is no longer armed once it has called us back.
+  if (aTimer) {
+    sIdleMemoryCleanupWantsLaterScheduled = false;
+  }
+
   auto result =
       moz_may_purge_now(/* aPeekOnly */ true, reuseGracePeriod, Nothing());
   switch (result) {
@@ -998,21 +1024,23 @@ void CheckIdleMemoryCleanupNeeded(nsITimer* aTimer, void* aClosure) {
       // if something else causes a MayPurgeAll (like
       // jemalloc_free_(excess)_dirty_pages or moz_set_max_dirty_page_modifier)
       // which can happen anytime.
-      if (sIdleMemoryCleanupRunner || sIdleMemoryCleanupWantsLaterScheduled) {
+      if (aTimer || sIdleMemoryCleanupRunner ||
+          sIdleMemoryCleanupWantsLaterScheduled) {
         PROFILER_MARKER("IdlePurgePeek", GCCC, MarkerTiming::InstantNow(),
                         IdlePurgePeekMarker,
                         ProfilerString8View::WrapNullTerminatedString(
-                            "Done (Cancel timer or runner)"));
+                            "Done (Nothing left to purge)"),
+                        ProfilerString8View::WrapNullTerminatedString(reason));
         CancelIdleMemoryCleanupTimerAndRunner();
       }
       break;
     case may_purge_now_result_t::WantsLater:
       if (!sIdleMemoryCleanupWantsLaterScheduled) {
-        PROFILER_MARKER(
-            "IdlePurgePeek", GCCC, MarkerTiming::InstantNow(),
-            IdlePurgePeekMarker,
-            ProfilerString8View::WrapNullTerminatedString(
-                "WantsLater (First schedule of low priority timer)"));
+        PROFILER_MARKER("IdlePurgePeek", GCCC, MarkerTiming::InstantNow(),
+                        IdlePurgePeekMarker,
+                        ProfilerString8View::WrapNullTerminatedString(
+                            "WantsLater (Arming low priority timer)"),
+                        ProfilerString8View::WrapNullTerminatedString(reason));
       }
       // We always want to (re-)schedule the timer to prevent it from firing
       // as much as possible.
@@ -1025,7 +1053,8 @@ void CheckIdleMemoryCleanupNeeded(nsITimer* aTimer, void* aClosure) {
         PROFILER_MARKER("IdlePurgePeek", GCCC, MarkerTiming::InstantNow(),
                         IdlePurgePeekMarker,
                         ProfilerString8View::WrapNullTerminatedString(
-                            "NeedsMore (Schedule as-soon-as-idle cleanup)"));
+                            "NeedsMore (Schedule as-soon-as-idle cleanup)"),
+                        ProfilerString8View::WrapNullTerminatedString(reason));
         ScheduleIdleMemoryCleanup(wantsLaterDelay);
       } else {
         MOZ_ASSERT(!sIdleMemoryCleanupWantsLaterScheduled);
@@ -1047,7 +1076,8 @@ struct IdlePurgeMarker : mozilla::BaseMarkerType<IdlePurgeMarker> {
   static constexpr MS::PayloadField PayloadFields[] = {
       {"num_calls", MS::InputType::Uint32, "Number of PurgeNow() calls",
        MS::Format::Integer},
-      {"next", MS::InputType::CString, "Last result", MS::Format::String}};
+      {"last_result", MS::InputType::CString, "Last result",
+       MS::Format::String}};
 
   static void StreamJSONMarkerData(
       mozilla::baseprofiler::SpliceableJSONWriter& aWriter, uint32_t aNumCalls,
@@ -1097,11 +1127,11 @@ bool RunIdleMemoryCleanup(TimeStamp aDeadline, uint32_t aWantsLaterDelay) {
   const char* last_result;
   switch (result) {
     case may_purge_now_result_t::Done:
-      last_result = "Done (Cancel timer and runner)";
+      last_result = "Done (Cancel runner)";
       CancelIdleMemoryCleanupTimerAndRunner();
       break;
     case may_purge_now_result_t::WantsLater:
-      last_result = "WantsLater (First schedule of low priority timer)";
+      last_result = "WantsLater (Arming low priority timer)";
       ScheduleWantsLaterTimer(aWantsLaterDelay);
       break;
     case may_purge_now_result_t::NeedsMore:
@@ -1135,6 +1165,18 @@ void TaskController::MayScheduleIdleMemoryCleanup() {
   }
 
   CheckIdleMemoryCleanupNeeded(nullptr, (void*)"MayScheduleIdleMemoryCleanup");
+}
+
+void TaskController::RequestIdleMemoryCleanup(StaticString aReason) {
+  MOZ_ASSERT(NS_IsMainThread());
+  if (!mIsLazyPurgeEnabled) {
+    jemalloc_free_dirty_pages();
+    return;
+  }
+  if (AppShutdown::IsShutdownImpending()) {
+    return;
+  }
+  CheckIdleMemoryCleanupNeeded(nullptr, (void*)aReason.get());
 }
 #endif
 

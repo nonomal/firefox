@@ -8,6 +8,7 @@ package org.mozilla.fenix.ui.robots
 
 import android.os.Build
 import android.util.Log
+import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.test.espresso.Espresso
 import androidx.test.espresso.Espresso.onView
@@ -37,9 +38,7 @@ import org.mozilla.fenix.helpers.TestHelper.appName
 import org.mozilla.fenix.helpers.TestHelper.packageName
 import org.mozilla.fenix.settings.SupportUtils
 
-/**
- * Implementation of Robot Pattern for the settings search sub menu.
- */
+/** Implementation of Robot Pattern for the settings search sub menu. */
 class SettingsSubMenuAboutRobot {
     fun verifyAboutFirefoxPreviewInfo() {
         verifyVersionNumber()
@@ -50,21 +49,26 @@ class SettingsSubMenuAboutRobot {
     fun verifyVersionNumber() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
 
-        val packageInfo =
-            context.packageManagerCompatHelper.getPackageInfoCompat(context.packageName, 0)
+        val packageInfo = context.packageManagerCompatHelper.getPackageInfoCompat(context.packageName, 0)
         val versionCode = PackageInfoCompat.getLongVersionCode(packageInfo).toString()
         val buildNVersion = "${packageInfo.versionName} (Build #$versionCode)\n"
         val geckoVersion =
             org.mozilla.geckoview.BuildConfig.MOZ_APP_VERSION + "-" + org.mozilla.geckoview.BuildConfig.MOZ_APP_BUILDID
         val asVersion = mozilla.components.Build.APPLICATION_SERVICES_VERSION
         val osVersion = Build.VERSION.RELEASE
-        Log.i(TAG, "verifyVersionNumber: Trying to verify that the about section contains build version: $buildNVersion")
+        Log.i(
+            TAG,
+            "verifyVersionNumber: Trying to verify that the about section contains build version: $buildNVersion",
+        )
         onView(withId(R.id.about_text)).check(matches(withText(containsString(buildNVersion))))
         Log.i(TAG, "verifyVersionNumber: Verified that the about section contains build version: $buildNVersion")
         Log.i(TAG, "verifyVersionNumber: Trying to verify that the about section contains gecko version: $geckoVersion")
         onView(withId(R.id.about_text)).check(matches(withText(containsString(geckoVersion))))
         Log.i(TAG, "verifyVersionNumber: Verified that the about section contains gecko version: $geckoVersion")
-        Log.i(TAG, "verifyVersionNumber: Trying to verify that the about section contains android services version: $asVersion")
+        Log.i(
+            TAG,
+            "verifyVersionNumber: Trying to verify that the about section contains android services version: $asVersion",
+        )
         onView(withId(R.id.about_text)).check(matches(withText(containsString(asVersion))))
         Log.i(TAG, "verifyVersionNumber: Verified that the about section contains android services version: $asVersion")
         Log.i(TAG, "verifyVersionNumber: Trying to verify that the about section contains Android version: $osVersion")
@@ -73,10 +77,15 @@ class SettingsSubMenuAboutRobot {
     }
 
     fun verifyProductCompany() {
-        Log.i(TAG, "verifyProductCompany: Trying to verify that the about section contains the company that produced the app info: ${"$appName is produced by Mozilla."}")
-        onView(withId(R.id.about_content))
-            .check(matches(withText(containsString("$appName is produced by Mozilla."))))
-        Log.i(TAG, "verifyProductCompany: Verified that the about section contains the company that produced the app info: \"$appName is produced by Mozilla.\"")
+        Log.i(
+            TAG,
+            "verifyProductCompany: Trying to verify that the about section contains the company that produced the app info: ${"$appName is produced by Mozilla."}",
+        )
+        onView(withId(R.id.about_content)).check(matches(withText(containsString("$appName is produced by Mozilla."))))
+        Log.i(
+            TAG,
+            "verifyProductCompany: Verified that the about section contains the company that produced the app info: \"$appName is produced by Mozilla.\"",
+        )
     }
 
     fun verifyCurrentTimestamp() {
@@ -91,32 +100,41 @@ class SettingsSubMenuAboutRobot {
     fun verifyAboutToolbar() {
         Log.i(TAG, "verifyAboutToolbar: Trying to verify that the \"About $appName\" toolbar title is visible")
         onView(
-            allOf(
-                withId(R.id.navigationToolbar),
-                hasDescendant(withText("About $appName")),
-            ),
-        ).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
+                allOf(
+                    withId(R.id.navigationToolbar),
+                    hasDescendant(withText("About $appName")),
+                )
+            )
+            .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyAboutToolbar: Verified that the \"About $appName\" toolbar title is visible")
     }
 
-    fun verifyWhatIsNewInFirefoxLink() {
-        Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+    fun verifyWhatIsNewInFirefoxLink(composeTestRule: ComposeTestRule) {
+        Log.i(
+            TAG,
+            "verifyWhatIsNewInFirefoxLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
-        Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyWhatIsNewInFirefoxLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
 
         val firefox = TestHelper.appContext.getString(R.string.firefox)
         Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Trying to verify that the \"What’s new in $firefox\" link is visible")
-        onView(withText("What’s new in $firefox")).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
+        onView(withText("What’s new in $firefox"))
+            .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Verified that the \"What’s new in $firefox\" link is visible")
         Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Trying to click the \"What’s new in $firefox\" link")
         onView(withText("What’s new in $firefox")).perform(click())
         Log.i(TAG, "verifyWhatIsNewInFirefoxLink: Clicked the \"What’s new in $firefox\" link")
 
-        browserScreen {
+        browserScreen(composeTestRule) {
             verifyWhatsNewURL()
         }
     }
-    fun verifySupportLink() {
+
+    fun verifySupportLink(composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifySupport: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
         Log.i(TAG, "verifySupport: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
@@ -127,13 +145,16 @@ class SettingsSubMenuAboutRobot {
         onView(withText("Support")).perform(click())
         Log.i(TAG, "verifySupport: Clicked the \"Support\" link")
 
-        browserScreen {
+        browserScreen(composeTestRule) {
             verifyHelpUrl()
         }
     }
 
     fun verifyCrashesLink() {
-        Log.i(TAG, "verifyCrashesLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyCrashesLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
         Log.i(TAG, "verifyCrashesLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
         Log.i(TAG, "verifyCrashesLink: Trying to verify that the \"Crashes\" link is visible")
@@ -152,10 +173,16 @@ class SettingsSubMenuAboutRobot {
         }
     }
 
-    fun verifyPrivacyNoticeLink() {
-        Log.i(TAG, "verifyPrivacyNoticeLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+    fun verifyPrivacyNoticeLink(composeTestRule: ComposeTestRule) {
+        Log.i(
+            TAG,
+            "verifyPrivacyNoticeLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
-        Log.i(TAG, "verifyPrivacyNoticeLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyPrivacyNoticeLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         Log.i(TAG, "verifyPrivacyNoticeLink: Trying to verify that the \"Privacy notice\" link is visible")
         onView(withText("Privacy notice")).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyPrivacyNoticeLink: Verified that the \"Privacy notice\" link is visible")
@@ -163,15 +190,21 @@ class SettingsSubMenuAboutRobot {
         onView(withText("Privacy notice")).perform(click())
         Log.i(TAG, "verifyPrivacyNoticeLink: Clicked the \"Privacy notice\" link")
 
-        browserScreen {
+        browserScreen(composeTestRule) {
             verifyUrl("/privacy/firefox")
         }
     }
 
-    fun verifyKnowYourRightsLink() {
-        Log.i(TAG, "verifyKnowYourRightsLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+    fun verifyKnowYourRightsLink(composeTestRule: ComposeTestRule) {
+        Log.i(
+            TAG,
+            "verifyKnowYourRightsLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
-        Log.i(TAG, "verifyKnowYourRightsLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyKnowYourRightsLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         Log.i(TAG, "verifyKnowYourRightsLink: Trying to verify that the \"Know your rights\" link is visible")
         onView(withText("Know your rights")).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyKnowYourRightsLink: Verified that the \"Know your rights\" link is visible")
@@ -179,33 +212,50 @@ class SettingsSubMenuAboutRobot {
         onView(withText("Know your rights")).perform(click())
         Log.i(TAG, "verifyKnowYourRightsLink: Clicked the \"Know your rights\" link")
 
-        browserScreen {
+        browserScreen(composeTestRule) {
             verifyUrl(SupportUtils.SumoTopic.YOUR_RIGHTS.topicStr)
         }
     }
 
-    fun verifyLicensingInformationLink() {
-        Log.i(TAG, "verifyLicensingInformationLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+    fun verifyLicensingInformationLink(composeTestRule: ComposeTestRule) {
+        Log.i(
+            TAG,
+            "verifyLicensingInformationLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
-        Log.i(TAG, "verifyLicensingInformationLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
-        Log.i(TAG, "verifyLicensingInformationLink: Trying to verify that the \"Licensing information\" link is visible")
-        onView(withText("Licensing information")).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
+        Log.i(
+            TAG,
+            "verifyLicensingInformationLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
+        Log.i(
+            TAG,
+            "verifyLicensingInformationLink: Trying to verify that the \"Licensing information\" link is visible",
+        )
+        onView(withText("Licensing information"))
+            .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyLicensingInformationLink: Verified that the \"Licensing information\" link is visible")
         Log.i(TAG, "verifyLicensingInformationLink: Trying to click the \"Licensing information\" link")
         onView(withText("Licensing information")).perform(click())
         Log.i(TAG, "verifyLicensingInformationLink: Clicked the \"Licensing information\" link")
 
-        browserScreen {
+        browserScreen(composeTestRule) {
             verifyUrl("about:license")
         }
     }
 
     fun verifyLibrariesUsedLink() {
-        Log.i(TAG, "verifyLibrariesUsedLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyLibrariesUsedLink: Trying to perform ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         aboutMenuList.scrollToEnd(LISTS_MAXSWIPES)
-        Log.i(TAG, "verifyLibrariesUsedLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list")
+        Log.i(
+            TAG,
+            "verifyLibrariesUsedLink: Performed ${LISTS_MAXSWIPES}x a scroll action to the end of the about list",
+        )
         Log.i(TAG, "verifyLibrariesUsedLink: Trying to verify that the \"Libraries that we use\" link is visible")
-        onView(withText("Libraries that we use")).check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
+        onView(withText("Libraries that we use"))
+            .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)))
         Log.i(TAG, "verifyLibrariesUsedLink: Verified that the \"Libraries that we use\" link is visible")
     }
 
@@ -214,18 +264,14 @@ class SettingsSubMenuAboutRobot {
         onView(withText("Libraries that we use")).perform(click())
         Log.i(TAG, "verifyLibrariesUsedLink: Clicked the \"Libraries that we use\" link")
         Log.i(TAG, "verifyLibrariesUsedLink: Trying to verify that the toolbar has title: \"$appName | OSS Libraries\"")
-        onView(withId(R.id.navigationToolbar)).check(
-            matches(
-                hasDescendant(
-                    withText(
-                        containsString("$appName | OSS Libraries"),
-                    ),
-                ),
-            ),
-        )
+        onView(withId(R.id.navigationToolbar))
+            .check(matches(hasDescendant(withText(containsString("$appName | OSS Libraries")))))
         Log.i(TAG, "verifyLibrariesUsedLink: Verified that the toolbar has title: \"$appName | OSS Libraries\"")
-        Log.i(TAG, "verifyTheLibrariesListNotEmpty: Trying to verify that the OSS Libraries list has more then 10 items.")
-        onView(withId(R.id.about_libraries_listview))
+        Log.i(
+            TAG,
+            "verifyTheLibrariesListNotEmpty: Trying to verify that the OSS Libraries list has more then 10 items.",
+        )
+        onView(withId(mozilla.components.support.license.R.id.about_libraries_listview))
             .check(matches(isDisplayed()))
             .check(matches(hasMinimumChildCount(10)))
         Log.i(TAG, "verifyTheLibrariesListNotEmpty: Verify that the OSS Libraries list has more then 10 items.")
@@ -243,15 +289,6 @@ class SettingsSubMenuAboutRobot {
     }
 }
 
-private fun navigateBackToAboutPage() {
-    navigationToolbar {
-    }.openThreeDotMenu {
-    }.openSettings {
-    }.openAboutFirefoxPreview {
-    }
-}
-
 private val aboutMenuList = UiScrollable(UiSelector().resourceId("$packageName:id/about_layout"))
 
-private fun goBackButton() =
-    onView(withContentDescription("Navigate up"))
+private fun goBackButton() = onView(withContentDescription("Navigate up"))

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +5,7 @@
 #ifndef nsBaseParentChannel_h
 #define nsBaseParentChannel_h
 
+#include "mozilla/dom/RemoteType.h"
 #include "nsIParentChannel.h"
 
 // Basic type which implements a no-op nsIParentChannel instance.
@@ -26,13 +25,13 @@ class nsBaseParentChannel : public nsIParentChannel {
   NS_DECL_NSIREQUESTOBSERVER
   NS_DECL_NSISTREAMLISTENER
 
-  explicit nsBaseParentChannel(const nsACString& aRemoteType)
+  explicit nsBaseParentChannel(const mozilla::dom::RemoteType& aRemoteType)
       : mRemoteType(aRemoteType) {}
 
  protected:
   virtual ~nsBaseParentChannel() = default;
 
-  nsCString mRemoteType;
+  mozilla::dom::RemoteType mRemoteType;
 };
 
 #endif  // nsBaseParentChannel_h

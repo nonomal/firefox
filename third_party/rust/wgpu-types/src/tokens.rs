@@ -1,5 +1,9 @@
+use macro_rules_attribute::derive;
+
+use crate::{link_to_wgpu_item, ConstDefault};
+
 /// Token of the user agreeing to access experimental features.
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, ConstDefault!, Copy, Clone, Eq, PartialEq)]
 pub struct ExperimentalFeatures {
     enabled: bool,
 }
@@ -7,7 +11,7 @@ pub struct ExperimentalFeatures {
 impl ExperimentalFeatures {
     /// Uses of [`Features`] prefixed with "EXPERIMENTAL" are disallowed.
     ///
-    /// [`Features`]: ../wgpu/struct.Features.html
+    #[doc = link_to_wgpu_item!(struct Features)]
     pub const fn disabled() -> Self {
         Self { enabled: false }
     }
@@ -30,7 +34,7 @@ impl ExperimentalFeatures {
     ///   apis and those may be hit by calling otherwise safe code.
     /// - You agree to report any such bugs to us, if you find them.
     ///
-    /// [`Features`]: ../wgpu/struct.Features.html
+    #[doc = link_to_wgpu_item!(struct Features)]
     /// [`api-specs`]: https://github.com/gfx-rs/wgpu/tree/trunk/docs/api-specs
     pub const unsafe fn enabled() -> Self {
         Self { enabled: true }
@@ -41,3 +45,43 @@ impl ExperimentalFeatures {
         self.enabled
     }
 }
+
+/// Token of the user agreeing to use [`LoadOp::DontCare`](crate::LoadOp::DontCare).
+//
+// Maintenance note: This type MUST NOT implement Default, Deserialize, or anything else which
+// allows safely constructing it. This differs from `ExperimentalFeatures` because it doesn't have
+// an "enabled" flag, because its role is to prevent its container (an enum variant) from being
+// constructed at all. We could change that if necessary (e.g. perhaps for the wgpu trace/player),
+// but if we did, we would have to give `LoadOp::DontCare` a specific fallback behavior when the
+// token is disabled/invalid.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct LoadOpDontCare {
+    // Private to prevent construction outside of the unsafe
+    // enabled() function.
+    _private: (),
+}
+
+impl LoadOpDontCare {
+    /// Using [`LoadOp::DontCare`](crate::LoadOp::DontCare) will result
+    /// in the render target having undefined contents at the start of the render pass.
+    /// This may lead to undefined behavior if you read from the any of the
+    /// render target pixels without first writing to them.
+    ///
+    /// Blending also becomes undefined behavior if the source
+    /// pixels are undefined.
+    ///
+    /// All pixels in the render target must be written to before
+    /// any blending or a [`StoreOp::Store`](crate::StoreOp::Store) occurs.
+    ///
+    /// # Safety
+    ///
+    /// - You acknowledge that using `LoadOp::DontCare` may lead to undefined behavior
+    ///   if the above conditions are not met.
+    pub const unsafe fn enabled() -> Self {
+        Self { _private: () }
+    }
+}
+
+static_assertions::assert_not_impl_any!(LoadOpDontCare: Default);
+#[cfg(feature = "serde")]
+static_assertions::assert_not_impl_any!(LoadOpDontCare: serde::Deserialize<'static>);

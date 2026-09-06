@@ -3,17 +3,7 @@ use core::{mem::ManuallyDrop, ops::Deref};
 use alloc::sync::Arc;
 use hal::DynResource;
 
-use crate::{
-    device::Device,
-    global::Global,
-    id::{
-        AdapterId, BlasId, BufferId, CommandEncoderId, DeviceId, QueueId, SurfaceId, TextureId,
-        TextureViewId, TlasId,
-    },
-    lock::{RankData, RwLockReadGuard},
-    resource::RawResourceAccess,
-    snatch::SnatchGuard,
-};
+use crate::{lock::RankData, resource::RawResourceAccess, snatch::SnatchGuard};
 
 /// A guard which holds alive a wgpu-core resource and dereferences to the Hal type.
 struct SimpleResourceGuard<Resource, HalType> {
@@ -154,182 +144,90 @@ where
 {
 }
 
-/// A guard which holds alive a device and the device's fence lock, dereferencing to the Hal type.
-struct FenceGuard<Fence> {
-    device: Arc<Device>,
-    fence_lock_rank_data: ManuallyDrop<RankData>,
-    ptr: *const Fence,
-}
-
-impl<Fence> FenceGuard<Fence>
-where
-    Fence: 'static,
-{
-    /// Creates a new guard over a device's fence.
-    ///
-    /// Returns `None` if:
-    /// - The device's fence is not of the expected Hal type.
-    pub fn new(device: Arc<Device>) -> Option<Self> {
-        // Grab the fence lock.
-        let fence_guard = device.fence.read();
-
-        // Get the raw fence and downcast it to the expected Hal type, coercing it to a pointer
-        // to get rid of the lifetime connecting us to the fence guard.
-        let ptr: *const Fence = fence_guard.as_any().downcast_ref::<Fence>()?;
-
-        // SAFETY: At this point all panicking or divergance has already happened,
-        // so we can safely forget the fence guard without causing the lock to be left open.
-        let fence_lock_rank_data = RwLockReadGuard::forget(fence_guard);
-
-        // SAFETY: We only construct this guard while the fence lock is held,
-        // as the `drop` implementation of this guard will unsafely release the lock.
-        Some(Self {
-            device,
-            fence_lock_rank_data: ManuallyDrop::new(fence_lock_rank_data),
-            ptr,
-        })
-    }
-}
-
-impl<Fence> Deref for FenceGuard<Fence> {
-    type Target = Fence;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: The pointer is guaranteed to be valid as the original device's fence
-        // is still alive and the fence lock is still being held due to the forgotten
-        // fence guard.
-        unsafe { &*self.ptr }
-    }
-}
-
-impl<Fence> Drop for FenceGuard<Fence> {
-    fn drop(&mut self) {
-        // SAFETY:
-        // - We are not going to access the rank data anymore.
-        let data = unsafe { ManuallyDrop::take(&mut self.fence_lock_rank_data) };
-
-        // SAFETY:
-        // - The pointer is no longer going to be accessed.
-        // - The fence lock is being held because this type was not created
-        //   until after the fence lock was forgotten.
-        unsafe {
-            self.device.fence.force_unlock_read(data);
-        };
-    }
-}
-
-unsafe impl<Fence> Send for FenceGuard<Fence> where Fence: Send {}
-unsafe impl<Fence> Sync for FenceGuard<Fence> where Fence: Sync {}
-
-impl Global {
+impl crate::resource::Buffer {
     /// # Safety
     ///
     /// - The raw buffer handle must not be manually destroyed
-    pub unsafe fn buffer_as_hal<A: hal::Api>(
-        &self,
-        id: BufferId,
-    ) -> Option<impl Deref<Target = A::Buffer>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Buffer>> {
         profiling::scope!("Buffer::as_hal");
 
-        let hub = &self.hub;
-
-        let buffer = hub.buffers.get(id).get().ok()?;
-
-        SnatchableResourceGuard::new(buffer)
+        SnatchableResourceGuard::new(self)
     }
+}
 
+impl crate::resource::Texture {
     /// # Safety
     ///
     /// - The raw texture handle must not be manually destroyed
-    pub unsafe fn texture_as_hal<A: hal::Api>(
-        &self,
-        id: TextureId,
-    ) -> Option<impl Deref<Target = A::Texture>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Texture>> {
         profiling::scope!("Texture::as_hal");
 
-        let hub = &self.hub;
-
-        let texture = hub.textures.get(id).get().ok()?;
-
-        SnatchableResourceGuard::new(texture)
+        SnatchableResourceGuard::new(self)
     }
+}
 
+impl crate::resource::TextureView {
     /// # Safety
     ///
     /// - The raw texture view handle must not be manually destroyed
-    pub unsafe fn texture_view_as_hal<A: hal::Api>(
-        &self,
-        id: TextureViewId,
+    pub unsafe fn as_hal<A: hal::Api>(
+        self: Arc<Self>,
     ) -> Option<impl Deref<Target = A::TextureView>> {
         profiling::scope!("TextureView::as_hal");
 
-        let hub = &self.hub;
-
-        let view = hub.texture_views.get(id).get().ok()?;
-
-        SnatchableResourceGuard::new(view)
+        SnatchableResourceGuard::new(self)
     }
+}
 
+impl crate::instance::Adapter {
     /// # Safety
     ///
     /// - The raw adapter handle must not be manually destroyed
-    pub unsafe fn adapter_as_hal<A: hal::Api>(
-        &self,
-        id: AdapterId,
-    ) -> Option<impl Deref<Target = A::Adapter>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Adapter>> {
         profiling::scope!("Adapter::as_hal");
 
-        let hub = &self.hub;
-        let adapter = hub.adapters.get(id);
-
-        SimpleResourceGuard::new(adapter, move |adapter| {
+        SimpleResourceGuard::new(self, move |adapter| {
             adapter.raw.adapter.as_any().downcast_ref()
         })
     }
+}
 
+impl crate::device::Device {
     /// # Safety
     ///
     /// - The raw device handle must not be manually destroyed
-    pub unsafe fn device_as_hal<A: hal::Api>(
-        &self,
-        id: DeviceId,
-    ) -> Option<impl Deref<Target = A::Device>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Device>> {
         profiling::scope!("Device::as_hal");
 
-        let device = self.hub.devices.get(id);
-
-        SimpleResourceGuard::new(device, move |device| device.raw().as_any().downcast_ref())
+        SimpleResourceGuard::new(self, move |device| device.raw().as_any().downcast_ref())
     }
 
     /// # Safety
     ///
     /// - The raw fence handle must not be manually destroyed
-    pub unsafe fn device_fence_as_hal<A: hal::Api>(
-        &self,
-        id: DeviceId,
+    pub unsafe fn fence_as_hal<A: hal::Api>(
+        self: Arc<Self>,
     ) -> Option<impl Deref<Target = A::Fence>> {
         profiling::scope!("Device::fence_as_hal");
 
-        let device = self.hub.devices.get(id);
-
-        FenceGuard::new(device)
+        SimpleResourceGuard::new(self, move |device| device.fence.as_any().downcast_ref())
     }
+}
 
+impl crate::instance::Surface {
     /// # Safety
+    ///
     /// - The raw surface handle must not be manually destroyed
-    pub unsafe fn surface_as_hal<A: hal::Api>(
-        &self,
-        id: SurfaceId,
-    ) -> Option<impl Deref<Target = A::Surface>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Surface>> {
         profiling::scope!("Surface::as_hal");
 
-        let surface = self.surfaces.get(id);
-
-        SimpleResourceGuard::new(surface, move |surface| {
+        SimpleResourceGuard::new(self, move |surface| {
             surface.raw(A::VARIANT)?.as_any().downcast_ref()
         })
     }
+}
 
+impl crate::command::CommandEncoder {
     /// Encode commands using the raw HAL command encoder.
     ///
     /// # Panics
@@ -339,21 +237,13 @@ impl Global {
     /// # Safety
     ///
     /// - The raw command encoder handle must not be manually destroyed
-    pub unsafe fn command_encoder_as_hal_mut<
-        A: hal::Api,
-        F: FnOnce(Option<&mut A::CommandEncoder>) -> R,
-        R,
-    >(
-        &self,
-        id: CommandEncoderId,
+    pub unsafe fn as_hal_mut<A: hal::Api, F: FnOnce(Option<&mut A::CommandEncoder>) -> R, R>(
+        self: &Arc<Self>,
         hal_command_encoder_callback: F,
     ) -> R {
         profiling::scope!("CommandEncoder::as_hal");
 
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
+        let mut cmd_buf_data = self.data.lock();
         cmd_buf_data.record_as_hal_mut(|opt_cmd_buf| -> R {
             hal_command_encoder_callback(opt_cmd_buf.and_then(|cmd_buf| {
                 cmd_buf
@@ -364,50 +254,41 @@ impl Global {
             }))
         })
     }
+}
 
+impl crate::device::queue::Queue {
     /// # Safety
     ///
     /// - The raw queue handle must not be manually destroyed
-    pub unsafe fn queue_as_hal<A: hal::Api>(
-        &self,
-        id: QueueId,
-    ) -> Option<impl Deref<Target = A::Queue>> {
+    pub unsafe fn as_hal<A: hal::Api>(self: Arc<Self>) -> Option<impl Deref<Target = A::Queue>> {
         profiling::scope!("Queue::as_hal");
 
-        let queue = self.hub.queues.get(id);
-
-        SimpleResourceGuard::new(queue, move |queue| queue.raw().as_any().downcast_ref())
+        SimpleResourceGuard::new(self, move |queue| queue.raw().as_any().downcast_ref())
     }
+}
 
+impl crate::resource::Blas {
     /// # Safety
     ///
     /// - The raw blas handle must not be manually destroyed
-    pub unsafe fn blas_as_hal<A: hal::Api>(
-        &self,
-        id: BlasId,
+    pub unsafe fn as_hal<A: hal::Api>(
+        self: Arc<Self>,
     ) -> Option<impl Deref<Target = A::AccelerationStructure>> {
         profiling::scope!("Blas::as_hal");
 
-        let hub = &self.hub;
-
-        let blas = hub.blas_s.get(id).get().ok()?;
-
-        SnatchableResourceGuard::new(blas)
+        SnatchableResourceGuard::new(self)
     }
+}
 
+impl crate::resource::Tlas {
     /// # Safety
     ///
     /// - The raw tlas handle must not be manually destroyed
-    pub unsafe fn tlas_as_hal<A: hal::Api>(
-        &self,
-        id: TlasId,
+    pub unsafe fn as_hal<A: hal::Api>(
+        self: Arc<Self>,
     ) -> Option<impl Deref<Target = A::AccelerationStructure>> {
         profiling::scope!("Tlas::as_hal");
 
-        let hub = &self.hub;
-
-        let tlas = hub.tlas_s.get(id).get().ok()?;
-
-        SnatchableResourceGuard::new(tlas)
+        SnatchableResourceGuard::new(self)
     }
 }

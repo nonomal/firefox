@@ -3,6 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 
+import functools
 import hashlib
 import os
 import pathlib
@@ -10,7 +11,6 @@ import sys
 import time
 
 import requests
-from mozbuild.util import memoize
 from taskgraph import create
 from taskgraph.util import json
 from taskgraph.util.taskcluster import requests_retry_session
@@ -22,7 +22,6 @@ except ImportError:
     from time import time as monotonic
 
 BUGBUG_BASE_URL = "https://bugbug.moz.tools"
-BUGBUG_BASE_FALLBACK_URL = "https://bugbug.herokuapp.com"
 RETRY_TIMEOUT = 9 * 60  # seconds
 RETRY_INTERVAL = 10  # seconds
 
@@ -49,7 +48,7 @@ class BugbugTimeoutException(Exception):
     pass
 
 
-@memoize
+@functools.cache
 def get_session():
     s = requests.Session()
     s.headers.update({"X-API-KEY": "gecko-taskgraph"})
@@ -99,14 +98,13 @@ def _write_perfherder_data(lower_is_better):
             json.dump(perfherder_data, f)
 
 
-@memoize
+@functools.cache
 def push_schedules(branch, rev):
     # Noop if we're in test-action-callback
     if create.testing:
         return
 
     url = BUGBUG_BASE_URL + f"/push/{branch}/{rev}/schedules"
-    fallback_url = url.replace(BUGBUG_BASE_URL, BUGBUG_BASE_FALLBACK_URL)
     start = monotonic()
     session = get_session()
 
@@ -119,34 +117,16 @@ def push_schedules(branch, rev):
 
     attempts = timeout / RETRY_INTERVAL
     i = 0
-    success = False
     while i < attempts:
         r = session.get(url)
         r.raise_for_status()
 
         if r.status_code != 202:
-            success = True
             break
-
-        # Trigger the fallback deployment, but ignore it for now.
-        r = session.get(fallback_url)
-        r.raise_for_status()
 
         time.sleep(RETRY_INTERVAL)
         i += 1
     end = monotonic()
-
-    if not success:
-        i = 0
-        while i < attempts:
-            r = session.get(fallback_url)
-            r.raise_for_status()
-
-            if r.status_code != 202:
-                break
-
-            time.sleep(RETRY_INTERVAL)
-            i += 1
 
     _write_perfherder_data(
         lower_is_better={
@@ -170,7 +150,7 @@ def push_schedules(branch, rev):
     return data
 
 
-@memoize
+@functools.cache
 def patch_schedules(base_rev, patch_content, mode="quick"):
     """Query BugBug API with a patch to get test recommendations.
 
@@ -198,8 +178,6 @@ def patch_schedules(base_rev, patch_content, mode="quick"):
     patch_hash = hashlib.md5(filtered_content.encode("utf-8")).hexdigest()
 
     url = BUGBUG_BASE_URL + f"/patch/{base_rev}/{patch_hash}/schedules"
-    # FIXME: Remove fallback once BugBug is fully migrated.
-    url = url.replace(BUGBUG_BASE_URL, BUGBUG_BASE_FALLBACK_URL)
 
     session = get_session()
 

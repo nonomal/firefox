@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -9,6 +7,7 @@
 #include "vm/Iteration.h"
 
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/DebugOnly.h"
 #include "mozilla/Likely.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
@@ -44,6 +43,7 @@
 #include "gc/StoreBuffer-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/PlainObject-inl.h"  // js::PlainObject::createWithTemplate
+#include "vm/Shape-inl.h"        // js::GetPropertyAttributes
 
 using namespace js;
 
@@ -60,9 +60,9 @@ static const gc::AllocKind ITERATOR_FINALIZE_KIND =
 // |NativeIterator| allocations if the |IdToString| in that constructor recurs
 // into this code.
 void NativeIterator::trace(JSTracer* trc) {
-  TraceNullableEdge(trc, &objectBeingIterated_, "objectBeingIterated_");
-  TraceNullableEdge(trc, &iterObj_, "iterObj_");
-  TraceNullableEdge(trc, &objShape_, "objShape_");
+  TraceEdge(trc, &objectBeingIterated_, "objectBeingIterated_");
+  TraceEdge(trc, &iterObj_, "iterObj_");
+  TraceEdge(trc, &objShape_, "objShape_");
 
   // The limits below are correct at every instant of |NativeIterator|
   // initialization, with the end-pointer incremented as each new shape is
@@ -94,9 +94,13 @@ class PropertyEnumerator {
   uint32_t flags_;
   Rooted<PropertyKeySet> visited_;
 
-  uint32_t ownPropertyCount_;
+  uint32_t ownPropertyCount_ = 0;
 
   bool enumeratingProtoChain_ = false;
+  bool forObjectKeys_ = false;
+
+  bool hasOwnDenseElements_ = false;
+  mozilla::DebugOnly<bool> hasDenseElementsFromProto_ = false;
 
   enum class IndicesState {
     // Every property that has been enumerated so far can be represented as a
@@ -141,6 +145,17 @@ class PropertyEnumerator {
     return indicesState_ == IndicesState::Allocating;
   }
   uint32_t ownPropertyCount() const { return ownPropertyCount_; }
+
+  void setForObjectKeys(bool value) { forObjectKeys_ = value; }
+
+  bool hasOwnDenseElements() const { return hasOwnDenseElements_; }
+  bool hasDenseElementsFromProto() const {
+#ifdef DEBUG
+    return hasDenseElementsFromProto_;
+#else
+    return false;
+#endif
+  }
 
  private:
   template <bool CheckForDuplicates>
@@ -302,17 +317,24 @@ bool PropertyEnumerator::enumerateNativeProperties(JSContext* cx) {
     size_t firstElemIndex = props_.length();
     size_t initlen = pobj->getDenseInitializedLength();
     const Value* elements = pobj->getDenseElements();
+    bool elementsAreFrozen = pobj->denseElementsAreFrozen();
     bool hasHoles = false;
     for (uint32_t i = 0; i < initlen; ++i) {
       if (elements[i].isMagic(JS_ELEMENTS_HOLE)) {
         hasHoles = true;
       } else {
+        PropertyIndex index = elementsAreFrozen ? PropertyIndex::Invalid()
+                                                : PropertyIndex::ForElement(i);
         // Dense arrays never get so large that i would not fit into an
         // integer id.
         if (!enumerate<CheckForDuplicates>(cx, PropertyKey::Int(i),
-                                           /* enumerable = */ true,
-                                           PropertyIndex::ForElement(i))) {
+                                           /* enumerable = */ true, index)) {
           return false;
+        }
+        if (enumeratingProtoChain_) {
+          hasDenseElementsFromProto_ = true;
+        } else {
+          hasOwnDenseElements_ = true;
         }
       }
     }
@@ -611,6 +633,10 @@ static bool ProtoMayHaveEnumerableProperties(JSObject* obj) {
 }
 
 bool PropertyEnumerator::snapshot(JSContext* cx) {
+  if (forObjectKeys_) {
+    flags_ |= JSITER_OWNONLY;
+  }
+
   // If we're only interested in enumerable properties and the proto chain has
   // no enumerable properties (the common case), we can optimize this to ignore
   // the proto chain. This also lets us take advantage of the no-duplicate-check
@@ -631,6 +657,13 @@ bool PropertyEnumerator::snapshot(JSContext* cx) {
   bool checkForDuplicates = !(flags_ & JSITER_OWNONLY);
 
   do {
+#ifdef DEBUG
+    if (enumeratingProtoChain_ &&
+        ObjectMayHaveExtraIndexedOwnProperties(obj_)) {
+      hasDenseElementsFromProto_ = true;
+    }
+#endif
+
     if (obj_->getClass()->getNewEnumerate()) {
       markIndicesUnsupported();
 
@@ -690,7 +723,8 @@ bool PropertyEnumerator::snapshot(JSContext* cx) {
   } while (obj_ != nullptr);
 
 #ifdef DEBUG
-  if (js::SupportDifferentialTesting() && !supportsIndices()) {
+  if (js::SupportDifferentialTesting() && !supportsIndices() &&
+      !forObjectKeys_) {
     /*
      * In some cases the enumeration order for an object depends on the
      * execution mode (interpreter vs. JIT), especially for native objects
@@ -778,6 +812,9 @@ static inline size_t NumTrailingBytes(size_t propertyCount,
                   protoShapeCount * sizeof(GCPtr<Shape*>);
   if (hasIndices) {
     result += propertyCount * sizeof(PropertyIndex);
+    if constexpr (sizeof(PropertyIndex) != alignof(GCPtr<Shape*>)) {
+      result = AlignBytes(result, alignof(GCPtr<Shape*>));
+    }
   }
   return result;
 }
@@ -791,7 +828,8 @@ static inline size_t AllocationSize(size_t propertyCount,
 static PropertyIteratorObject* CreatePropertyIterator(
     JSContext* cx, Handle<JSObject*> objBeingIterated, HandleIdVector props,
     bool supportsIndices, PropertyIndexVector* indices,
-    uint32_t cacheableProtoChainLength, uint32_t ownPropertyCount) {
+    uint32_t cacheableProtoChainLength, uint32_t ownPropertyCount,
+    bool forObjectKeys) {
   MOZ_ASSERT_IF(indices, supportsIndices);
   if (props.length() >= NativeIterator::PropCountLimit) {
     ReportAllocationOverflow(cx);
@@ -827,9 +865,9 @@ static PropertyIteratorObject* CreatePropertyIterator(
 
   // This also registers |ni| with |propIter|.
   bool hadError = false;
-  new (mem)
-      NativeIterator(cx, propIter, objBeingIterated, props, supportsIndices,
-                     indices, numShapes, ownPropertyCount, &hadError);
+  new (mem) NativeIterator(cx, propIter, objBeingIterated, props,
+                           supportsIndices, indices, numShapes,
+                           ownPropertyCount, forObjectKeys, &hadError);
   if (hadError) {
     return nullptr;
   }
@@ -853,7 +891,8 @@ NativeIterator::NativeIterator(JSContext* cx,
                                Handle<JSObject*> objBeingIterated,
                                HandleIdVector props, bool supportsIndices,
                                PropertyIndexVector* indices, uint32_t numShapes,
-                               uint32_t ownPropertyCount, bool* hadError)
+                               uint32_t ownPropertyCount, bool forObjectKeys,
+                               bool* hadError)
     : objectBeingIterated_(nullptr),
       iterObj_(propIter),
       objShape_(numShapes > 0 ? objBeingIterated->shape() : nullptr),
@@ -876,6 +915,10 @@ NativeIterator::NativeIterator(JSContext* cx,
     flags_ |= Flags::IndicesAllocated;
   } else if (supportsIndices) {
     flags_ |= Flags::IndicesSupported;
+  }
+
+  if (forObjectKeys) {
+    flags_ |= Flags::OwnPropertiesOnly;
   }
 
   // NOTE: This must be done first thing: The caller can't free `this` on error
@@ -1188,25 +1231,33 @@ static bool IndicesAreValid(NativeObject* obj, NativeIterator* ni) {
 }
 #endif
 
-template <bool WantIndices, bool SkipRegistration>
-static PropertyIteratorObject* GetIteratorImpl(JSContext* cx,
-                                               HandleObject obj) {
+static PropertyIteratorObject* GetIteratorImpl(JSContext* cx, HandleObject obj,
+                                               bool wantIndices,
+                                               bool forObjectKeys) {
   MOZ_ASSERT(!obj->is<PropertyIteratorObject>());
   MOZ_ASSERT(cx->compartment() == obj->compartment(),
              "We may end up allocating shapes in the wrong zone!");
 
   uint32_t cacheableProtoChainLength = 0;
   if (PropertyIteratorObject* iterobj = LookupInIteratorCache(
-          cx, obj, &cacheableProtoChainLength, !SkipRegistration)) {
+          cx, obj, &cacheableProtoChainLength, !forObjectKeys)) {
     NativeIterator* ni = iterobj->getNativeIterator();
-    bool recreateWithIndices = WantIndices && ni->indicesSupported();
-    if (!recreateWithIndices) {
-      MOZ_ASSERT_IF(WantIndices && ni->indicesAvailable(),
+    bool recreateWithIndices = wantIndices && ni->indicesSupported();
+    bool recreateWithProtoProperties =
+        !forObjectKeys && ni->ownPropertiesOnly();
+    if (!recreateWithIndices && !recreateWithProtoProperties) {
+      MOZ_ASSERT_IF(wantIndices && ni->indicesAvailable(),
                     IndicesAreValid(&obj->as<NativeObject>(), ni));
-      if (!SkipRegistration) {
+      if (!forObjectKeys) {
         RegisterEnumerator(cx, ni, obj);
       }
       return iterobj;
+    }
+    // We don't want to get in a pattern where an Object.keys + indices
+    // use case clobbers us because it wants indices, and then we clobber
+    // it because we want prototype keys. This prevents that.
+    if (!recreateWithIndices && ni->indicesAvailable()) {
+      wantIndices = true;
     }
   }
 
@@ -1222,66 +1273,69 @@ static PropertyIteratorObject* GetIteratorImpl(JSContext* cx,
   bool supportsIndices = false;
   uint32_t ownPropertyCount = 0;
 
+  mozilla::DebugOnly<bool> hasIndexedPropertiesFromProto = false;
   if (MOZ_UNLIKELY(obj->is<ProxyObject>())) {
     if (!Proxy::enumerate(cx, obj, &keys)) {
       return nullptr;
     }
   } else {
-    uint32_t flags = 0;
-    PropertyEnumerator enumerator(cx, obj, flags, &keys, &indices);
+    PropertyEnumerator enumerator(cx, obj, /*flags*/ 0, &keys, &indices);
+    enumerator.setForObjectKeys(forObjectKeys);
     if (!enumerator.snapshot(cx)) {
       return nullptr;
     }
     supportsIndices = enumerator.supportsIndices();
     ownPropertyCount = enumerator.ownPropertyCount();
-    MOZ_ASSERT_IF(WantIndices && supportsIndices,
+    MOZ_ASSERT_IF(wantIndices && supportsIndices,
                   keys.length() == indices.length());
-  }
 
-  // If the object has dense elements, mark the dense elements as
-  // maybe-in-iteration. However if we're unregistered (as is the case in
-  // an Object.keys scalar replacement), we're not able to do the appropriate
-  // invalidations on deletion etc. anyway. Accordingly, we're forced to just
-  // disable the indices optimization for this iterator entirely.
-  //
-  // The iterator is a snapshot so if indexed properties are added after this
-  // point we don't need to do anything. However, the object might have sparse
-  // elements now that can be densified later. To account for this, we set the
-  // maybe-in-iteration flag also in NativeObject::maybeDensifySparseElements.
-  //
-  // In debug builds, AssertDenseElementsNotIterated is used to check the flag
-  // is set correctly.
-  if (obj->is<NativeObject>() &&
-      obj->as<NativeObject>().getDenseInitializedLength() > 0) {
-    if (SkipRegistration) {
-      supportsIndices = false;
-    } else {
-      obj->as<NativeObject>().markDenseElementsMaybeInIteration();
+    // If the object has own dense elements, mark its dense elements as
+    // maybe-in-iteration. However, if this is for Object.keys, we're not able
+    // to do the appropriate invalidations on deletion etc. anyway. Accordingly,
+    // we're forced to just disable the indices optimization for this iterator
+    // entirely.
+    //
+    // The iterator is a snapshot so if indexed properties are added after this
+    // point we don't need to do anything. However, the object might have sparse
+    // elements now that can be densified later. To account for this, we set the
+    // maybe-in-iteration flag also in NativeObject::maybeDensifySparseElements.
+    //
+    // In debug builds, AssertDenseElementsNotIterated is used to check the flag
+    // is set correctly.
+    if (obj->is<NativeObject>()) {
+      if (enumerator.hasOwnDenseElements()) {
+        if (forObjectKeys) {
+          supportsIndices = false;
+        } else {
+          obj->as<NativeObject>().markDenseElementsMaybeInIteration();
+        }
+      }
+      if (enumerator.hasDenseElementsFromProto()) {
+        hasIndexedPropertiesFromProto = true;
+      }
     }
   }
 
   PropertyIndexVector* indicesPtr =
-      WantIndices && supportsIndices ? &indices : nullptr;
-  PropertyIteratorObject* iterobj =
-      CreatePropertyIterator(cx, obj, keys, supportsIndices, indicesPtr,
-                             cacheableProtoChainLength, ownPropertyCount);
+      wantIndices && supportsIndices ? &indices : nullptr;
+  PropertyIteratorObject* iterobj = CreatePropertyIterator(
+      cx, obj, keys, supportsIndices, indicesPtr, cacheableProtoChainLength,
+      ownPropertyCount, forObjectKeys);
   if (!iterobj) {
     return nullptr;
   }
-  if (!SkipRegistration) {
+  if (!forObjectKeys) {
     RegisterEnumerator(cx, iterobj->getNativeIterator(), obj);
   }
 
   cx->check(iterobj);
   MOZ_ASSERT_IF(
-      WantIndices && supportsIndices,
+      wantIndices && supportsIndices,
       IndicesAreValid(&obj->as<NativeObject>(), iterobj->getNativeIterator()));
 
 #ifdef DEBUG
-  if (obj->is<NativeObject>()) {
-    if (PrototypeMayHaveIndexedProperties(&obj->as<NativeObject>())) {
-      iterobj->getNativeIterator()->setMaybeHasIndexedPropertiesFromProto();
-    }
+  if (hasIndexedPropertiesFromProto) {
+    iterobj->getNativeIterator()->setMaybeHasIndexedPropertiesFromProto();
   }
 #endif
 
@@ -1296,22 +1350,22 @@ static PropertyIteratorObject* GetIteratorImpl(JSContext* cx,
 }
 
 PropertyIteratorObject* js::GetIterator(JSContext* cx, HandleObject obj) {
-  return GetIteratorImpl<false, false>(cx, obj);
+  return GetIteratorImpl(cx, obj, false, false);
 }
 
 PropertyIteratorObject* js::GetIteratorWithIndices(JSContext* cx,
                                                    HandleObject obj) {
-  return GetIteratorImpl<true, false>(cx, obj);
+  return GetIteratorImpl(cx, obj, true, false);
 }
 
-PropertyIteratorObject* js::GetIteratorUnregistered(JSContext* cx,
-                                                    HandleObject obj) {
-  return GetIteratorImpl<false, true>(cx, obj);
+PropertyIteratorObject* js::GetIteratorForObjectKeys(JSContext* cx,
+                                                     HandleObject obj) {
+  return GetIteratorImpl(cx, obj, false, true);
 }
 
-PropertyIteratorObject* js::GetIteratorWithIndicesUnregistered(
+PropertyIteratorObject* js::GetIteratorWithIndicesForObjectKeys(
     JSContext* cx, HandleObject obj) {
-  return GetIteratorImpl<true, true>(cx, obj);
+  return GetIteratorImpl(cx, obj, true, true);
 }
 
 PropertyIteratorObject* js::LookupInIteratorCache(JSContext* cx,
@@ -1360,35 +1414,16 @@ PlainObject* GlobalObject::getOrCreateIterResultTemplateObject(JSContext* cx) {
     return obj;
   }
 
-  PlainObject* templateObj =
-      createIterResultTemplateObject(cx, WithObjectPrototype::Yes);
+  PlainObject* templateObj = createIterResultTemplateObject(cx);
   obj.init(templateObj);
   return obj;
 }
 
 /* static */
-PlainObject* GlobalObject::getOrCreateIterResultWithoutPrototypeTemplateObject(
-    JSContext* cx) {
-  GCPtr<PlainObject*>& obj =
-      cx->global()->data().iterResultWithoutPrototypeTemplate;
-  if (obj) {
-    return obj;
-  }
-
-  PlainObject* templateObj =
-      createIterResultTemplateObject(cx, WithObjectPrototype::No);
-  obj.init(templateObj);
-  return obj;
-}
-
-/* static */
-PlainObject* GlobalObject::createIterResultTemplateObject(
-    JSContext* cx, WithObjectPrototype withProto) {
+PlainObject* GlobalObject::createIterResultTemplateObject(JSContext* cx) {
   // Create template plain object
   Rooted<PlainObject*> templateObject(
-      cx, withProto == WithObjectPrototype::Yes
-              ? NewPlainObject(cx, TenuredObject)
-              : NewPlainObjectWithProto(cx, nullptr));
+      cx, NewPlainObject(cx, {.newKind = TenuredObject}));
   if (!templateObject) {
     return nullptr;
   }
@@ -1440,21 +1475,13 @@ void PropertyIteratorObject::finalize(JS::GCContext* gcx, JSObject* obj) {
 }
 
 const JSClassOps PropertyIteratorObject::classOps_ = {
-    nullptr,   // addProperty
-    nullptr,   // delProperty
-    nullptr,   // enumerate
-    nullptr,   // newEnumerate
-    nullptr,   // resolve
-    nullptr,   // mayResolve
-    finalize,  // finalize
-    nullptr,   // call
-    nullptr,   // construct
-    trace,     // trace
+    .finalize = finalize,
+    .trace = trace,
 };
 
 const JSClass PropertyIteratorObject::class_ = {
     "Iterator",
-    JSCLASS_HAS_RESERVED_SLOTS(SlotCount) | JSCLASS_BACKGROUND_FINALIZE,
+    JSCLASS_HAS_RESERVED_SLOTS(SLOT_COUNT) | JSCLASS_BACKGROUND_FINALIZE,
     &PropertyIteratorObject::classOps_,
 };
 
@@ -1486,7 +1513,8 @@ ArrayIteratorObject* js::NewArrayIteratorTemplate(JSContext* cx) {
     return nullptr;
   }
 
-  return NewTenuredObjectWithGivenProto<ArrayIteratorObject>(cx, proto);
+  return NewObjectWithGivenProto<ArrayIteratorObject>(
+      cx, proto, {.newKind = TenuredObject});
 }
 
 ArrayIteratorObject* js::NewArrayIterator(JSContext* cx) {
@@ -1535,7 +1563,8 @@ StringIteratorObject* js::NewStringIteratorTemplate(JSContext* cx) {
     return nullptr;
   }
 
-  return NewTenuredObjectWithGivenProto<StringIteratorObject>(cx, proto);
+  return NewObjectWithGivenProto<StringIteratorObject>(
+      cx, proto, {.newKind = TenuredObject});
 }
 
 StringIteratorObject* js::NewStringIterator(JSContext* cx) {
@@ -1617,7 +1646,8 @@ RegExpStringIteratorObject* js::NewRegExpStringIteratorTemplate(JSContext* cx) {
     return nullptr;
   }
 
-  return NewTenuredObjectWithGivenProto<RegExpStringIteratorObject>(cx, proto);
+  return NewObjectWithGivenProto<RegExpStringIteratorObject>(
+      cx, proto, {.newKind = TenuredObject});
 }
 
 RegExpStringIteratorObject* js::NewRegExpStringIterator(JSContext* cx) {
@@ -1679,7 +1709,7 @@ PropertyIteratorObject* GlobalObject::getOrCreateEmptyIterator(JSContext* cx) {
   if (!cx->global()->data().emptyIterator) {
     RootedIdVector props(cx);  // Empty
     PropertyIteratorObject* iter =
-        CreatePropertyIterator(cx, nullptr, props, false, nullptr, 0, 0);
+        CreatePropertyIterator(cx, nullptr, props, false, nullptr, 0, 0, false);
     if (!iter) {
       return nullptr;
     }
@@ -1739,24 +1769,14 @@ void js::CloseIterator(JSObject* obj) {
 bool js::IteratorCloseForException(JSContext* cx, HandleObject obj) {
   MOZ_ASSERT(cx->isExceptionPending());
 
-  // Closing an iterator is implemented as an exception.
-  bool isClosingGenerator = cx->isClosingGenerator();
-
-  // Save the current exception state. This implicitly clears any pending
-  // exception, so it needs to happen after calling |cx->isClosingGenerator()|.
-  // The destructor restores the saved exception state, unless there's a new
-  // pending exception.
+  // Save the current exception state. The destructor restores it, unless
+  // there's a new pending exception.
   JS::AutoSaveExceptionState savedExc(cx);
 
   // CloseIterOperation when called with |CompletionKind::Throw| clears any
   // pending exception, so the previously stored exception in |savedExc| is
   // correctly restored.
-  // When called with |CompletionKind::Return|, pending exceptions aren't
-  // cleared, so the "generator closing" exception state in |savedExc| is only
-  // restored if there isn't a new pending exception.
-  auto completionKind =
-      isClosingGenerator ? CompletionKind::Return : CompletionKind::Throw;
-  return CloseIterOperation(cx, obj, completionKind);
+  return CloseIterOperation(cx, obj, CompletionKind::Throw);
 }
 
 void js::UnwindIteratorForUncatchableException(JSObject* obj) {
@@ -1791,10 +1811,9 @@ static bool SuppressDeletedProperty(JSContext* cx, NativeIterator* ni,
   }
 
   // Check whether id is still to come.
-  Rooted<JSLinearString*> idStr(cx);
   IteratorProperty* cursor = ni->nextProperty();
   for (; cursor < ni->propertiesEnd(); ++cursor) {
-    idStr = cursor->asString();
+    JSLinearString* idStr = cursor->asString();
     // Common case: both strings are atoms.
     if (idStr->isAtom() && str->isAtom()) {
       if (idStr != str) {
@@ -1808,27 +1827,36 @@ static bool SuppressDeletedProperty(JSContext* cx, NativeIterator* ni,
 
     // Check whether another property along the prototype chain became
     // visible as a result of this deletion.
-    RootedObject proto(cx);
-    if (!GetPrototype(cx, obj, &proto)) {
-      return false;
-    }
-    if (proto) {
-      RootedId id(cx);
-      RootedValue idv(cx, StringValue(idStr));
-      if (!PrimitiveValueToId<CanGC>(cx, idv, &id)) {
-        return false;
-      }
-
-      Rooted<mozilla::Maybe<PropertyDescriptor>> desc(cx);
-      RootedObject holder(cx);
-      if (!GetPropertyDescriptor(cx, proto, id, &desc, &holder)) {
-        return false;
-      }
-
-      // If deletion just made something up the chain visible, no need to
-      // do anything.
-      if (desc.isSome() && desc->enumerable()) {
-        return true;
+    //
+    // Use pure lookups to avoid re-entrancy: proxy traps can run arbitrary JS
+    // that may close iterators and modify the iterator list we're currently
+    // traversing in SuppressDeletedPropertyHelper. If pure lookup is not
+    // possible (e.g. the object is a proxy with a dynamic prototype, or the
+    // object has a resolve hook that might resolve this property), we
+    // conservatively suppress the property.
+    //
+    // Note that the spec does not precisely define the observable behavior of
+    // property deletion during for-in.
+    // See https://tc39.es/ecma262/#sec-enumerate-object-properties
+    if (obj->hasStaticPrototype()) {
+      JSObject* proto = obj->staticPrototype();
+      if (proto) {
+        JSAtom* atom = AtomizeString(cx, str);
+        if (!atom) {
+          return false;
+        }
+        PropertyKey key = AtomToId(atom);
+        NativeObject* holder = nullptr;
+        PropertyResult prop;
+        if (LookupPropertyPure(cx, proto, key, &holder, &prop) &&
+            prop.isFound()) {
+          // If deletion just made something up the chain visible, no need to
+          // do anything.
+          JS::PropertyAttributes attrs = GetPropertyAttributes(holder, prop);
+          if (attrs.enumerable()) {
+            return true;
+          }
+        }
       }
     }
 
@@ -1938,9 +1966,9 @@ static const JSFunctionSpec iterator_static_methods[] = {
     JS_SELF_HOSTED_FN("concat", "IteratorConcat", 0, 0),
 #ifdef NIGHTLY_BUILD
     JS_SELF_HOSTED_FN("range", "IteratorRange", 3, 0),
+#endif
     JS_SELF_HOSTED_FN("zip", "IteratorZip", 2, 0),
     JS_SELF_HOSTED_FN("zipKeyed", "IteratorZipKeyed", 2, 0),
-#endif
     JS_FS_END,
 };
 
@@ -1958,14 +1986,12 @@ static const JSFunctionSpec iterator_methods[] = {
     JS_SELF_HOSTED_FN("some", "IteratorSome", 1, 0),
     JS_SELF_HOSTED_FN("every", "IteratorEvery", 1, 0),
     JS_SELF_HOSTED_FN("find", "IteratorFind", 1, 0),
-    JS_SELF_HOSTED_SYM_FN(iterator, "IteratorIdentity", 0, 0),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
-    JS_SELF_HOSTED_SYM_FN(dispose, "IteratorDispose", 0, 0),
-#endif
-#ifdef NIGHTLY_BUILD
+    JS_SELF_HOSTED_FN("includes", "IteratorIncludes", 2, 0),
+    JS_SELF_HOSTED_FN("join", "IteratorJoin", 1, 0),
     JS_SELF_HOSTED_FN("chunks", "IteratorChunks", 1, 0),
     JS_SELF_HOSTED_FN("windows", "IteratorWindows", 2, 0),
-#endif
+    JS_SELF_HOSTED_SYM_FN(iterator, "IteratorIdentity", 0, 0),
+    JS_SELF_HOSTED_SYM_FN(dispose, "IteratorDispose", 0, 0),
     JS_FS_END,
 };
 
@@ -2302,33 +2328,32 @@ IteratorHelperObject* js::NewIteratorHelper(JSContext* cx) {
   return NewObjectWithGivenProto<IteratorHelperObject>(cx, proto);
 }
 
-bool js::IterableToArray(JSContext* cx, HandleValue iterable,
-                         MutableHandle<ArrayObject*> array) {
+ArrayObject* js::IterableToArray(JSContext* cx, HandleValue iterable) {
   JS::ForOfIterator iterator(cx);
   if (!iterator.init(iterable, JS::ForOfIterator::ThrowOnNonIterable)) {
-    return false;
+    return nullptr;
   }
 
-  array.set(NewDenseEmptyArray(cx));
+  Rooted<ArrayObject*> array(cx, NewDenseEmptyArray(cx));
   if (!array) {
-    return false;
+    return nullptr;
   }
 
   RootedValue nextValue(cx);
   while (true) {
     bool done;
     if (!iterator.next(&nextValue, &done)) {
-      return false;
+      return nullptr;
     }
     if (done) {
       break;
     }
 
     if (!NewbornArrayPush(cx, array, nextValue)) {
-      return false;
+      return nullptr;
     }
   }
-  return true;
+  return array;
 }
 
 bool js::HasOptimizableArrayIteratorPrototype(JSContext* cx) {

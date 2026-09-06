@@ -8,6 +8,7 @@
 #include "FetchParent.h"
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/Components.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/ClientInfo.h"
@@ -231,10 +232,9 @@ RefPtr<FetchServicePromises> FetchService::FetchInstance::Fetch() {
 
   nsAutoCString principalSpec;
   MOZ_ALWAYS_SUCCEEDS(mPrincipal->GetAsciiSpec(principalSpec));
-  nsAutoCString requestURL;
-  mRequest->GetURL(requestURL);
+  nsCOMPtr<nsIURI> requestURL = mRequest->GetURL();
   FETCH_LOG(("FetchInstance::Fetch [%p], mRequest URL: %s mPrincipal: %s", this,
-             requestURL.BeginReading(), principalSpec.BeginReading()));
+             requestURL->GetSpecOrDefault().get(), principalSpec.get()));
 
   nsresult rv;
 
@@ -270,8 +270,7 @@ RefPtr<FetchServicePromises> FetchService::FetchInstance::Fetch() {
   if (mArgsType == FetchArgsType::WorkerFetch) {
     auto& args = mArgs.as<WorkerFetchArgs>();
     mFetchDriver->SetWorkerScript(args.mWorkerScript);
-    MOZ_ASSERT(args.mClientInfo.isSome());
-    mFetchDriver->SetClientInfo(args.mClientInfo.ref());
+    mFetchDriver->SetClientInfo(args.mClientInfo);
     mFetchDriver->SetController(args.mController);
     if (args.mCSPEventListener) {
       mFetchDriver->SetCSPEventListener(args.mCSPEventListener);
@@ -284,6 +283,7 @@ RefPtr<FetchServicePromises> FetchService::FetchInstance::Fetch() {
 
   if (mArgsType == FetchArgsType::MainThreadFetch) {
     auto& args = mArgs.as<MainThreadFetchArgs>();
+    mFetchDriver->SetClientInfo(args.mClientInfo);
     mFetchDriver->SetAssociatedBrowsingContextID(
         args.mAssociatedBrowsingContextID);
     mFetchDriver->SetIsThirdPartyContext(Some(args.mIsThirdPartyContext));
@@ -717,7 +717,7 @@ nsresult FetchService::RegisterNetworkObserver() {
     return NS_ERROR_UNEXPECTED;
   }
 
-  nsCOMPtr<nsIIOService> ioService = services::GetIOService();
+  nsCOMPtr<nsIIOService> ioService = components::IO::Service();
   if (!ioService) {
     return NS_ERROR_UNEXPECTED;
   }

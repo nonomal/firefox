@@ -97,7 +97,7 @@ var tests = [
       this.oldSelectedTab = gBrowser.selectedTab;
       await BrowserTestUtils.openNewForegroundTab(
         gBrowser,
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         "http://example.com/"
       );
 
@@ -203,8 +203,11 @@ var tests = [
   {
     id: "Test#6",
     async run() {
-      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
-      await promiseTabLoadEvent(gBrowser.selectedTab, "http://example.com/");
+      await BrowserTestUtils.loadURIString({
+        browser: gBrowser.selectedTab.linkedBrowser,
+        // eslint-disable-next-line sdl/no-insecure-url
+        uriString: "http://example.com/",
+      });
       let notifyObj = new BasicNotification(this.id);
       notifyObj.options.eventCallback = function (eventName) {
         if (eventName == "removed") {
@@ -225,7 +228,7 @@ var tests = [
       let oldSelectedTab = gBrowser.selectedTab;
       let newTab = await BrowserTestUtils.openNewForegroundTab(
         gBrowser,
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         "http://example.com/"
       );
       gBrowser.selectedTab = oldSelectedTab;
@@ -252,12 +255,15 @@ var tests = [
   {
     id: "Test#8",
     async run() {
-      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
-      await promiseTabLoadEvent(gBrowser.selectedTab, "http://example.com/");
+      await BrowserTestUtils.loadURIString({
+        browser: gBrowser.selectedTab.linkedBrowser,
+        // eslint-disable-next-line sdl/no-insecure-url
+        uriString: "http://example.com/",
+      });
       let originalTab = gBrowser.selectedTab;
       let bgTab = await BrowserTestUtils.openNewForegroundTab(
         gBrowser,
-        // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+        // eslint-disable-next-line sdl/no-insecure-url
         "http://example.com/"
       );
       let anchor = document.createXULElement("box");
@@ -286,6 +292,7 @@ var tests = [
 
       fgNotification.remove();
       gBrowser.removeTab(bgTab);
+      anchor.remove();
       goNext();
     },
   },
@@ -293,10 +300,11 @@ var tests = [
   {
     id: "Test#9",
     async run() {
-      await promiseTabLoadEvent(
-        gBrowser.selectedTab,
-        "data:text/html;charset=utf8,<iframe%20id='iframe'%20src='http://example.com/'>"
-      );
+      await BrowserTestUtils.loadURIString({
+        browser: gBrowser.selectedTab.linkedBrowser,
+        uriString:
+          "data:text/html;charset=utf8,<iframe%20id='iframe'%20src='http://example.com/'>",
+      });
       this.notifyObj = new BasicNotification(this.id);
       this.notifyObj.options.eventCallback = function (eventName) {
         if (eventName == "removed") {
@@ -313,13 +321,13 @@ var tests = [
 
       await Promise.all([
         BrowserUtils.promiseObserved("window-global-created", wgp =>
-          // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+          // eslint-disable-next-line sdl/no-insecure-url
           wgp.documentURI.spec.startsWith("http://example.org/")
         ),
         SpecialPowers.spawn(gBrowser.selectedBrowser, [], function () {
           content.document
             .getElementById("iframe")
-            // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+            // eslint-disable-next-line sdl/no-insecure-url
             .setAttribute("src", "http://example.org/");
         }),
       ]);

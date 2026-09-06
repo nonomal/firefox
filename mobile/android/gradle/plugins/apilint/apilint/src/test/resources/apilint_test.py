@@ -37,20 +37,18 @@ for t in tests:
         after_api = test_base + ".txt"
 
     if check_compat:
-        sp.call(
-            [
-                "python3",
-                "src/main/resources/diff.py",
-                "--existing",
-                before_api,
-                "--local",
-                after_api,
-            ]
-        )
+        sp.call([
+            sys.executable,
+            "src/main/resources/diff.py",
+            "--existing",
+            before_api,
+            "--local",
+            after_api,
+        ])
 
     json_file = "{}/{}-result.json".format(args.build_dir, t["test"])
     test = [
-        "python3",
+        sys.executable,
         "src/main/resources/apilint.py",
         "--result-json",
         json_file,

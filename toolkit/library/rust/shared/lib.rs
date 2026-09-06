@@ -5,6 +5,7 @@
 extern crate geckoservo;
 
 extern crate abridged_certs;
+extern crate app_collator_glue;
 #[cfg(feature = "cubeb-remoting")]
 extern crate audioipc2_client;
 #[cfg(feature = "cubeb-remoting")]
@@ -26,15 +27,21 @@ extern crate cubeb_coreaudio;
 extern crate cubeb_pulse;
 extern crate data_storage;
 extern crate dom_fragmentdirectives;
+extern crate dom_speculationrules;
 extern crate encoding_glue;
 extern crate fog_control;
+#[cfg(feature = "fontations")]
+extern crate fontations_glue;
 extern crate gecko_profiler;
 extern crate gkrust_utils;
+extern crate harfbuzz_glue;
 extern crate http_sfv;
 extern crate idna_glue;
 extern crate ipdl_utils;
 extern crate jog;
 extern crate jsrust_shared;
+#[cfg(feature = "jxl_decoder")]
+extern crate jxl_decoder;
 extern crate kvstore;
 extern crate mapped_hyph;
 extern crate mozurl;
@@ -44,10 +51,10 @@ extern crate nserror;
 extern crate nsstring;
 extern crate prefs_parser;
 extern crate processtools;
-#[cfg(feature = "gecko_profiler")]
 extern crate profiler_helper;
 extern crate rsdparsa_capi;
 extern crate signature_cache;
+extern crate sitecategories;
 extern crate static_prefs;
 extern crate storage;
 extern crate webrender_bindings;
@@ -88,6 +95,7 @@ extern crate l10nregistry_ffi;
 extern crate localization_ffi;
 
 extern crate ipcclientcerts;
+extern crate pdf_trust_anchors;
 extern crate qwac_trust_anchors;
 extern crate trust_anchors;
 
@@ -107,9 +115,13 @@ extern crate uniffi_bindgen_gecko_js_test_fixtures;
 
 #[cfg(not(target_os = "android"))]
 extern crate viaduct;
+#[cfg(not(target_os = "android"))]
+extern crate viaduct_necko;
 
 extern crate gecko_logger;
 extern crate gecko_tracing;
+#[cfg(feature = "with_dbus")]
+extern crate xdg_alerts;
 
 #[cfg(feature = "oxidized_breakpad")]
 extern crate rust_minidump_writer_linux;
@@ -123,8 +135,12 @@ extern crate crash_helper_client;
 #[cfg(feature = "webmidi_midir_impl")]
 extern crate midir_impl;
 
+#[cfg(all(target_os = "windows", feature = "backgroundtaskregistrar"))]
+extern crate backgroundtaskregistrar;
 #[cfg(target_os = "windows")]
 extern crate detect_win32k_conflicts;
+#[cfg(all(target_os = "windows", feature = "shell_windows"))]
+extern crate shell_windows;
 #[cfg(target_os = "windows")]
 extern crate widget_windows;
 
@@ -135,6 +151,8 @@ extern crate dap_ffi;
 extern crate data_encoding_ffi;
 
 extern crate binary_http;
+extern crate happy_eyeballs_glue;
+extern crate lockstore_ffi;
 extern crate mls_gk;
 extern crate oblivious_http;
 
@@ -143,6 +161,9 @@ extern crate mime_guess_ffi;
 extern crate uritemplate_glue;
 extern crate urlpattern;
 extern crate urlpattern_glue;
+
+extern crate adblock;
+extern crate content_classifier_engine;
 
 #[cfg(feature = "libz-rs-sys")]
 extern crate libz_rs_sys;
@@ -162,6 +183,10 @@ pub extern "C" fn GkRust_Init() {
     let _ = GeckoLogger::init();
     // Initialize tracing.
     gecko_tracing::initialize_tracing();
+    #[cfg(not(target_os = "android"))]
+    if let Err(e) = viaduct_necko::init_necko_backend() {
+        log::warn!("Failed to initialize viaduct-necko backend: {:?}", e);
+    }
 }
 
 #[no_mangle]

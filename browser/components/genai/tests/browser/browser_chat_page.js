@@ -20,7 +20,7 @@ registerCleanupFunction(() => {
 // Bug 1895789 to standarize contextmenu helpers in BrowserTestUtils
 async function openContextMenu({ menuId, browser }) {
   const tab = gBrowser.getTabForBrowser(browser);
-  const win = tab.ownerGlobal;
+  const win = tab.documentGlobal;
 
   const contextMenu = win.document.getElementById(menuId);
   if (!contextMenu) {
@@ -44,7 +44,7 @@ async function openContextMenu({ menuId, browser }) {
     EventUtils.synthesizeMouseAtCenter(
       aichatEl,
       { type: "contextmenu", button: 2 },
-      aichatEl.ownerGlobal
+      aichatEl.documentGlobal
     );
   } else {
     BrowserTestUtils.synthesizeMouse(
@@ -109,24 +109,8 @@ function assertContextMenuStubResult(stub) {
   );
 }
 
-async function ensureSidebarLauncherIsVisible() {
-  await TestUtils.waitForTick();
-  // Show the sidebar launcher if its hidden
-  if (SidebarController.sidebarContainer.hidden) {
-    document.getElementById("sidebar-button").doCommand();
-  }
-  await TestUtils.waitForTick();
-  Assert.ok(
-    BrowserTestUtils.isVisible(SidebarController.sidebarMain),
-    "Sidebar launcher is visible"
-  );
-}
-
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
+// Schedule reset to the initial sidebar state after the test.
+SidebarTestUtils.restoreStateAtCleanup(window);
 
 /**
  * Check page, tab, and tool context menu have summarize prompt
@@ -142,7 +126,7 @@ add_task(async function test_page_and_tab_menu_prompt() {
       ["sidebar.revamp", true],
     ],
   });
-  await ensureSidebarLauncherIsVisible();
+  await SidebarTestUtils.ensureLauncherVisible(window);
 
   await BrowserTestUtils.withNewTab("https://example.com", async browser => {
     await runContextMenuTest({
@@ -176,7 +160,7 @@ add_task(async function test_page_and_tab_menu_prompt() {
   });
 
   sandbox.restore();
-  SidebarController.hide();
+  SidebarTestUtils.closePanel(window);
 });
 
 /**
@@ -253,7 +237,7 @@ add_task(async function test_page_menu_no_chatbot() {
         ["sidebar.main.tools", "history"],
       ],
     });
-    await ensureSidebarLauncherIsVisible();
+    await SidebarTestUtils.ensureLauncherVisible(window);
     await openContextMenu({ menuId: CONTENT_AREA_CONTEXT_MENU, browser });
 
     Assert.ok(
@@ -535,7 +519,7 @@ add_task(async function test_click_summarize_button() {
   Assert.equal(stub.callCount, 1);
 
   sandbox.restore();
-  SidebarController.hide();
+  SidebarTestUtils.closePanel(window);
 });
 
 /**
@@ -573,7 +557,7 @@ add_task(async function test_provider_less_summarization() {
     "Chat opened tab for summarize"
   );
 
-  SidebarController.hide();
+  SidebarTestUtils.closePanel(window);
   gBrowser.removeTab(gBrowser.selectedTab);
 });
 
@@ -657,7 +641,7 @@ add_task(async function test_show_warning_when_text_is_long() {
       Assert.equal(events[0].extra.type, "page_summarization", "Page type");
       Assert.equal(events[0].extra.provider, "localhost", "With localhost");
 
-      SidebarController.hide();
+      SidebarTestUtils.closePanel(window);
       await SpecialPowers.popPrefEnv();
     }
   );

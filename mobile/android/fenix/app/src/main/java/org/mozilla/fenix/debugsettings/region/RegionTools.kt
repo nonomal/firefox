@@ -15,28 +15,31 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.map
 import mozilla.components.browser.state.action.SearchAction
 import mozilla.components.browser.state.search.RegionState
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.button.FilledButton
 import mozilla.components.compose.base.textfield.TextField
-import mozilla.components.lib.state.ext.observeAsState
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import org.mozilla.fenix.Config
 import org.mozilla.fenix.R
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 private const val DEFAULT_REGION = "XX"
 private const val MAX_REGION_LENGTH = 2
@@ -45,27 +48,22 @@ private const val MAX_REGION_LENGTH = 2
 private const val PREFERENCE_FILE = "mozac_feature_search_region"
 private const val PREFERENCE_KEY_HOME_REGION = "region.home"
 
-/**
- * Region UI that display region related tools.
- */
+/** Region UI that display region related tools. */
 @Composable
 @Suppress("LongMethod")
-fun RegionTools(
-    browserStore: BrowserStore,
-) {
-    val region by browserStore.observeAsState(initialValue = RegionState.Default) { state ->
-        state.search.region ?: RegionState.Default
+fun RegionTools(browserStore: BrowserStore) {
+    val region by remember {
+        browserStore.stateFlow.map { state ->
+            state.search.region ?: RegionState.Default
+        }
     }
+        .collectAsState(initial = RegionState.Default)
     val viewModel: RegionToolsViewModel = viewModel()
     val homeRegion = viewModel.homeRegion
     val currentRegion = viewModel.currentRegion
 
     Surface {
-        Column(
-            modifier = Modifier
-                .padding(all = 16.dp)
-                .verticalScroll(state = rememberScrollState()),
-        ) {
+        Column(modifier = Modifier.padding(all = 16.dp).verticalScroll(state = rememberScrollState())) {
             Text(
                 text = stringResource(R.string.debug_drawer_regin_tools_description),
                 style = FirefoxTheme.typography.headline8,
@@ -133,21 +131,23 @@ fun RegionTools(
                 onClick = {
                     browserStore.dispatch(
                         SearchAction.SetRegionAction(
-                            regionState = RegionState(
-                                home = homeRegion.ifBlank { DEFAULT_REGION },
-                                current = currentRegion.ifBlank { DEFAULT_REGION },
-                            ),
+                            regionState =
+                                RegionState(
+                                    home = homeRegion.ifBlank { DEFAULT_REGION },
+                                    current = currentRegion.ifBlank { DEFAULT_REGION },
+                                ),
                             distribution = null,
-                        ),
+                        )
                     )
                 },
             )
 
             if (Config.channel.isNightlyOrDebug) {
-                val preferences = LocalContext.current.getSharedPreferences(
-                    PREFERENCE_FILE,
-                    Context.MODE_PRIVATE,
-                )
+                val preferences =
+                    LocalContext.current.getSharedPreferences(
+                        PREFERENCE_FILE,
+                        Context.MODE_PRIVATE,
+                    )
 
                 FilledButton(
                     text = stringResource(R.string.debug_drawer_override_home_region_permanently),
@@ -174,30 +174,16 @@ private fun String.validRegionInput(maxLength: Int): String? {
     }
 }
 
-/**
- * Holds user input for overriding home and current regions in the debug UI.
- */
+/** Holds user input for overriding home and current regions in the debug UI. */
 class RegionToolsViewModel : ViewModel() {
     var homeRegion by mutableStateOf("")
     var currentRegion by mutableStateOf("")
 }
 
-@Composable
-@PreviewLightDark
-private fun RegionScreenPreview() {
-    FirefoxTheme {
-        RegionTools(
-            browserStore = BrowserStore(),
-        )
-    }
-}
-
-@Composable
 @Preview
-private fun RegionScreenPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
-        RegionTools(
-            browserStore = BrowserStore(),
-        )
+@Composable
+private fun RegionScreenPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
+        RegionTools(browserStore = BrowserStore())
     }
 }

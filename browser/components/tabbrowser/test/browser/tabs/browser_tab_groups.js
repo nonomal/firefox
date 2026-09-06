@@ -9,7 +9,7 @@ const { sinon } = ChromeUtils.importESModule(
   "resource://testing-common/Sinon.sys.mjs"
 );
 const { TabStateFlusher } = ChromeUtils.importESModule(
-  "resource:///modules/sessionstore/TabStateFlusher.sys.mjs"
+  "moz-src:///browser/components/sessionstore/TabStateFlusher.sys.mjs"
 );
 
 add_setup(async function () {
@@ -64,10 +64,10 @@ add_task(async function test_tabGroupCreateAndAddSplitView() {
 add_task(async function test_tabGroupCreateAndAddTabAtPosition() {
   let tabs = createManyTabs(10);
   let tabToGroup = tabs[5];
-  let originalPos = tabToGroup._tPos;
+  let originalPos = tabToGroup.index;
   gBrowser.addTabGroup([tabs[5]], { insertBefore: tabs[5] });
 
-  Assert.equal(tabToGroup._tPos, originalPos, "tab has not changed position");
+  Assert.equal(tabToGroup.index, originalPos, "tab has not changed position");
 
   tabs.forEach(t => {
     BrowserTestUtils.removeTab(t);
@@ -268,7 +268,7 @@ add_task(async function test_tabGroupPreventScrollOnUncollapse() {
   // create some more tabs after the group
   createManyTabs(4, win);
 
-  await BrowserTestUtils.waitForCondition(() => {
+  await TestUtils.waitForCondition(() => {
     return Array.from(win.gBrowser.tabs).every(tab => tab._fullyOpen);
   });
 
@@ -279,11 +279,11 @@ add_task(async function test_tabGroupPreventScrollOnUncollapse() {
 
   info("scrolling to beginning of tabstrip");
   let arrowScrollbox = win.gBrowser.tabContainer.arrowScrollbox;
-  let scrolledToStart = BrowserTestUtils.waitForCondition(() =>
-    arrowScrollbox.hasAttribute("scrolledtostart")
-  );
+  let scrolledToStart = TestUtils.waitForCondition(() => {
+    return arrowScrollbox.hasAttribute("scrolledtostart");
+  }, "Waiting for tabstrip to be scrolled to start");
 
-  bigGroup.labelElement.scrollIntoView(true);
+  arrowScrollbox.ensureElementIsVisible(bigGroup.labelElement, true);
   await scrolledToStart;
   Assert.ok(!bigGroup.collapsed, "Group is expanded");
   Assert.ok(
@@ -375,6 +375,20 @@ add_task(async function test_groupHasActiveTab() {
   let group2 = gBrowser.addTabGroup([tab2]);
 
   async function activeTabTest(tabsMode) {
+    async function addTabToGroup(group, tab) {
+      if (tab.group == group) {
+        return;
+      }
+      let tabGrouped = BrowserTestUtils.waitForEvent(
+        group,
+        "TabGrouped",
+        false,
+        event => event.detail == tab
+      );
+      group.addTabs([tab]);
+      await tabGrouped;
+    }
+
     info(`hasactivetab test for ${tabsMode} tabs mode`);
     info("tab3 is ungrouped and active");
     gBrowser.selectedTab = tab3;
@@ -393,21 +407,23 @@ add_task(async function test_groupHasActiveTab() {
     Assert.ok(!group1.hasActiveTab, "group1 hasactivetab=false");
     Assert.ok(!group2.hasActiveTab, "group2 hasactivetab=false");
     info("tab3 enters group1 as the active tab");
-    let tab3InGroup1 = BrowserTestUtils.waitForEvent(group1, "TabGrouped");
-    group1.addTabs([tab3]);
-    await tab3InGroup1;
+    await addTabToGroup(group1, tab3);
     Assert.ok(group1.hasActiveTab, "group1 hasactivetab=true");
     Assert.ok(!group2.hasActiveTab, "group2 hasactivetab=false");
     info("tab3 enters group2 as the active tab");
-    let tab3InGroup2 = BrowserTestUtils.waitForEvent(group2, "TabGrouped");
-    group2.addTabs([tab3]);
-    await tab3InGroup2;
+    await addTabToGroup(group2, tab3);
     Assert.ok(!group1.hasActiveTab, "group1 hasactivetab=false");
     Assert.ok(group2.hasActiveTab, "group2 hasactivetab=true");
     info("tab3 becomes ungrouped again as the active tab");
     let tab3Moved = BrowserTestUtils.waitForEvent(tab3, "TabMove");
+    let tab3Ungrouped = BrowserTestUtils.waitForEvent(
+      group2,
+      "TabUngrouped",
+      false,
+      event => event.detail == tab3
+    );
     gBrowser.moveTabToEnd(tab3);
-    await tab3Moved;
+    await Promise.all([tab3Moved, tab3Ungrouped]);
     Assert.ok(!group1.hasActiveTab, "group1 hasactivetab=false");
     Assert.ok(!group2.hasActiveTab, "group2 hasactivetab=false");
   }
@@ -515,12 +531,12 @@ add_task(async function test_tabUngroup() {
   let group2 = gBrowser.addTabGroup([extraTab2]);
 
   Assert.equal(
-    groupedTab1._tPos,
+    groupedTab1.index,
     2,
     "grouped tab 1 starts in correct position"
   );
   Assert.equal(
-    groupedTab2._tPos,
+    groupedTab2.index,
     3,
     "grouped tab 2 starts in correct position"
   );
@@ -533,12 +549,12 @@ add_task(async function test_tabUngroup() {
   await removePromise;
 
   Assert.equal(
-    groupedTab1._tPos,
+    groupedTab1.index,
     2,
     "tab 1 is in the same position as before ungroup"
   );
   Assert.equal(
-    groupedTab2._tPos,
+    groupedTab2.index,
     3,
     "tab 2 is in the same position as before ungroup"
   );
@@ -575,7 +591,9 @@ add_task(async function test_tabGroupDeletesWhenLastTabClosed() {
   let tab = BrowserTestUtils.addTab(gBrowser, "about:blank");
   let group = gBrowser.addTabGroup([tab]);
 
+  let removePromise = BrowserTestUtils.waitForEvent(group, "TabGroupRemoved");
   gBrowser.removeTab(tab);
+  await removePromise;
 
   Assert.equal(group.parent, null, "group is removed from tabbrowser");
 });
@@ -738,11 +756,21 @@ add_task(async function test_moveTabGroup() {
 });
 
 add_task(async function test_moveTabBetweenGroups() {
-  let tab1 = BrowserTestUtils.addTab(gBrowser, "about:blank");
-  let tab2 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+  let tab1 = await addTab("about:blank");
+  let tab2 = await addTab("about:blank");
 
-  let tab1Added = BrowserTestUtils.waitForEvent(window, "TabGrouped");
-  let tab2Added = BrowserTestUtils.waitForEvent(window, "TabGrouped");
+  let tab1Added = BrowserTestUtils.waitForEvent(
+    window,
+    "TabGrouped",
+    false,
+    event => event.detail === tab1
+  );
+  let tab2Added = BrowserTestUtils.waitForEvent(
+    window,
+    "TabGrouped",
+    false,
+    event => event.detail === tab2
+  );
   let group1 = gBrowser.addTabGroup([tab1]);
   let group2 = gBrowser.addTabGroup([tab2]);
   await Promise.allSettled([tab1Added, tab2Added]);
@@ -785,8 +813,8 @@ add_task(async function test_moveTabToStartOrEnd() {
   let tab1 = gBrowser.selectedTab;
   let tab2 = BrowserTestUtils.addTab(gBrowser, "about:blank");
   gBrowser.addTabGroup([tab1, tab2]);
-  Assert.equal(tab1._tPos, 0, "tab 1 starts at tab index 0");
-  Assert.equal(tab2._tPos, 1, "tab 2 starts at tab index 1");
+  Assert.equal(tab1.index, 0, "tab 1 starts at tab index 0");
+  Assert.equal(tab2.index, 1, "tab 2 starts at tab index 1");
   Assert.equal(
     tab1.elementIndex,
     1,
@@ -808,12 +836,12 @@ add_task(async function test_moveTabToStartOrEnd() {
     "last tab is still grouped after moving first tab to start"
   );
   Assert.equal(
-    tab1._tPos,
+    tab1.index,
     0,
     "tab 1 remains at tab index 0 after moving to start"
   );
   Assert.equal(
-    tab2._tPos,
+    tab2.index,
     1,
     "tab 2 remains at tab index 1 after tab 1 moved to start"
   );
@@ -831,12 +859,12 @@ add_task(async function test_moveTabToStartOrEnd() {
   gBrowser.moveTabToEnd(tab2);
   Assert.ok(!tab2.group, "last tab is not grouped anymore after moving to end");
   Assert.equal(
-    tab1._tPos,
+    tab1.index,
     0,
     "tab 1 remains at tab index 0 after tab 2 moved to end"
   );
   Assert.equal(
-    tab2._tPos,
+    tab2.index,
     1,
     "tab 2 remains at tab index 1 after moving to end"
   );
@@ -870,18 +898,18 @@ add_task(async function test_tabGroupSelect() {
 
   let group = gBrowser.addTabGroup([tab1, tab2]);
   await Promise.allSettled([tab1Added, tab2Added]);
-  gBrowser.selectTabAtIndex(tab3._tPos);
+  gBrowser.selectTabAtIndex(tab3.index);
   Assert.ok(tab3.selected, "Tab 3 is selected");
   group.select();
   Assert.ok(group.tabs[0].selected, "First tab is selected");
-  gBrowser.selectTabAtIndex(group.tabs[1]._tPos);
+  gBrowser.selectTabAtIndex(group.tabs[1].index);
   Assert.ok(group.tabs[1].selected, "Second tab is selected");
   group.select();
   Assert.ok(group.tabs[1].selected, "Second tab is still selected");
   group.collapsed = true;
   Assert.ok(group.collapsed, "Group is collapsed");
   Assert.ok(group.tabs[1].selected, "Second tab is still selected");
-  gBrowser.selectTabAtIndex(tab3._tPos);
+  gBrowser.selectTabAtIndex(tab3.index);
   Assert.ok(tab3.selected, "Tab 3 is selected");
   group.select();
   Assert.ok(group.tabs[0].selected, "First tab in group is selected");
@@ -1116,7 +1144,7 @@ add_task(async function test_adoptTab() {
   });
   let adoptedTab = newWin.gBrowser.adoptTab(otherWinTab, { tabIndex: 1 });
 
-  Assert.equal(adoptedTab._tPos, 1, "tab adopted into expected position");
+  Assert.equal(adoptedTab.index, 1, "tab adopted into expected position");
   Assert.equal(adoptedTab.group, group, "tab adopted into tab group");
 
   await removeTabGroup(group);
@@ -1184,7 +1212,7 @@ add_task(async function test_bug1957723_addTabsByIndex() {
     triggeringPrincipal,
   });
   Assert.equal(
-    tab1._tPos,
+    tab1.index,
     2,
     "Tab added at starting index of tab group is in correct position"
   );
@@ -1200,7 +1228,7 @@ add_task(async function test_bug1957723_addTabsByIndex() {
     triggeringPrincipal,
   });
   Assert.equal(
-    tab2._tPos,
+    tab2.index,
     4,
     "Tab added by index just before end of tab group is in correct position"
   );
@@ -1216,7 +1244,7 @@ add_task(async function test_bug1957723_addTabsByIndex() {
     triggeringPrincipal,
   });
   Assert.equal(
-    tab3._tPos,
+    tab3.index,
     5,
     "Tab added at index just after end of tab group is in correct position"
   );
@@ -1227,7 +1255,8 @@ add_task(async function test_bug1957723_addTabsByIndex() {
   );
   gBrowser.removeTab(tab3);
 
-  gBrowser.removeAllTabsBut(initialTab);
+  // animate: false ensures tabs are synchronously removed from the DOM before the next test runs:
+  gBrowser.removeAllTabsBut(initialTab, { animate: false });
 });
 
 add_task(async function test_bug1959438_duplicateTabJustBeforeGroup() {
@@ -1257,7 +1286,8 @@ add_task(async function test_bug1959438_duplicateTabJustBeforeGroup() {
   // This will fail if the tab ends up merged with the tab label.
   Assert.equal(gBrowser.tabs.length, 5, "A new tab was added to the tab strip");
 
-  gBrowser.removeAllTabsBut(initialTab);
+  // animate: false ensures tabs are synchronously removed from the DOM before the next test runs:
+  gBrowser.removeAllTabsBut(initialTab, { animate: false });
 });
 
 add_task(async function test_bug1969925_adoptLastTabGroupFromWindow() {
@@ -1296,4 +1326,156 @@ add_task(async function test_bug1969925_adoptLastTabGroupFromWindow() {
   );
 
   await removeTabGroup(groupAfterAdopt);
+});
+
+/*
+ * Tests that if a new tab is opened via right click from the active tab in a collapsed group,
+ * the group auto-uncollapses so you can see the tab that was just opened.
+ */
+add_task(async function test_bug1997096_autoUncollapseOnRightClick() {
+  let groupedTab = await addTabTo(gBrowser);
+  let group = gBrowser.addTabGroup([groupedTab]);
+  gBrowser.selectedTab = groupedTab;
+  group.collapsed = true;
+
+  let newTabPromise = BrowserTestUtils.waitForNewTab(gBrowser, null, true);
+
+  let contextMenu = document.getElementById("contentAreaContextMenu");
+  let contextMenuShown = BrowserTestUtils.waitForPopupEvent(
+    contextMenu,
+    "shown"
+  );
+  await BrowserTestUtils.synthesizeMouseAtCenter(
+    "a",
+    { type: "contextmenu", button: 2 },
+    groupedTab.linkedBrowser
+  );
+  await contextMenuShown;
+
+  await BrowserTestUtils.activateMenuItem(
+    document.getElementById("context-openlinkintab")
+  );
+
+  let newTab = await newTabPromise;
+
+  Assert.ok(newTab, "New tab opened via right click");
+  Assert.ok(
+    !group.collapsed,
+    "Group is automatically uncollapsed when opening tab via right click"
+  );
+
+  BrowserTestUtils.removeTab(newTab);
+  BrowserTestUtils.removeTab(groupedTab);
+});
+
+add_task(async function test_bug2007061_hideSplitViewWhenDraggingGroup() {
+  let tab1 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+  let tab2 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+  let splitview = gBrowser.addTabSplitView([tab1, tab2]);
+  let group = gBrowser.addTabGroup([splitview]);
+
+  gBrowser.selectedTab = tab1;
+  Assert.ok(tab1.selected, "tab1 in split view is selected");
+
+  Assert.ok(splitview.hasActiveTab, "split view has active tab attribute");
+
+  group.collapsed = true;
+  Assert.ok(group.collapsed, "group is collapsed");
+
+  group.isBeingDragged = true;
+  Assert.ok(
+    group.hasAttribute("movingtabgroup"),
+    "group has movingtabgroup attribute when being dragged"
+  );
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(splitview),
+    "split view wrapper is hidden while dragging collapsed group"
+  );
+
+  group.isBeingDragged = false;
+
+  await removeTabGroup(group);
+});
+
+add_task(
+  async function test_bug2014632_splitViewInCollapsedGroupVisibleDuringDrag() {
+    let group1Tab = BrowserTestUtils.addTab(gBrowser, "about:blank");
+    let group1 = gBrowser.addTabGroup([group1Tab], {
+      label: "A very long group name for testing",
+    });
+    group1.collapsed = true;
+
+    let standaloneTab1 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+
+    let tab1 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+    let tab2 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+    let splitview = gBrowser.addTabSplitView([tab1, tab2]);
+    let group2 = gBrowser.addTabGroup([splitview]);
+    group2.collapsed = true;
+
+    let standaloneTab2 = BrowserTestUtils.addTab(gBrowser, "about:blank");
+
+    gBrowser.selectedTab = tab1;
+    Assert.ok(tab1.selected, "tab1 in split view is selected");
+    Assert.ok(splitview.hasActiveTab, "split view has active tab attribute");
+    Assert.ok(group2.collapsed, "group2 is collapsed");
+
+    Assert.ok(
+      splitview.visible,
+      "split view should be visible when in collapsed group with active tab"
+    );
+
+    let dragAndDropElements = gBrowser.tabContainer.dragAndDropElements;
+    Assert.ok(
+      dragAndDropElements.includes(splitview),
+      "split view should be included in dragAndDropElements"
+    );
+
+    let splitviewIndex = dragAndDropElements.indexOf(splitview);
+    Assert.greater(
+      splitviewIndex,
+      0,
+      "split view should have a valid index in dragAndDropElements"
+    );
+
+    group1.isBeingDragged = true;
+    Assert.ok(
+      splitview.visible,
+      "split view should remain visible while dragging another group"
+    );
+
+    Assert.ok(
+      gBrowser.tabContainer.dragAndDropElements.includes(splitview),
+      "split view should remain in dragAndDropElements while dragging another group"
+    );
+    group1.isBeingDragged = false;
+
+    await removeTabGroup(group1);
+    await removeTabGroup(group2);
+    BrowserTestUtils.removeTab(standaloneTab1);
+    BrowserTestUtils.removeTab(standaloneTab2);
+  }
+);
+
+/**
+ * bug 2017651 - ensure tab-group elements can be garbage collected after removal.
+ */
+add_task(async function test_tabGroupGarbageCollection() {
+  let tabGroup = document.createXULElement("tab-group");
+  let weakRef = Cu.getWeakReference(tabGroup);
+
+  document.body.appendChild(tabGroup);
+  tabGroup.remove();
+  tabGroup = null;
+
+  // Perform multiple GC's to avoid intermittent delayed collection.
+  await new Promise(resolve => SpecialPowers.exactGC(resolve));
+  await new Promise(resolve => SpecialPowers.exactGC(resolve));
+  await new Promise(resolve => SpecialPowers.exactGC(resolve));
+
+  Assert.ok(
+    !weakRef.get(),
+    "tab-group element should be garbage collected after removal from DOM"
+  );
 });

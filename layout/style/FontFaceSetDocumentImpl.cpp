@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -20,7 +18,6 @@
 #include "nsDOMNavigationTiming.h"
 #include "nsFontFaceLoader.h"
 #include "nsIDocShell.h"
-#include "nsINetworkPredictor.h"
 #include "nsISupportsPriority.h"
 #include "nsIWebNavigation.h"
 #include "nsPresContext.h"
@@ -319,9 +316,6 @@ nsresult FontFaceSetDocumentImpl::StartLoad(gfxUserFontEntry* aUserFontEntry,
     mLoaders.PutEntry(fontLoader);
   }
 
-  net::PredictorLearn(src.mURI->get(), mDocument->GetDocumentURI(),
-                      nsINetworkPredictor::LEARN_LOAD_SUBRESOURCE, loadGroup);
-
   if (NS_SUCCEEDED(rv)) {
     fontLoader->StartedLoading(streamLoader);
     // let the font entry remember the loader, in case we need to cancel it
@@ -477,8 +471,8 @@ bool FontFaceSetDocumentImpl::UpdateRules(
       RefPtr<FontFaceImpl> f = record.mFontFace;
       if (gfxUserFontEntry* userFontEntry = f->GetUserFontEntry()) {
         if (nsFontFaceLoader* loader = userFontEntry->GetLoader()) {
+          // Cancel() removes the loader from its registering set's mLoaders.
           loader->Cancel();
-          RemoveLoader(loader);
         }
       }
 

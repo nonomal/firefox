@@ -16,8 +16,11 @@
 #include <optional>
 #include <string>
 
+#include "absl/strings/string_view.h"
+#include "api/environment/environment.h"
+#include "api/task_queue/pending_task_safety_flag.h"
+#include "api/task_queue/task_queue_base.h"
 #include "api/transport/ecn_marking.h"
-#include "api/units/timestamp.h"
 #include "p2p/base/packet_transport_internal.h"
 #include "rtc_base/async_packet_socket.h"
 #include "rtc_base/copy_on_write_buffer.h"
@@ -26,15 +29,14 @@
 #include "rtc_base/network_route.h"
 #include "rtc_base/socket.h"
 #include "rtc_base/socket_address.h"
-#include "rtc_base/time_utils.h"
 
 namespace webrtc {
 
 // Used to simulate a packet-based transport.
 class FakePacketTransport : public PacketTransportInternal {
  public:
-  explicit FakePacketTransport(const std::string& transport_name)
-      : transport_name_(transport_name) {}
+  FakePacketTransport(const Environment& env, absl::string_view transport_name)
+      : env_(env), transport_name_(transport_name) {}
   ~FakePacketTransport() override {
     if (dest_ && dest_->dest_ == this) {
       dest_->dest_ = nullptr;
@@ -77,8 +79,13 @@ class FakePacketTransport : public PacketTransportInternal {
     CopyOnWriteBuffer packet(data, len);
     SendPacketInternal(packet, options);
 
-    SentPacketInfo sent_packet(options.packet_id, TimeMillis());
-    SignalSentPacket(this, sent_packet);
+    SentPacketInfo sent_packet(options.packet_id,
+                               env_.clock().TimeInMilliseconds());
+    // Because handlers of NotifySentPacket may be sending packets,
+    // dispatch this call to a new task.
+    TaskQueueBase::Current()->PostTask(
+        SafeTask(safety_.flag(),
+                 [this, sent_packet] { NotifySentPacket(this, sent_packet); }));
     return static_cast<int>(len);
   }
 
@@ -100,13 +107,16 @@ class FakePacketTransport : public PacketTransportInternal {
   void SetError(int error) { error_ = error; }
 
   const CopyOnWriteBuffer* last_sent_packet() { return &last_sent_packet_; }
+  const AsyncSocketPacketOptions& last_sent_packet_options() const {
+    return last_sent_packet_options_;
+  }
 
   std::optional<NetworkRoute> network_route() const override {
     return network_route_;
   }
   void SetNetworkRoute(std::optional<NetworkRoute> network_route) {
     network_route_ = network_route;
-    SignalNetworkRouteChanged(network_route);
+    NotifyNetworkRouteChanged(network_route);
   }
 
   using PacketTransportInternal::NotifyOnClose;
@@ -119,9 +129,9 @@ class FakePacketTransport : public PacketTransportInternal {
     }
     writable_ = writable;
     if (writable_) {
-      SignalReadyToSend(this);
+      NotifyReadyToSend(this);
     }
-    SignalWritableState(this);
+    NotifyWritableState(this);
   }
 
   void set_receiving(bool receiving) {
@@ -129,20 +139,23 @@ class FakePacketTransport : public PacketTransportInternal {
       return;
     }
     receiving_ = receiving;
-    SignalReceivingState(this);
+    NotifyReceivingState(this);
   }
 
   void SendPacketInternal(const CopyOnWriteBuffer& packet,
                           const AsyncSocketPacketOptions& options) {
     last_sent_packet_ = packet;
+    last_sent_packet_options_ = options;
     if (dest_) {
       dest_->NotifyPacketReceived(ReceivedIpPacket(
-          packet, SocketAddress(), Timestamp::Micros(TimeMicros()),
-          options.ecn_1 ? EcnMarking::kEct1 : EcnMarking::kNotEct));
+          packet, SocketAddress(), env_.clock().CurrentTime(),
+          options.ect_1 ? EcnMarking::kEct1 : EcnMarking::kNotEct));
     }
   }
 
+  const Environment env_;
   CopyOnWriteBuffer last_sent_packet_;
+  AsyncSocketPacketOptions last_sent_packet_options_;
   std::string transport_name_;
   FakePacketTransport* dest_ = nullptr;
   bool writable_ = false;
@@ -152,6 +165,7 @@ class FakePacketTransport : public PacketTransportInternal {
   int error_ = 0;
 
   std::optional<NetworkRoute> network_route_;
+  ScopedTaskSafety safety_;
 };
 
 }  //  namespace webrtc

@@ -1,77 +1,35 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "AccEvent.h"
-#include "LocalAccessible-inl.h"
-
-#include "EmbeddedObjCollector.h"
 #include "AccGroupInfo.h"
 #include "AccIterator.h"
+#include "ApplicationAccessible.h"
 #include "CachedTableAccessible.h"
 #include "CssAltContent.h"
 #include "DocAccessible-inl.h"
-#include "mozilla/a11y/AccAttributes.h"
-#include "mozilla/a11y/DocAccessibleChild.h"
-#include "mozilla/a11y/Platform.h"
-#include "mozilla/FocusModel.h"
-#include "nsAccUtils.h"
-#include "nsMenuPopupFrame.h"
-#include "nsAccessibilityService.h"
-#include "ApplicationAccessible.h"
-#include "nsGenericHTMLElement.h"
-#include "NotificationController.h"
-#include "nsEventShell.h"
-#include "nsTextEquivUtils.h"
+#include "EmbeddedObjCollector.h"
 #include "EventTree.h"
+#include "HTMLElementAccessibles.h"
+#include "HTMLSelectAccessible.h"
+#include "HTMLTableAccessible.h"
+#include "ImageAccessible.h"
+#include "LocalAccessible-inl.h"
+#include "NotificationController.h"
 #include "OuterDocAccessible.h"
 #include "Pivot.h"
 #include "Relation.h"
-#include "mozilla/a11y/Role.h"
 #include "RootAccessible.h"
 #include "States.h"
 #include "TextLeafAccessible.h"
 #include "TextLeafRange.h"
 #include "TextRange.h"
-#include "HTMLElementAccessibles.h"
-#include "HTMLSelectAccessible.h"
-#include "HTMLTableAccessible.h"
-#include "ImageAccessible.h"
-
-#include "nsComputedDOMStyle.h"
-#include "nsGkAtoms.h"
-#include "nsIDOMXULButtonElement.h"
-#include "nsIDOMXULSelectCntrlEl.h"
-#include "nsIDOMXULSelectCntrlItemEl.h"
-#include "nsIMutationObserver.h"
-#include "nsINodeList.h"
-
-#include "mozilla/dom/Document.h"
-#include "mozilla/dom/HTMLFormElement.h"
-#include "mozilla/dom/HTMLAnchorElement.h"
-#include "mozilla/gfx/Matrix.h"
-#include "nsIContent.h"
-#include "nsIFormControl.h"
-
-#include "nsDisplayList.h"
-#include "nsLayoutUtils.h"
-#include "nsPresContext.h"
-#include "nsIFrame.h"
-#include "nsTextFrame.h"
-#include "nsView.h"
-#include "nsIDocShellTreeItem.h"
-#include "nsStyleStructInlines.h"
-#include "nsFocusManager.h"
-
-#include "nsString.h"
-#include "nsAtom.h"
-#include "nsContainerFrame.h"
-
 #include "mozilla/Assertions.h"
 #include "mozilla/BasicEvents.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/FloatingPoint.h"
+#include "mozilla/FocusModel.h"
 #include "mozilla/PerfStats.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ProfilerMarkers.h"
@@ -79,11 +37,49 @@
 #include "mozilla/StaticPrefs_accessibility.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_ui.h"
+#include "mozilla/a11y/AccAttributes.h"
+#include "mozilla/a11y/DocAccessibleChild.h"
+#include "mozilla/a11y/Platform.h"
+#include "mozilla/a11y/Role.h"
+#include "mozilla/dom/ContentList.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/HTMLAnchorElement.h"
+#include "mozilla/dom/HTMLFormElement.h"
+#include "mozilla/dom/HTMLHeadingElement.h"
+#include "mozilla/dom/HTMLInputElement.h"
 #include "mozilla/dom/HTMLLabelElement.h"
 #include "mozilla/dom/KeyboardEventBinding.h"
+#include "mozilla/dom/NodeList.h"
+#include "mozilla/dom/PopoverData.h"
 #include "mozilla/dom/TreeWalker.h"
 #include "mozilla/dom/UserActivation.h"
+#include "mozilla/gfx/Matrix.h"
+#include "nsAccUtils.h"
+#include "nsAccessibilityService.h"
+#include "nsAtom.h"
+#include "nsComputedDOMStyle.h"
+#include "nsContainerFrame.h"
+#include "nsDisplayList.h"
+#include "nsEventShell.h"
+#include "nsFocusManager.h"
+#include "nsGenericHTMLElement.h"
+#include "nsGkAtoms.h"
+#include "nsIContent.h"
+#include "nsIDOMXULButtonElement.h"
+#include "nsIDOMXULSelectCntrlEl.h"
+#include "nsIDOMXULSelectCntrlItemEl.h"
+#include "nsIDocShellTreeItem.h"
+#include "nsIFormControl.h"
+#include "nsIFrame.h"
+#include "nsIMutationObserver.h"
+#include "nsLayoutUtils.h"
+#include "nsMenuPopupFrame.h"
+#include "nsPresContext.h"
+#include "nsString.h"
+#include "nsStyleStructInlines.h"
+#include "nsTextEquivUtils.h"
+#include "nsTextFrame.h"
 
 using namespace mozilla;
 using namespace mozilla::a11y;
@@ -152,6 +148,10 @@ ENameValueFlag LocalAccessible::Name(nsString& aName) const {
   }
 
   if (auto cssAlt = CssAltContent(mContent)) {
+    // This covers two cases:
+    // 1. The CSS content property replaces the content of an element with an
+    // image plus alt text.
+    // 2. Alt text is provided for a pseudo-element image.
     cssAlt.AppendToString(aName);
     return eNameOK;
   }
@@ -369,6 +369,10 @@ uint64_t LocalAccessible::NativeState() const {
       state |= states::REQUIRED;
     }
 
+    if (elementState.HasState(dom::ElementState::MODAL)) {
+      state |= states::MODAL;
+    }
+
     state |= NativeInteractiveState();
   }
 
@@ -424,12 +428,31 @@ uint64_t LocalAccessible::NativeInteractiveState() const {
 
 uint64_t LocalAccessible::NativeLinkState() const { return 0; }
 
+bool LocalAccessible::IsOnlyPlainContent() const {
+  if (!IsPlainContent()) {
+    return false;
+  }
+
+  uint32_t childCount = ChildCount();
+  for (uint32_t i = 0; i < childCount; i++) {
+    LocalAccessible* child = LocalChildAt(i);
+    if (!child) {
+      continue;
+    }
+
+    if (!child->IsOnlyPlainContent()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool LocalAccessible::NativelyUnavailable() const {
   if (mContent->IsHTMLElement()) return mContent->AsElement()->IsDisabled();
 
-  return mContent->IsElement() && mContent->AsElement()->AttrValueIs(
-                                      kNameSpaceID_None, nsGkAtoms::disabled,
-                                      nsGkAtoms::_true, eCaseMatters);
+  return mContent->IsElement() &&
+         mContent->AsElement()->GetBoolAttr(nsGkAtoms::disabled);
 }
 
 Accessible* LocalAccessible::ChildAtPoint(int32_t aX, int32_t aY,
@@ -570,9 +593,10 @@ LocalAccessible* LocalAccessible::LocalChildAtPoint(
   return accessible;
 }
 
-nsIFrame* LocalAccessible::FindNearestAccessibleAncestorFrame() {
+nsIFrame* LocalAccessible::FindNearestAccessibleAncestorFrame() const {
   nsIFrame* frame = GetFrame();
-  if (frame->StyleDisplay()->mPosition == StylePositionProperty::Fixed &&
+  if (frame &&
+      frame->StyleDisplay()->mPosition == StylePositionProperty::Fixed &&
       nsLayoutUtils::IsReallyFixedPos(frame)) {
     return mDoc->PresShellPtr()->GetRootFrame();
   }
@@ -594,8 +618,8 @@ nsIFrame* LocalAccessible::FindNearestAccessibleAncestorFrame() {
     ancestor = ancestor->LocalParent();
   }
 
-  MOZ_ASSERT_UNREACHABLE("No ancestor with frame?");
-  return nsLayoutUtils::GetContainingBlockForClientRect(frame);
+  return frame ? nsLayoutUtils::GetContainingBlockForClientRect(frame)
+               : nullptr;
 }
 
 nsRect LocalAccessible::ParentRelativeBounds() {
@@ -658,18 +682,27 @@ nsRect LocalAccessible::ParentRelativeBounds() {
       return result;
     }
 
-    if (ScrollContainerFrame* sf =
-            mParent == mDoc
-                ? mDoc->PresShellPtr()->GetRootScrollContainerFrame()
-                : boundingFrame->GetScrollTargetFrame()) {
-      // If boundingFrame has a scroll position, result is currently relative
-      // to that. Instead, we want result to remain the same regardless of
-      // scrolling. We then subtract the scroll position later when
-      // calculating absolute bounds. We do this because we don't want to push
-      // cache updates for the bounds of all descendants every time we scroll.
-      nsPoint scrollPos = sf->GetScrollPosition().ApplyResolution(
-          mDoc->PresShellPtr()->GetResolution());
-      result.MoveBy(scrollPos.x, scrollPos.y);
+    if (!IsDoc()) {
+      if (ScrollContainerFrame* sf =
+              boundingFrame == mDoc->GetFrame()
+                  ? mDoc->PresShellPtr()->GetRootScrollContainerFrame()
+                  : boundingFrame->GetScrollTargetFrame()) {
+        // If boundingFrame has a scroll position, result is currently relative
+        // to that. Instead, we want result to remain the same regardless of
+        // scrolling. We then subtract the scroll position later when
+        // calculating absolute bounds. We do this because we don't want to push
+        // cache updates for the bounds of all descendants every time we scroll.
+        // We don't need to do this for the document because document bounds are
+        // always computed to be self-relative -- see
+        // FindNearestAccessibleAncestorFrame. However, if boundingFrame is the
+        // document's frame (e.g. mParent had no frame, and the document is the
+        // nearest frame-having ancestor), we have to account for any scroll
+        // offset between the doc and its content. This is tracked in the
+        // PresShell's root scroll container frame.
+        nsPoint scrollPos = sf->GetScrollPosition().ApplyResolution(
+            mDoc->PresShellPtr()->GetResolution());
+        result.MoveBy(scrollPos.x, scrollPos.y);
+      }
     }
 
     return result;
@@ -708,6 +741,13 @@ nsRect LocalAccessible::BoundsInAppUnits() const {
   nsIFrame* boundingFrame = nullptr;
   nsRect unionRectTwips = RelativeBounds(&boundingFrame);
   if (!boundingFrame) {
+    if (nsCoreUtils::IsDisplayContents(mContent)) {
+      nsRect result;
+      for (uint32_t i = 0, n = ChildCount(); i < n; i++) {
+        result.UnionRect(result, LocalChildAt(i)->BoundsInAppUnits());
+      }
+      return result;
+    }
     return nsRect();
   }
 
@@ -844,26 +884,18 @@ nsresult LocalAccessible::HandleAccEvent(AccEvent* aEvent) {
 
   if (IPCAccessibilityActive() && Document()) {
     DocAccessibleChild* ipcDoc = mDoc->IPCDoc();
-    // If ipcDoc is null, we can't fire the event to the client. We shouldn't
-    // have fired the event in the first place, since this makes events
-    // inconsistent for local and remote documents. To avoid this, don't call
-    // nsEventShell::FireEvent on a DocAccessible for which
-    // HasLoadState(eTreeConstructed) is false.
-    MOZ_ASSERT(ipcDoc);
+    // If ipcDoc is null, we can't fire the event to the client in the parent
+    // process. This could happen for two reasons:
+    // 1. There is no client in the parent process, so we didn't create a
+    // DocAccessibleChild.
+    // 2. A DocAccessibleChild would have been created, but we incorrectly fired
+    // an event before that happened. In this case, we shouldn't have fired the
+    // event in the first place, since this makes events inconsistent for local
+    // and remote documents. To avoid this, don't call nsEventShell::FireEvent
+    // on a DocAccessible for which HasLoadState(eTreeConstructed) is false.
+    MOZ_ASSERT(mDoc->HasLoadState(DocAccessible::eTreeConstructed));
     if (ipcDoc) {
       uint64_t id = aEvent->GetAccessible()->ID();
-
-      auto getCaretRect = [aEvent] {
-        HyperTextAccessible* ht = aEvent->GetAccessible()->AsHyperText();
-        if (ht) {
-          auto [rect, widget] = ht->GetCaretRect();
-          // Remove doc offset and reapply in parent.
-          LayoutDeviceIntRect docBounds = ht->Document()->Bounds();
-          rect.MoveBy(-docBounds.X(), -docBounds.Y());
-          return rect;
-        }
-        return LayoutDeviceIntRect();
-      };
 
       switch (aEvent->GetEventType()) {
         case nsIAccessibleEvent::EVENT_SHOW:
@@ -911,9 +943,12 @@ nsresult LocalAccessible::HandleAccEvent(AccEvent* aEvent) {
         case nsIAccessibleEvent::EVENT_TEXT_CARET_MOVED: {
           AccCaretMoveEvent* event = downcast_accEvent(aEvent);
           ipcDoc->SendCaretMoveEvent(
-              id, getCaretRect(), event->GetCaretOffset(),
-              event->IsSelectionCollapsed(), event->IsAtEndOfLine(),
-              event->GetGranularity(), event->IsFromUserInput());
+              id,
+              DocAccessibleChild::GetCaretRectForIPCEvent(
+                  aEvent->GetAccessible()),
+              event->GetCaretOffset(), event->IsSelectionCollapsed(),
+              event->IsAtEndOfLine(), event->GetGranularity(),
+              event->IsFromUserInput(), /* aSuppressEvent */ false);
           break;
         }
         case nsIAccessibleEvent::EVENT_TEXT_INSERTED:
@@ -934,7 +969,9 @@ nsresult LocalAccessible::HandleAccEvent(AccEvent* aEvent) {
           break;
         }
         case nsIAccessibleEvent::EVENT_FOCUS:
-          ipcDoc->SendFocusEvent(id, getCaretRect());
+          ipcDoc->SendFocusEvent(id,
+                                 DocAccessibleChild::GetCaretRectForIPCEvent(
+                                     aEvent->GetAccessible()));
           break;
         case nsIAccessibleEvent::EVENT_SCROLLING_END:
         case nsIAccessibleEvent::EVENT_SCROLLING: {
@@ -945,14 +982,12 @@ nsresult LocalAccessible::HandleAccEvent(AccEvent* aEvent) {
               scrollingEvent->MaxScrollY());
           break;
         }
-#if !defined(XP_WIN)
         case nsIAccessibleEvent::EVENT_ANNOUNCEMENT: {
           AccAnnouncementEvent* announcementEvent = downcast_accEvent(aEvent);
           ipcDoc->SendAnnouncementEvent(id, announcementEvent->Announcement(),
                                         announcementEvent->Priority());
           break;
         }
-#endif  // !defined(XP_WIN)
         case nsIAccessibleEvent::EVENT_TEXT_SELECTION_CHANGED: {
           AccTextSelChangeEvent* textSelChangeEvent = downcast_accEvent(aEvent);
           AutoTArray<TextRange, 1> ranges;
@@ -1071,13 +1106,13 @@ nsresult LocalAccessible::HandleAccEvent(AccEvent* aEvent) {
           scrollingEvent->MaxScrollY());
       break;
     }
+#endif  // defined(ANDROID)
     case nsIAccessibleEvent::EVENT_ANNOUNCEMENT: {
       AccAnnouncementEvent* announcementEvent = downcast_accEvent(aEvent);
       PlatformAnnouncementEvent(target, announcementEvent->Announcement(),
                                 announcementEvent->Priority());
       break;
     }
-#endif  // defined(ANDROID)
 #if defined(MOZ_WIDGET_COCOA)
     case nsIAccessibleEvent::EVENT_TEXT_SELECTION_CHANGED: {
       AccTextSelChangeEvent* textSelChangeEvent = downcast_accEvent(aEvent);
@@ -1122,7 +1157,7 @@ already_AddRefed<AccAttributes> LocalAccessible::Attributes() {
     attribIter.ExposeAttr(attributes);
   }
 
-  if (nsAccUtils::HasARIAAttr(Elm(), nsGkAtoms::aria_actions)) {
+  if (HasCustomActions()) {
     attributes->SetAttribute(nsGkAtoms::hasActions, true);
   }
 
@@ -1162,7 +1197,7 @@ already_AddRefed<AccAttributes> LocalAccessible::Attributes() {
 }
 
 already_AddRefed<AccAttributes> LocalAccessible::NativeAttributes() {
-  RefPtr<AccAttributes> attributes = new AccAttributes();
+  auto attributes = MakeRefPtr<AccAttributes>();
 
   // We support values, so expose the string value as well, via the valuetext
   // object attribute. We test for the value interface because we don't want
@@ -1333,8 +1368,6 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
   // DOM attribute & resulting layout to actually change. Otherwise,
   // assistive technology will retrieve the wrong state/value/selection info.
 
-  CssAltContent::HandleAttributeChange(mContent, aNameSpaceID, aAttribute);
-
   // XXX todo
   // We still need to handle special HTML cases here
   // For example, if an <img>'s usemap attribute is modified
@@ -1353,8 +1386,8 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
     if (diffState) {
       for (uint64_t state = 1; state <= states::LAST_ENTRY; state <<= 1) {
         if (diffState & state) {
-          RefPtr<AccEvent> stateChangeEvent =
-              new AccStateChangeEvent(this, state, (currState & state));
+          auto stateChangeEvent =
+              MakeRefPtr<AccStateChangeEvent>(this, state, (currState & state));
           mDoc->FireDelayedEvent(stateChangeEvent);
         }
       }
@@ -1375,8 +1408,8 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
     // main summary.
     if (HTMLSummaryAccessible* summaryAccessible =
             HTMLSummaryAccessible::FromDetails(this)) {
-      RefPtr<AccEvent> expandedChangeEvent =
-          new AccStateChangeEvent(summaryAccessible, states::EXPANDED);
+      auto expandedChangeEvent =
+          MakeRefPtr<AccStateChangeEvent>(summaryAccessible, states::EXPANDED);
       mDoc->FireDelayedEvent(expandedChangeEvent);
       return;
     }
@@ -1392,8 +1425,7 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
         // For aria attributes like drag and drop changes we fire a generic
         // attribute change event; at least until native API comes up with a
         // more meaningful event.
-        RefPtr<AccEvent> event =
-            new AccObjectAttrChangedEvent(this, aAttribute);
+        auto event = MakeRefPtr<AccObjectAttrChangedEvent>(this, aAttribute);
         mDoc->FireDelayedEvent(event);
       }
     }
@@ -1402,8 +1434,8 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
   if (aAttribute == nsGkAtoms::aria_actions && IsAdditionOrRemoval(aModType)) {
     // We only care about the presence of aria-actions, not its value.
     mDoc->QueueCacheUpdate(this, CacheDomain::ARIA);
-    RefPtr<AccEvent> event =
-        new AccObjectAttrChangedEvent(this, nsGkAtoms::hasActions);
+    auto event =
+        MakeRefPtr<AccObjectAttrChangedEvent>(this, nsGkAtoms::hasActions);
     mDoc->FireDelayedEvent(event);
   }
 
@@ -1560,9 +1592,11 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
     LocalAccessible* widget = nsAccUtils::GetSelectableContainer(this, State());
     if (widget) {
       AccSelChangeEvent::SelChangeType selChangeType;
-      if (aNameSpaceID != kNameSpaceID_None) {
-        selChangeType = elm->AttrValueIs(aNameSpaceID, aAttribute,
-                                         nsGkAtoms::_true, eCaseMatters)
+      if (aAttribute == nsGkAtoms::selected) {
+        // The condition above guarantees a XUL element here. In XUL, `selected`
+        // is a boolean attribute whose mere presence indicates selection,
+        // unlike aria-selected which is "true"/"false".
+        selChangeType = elm->HasAttr(nsGkAtoms::selected)
                             ? AccSelChangeEvent::eSelectionAdd
                             : AccSelChangeEvent::eSelectionRemove;
       } else {
@@ -1572,8 +1606,7 @@ void LocalAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
                             : AccSelChangeEvent::eSelectionRemove;
       }
 
-      RefPtr<AccEvent> event =
-          new AccSelChangeEvent(widget, this, selChangeType);
+      auto event = MakeRefPtr<AccSelChangeEvent>(widget, this, selChangeType);
       mDoc->FireDelayedEvent(event);
       if (aAttribute == nsGkAtoms::aria_selected) {
         mDoc->QueueCacheUpdate(this, CacheDomain::State);
@@ -1666,7 +1699,10 @@ void LocalAccessible::ApplyARIAState(uint64_t* aState) const {
     // We only force the readonly bit off if we have a real mapping for the aria
     // role. This preserves the ability for screen readers to use readonly
     // (primarily on the document) as the hint for creating a virtual buffer.
-    if (roleMapEntry->role != roles::NOTHING) *aState &= ~states::READONLY;
+    // Avoid doing this on text fields, since the readonly state is useful
+    // there.
+    if (roleMapEntry->role != roles::NOTHING && !IsTextField())
+      *aState &= ~states::READONLY;
 
     if (mContent->HasID()) {
       // If has a role & ID and aria-activedescendant on the container, assume
@@ -1696,11 +1732,14 @@ void LocalAccessible::ApplyARIAState(uint64_t* aState) const {
     }
   }
 
-  // special case: A native button element whose role got transformed by ARIA to
-  // a toggle button Also applies to togglable button menus, like in the Dev
-  // Tools Web Console.
-  if (IsButton() || IsMenuButton()) {
-    aria::MapToState(aria::eARIAPressed, element, aState);
+  if (!roleMapEntry) {
+    if (nsStaticAtom* ariaRole = ComputedARIARole()) {
+      const nsRoleMapEntry* computedRoleMapEntry = aria::GetRoleMap(ariaRole);
+      aria::MapToStateIfInRoleMapEntry(computedRoleMapEntry,
+                                       aria::eARIAExpanded, element, aState);
+      aria::MapToStateIfInRoleMapEntry(computedRoleMapEntry, aria::eARIAPressed,
+                                       element, aState);
+    }
   }
 
   if (!IsTextField() && IsEditableRoot()) {
@@ -1759,10 +1798,11 @@ void LocalAccessible::Value(nsString& aValue) const {
 
   const nsRoleMapEntry* roleMapEntry = ARIARoleMap();
 
-  // Value of textbox is a textified subtree.
-  if ((roleMapEntry && roleMapEntry->Is(nsGkAtoms::textbox)) ||
+  // The value of a textbox is the text content from its subtree.
+  if (IsTextField() || (roleMapEntry && roleMapEntry->Is(nsGkAtoms::textbox)) ||
       (IsGeneric() && IsEditableRoot())) {
-    nsTextEquivUtils::GetTextEquivFromSubtree(this, aValue);
+    TextLeafRange::FromAccessible(const_cast<LocalAccessible*>(this))
+        .GetFlattenedText(aValue);
     return;
   }
 
@@ -1942,6 +1982,39 @@ nsIContent* LocalAccessible::GetAtomicRegion() const {
   return atomic.EqualsLiteral("true") ? loopContent : nullptr;
 }
 
+static bool IsHintPopover(nsIContent* aContent) {
+  auto* htmlEl = nsGenericHTMLElement::FromNode(aContent);
+  return htmlEl &&
+         htmlEl->GetPopoverAttributeState() == dom::PopoverAttributeState::Hint;
+}
+
+static bool IsOpenHintPopover(nsIContent* aContent) {
+  auto* htmlEl = nsGenericHTMLElement::FromNode(aContent);
+  return htmlEl && htmlEl->PopoverOpen() &&
+         htmlEl->GetPopoverAttributeState() == dom::PopoverAttributeState::Hint;
+}
+
+// Returns true if targetEl is:
+//  - a non hint popover (these should always use details, not described by).
+//  - a hint popover that is not open (no relation should be established).
+//  - a hint popover with "rich" content (for non-rich content, desdcribed by
+//    should be established instead).
+static bool ShouldHintPopoverEstablishDetailsRelation(
+    dom::Element* aTargetEl, LocalAccessible* aTargetAcc) {
+  if (!IsHintPopover(aTargetEl)) {
+    return true;
+  }
+  if (!IsOpenHintPopover(aTargetEl)) {
+    return false;
+  }
+  return !aTargetAcc->IsOnlyPlainContent();
+}
+
+static bool ShouldHintPopoverEstablishDescribedByRelation(
+    dom::Element* aTargetEl, LocalAccessible* aTargetAcc) {
+  return IsOpenHintPopover(aTargetEl) && aTargetAcc->IsOnlyPlainContent();
+}
+
 LocalAccessible* LocalAccessible::GetCommandForDetailsRelation() const {
   dom::Element* targetEl = mContent->GetEffectiveCommandForElement();
   if (!targetEl) {
@@ -1967,6 +2040,9 @@ LocalAccessible* LocalAccessible::GetCommandForDetailsRelation() const {
   if (targetAcc->NextSibling() == this || targetAcc->PrevSibling() == this) {
     return nullptr;
   }
+  if (!ShouldHintPopoverEstablishDetailsRelation(targetEl, targetAcc)) {
+    return nullptr;
+  }
   return targetAcc;
 }
 
@@ -1989,6 +2065,9 @@ LocalAccessible* LocalAccessible::GetPopoverTargetDetailsRelation() const {
     }
   }
   if (targetAcc->NextSibling() == this || targetAcc->PrevSibling() == this) {
+    return nullptr;
+  }
+  if (!ShouldHintPopoverEstablishDetailsRelation(targetEl, targetAcc)) {
     return nullptr;
   }
   return targetAcc;
@@ -2060,6 +2139,54 @@ LocalAccessible* LocalAccessible::GetAnchorPositionTargetDetailsRelation()
   return targetAcc;
 }
 
+LocalAccessible* LocalAccessible::GetPopoverTargetDescribedByRelation() const {
+  dom::Element* targetEl = mContent->GetEffectivePopoverTargetElement();
+  if (!targetEl) {
+    return nullptr;
+  }
+  LocalAccessible* targetAcc = mDoc->GetAccessible(targetEl);
+  if (!targetAcc) {
+    return nullptr;
+  }
+  if (const nsAttrValue* actionVal =
+          Elm()->GetParsedAttr(nsGkAtoms::popovertargetaction)) {
+    if (static_cast<PopoverTargetAction>(actionVal->GetEnumValue()) ==
+        PopoverTargetAction::Hide) {
+      return nullptr;
+    }
+  }
+  if (ShouldHintPopoverEstablishDescribedByRelation(targetEl, targetAcc)) {
+    return targetAcc;
+  }
+  return nullptr;
+}
+
+LocalAccessible* LocalAccessible::GetCommandForDescribedByRelation() const {
+  dom::Element* targetEl = mContent->GetEffectiveCommandForElement();
+  if (!targetEl) {
+    return nullptr;
+  }
+  LocalAccessible* targetAcc = mDoc->GetAccessible(targetEl);
+  if (!targetAcc) {
+    return nullptr;
+  }
+  if (const nsAttrValue* actionVal = Elm()->GetParsedAttr(nsGkAtoms::command)) {
+    if (actionVal && actionVal->Type() != nsAttrValue::eEnum) {
+      return nullptr;
+    }
+    auto command =
+        static_cast<dom::Element::Command>(actionVal->GetEnumValue());
+    if (command != dom::Element::Command::ShowPopover &&
+        command != dom::Element::Command::TogglePopover) {
+      return nullptr;
+    }
+  }
+  if (ShouldHintPopoverEstablishDescribedByRelation(targetEl, targetAcc)) {
+    return targetAcc;
+  }
+  return nullptr;
+}
+
 Relation LocalAccessible::RelationByType(RelationType aType) const {
   if (!HasOwnContent()) return Relation();
 
@@ -2072,7 +2199,7 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
       Relation rel(new AssociatedElementsIterator(mDoc, mContent,
                                                   nsGkAtoms::aria_labelledby));
       if (mContent->IsHTMLElement()) {
-        rel.AppendIter(new HTMLLabelIterator(Document(), this));
+        rel.AppendIter(new HTMLLabelIterator(mDoc, this));
       }
       rel.AppendIter(new XULLabelIterator(Document(), mContent));
 
@@ -2096,6 +2223,12 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
       if (mContent->IsXULElement()) {
         rel.AppendIter(new XULDescriptionIterator(Document(), mContent));
       }
+      if (LocalAccessible* target = GetCommandForDescribedByRelation()) {
+        rel.AppendTarget(target);
+      }
+      if (LocalAccessible* target = GetPopoverTargetDescribedByRelation()) {
+        rel.AppendTarget(target);
+      }
 
       return rel;
     }
@@ -2110,6 +2243,25 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
       if (mContent->IsXULElement(nsGkAtoms::description)) {
         rel.AppendIter(
             new AssociatedElementsIterator(mDoc, mContent, nsGkAtoms::control));
+      }
+
+      RelatedAccIterator popoverInvokers(mDoc, mContent,
+                                         nsGkAtoms::popovertarget);
+      while (Accessible* invoker = popoverInvokers.Next()) {
+        if (invoker->AsLocal()->GetPopoverTargetDescribedByRelation()) {
+          MOZ_ASSERT(
+              invoker->AsLocal()->GetPopoverTargetDescribedByRelation() ==
+              this);
+          rel.AppendTarget(invoker);
+        }
+      }
+      RelatedAccIterator commandInvokers(mDoc, mContent, nsGkAtoms::commandfor);
+      while (Accessible* invoker = commandInvokers.Next()) {
+        if (invoker->AsLocal()->GetCommandForDescribedByRelation()) {
+          MOZ_ASSERT(invoker->AsLocal()->GetCommandForDescribedByRelation() ==
+                     this);
+          rel.AppendTarget(invoker);
+        }
       }
 
       return rel;
@@ -2153,15 +2305,11 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
       // ROLE_WINDOW accessible which will prevent us from going up further
       // (because it is system generated and has no idea about the hierarchy
       // above it).
-      nsIFrame* frame = GetFrame();
-      if (frame) {
-        nsView* view = frame->GetView();
-        if (view) {
-          ScrollContainerFrame* scrollContainerFrame = do_QueryFrame(frame);
-          if (scrollContainerFrame || view->GetWidget() ||
-              !frame->GetParent()) {
-            rel.AppendTarget(LocalParent());
-          }
+      if (nsIFrame* frame = GetFrame()) {
+        ScrollContainerFrame* scrollContainerFrame = do_QueryFrame(frame);
+        if (scrollContainerFrame || frame->GetOwnWidget() ||
+            !frame->GetParent()) {
+          rel.AppendTarget(LocalParent());
         }
       }
 
@@ -2279,7 +2427,7 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
         NS_ConvertUTF8toUTF16 hash16(Substring(hash, 1));
         if (dom::Element* elm = mContent->OwnerDoc()->GetElementById(hash16)) {
           rel.AppendTarget(mDoc->GetAccessibleOrContainer(elm));
-        } else if (nsCOMPtr<nsINodeList> list =
+        } else if (RefPtr<dom::NodeList> list =
                        mContent->OwnerDoc()->GetElementsByName(hash16)) {
           // Loop through the named nodes looking for the first anchor
           uint32_t length = list->Length();
@@ -2307,7 +2455,7 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
       if (mContent->IsHTMLElement()) {
         // HTML form controls implements nsIFormControl interface.
         if (auto* control = nsIFormControl::FromNode(mContent)) {
-          if (dom::HTMLFormElement* form = control->GetForm()) {
+          if (dom::HTMLFormElement* form = control->GetFormInternal()) {
             return Relation(mDoc, form->GetDefaultSubmitElement());
           }
         }
@@ -2316,7 +2464,7 @@ Relation LocalAccessible::RelationByType(RelationType aType) const {
         dom::Document* doc = mContent->OwnerDoc();
         nsIContent* buttonEl = nullptr;
         if (doc->AllowXULXBL()) {
-          nsCOMPtr<nsIHTMLCollection> possibleDefaultButtons =
+          RefPtr<dom::HTMLCollection> possibleDefaultButtons =
               doc->GetElementsByAttribute(u"default"_ns, u"true"_ns);
           if (possibleDefaultButtons) {
             uint32_t length = possibleDefaultButtons->Length();
@@ -2470,7 +2618,8 @@ void LocalAccessible::DispatchClickEvent(uint32_t aActionIndex) const {
   RefPtr<PresShell> presShell = mDoc->PresShellPtr();
 
   // Scroll into view.
-  presShell->ScrollContentIntoView(mContent, ScrollAxis(), ScrollAxis(),
+  presShell->ScrollContentIntoView(mContent, AxisScrollParams(),
+                                   AxisScrollParams(),
                                    ScrollFlags::ScrollOverflowHidden);
 
   AutoWeakFrame frame = GetFrame();
@@ -2758,6 +2907,12 @@ void LocalAccessible::BindToParent(LocalAccessible* aParent,
   } else {
     mContextFlags &= ~eHasDescriptionDependent;
   }
+  if (mParent->HasValueDependent() ||
+      nsAccUtils::ShouldFireValueChangeForDescendantChanges(mParent)) {
+    mContextFlags |= eHasValueDependent;
+  } else {
+    mContextFlags &= ~eHasValueDependent;
+  }
 
   // Add name/description dependent flags for dependent content once
   // a name/description provider is added to doc.
@@ -2776,12 +2931,29 @@ void LocalAccessible::BindToParent(LocalAccessible* aParent,
     }
   }
 
-  mContextFlags |=
-      static_cast<uint32_t>((mParent->IsAlert() || mParent->IsInsideAlert())) &
-      eInsideAlert;
+  if (mParent->IsAlert() || mParent->IsInsideAlert()) {
+    mContextFlags |= eInsideAlert;
+  }
 
-  if (IsTableCell()) {
+  if (IsTableRow() || IsTableCell()) {
     CachedTableAccessible::Invalidate(this);
+  }
+
+  if (mContent && mContent->IsElement()) {
+    // If this element is an open hint popover, queue cache updates for all its
+    // invokers so they can recompute relations now that this popover and its
+    // descendants are in the accessibility tree.
+    if (IsOpenHintPopover(mContent)) {
+      mDoc->QueueCacheUpdateForPopoverInvokers(mContent->AsElement());
+    }
+
+    // If this element is being bound to a parent that is an open hint popover,
+    // queue cache updates for that popover's invokers. This handles the case
+    // where interactive descendants are added to the hint popover after it's
+    // already been shown.
+    if (aParent->Elm() && IsOpenHintPopover(aParent->Elm())) {
+      mDoc->QueueCacheUpdateForPopoverInvokers(aParent->Elm());
+    }
   }
 }
 
@@ -2789,8 +2961,14 @@ void LocalAccessible::BindToParent(LocalAccessible* aParent,
 void LocalAccessible::UnbindFromParent() {
   // We do this here to handle document shutdown and an Accessible being moved.
   // We do this for subtree removal in DocAccessible::UncacheChildrenInSubtree.
-  if (IsTable() || IsTableCell()) {
+  if (IsTableRow() || IsTable() || IsTableCell()) {
     CachedTableAccessible::Invalidate(this);
+  }
+
+  // If this element is a hint popover being hidden, queue cache updates for all
+  // its invokers so they can clear the relations.
+  if (mContent && mContent->IsElement() && IsHintPopover(mContent)) {
+    mDoc->QueueCacheUpdateForPopoverInvokers(mContent->AsElement());
   }
 
   mParent = nullptr;
@@ -2799,7 +2977,7 @@ void LocalAccessible::UnbindFromParent() {
 
   delete mGroupInfo;
   mGroupInfo = nullptr;
-  mContextFlags &= ~eHasNameDependent & ~eInsideAlert;
+  mContextFlags &= ~eHasNameDependent & ~eHasValueDependent & ~eInsideAlert;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2918,9 +3096,12 @@ void LocalAccessible::RelocateChild(uint32_t aNewIndex,
   MOZ_DIAGNOSTIC_ASSERT(aNewIndex <= mChildren.Length(),
                         "Wrong new index was given");
 
-  RefPtr<AccHideEvent> hideEvent = new AccHideEvent(aChild, false);
-  if (mDoc->Controller()->QueueMutationEvent(hideEvent)) {
-    aChild->SetHideEventTarget(true);
+  // Don't queue events while we're still building the initial tree.
+  if (mDoc->HasLoadState(DocAccessible::eTreeConstructed)) {
+    auto hideEvent = MakeRefPtr<AccHideEvent>(aChild, false);
+    if (mDoc->Controller()->QueueMutationEvent(hideEvent)) {
+      aChild->SetHideEventTarget(true);
+    }
   }
 
   mEmbeddedObjCollector = nullptr;
@@ -2953,10 +3134,12 @@ void LocalAccessible::RelocateChild(uint32_t aNewIndex,
     mChildren[idx]->mStateFlags |= eGroupInfoDirty;
   }
 
-  RefPtr<AccShowEvent> showEvent = new AccShowEvent(aChild);
-  DebugOnly<bool> added = mDoc->Controller()->QueueMutationEvent(showEvent);
-  MOZ_ASSERT(added);
-  aChild->SetShowEventTarget(true);
+  if (mDoc->HasLoadState(DocAccessible::eTreeConstructed)) {
+    auto showEvent = MakeRefPtr<AccShowEvent>(aChild);
+    DebugOnly<bool> added = mDoc->Controller()->QueueMutationEvent(showEvent);
+    MOZ_ASSERT(added);
+    aChild->SetShowEventTarget(true);
+  }
 }
 
 LocalAccessible* LocalAccessible::LocalChildAt(uint32_t aIndex) const {
@@ -2992,9 +3175,7 @@ Accessible* LocalAccessible::EmbeddedChildAt(uint32_t aIndex) {
     if (!mEmbeddedObjCollector) {
       mEmbeddedObjCollector.reset(new EmbeddedObjCollector(this));
     }
-    return mEmbeddedObjCollector.get()
-               ? mEmbeddedObjCollector->GetAccessibleAt(aIndex)
-               : nullptr;
+    return mEmbeddedObjCollector->GetAccessibleAt(aIndex);
   }
 
   return ChildAt(aIndex);
@@ -3006,9 +3187,7 @@ int32_t LocalAccessible::IndexOfEmbeddedChild(Accessible* aChild) {
     if (!mEmbeddedObjCollector) {
       mEmbeddedObjCollector.reset(new EmbeddedObjCollector(this));
     }
-    return mEmbeddedObjCollector.get()
-               ? mEmbeddedObjCollector->GetIndexAt(aChild->AsLocal())
-               : -1;
+    return mEmbeddedObjCollector->GetIndexAt(aChild->AsLocal());
   }
 
   return GetIndexOf(aChild->AsLocal());
@@ -3190,8 +3369,20 @@ bool LocalAccessible::IsActiveDescendant(LocalAccessible** aWidget) const {
 
 void LocalAccessible::Announce(const nsAString& aAnnouncement,
                                uint16_t aPriority) {
-  RefPtr<AccAnnouncementEvent> event =
-      new AccAnnouncementEvent(this, aAnnouncement, aPriority);
+  // Don't fire announcement events if the document is in the background (not
+  // active).
+  if (!mDoc) {
+    return;
+  }
+  dom::Document* docNode = mDoc->DocumentNode();
+  if (!docNode) {
+    return;
+  }
+  dom::BrowsingContext* bc = docNode->GetBrowsingContext();
+  if (!bc || !bc->IsActive()) {
+    return;
+  }
+  auto event = MakeRefPtr<AccAnnouncementEvent>(this, aAnnouncement, aPriority);
   nsEventShell::FireEvent(event);
 }
 
@@ -3327,8 +3518,7 @@ void LocalAccessible::SendCache(uint64_t aCacheDomain,
   }
 
   // Only send cache updates for domains that are active.
-  const uint64_t domainsToSend =
-      nsAccessibilityService::GetActiveCacheDomains() & aCacheDomain;
+  const uint64_t domainsToSend = mDoc->EffectiveCacheDomains() & aCacheDomain;
 
   // Avoid sending cache updates if we have no domains to update.
   if (domainsToSend == CacheDomain::None) {
@@ -3376,7 +3566,7 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
     uint64_t aInitialDomains) {
   MOZ_ASSERT((~aCacheDomain & aInitialDomains) == CacheDomain::None,
              "Initial domain pushes without domains requested!");
-  RefPtr<AccAttributes> fields = new AccAttributes();
+  auto fields = MakeRefPtr<AccAttributes>();
 
   if (aUpdateType == CacheUpdateType::Initial) {
     aInitialDomains = CacheDomain::All;
@@ -3445,11 +3635,11 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
   }
 
   if (aCacheDomain & CacheDomain::Value) {
-    // We cache the text value in 3 cases:
+    // We cache the text value in 4 cases:
     // 1. Accessible is an HTML input type that holds a number.
     // 2. Accessible has a numeric value and an aria-valuetext.
-    // 3. Accessible is an HTML input type that holds text.
-    // 4. Accessible is a link, in which case value is the target URL.
+    // 3. Accessible is a link, in which case value is the target URL.
+    // 4. Accessible is an HTML input type that holds a color.
     // ... for all other cases we divine the value remotely.
     bool cacheValueText = false;
     if (HasNumericValue()) {
@@ -3461,8 +3651,10 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
                        (mContent->IsElement() &&
                         nsAccUtils::HasARIAAttr(mContent->AsElement(),
                                                 nsGkAtoms::aria_valuetext));
-    } else {
-      cacheValueText = IsTextField() || IsHTMLLink();
+    } else if (IsHTMLLink()) {
+      cacheValueText = true;
+    } else if (auto* input = dom::HTMLInputElement::FromNodeOrNull(mContent)) {
+      cacheValueText = input->IsInputColor();
     }
 
     if (cacheValueText) {
@@ -3683,15 +3875,8 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
     if (boundsChanged) {
       mBounds = Some(newBoundsRect);
 
-      nsTArray<int32_t> boundsArray(4);
-
-      boundsArray.AppendElement(newBoundsRect.x);
-      boundsArray.AppendElement(newBoundsRect.y);
-      boundsArray.AppendElement(newBoundsRect.width);
-      boundsArray.AppendElement(newBoundsRect.height);
-
-      fields->SetAttribute(CacheKey::ParentRelativeBounds,
-                           std::move(boundsArray));
+      UniquePtr<nsRect> ptr = MakeUnique<nsRect>(newBoundsRect);
+      fields->SetAttribute(CacheKey::ParentRelativeBounds, std::move(ptr));
     }
 
     if (frame && frame->ScrollableOverflowRect().IsEmpty()) {
@@ -3712,12 +3897,29 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
         TextLeafPoint point(this, 0);
         RefPtr<AccAttributes> attrs = point.GetTextAttributesLocalAcc(
             /* aIncludeDefaults */ false);
-        fields->SetAttribute(CacheKey::TextAttributes, std::move(attrs));
+        if (attrs->Count()) {
+          fields->SetAttribute(CacheKey::TextAttributes, std::move(attrs));
+        } else if (IsUpdatePush(CacheDomain::Text)) {
+          fields->SetAttribute(CacheKey::TextAttributes, DeleteEntry());
+        }
       }
     }
     if (HyperTextAccessible* ht = AsHyperText()) {
       RefPtr<AccAttributes> attrs = ht->DefaultTextAttributes();
-      fields->SetAttribute(CacheKey::TextAttributes, std::move(attrs));
+      LocalAccessible* parent = LocalParent();
+      if (HyperTextAccessible* htParent =
+              parent ? parent->AsHyperText() : nullptr) {
+        if (RefPtr<AccAttributes> parentAttrs =
+                htParent->DefaultTextAttributes()) {
+          // Discard any entries that our parent already has.
+          attrs->RemoveIdentical(parentAttrs);
+        }
+      }
+      if (attrs->Count()) {
+        fields->SetAttribute(CacheKey::TextAttributes, std::move(attrs));
+      } else if (IsUpdatePush(CacheDomain::Text)) {
+        fields->SetAttribute(CacheKey::TextAttributes, DeleteEntry());
+      }
     } else if (!IsText()) {
       // Language is normally cached in text attributes, but Accessibles that
       // aren't HyperText or Text (e.g. <img>, <input type="radio">) don't have
@@ -3910,12 +4112,19 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
     } else if (IsUpdatePush(CacheDomain::DOMNodeIDAndClass)) {
       fields->SetAttribute(CacheKey::DOMNodeID, DeleteEntry());
     }
-    nsString className;
-    DOMNodeClass(className);
-    if (!className.IsEmpty()) {
-      fields->SetAttribute(CacheKey::DOMNodeClass, std::move(className));
-    } else if (IsUpdatePush(CacheDomain::DOMNodeIDAndClass)) {
-      fields->SetAttribute(CacheKey::DOMNodeClass, DeleteEntry());
+
+    if (dom::Element* el = Elm()) {
+      nsTArray<RefPtr<nsAtom>> classes;
+      if (const nsAttrValue* attr = el->GetClasses()) {
+        for (uint32_t i = 0; i < attr->GetAtomCount(); i++) {
+          classes.AppendElement(attr->AtomAt(i));
+        }
+      }
+      if (!classes.IsEmpty()) {
+        fields->SetAttribute(CacheKey::DOMNodeClass, std::move(classes));
+      } else if (IsUpdatePush(CacheDomain::DOMNodeIDAndClass)) {
+        fields->SetAttribute(CacheKey::DOMNodeClass, DeleteEntry());
+      }
     }
   }
 
@@ -3950,6 +4159,13 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       } else if (IsUpdatePush(CacheDomain::GroupInfo)) {
         fields->SetAttribute(attr, DeleteEntry());
       }
+    }
+
+    int32_t headingLevel = HeadingLevel();
+    if (headingLevel > 0) {
+      fields->SetAttribute(CacheKey::HeadingLevel, headingLevel);
+    } else if (IsUpdatePush(CacheDomain::GroupInfo)) {
+      fields->SetAttribute(CacheKey::HeadingLevel, DeleteEntry());
     }
   }
 
@@ -4069,7 +4285,7 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
     aria::AttrIterator attrIt(mContent);
     while (attrIt.Next()) {
       if (!ariaAttrs) {
-        ariaAttrs = new AccAttributes();
+        ariaAttrs = MakeRefPtr<AccAttributes>();
       }
       attrIt.ExposeAttr(ariaAttrs);
     }
@@ -4079,7 +4295,7 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       fields->SetAttribute(CacheKey::ARIAAttributes, DeleteEntry());
     }
 
-    if (nsAccUtils::HasARIAAttr(Elm(), nsGkAtoms::aria_actions)) {
+    if (HasCustomActions()) {
       fields->SetAttribute(CacheKey::HasActions, true);
     } else if (IsUpdatePush(CacheDomain::ARIA)) {
       fields->SetAttribute(CacheKey::HasActions, DeleteEntry());
@@ -4105,6 +4321,11 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       }
     }
 
+    // Track whether aria-details/aria-describedby have targets, so that
+    // commandfor/popovertarget can respect their precedence.
+    bool hasAriaDetails = false;
+    bool hasAriaDescribedby = false;
+
     for (auto const& data : kRelationTypeAtoms) {
       nsTArray<uint64_t> ids;
       nsStaticAtom* const relAtom = data.mAtom;
@@ -4116,23 +4337,31 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       if (data.mType == RelationType::LABEL_FOR) {
         // Labels are a special case -- we need to validate that the target of
         // their `for` attribute is in fact labelable. DOM checks this when we
-        // call GetControl(). If a label contains an element we will return it
-        // here.
+        // call GetLabeledElementInternal(). If a label contains an element we
+        // will return it here.
         if (dom::HTMLLabelElement* labelEl =
                 dom::HTMLLabelElement::FromNode(mContent)) {
-          rel.AppendTarget(mDoc, labelEl->GetControl());
+          rel.AppendTarget(mDoc, labelEl->GetLabeledElementInternal());
         }
       } else if (data.mType == RelationType::DETAILS) {
         if (relAtom == nsGkAtoms::aria_details) {
           rel.AppendIter(
               new AssociatedElementsIterator(mDoc, mContent, relAtom));
         } else if (relAtom == nsGkAtoms::commandfor) {
-          if (LocalAccessible* target = GetCommandForDetailsRelation()) {
-            rel.AppendTarget(target);
+          // aria-details takes precedence; skip if it has targets.
+          if (!hasAriaDetails) {
+            if (LocalAccessible* target = GetCommandForDetailsRelation()) {
+              rel.AppendTarget(target);
+              fields->SetAttribute(CacheKey::PopoverInvokerIsDetails, true);
+            }
           }
         } else if (relAtom == nsGkAtoms::popovertarget) {
-          if (LocalAccessible* target = GetPopoverTargetDetailsRelation()) {
-            rel.AppendTarget(target);
+          // aria-details takes precedence; skip if it has targets.
+          if (!hasAriaDetails) {
+            if (LocalAccessible* target = GetPopoverTargetDetailsRelation()) {
+              rel.AppendTarget(target);
+              fields->SetAttribute(CacheKey::PopoverInvokerIsDetails, true);
+            }
           }
         } else if (relAtom == nsGkAtoms::target) {
           if (LocalAccessible* target =
@@ -4141,6 +4370,26 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
           }
         } else {
           MOZ_ASSERT_UNREACHABLE("Unknown details relAtom");
+        }
+      } else if (data.mType == RelationType::DESCRIBED_BY) {
+        if (relAtom == nsGkAtoms::aria_describedby) {
+          rel.AppendIter(
+              new AssociatedElementsIterator(mDoc, mContent, relAtom));
+        } else if (relAtom == nsGkAtoms::commandfor) {
+          // aria-describedby takes precedence; skip if it has targets.
+          if (!hasAriaDescribedby) {
+            if (LocalAccessible* target = GetCommandForDescribedByRelation()) {
+              rel.AppendTarget(target);
+            }
+          }
+        } else if (relAtom == nsGkAtoms::popovertarget) {
+          // aria-describedby takes precedence; skip if it has targets.
+          if (!hasAriaDescribedby) {
+            if (LocalAccessible* target =
+                    GetPopoverTargetDescribedByRelation()) {
+              rel.AppendTarget(target);
+            }
+          }
         }
       } else if (data.mType == RelationType::CONTROLLER_FOR) {
         // We need to use RelationByType for controls because it might include
@@ -4162,7 +4411,18 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       }
       if (ids.Length()) {
         fields->SetAttribute(relAtom, std::move(ids));
-      } else if (IsUpdatePush(CacheDomain::Relations)) {
+        // Track that aria-details/aria-describedby have targets for precedence.
+        if (relAtom == nsGkAtoms::aria_details) {
+          hasAriaDetails = true;
+        } else if (relAtom == nsGkAtoms::aria_describedby) {
+          hasAriaDescribedby = true;
+        }
+      } else if (IsUpdatePush(CacheDomain::Relations) &&
+                 !fields->HasAttribute(relAtom)) {
+        // Only send DeleteEntry if we haven't already cached a value for this
+        // atom in an earlier iteration. This handles atoms that appear multiple
+        // times in kRelationTypeAtoms (e.g., popovertarget/commandfor appear
+        // for both DETAILS and DESCRIBED_BY).
         fields->SetAttribute(relAtom, DeleteEntry());
       }
     }
@@ -4458,6 +4718,13 @@ void LocalAccessible::DOMNodeClass(nsString& aClass) const {
   }
 }
 
+int32_t LocalAccessible::HeadingLevel() const {
+  if (auto* el = dom::HTMLHeadingElement::FromNodeOrNull(mContent)) {
+    return static_cast<int32_t>(el->ComputedLevel());
+  }
+  return 0;
+}
+
 void LocalAccessible::LiveRegionAttributes(nsAString* aLive,
                                            nsAString* aRelevant,
                                            Maybe<bool>* aAtomic,
@@ -4553,4 +4820,9 @@ bool LocalAccessible::ARIAAttrValueIs(nsAtom* aAttrName,
 bool LocalAccessible::HasARIAAttr(nsAtom* aAttrName) const {
   return mContent ? nsAccUtils::HasDefinedARIAToken(mContent, aAttrName)
                   : false;
+}
+
+bool LocalAccessible::HasCustomActions() const {
+  dom::Element* el = Elm();
+  return el && nsAccUtils::HasARIAAttr(el, nsGkAtoms::aria_actions);
 }

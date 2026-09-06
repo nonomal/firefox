@@ -409,6 +409,7 @@ const AVAILABLE_SHIMS = [
       "thenationaldesk.com",
       "foxbaltimore.com",
       "local12.com",
+      "aucklandfc.co.nz",
     ],
     matches: [
       "*://www.googletagservices.com/tag/js/gpt.js*",
@@ -517,31 +518,6 @@ const AVAILABLE_SHIMS = [
     file: "rich-relevance.js",
     matches: ["*://media.richrelevance.com/rrserver/js/1.2/p13n.js"],
     onlyIfBlockedByETP: true,
-  },
-  {
-    id: "Firebase",
-    platform: "all",
-    name: "Firebase",
-    bug: "1771783",
-    onlyIfPrivateBrowsing: true,
-    runFirst: "firebase.js",
-    matches: [
-      // bugs 1750699, 1767407
-      "*://www.gstatic.com/firebasejs/*/firebase-messaging.js*",
-    ],
-    contentScripts: [
-      {
-        js: "firebase.js",
-        runAt: "document_start",
-        matches: [
-          "*://www.homedepot.ca/*", // bug 1778993
-          "*://orangerie.eu/*", // bug 1758442
-          "*://web.whatsapp.com/*", // bug 1767407
-          "*://www.tripadvisor.com/*", // bug 1779536
-          "*://www.office.com/*", // bug 1783921
-        ],
-      },
-    ],
   },
   {
     id: "StickyAdsTV",
@@ -918,6 +894,7 @@ const AVAILABLE_SHIMS = [
       "embedClicked",
       "smartblockEmbedReplaced",
       "smartblockGetFluentString",
+      "shouldShowEmbedContentInPlaceholders",
     ],
     isSmartblockEmbedShim: true,
     onlyIfBlockedByETP: true,
@@ -928,9 +905,9 @@ const AVAILABLE_SHIMS = [
     ],
   },
   {
-    id: "TiktokEmbed",
+    id: "TikTokEmbed",
     platform: "desktop",
-    name: "Tiktok embed placeholder",
+    name: "TikTok embed placeholder",
     bug: "1892172",
     runFirst: "tiktok-embed.js",
     // Blank stub file just so we run the script above when the matched script
@@ -943,6 +920,7 @@ const AVAILABLE_SHIMS = [
       "embedClicked",
       "smartblockEmbedReplaced",
       "smartblockGetFluentString",
+      "shouldShowEmbedContentInPlaceholders",
     ],
     isSmartblockEmbedShim: true,
     onlyIfBlockedByETP: true,
@@ -964,10 +942,11 @@ const AVAILABLE_SHIMS = [
       "embedClicked",
       "smartblockEmbedReplaced",
       "smartblockGetFluentString",
+      "shouldShowEmbedContentInPlaceholders",
     ],
     isSmartblockEmbedShim: true,
     onlyIfBlockedByETP: true,
-    unblocksOnOptIn: ["*://*.disqus.com/*", "*://c.disquscdn.com/*"],
+    unblocksOnOptIn: ["*://*.disqus.com/*", "*://*.disquscdn.com/*"],
   },
   {
     id: "FingerpringJSBotd",
@@ -1009,18 +988,40 @@ const AVAILABLE_SHIMS = [
     // Blank stub file just so we run the script above when the matched script
     // files get blocked.
     file: "empty-script.js",
-    matches: ["https://platform.twitter.com/widgets.js"],
+    matches: [
+      "https://platform.twitter.com/widgets.js",
+      "https://platform.x.com/widgets.js",
+      {
+        patterns: [
+          // Sites which bundle their own copy of widgets.js never request the
+          // script above, so also shim the widget iframe that copy loads.
+          "*://platform.twitter.com/widgets/widget_iframe.*",
+          "*://platform.x.com/widgets/widget_iframe.*",
+          // Some sites render a tweet's content iframe
+          // directly via their own server-side embed.
+          "*://platform.twitter.com/embed/index.html*",
+          "*://platform.x.com/embed/index.html*",
+          "*://platform.twitter.com/embed/Tweet.html*",
+          "*://platform.x.com/embed/Tweet.html*",
+        ],
+        types: ["sub_frame"],
+        target: "empty-page.html",
+      },
+    ],
     logos: ["x-logo.svg"],
     needsShimHelpers: [
       "embedClicked",
       "smartblockEmbedReplaced",
       "smartblockGetFluentString",
+      "shouldShowEmbedContentInPlaceholders",
     ],
     isSmartblockEmbedShim: true,
     onlyIfBlockedByETP: true,
     unblocksOnOptIn: [
       "*://platform.twitter.com/*",
+      "*://platform.x.com/*",
       "*://syndication.twitter.com/*",
+      "*://syndication.x.com/*",
       "*://cdn.syndication.twimg.com/*",
       "*://video.twimg.com/*",
       "*://pbs.twimg.com/*",

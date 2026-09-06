@@ -27,9 +27,17 @@ export class GenAIChild extends JSWindowActorChild {
   downTimeStamp = 0;
   debounceDelay = 200;
   pendingHide = false;
+  #compositionActive = false;
+
+  /**
+   * A flag that gets set when this actor is destroyed.
+   */
+  #isDestroyed = false;
 
   registerHideEvents() {
     this.document.addEventListener("selectionchange", this);
+    this.document.addEventListener("compositionstart", this);
+    this.document.addEventListener("compositionend", this);
     HIDE_EVENTS.forEach(ev =>
       this.contentWindow.addEventListener(ev, this, true)
     );
@@ -38,10 +46,13 @@ export class GenAIChild extends JSWindowActorChild {
 
   removeHideEvents() {
     this.document.removeEventListener("selectionchange", this);
+    this.document.removeEventListener("compositionstart", this);
+    this.document.removeEventListener("compositionend", this);
     HIDE_EVENTS.forEach(ev =>
       this.contentWindow?.removeEventListener(ev, this, true)
     );
     this.pendingHide = false;
+    this.#compositionActive = false;
   }
 
   handleEvent(event) {
@@ -79,6 +90,10 @@ export class GenAIChild extends JSWindowActorChild {
         const { screenX, screenY } = event;
 
         this.mouseUpTimeout = this.contentWindow.setTimeout(() => {
+          if (this.#isDestroyed) {
+            return;
+          }
+
           const selectionInfo = this.getSelectionInfo();
           const delay = event.timeStamp - this.downTimeStamp;
 
@@ -104,11 +119,28 @@ export class GenAIChild extends JSWindowActorChild {
 
         break;
       }
+      case "compositionstart":
+        this.#compositionActive = true;
+        break;
+      case "compositionend":
+        this.#compositionActive = false;
+        break;
+      case "selectionchange":
+        if (this.#compositionActive) {
+          // Visually hide without calling sendHide()
+          // sendHide() triggers hidePopup() which issues a focus change event
+          // that breaking any active IME composition
+          if (this.pendingHide) {
+            this.sendAsyncMessage("GenAI:HideShortcuts", "selectionchange-ime");
+            this.removeHideEvents();
+          }
+        } else {
+          sendHide();
+        }
+        break;
       case "pagehide":
       case "resize":
       case "scroll":
-      case "selectionchange":
-        // Hide if selection might have shifted away from shortcuts
         sendHide();
         break;
     }
@@ -230,14 +262,33 @@ export class GenAIChild extends JSWindowActorChild {
       (/chatgpt\.com/i.test(win.location.host) ||
         win.location.pathname.includes("file_chat-autosubmit.html"))
     ) {
-      win.setTimeout(() => {
-        if (editable.textContent) {
-          editable.textContent = "";
-          editable.dispatchEvent(
+      const container = editable.parentElement;
+      if (!container) {
+        return;
+      }
+
+      const observer = new win.MutationObserver(() => {
+        // Always refetch because ChatGPT replaces editable div
+        const currentEditable = container.querySelector(
+          '[contenteditable="true"]'
+        );
+        if (!currentEditable) {
+          return;
+        }
+
+        let hasText = currentEditable.textContent?.trim().length > 0;
+        if (hasText) {
+          currentEditable.textContent = "";
+          currentEditable.dispatchEvent(
             new win.InputEvent("input", { bubbles: true })
           );
         }
-      }, 500);
+      });
+
+      observer.observe(container, { childList: true, subtree: true });
+
+      // Disconnect once things stabilize
+      win.setTimeout(() => observer.disconnect(), 2000);
     }
   }
 
@@ -257,5 +308,9 @@ export class GenAIChild extends JSWindowActorChild {
         // Replace duplicate whitespace with either a single newline or space
         .replace(/(\s*\n\s*)|\s{2,}/g, (_, newline) => (newline ? "\n" : " ")),
     };
+  }
+
+  didDestroy() {
+    this.#isDestroyed = true;
   }
 }

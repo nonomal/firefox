@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -83,7 +81,7 @@ void ScrollAnimationMSDPhysics::ApplyContentShift(const CSSPoint& aShiftDelta) {
 
 double ScrollAnimationMSDPhysics::GetDampingRatio() const {
   if (mAnimationKind == ScrollAnimationKind::SmoothMsd) {
-    return StaticPrefs::layout_css_scroll_behavior_damping_ratio();
+    return StaticPrefs::layout_css_scroll_snap_damping_ratio();
   }
   return 1.0;
 }
@@ -91,7 +89,7 @@ double ScrollAnimationMSDPhysics::GetDampingRatio() const {
 double ScrollAnimationMSDPhysics::ComputeSpringConstant(
     const TimeStamp& aTime) {
   if (mAnimationKind == ScrollAnimationKind::SmoothMsd) {
-    return StaticPrefs::layout_css_scroll_behavior_spring_constant();
+    return StaticPrefs::layout_css_scroll_snap_spring_constant();
   }
 
   if (!mPreviousEventTime) {

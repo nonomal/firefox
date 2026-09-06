@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -70,6 +68,12 @@ enum class PhysicalAxis : uint8_t { Vertical, Horizontal };
 using PhysicalAxes = EnumSet<PhysicalAxis>;
 static constexpr PhysicalAxes kPhysicalAxesBoth{PhysicalAxis::Vertical,
                                                 PhysicalAxis::Horizontal};
+
+inline StyleLogicalAxis ToStyleLogicalAxis(LogicalAxis aLogicalAxis) {
+  return StyleLogicalAxis(aLogicalAxis == LogicalAxis::Block
+                              ? StyleLogicalAxis::Block
+                              : StyleLogicalAxis::Inline);
+}
 
 inline LogicalAxis GetOrthogonalAxis(LogicalAxis aAxis) {
   return aAxis == LogicalAxis::Block ? LogicalAxis::Inline : LogicalAxis::Block;
@@ -248,6 +252,10 @@ class WritingMode {
    */
   bool IsVerticalSideways() const {
     return !!(mWritingMode & StyleWritingMode::VERTICAL_SIDEWAYS);
+  }
+
+  bool IsUpright() const {
+    return !!(mWritingMode & StyleWritingMode::UPRIGHT);
   }
 
   /**
@@ -464,7 +472,7 @@ class WritingMode {
    * Construct a default WritingMode, equivalent to specifying
    * 'writing-mode: horizontal-tb' and 'direction: ltr' in CSS.
    */
-  WritingMode() : mWritingMode{0} {}
+  constexpr WritingMode() : mWritingMode{0} {}
 
   /**
    * Construct writing mode based on a ComputedStyle.
@@ -472,6 +480,10 @@ class WritingMode {
   explicit WritingMode(const ComputedStyle* aComputedStyle) {
     NS_ASSERTION(aComputedStyle, "we need an ComputedStyle here");
     mWritingMode = aComputedStyle->WritingMode();
+  }
+
+  inline StyleWritingMode ToStyleWritingMode() const {
+    return StyleWritingMode(GetBits());
   }
 
   /**
@@ -499,13 +511,7 @@ class WritingMode {
   /**
    * Compare two WritingModes for equality.
    */
-  bool operator==(const WritingMode& aOther) const {
-    return mWritingMode == aOther.mWritingMode;
-  }
-
-  bool operator!=(const WritingMode& aOther) const {
-    return mWritingMode != aOther.mWritingMode;
-  }
+  bool operator==(const WritingMode&) const = default;
 
   /**
    * Check whether two modes are orthogonal to each other.
@@ -859,11 +865,6 @@ class LogicalPoint {
     return mPoint == aOther.mPoint;
   }
 
-  bool operator!=(const LogicalPoint& aOther) const {
-    CHECK_WRITING_MODE(aOther.GetWritingMode());
-    return mPoint != aOther.mPoint;
-  }
-
   LogicalPoint operator+(const LogicalPoint& aOther) const {
     CHECK_WRITING_MODE(aOther.GetWritingMode());
     // In non-debug builds, LogicalPoint does not store the WritingMode,
@@ -1086,11 +1087,6 @@ class LogicalSize {
     return mSize == aOther.mSize;
   }
 
-  bool operator!=(const LogicalSize& aOther) const {
-    CHECK_WRITING_MODE(aOther.GetWritingMode());
-    return mSize != aOther.mSize;
-  }
-
   LogicalSize operator+(const LogicalSize& aOther) const {
     CHECK_WRITING_MODE(aOther.GetWritingMode());
     return LogicalSize(GetWritingMode(), ISize() + aOther.ISize(),
@@ -1201,13 +1197,9 @@ struct LogicalSides final {
     mSides += aOther;
     return *this;
   }
-  bool operator==(LogicalSides aOther) const {
+  bool operator==(const LogicalSides& aOther) const {
     CHECK_WRITING_MODE(aOther.GetWritingMode());
     return mSides == aOther.mSides;
-  }
-  bool operator!=(LogicalSides aOther) const {
-    CHECK_WRITING_MODE(aOther.GetWritingMode());
-    return !(*this == aOther);
   }
 
 #ifdef DEBUG
@@ -1513,11 +1505,6 @@ class LogicalMargin {
   bool operator==(const LogicalMargin& aMargin) const {
     CHECK_WRITING_MODE(aMargin.GetWritingMode());
     return mMargin == aMargin.mMargin;
-  }
-
-  bool operator!=(const LogicalMargin& aMargin) const {
-    CHECK_WRITING_MODE(aMargin.GetWritingMode());
-    return mMargin != aMargin.mMargin;
   }
 
   LogicalMargin operator+(const LogicalMargin& aMargin) const {
@@ -2325,6 +2312,14 @@ inline bool nsStyleMargin::HasAuto(
     const AnchorPosResolutionParams& aParams) const {
   return aAxis == mozilla::LogicalAxis::Inline ? HasInlineAxisAuto(aWM, aParams)
                                                : HasBlockAxisAuto(aWM, aParams);
+}
+
+inline mozilla::LogicalMargin nsStyleDisplay::GetScrollbarInset(
+    mozilla::WritingMode aWM) const {
+  return mozilla::LogicalMargin(aWM, mScrollbarInsetBlock.start.ToAppUnits(),
+                                mScrollbarInsetInline.end.ToAppUnits(),
+                                mScrollbarInsetBlock.end.ToAppUnits(),
+                                mScrollbarInsetInline.start.ToAppUnits());
 }
 
 inline AnchorResolvedMargin nsStyleMargin::GetMargin(

@@ -8,7 +8,7 @@ from textwrap import dedent
 
 import mozunit
 import pytest
-from tryselect.task_config import Pernosco, all_task_configs
+from tryselect.task_config import Pernosco, PushDate, all_task_configs
 
 TC_URL = "https://taskcluster.example.com"
 TH_URL = "https://treeherder.mozilla.org"
@@ -35,7 +35,15 @@ TASK_CONFIG_TESTS = {
         ),
         (
             ["--profiler"],
-            {"try_task_config": {"env": {"MOZ_PROFILER_STARTUP": "1"}}},
+            {
+                "try_task_config": {
+                    "env": {
+                        "MOZ_PROFILER_STARTUP": "1",
+                        "MOZ_PROFILER_STARTUP_FEATURES": "default",
+                        "MOZ_PROFILER_STARTUP_INTERVAL": "1",
+                    }
+                }
+            },
         ),
         (
             ["--record"],
@@ -45,7 +53,12 @@ TASK_CONFIG_TESTS = {
             ["--profiler", "--record"],
             {
                 "try_task_config": {
-                    "env": {"MOZ_PROFILER_STARTUP": "1", "MOZ_RECORD_TEST": "1"}
+                    "env": {
+                        "MOZ_PROFILER_STARTUP": "1",
+                        "MOZ_PROFILER_STARTUP_FEATURES": "default",
+                        "MOZ_PROFILER_STARTUP_INTERVAL": "1",
+                        "MOZ_RECORD_TEST": "1",
+                    }
                 }
             },
         ),
@@ -95,10 +108,23 @@ TASK_CONFIG_TESTS = {
     "pernosco": [
         ([], None),
     ],
+    "pushdate": [
+        ([], None),
+        (
+            ["--pushdate", "20260424043035"],
+            {
+                "build_date": 1777005035,
+                "moz_build_date": "20260424043035",
+                "pushdate": 1777005035,
+            },
+        ),
+        (["--pushdate", "notadate"], SystemExit),
+    ],
     "rebuild": [
         ([], None),
         (["--rebuild", "10"], {"try_task_config": {"rebuild": 10}}),
-        (["--rebuild", "1"], SystemExit),
+        (["--rebuild", "1"], {"try_task_config": {"rebuild": 1}}),
+        (["--rebuild", "0"], SystemExit),
         (["--rebuild", "21"], SystemExit),
     ],
     "worker-overrides": [
@@ -127,7 +153,7 @@ TASK_CONFIG_TESTS = {
         (
             [
                 "--worker-override",
-                "b-linux=worker/pool" "--worker-suffix",
+                "b-linux=worker/pool--worker-suffix",
                 "b-linux=-dev",
             ],
             SystemExit,
@@ -154,6 +180,14 @@ def config_patch_resolver(patch_resolver):
 def mock_root_url(monkeypatch):
     monkeypatch.delenv("TASKCLUSTER_PROXY_URL", raising=False)
     monkeypatch.setenv("TASKCLUSTER_ROOT_URL", TC_URL)
+
+
+@pytest.fixture(autouse=True)
+def mock_get_worker_type(mocker):
+    mocker.patch(
+        "gecko_taskgraph.util.workertypes.get_worker_type",
+        side_effect=lambda gc, worker_type, parameters: ("gecko-1", worker_type),
+    )
 
 
 def test_task_configs(config_patch_resolver, task_config, args, expected):
@@ -207,6 +241,65 @@ def test_pernosco(patch_ssh_user):
     assert params == {"try_task_config": {"env": {"PERNOSCO": "1"}, "pernosco": True}}
 
 
+def test_pushdate():
+    parser = ArgumentParser()
+
+    cfg = PushDate()
+    cfg.add_arguments(parser)
+    args = parser.parse_args(["--pushdate", "20260424043035"])
+    params = cfg.get_parameters(**vars(args))
+    assert params == {
+        "build_date": 1777005035,
+        "moz_build_date": "20260424043035",
+        "pushdate": 1777005035,
+    }
+
+
+def test_extensions(mocker):
+    parser = ArgumentParser()
+    cfg = all_task_configs["extensions"]()
+    cfg.add_arguments(parser)
+
+    def fake_get(url, **kwargs):
+        addon_id = url.rstrip("/").split("/")[-1]
+        resp = mocker.Mock()
+        resp.json.return_value = {
+            "current_version": {"file": {"url": f"https://amo/{addon_id}.xpi"}}
+        }
+        return resp
+
+    mocker.patch("tryselect.task_config.requests.get", side_effect=fake_get)
+    mocker.patch("tryselect.task_config.requests.head", return_value=mocker.Mock())
+
+    # No extensions requested -> no parameters.
+    args = parser.parse_args([])
+    assert cfg.get_parameters(**vars(args)) is None
+
+    # GUIDs/slugs are resolved; a .xpi URL is passed through unchanged.
+    args = parser.parse_args([
+        "--extension",
+        "a@b",
+        "--extension",
+        "https://example.com/x.xpi",
+    ])
+    params = cfg.get_parameters(**vars(args))
+    assert params == {
+        "try_task_config": {
+            "env": {
+                "PERF_FLAGS": (
+                    "install-extension=https://amo/a@b.xpi,https://example.com/x.xpi"
+                )
+            }
+        }
+    }
+
+    # Local paths are rejected (CI can't reach them).
+    for bad in ("/tmp/local.xpi", "ext.xpi"):
+        args = parser.parse_args(["--extension", bad])
+        with pytest.raises(Exception):
+            cfg.get_parameters(**vars(args))
+
+
 def test_exisiting_tasks(mocker, responses, patch_ssh_user):
     parser = ArgumentParser()
     cfg = all_task_configs["existing-tasks"]()
@@ -235,6 +328,12 @@ def test_exisiting_tasks(mocker, responses, patch_ssh_user):
     responses.add(
         responses.GET,
         f"{TC_URL}/api/queue/v1/task/{task_id}/artifacts/public%2flabel-to-taskid.json",
+        status=303,
+        json={"url": f"{TC_URL}/artifacts/label-to-taskid.json"},
+    )
+    responses.add(
+        responses.GET,
+        f"{TC_URL}/artifacts/label-to-taskid.json",
         json=label_to_taskid,
     )
 
@@ -261,6 +360,12 @@ def test_exisiting_tasks_task_id(responses):
     responses.add(
         responses.GET,
         f"{TC_URL}/api/queue/v1/task/{task_id}/artifacts/public%2flabel-to-taskid.json",
+        status=303,
+        json={"url": f"{TC_URL}/artifacts/label-to-taskid.json"},
+    )
+    responses.add(
+        responses.GET,
+        f"{TC_URL}/artifacts/label-to-taskid.json",
         json=label_to_taskid,
     )
 
@@ -289,6 +394,12 @@ def test_exisiting_tasks_rev(responses):
     responses.add(
         responses.GET,
         f"{TC_URL}/api/queue/v1/task/{task_id}/artifacts/public%2flabel-to-taskid.json",
+        status=303,
+        json={"url": f"{TC_URL}/artifacts/label-to-taskid.json"},
+    )
+    responses.add(
+        responses.GET,
+        f"{TC_URL}/artifacts/label-to-taskid.json",
         json=label_to_taskid,
     )
 

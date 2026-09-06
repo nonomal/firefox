@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2; -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,6 +8,7 @@
 #include "mozilla/extensions/WebExtensionContentScript.h"
 #include "mozilla/extensions/WebExtensionPolicy.h"
 
+#include "mozilla/glean/ExtensionsMetrics.h"
 #include "mozilla/AddonManagerWebAPI.h"
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/dom/WindowGlobalChild.h"
@@ -18,10 +18,12 @@
 #include "nsContentUtils.h"
 #include "nsEscape.h"
 #include "nsGlobalWindowInner.h"
+#include "nsIConsoleService.h"
 #include "nsIObserver.h"
 #include "nsISubstitutingProtocolHandler.h"
 #include "nsLiteralString.h"
 #include "nsNetUtil.h"
+#include "nsPIDOMWindowInlines.h"
 #include "nsPrintfCString.h"
 
 namespace mozilla {
@@ -66,6 +68,8 @@ static const char kBackgroundPageHTMLEnd[] =
   "script-src 'self' 'wasm-unsafe-eval' http://localhost:* " \
   "http://127.0.0.1:*;"
 
+#define DEFAULT_SANDBOX_CSP "sandbox allow-scripts; script-src 'self';"
+
 static inline ExtensionPolicyService& EPS() {
   return ExtensionPolicyService::GetSingleton();
 }
@@ -91,13 +95,14 @@ static nsISubstitutingProtocolHandler* Proto() {
 
 bool ParseGlobs(GlobalObject& aGlobal,
                 Sequence<OwningMatchGlobOrUTF8String> aGlobs,
-                nsTArray<RefPtr<MatchGlobCore>>& aResult, ErrorResult& aRv) {
+                nsTArray<RefPtr<MatchGlobCore>>& aResult, ErrorResult& aRv,
+                bool aAllowQuestion = true) {
   for (auto& elem : aGlobs) {
     if (elem.IsMatchGlob()) {
       aResult.AppendElement(elem.GetAsMatchGlob()->Core());
     } else {
       RefPtr<MatchGlobCore> glob =
-          new MatchGlobCore(elem.GetAsUTF8String(), true, false, aRv);
+          new MatchGlobCore(elem.GetAsUTF8String(), aAllowQuestion, false, aRv);
       if (aRv.Failed()) {
         return false;
       }
@@ -169,6 +174,23 @@ WebAccessibleResource::WebAccessibleResource(
   }
 }
 
+bool WebAccessibleResource::IsHostMatch(const URLInfo& aURI) {
+  if (!mMatches) {
+    return false;
+  }
+  return mMatches->Matches(aURI) ||
+         // If aURI is not matching schemes of <all_urls>, permit access anyway
+         // if the match pattern includes <all_urls> or *://*/*. This allows
+         // requests from sandboxed documents (moz-nullprincipal) to pass.
+         //
+         // Note: this check means that file:-documents can create a sandboxed
+         // iframe to get access to a resource that is restricted to *://*/*,
+         // despite "*://*/*" supposed to only match http(s). This is acceptable
+         // because a file can already easily bypass the check by embedding a
+         // web page to fetch the resource.
+         (!MatchPattern::MatchesAllURLs(aURI) && mMatches->MatchesAllWebUrls());
+}
+
 bool WebAccessibleResource::IsExtensionMatch(const URLInfo& aURI) {
   if (!mExtensionIDs) {
     return false;
@@ -190,13 +212,16 @@ WebExtensionPolicyCore::WebExtensionPolicyCore(GlobalObject& aGlobal,
     : mPolicy(aPolicy),
       mId(NS_AtomizeMainThread(aInit.mId)),
       mName(aInit.mName),
+      mVersion(aInit.mVersion),
       mType(NS_AtomizeMainThread(aInit.mType)),
       mManifestVersion(aInit.mManifestVersion),
       mExtensionPageCSP(aInit.mExtensionPageCSP),
+      mSandboxPageCSP(aInit.mSandboxPageCSP),
       mIsPrivileged(aInit.mIsPrivileged),
       mTemporarilyInstalled(aInit.mTemporarilyInstalled),
       mBackgroundWorkerScript(aInit.mBackgroundWorkerScript),
       mIgnoreQuarantine(aInit.mIsPrivileged || aInit.mIgnoreQuarantine),
+      mHasRecommendedState(aInit.mHasRecommendedState),
       mPermissions(new AtomSet(aInit.mPermissions)) {
   // In practice this is not necessary, but in tests where the uuid
   // passed in is not lowercased various tests can fail.
@@ -222,6 +247,17 @@ WebExtensionPolicyCore::WebExtensionPolicyCore(GlobalObject& aGlobal,
     }
   }
 
+  if (!aInit.mSandboxPages.IsNull()) {
+    if (!ParseGlobs(aGlobal, aInit.mSandboxPages.Value(),
+                    mSandboxPages.SetValue(), aRv, false)) {
+      return;
+    }
+  }
+
+  if (mSandboxPageCSP.IsVoid()) {
+    mSandboxPageCSP.AssignLiteral(DEFAULT_SANDBOX_CSP);
+  }
+
   if (mExtensionPageCSP.IsVoid()) {
     if (mManifestVersion < 3) {
       EPS().GetDefaultCSP(mExtensionPageCSP);
@@ -244,6 +280,14 @@ WebExtensionPolicyCore::WebExtensionPolicyCore(GlobalObject& aGlobal,
   if (NS_FAILED(rv)) {
     aRv.Throw(rv);
   }
+}
+
+bool WebExtensionPolicyCore::IsSandboxPage(nsIURI* aURI) const {
+  extensions::URLInfo urlInfo(aURI);
+  return aURI && !mSandboxPages.IsNull() &&
+         urlInfo.Scheme() == nsGkAtoms::moz_extension &&
+         MozExtensionHostname().Equals(urlInfo.Host()) &&
+         mSandboxPages.Value().Matches(urlInfo.FilePath());
 }
 
 bool WebExtensionPolicyCore::SourceMayAccessPath(
@@ -271,6 +315,17 @@ bool WebExtensionPolicyCore::SourceMayAccessPath(
   return false;
 }
 
+bool WebExtensionPolicyCore::FileSchemeAllowed() const {
+  if (!StaticPrefs::extensions_webextensions_fileSchemeAccess_requireOptIn()) {
+    // Before we required an opt-in to "internal:fileSchemeAccess", file access
+    // was automatically allowed if the host permissions allowed it.
+    return true;
+  }
+  // Only "internal:fileSchemeAccess" is checked here; most callers should also
+  // check for the presence of file: or <all_urls> host permissions as needed.
+  return HasPermission(nsGkAtoms::fileSchemeAllowedPermission);
+}
+
 bool WebExtensionPolicyCore::CanAccessURI(const URLInfo& aURI, bool aExplicit,
                                           bool aCheckRestricted,
                                           bool aAllowFilePermission) const {
@@ -281,6 +336,11 @@ bool WebExtensionPolicyCore::CanAccessURI(const URLInfo& aURI, bool aExplicit,
     return false;
   }
   if (!aAllowFilePermission && aURI.Scheme() == nsGkAtoms::file) {
+    // aAllowFilePermission defaults to false. If you call CanAccessURI with
+    // it set to true, make sure to check FileSchemeAllowed() if needed.
+    return false;
+  }
+  if (CheckGuarded(aURI).isSome()) {
     return false;
   }
 
@@ -298,6 +358,17 @@ bool WebExtensionPolicyCore::QuarantinedFromURI(const URLInfo& aURI) const {
 
 bool WebExtensionPolicyCore::PrivateBrowsingAllowed() const {
   return HasPermission(nsGkAtoms::privateBrowsingAllowedPermission);
+}
+
+Maybe<dom::ExtensionGuardSource> WebExtensionPolicyCore::CheckGuarded(
+    const URLInfo& aURI) const {
+  AutoReadLock lock(mLock);
+  for (const auto& guard : mGuardSets) {
+    if (guard->Denies(aURI)) {
+      return Some(guard->Source());
+    }
+  }
+  return Nothing();
 }
 
 /*****************************************************************************
@@ -468,6 +539,10 @@ void WebExtensionPolicy::SetIgnoreQuarantine(bool aIgnore) {
   mCore->SetIgnoreQuarantine(aIgnore);
 }
 
+void WebExtensionPolicy::SetHasRecommendedState(bool aHasRecommendedState) {
+  mCore->SetHasRecommendedState(aHasRecommendedState);
+}
+
 void WebExtensionPolicy::RegisterContentScript(
     WebExtensionContentScript& script, ErrorResult& aRv) {
   // Raise an "invalid argument" error if the script is not related to
@@ -504,6 +579,25 @@ void WebExtensionPolicy::SetAllowedOrigins(MatchPatternSet& aAllowedOrigins) {
   AutoWriteLock lock(mCore->mLock);
   mHostPermissions = &aAllowedOrigins;
   mCore->mHostPermissions = aAllowedOrigins.Core();
+}
+
+void WebExtensionPolicy::GetGuardSets(
+    nsTArray<RefPtr<ExtensionGuardSet>>& aResult) const {
+  aResult.Assign(mGuardSets);
+}
+
+void WebExtensionPolicy::SetGuardSets(
+    const nsTArray<OwningNonNull<ExtensionGuardSet>>& aLists) {
+  nsTArray<RefPtr<ExtensionGuardSetCore>> cores(aLists.Length());
+  mGuardSets.ClearAndRetainStorage();
+  mGuardSets.SetCapacity(aLists.Length());
+  for (const auto& guard : aLists) {
+    cores.AppendElement(guard->Core());
+    mGuardSets.AppendElement(&*guard);
+  }
+  AutoWriteLock lock(mCore->mLock);
+  mCore->mGuardSets = std::move(cores);
+  WebExtensionPolicy_Binding::ClearCachedGuardSetsValue(this);
 }
 
 void WebExtensionPolicy::InjectContentScripts(ErrorResult& aRv) {
@@ -656,7 +750,9 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(WebExtensionPolicy)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mBrowsingContextGroup)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mLocalizeCallback)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mHostPermissions)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mGuardSets)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mContentScripts)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mReadyPromise)
   NS_IMPL_CYCLE_COLLECTION_UNLINK_PRESERVED_WRAPPER
   AssertIsOnMainThread();
   tmp->mCore->ClearPolicyWeakRef();
@@ -666,7 +762,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(WebExtensionPolicy)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBrowsingContextGroup)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocalizeCallback)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mHostPermissions)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGuardSets)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mContentScripts)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mReadyPromise)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(WebExtensionPolicy)
@@ -895,11 +993,12 @@ bool MozDocumentMatcher::Matches(const DocInfo& aDoc,
     }
   }
 
-  return MatchesURI(urlinfo, aIgnorePermissions);
+  return MatchesURI(urlinfo, aIgnorePermissions, Some(aDoc));
 }
 
 bool MozDocumentMatcher::MatchesURI(const URLInfo& aURL,
-                                    bool aIgnorePermissions) const {
+                                    bool aIgnorePermissions,
+                                    const Maybe<DocInfo>& aDoc) const {
   MOZ_ASSERT((!mRestricted && !mCheckPermissions) || mExtension);
 
   if (MOZ_LIKELY(!mIsUserScript)) {
@@ -942,12 +1041,77 @@ bool MozDocumentMatcher::MatchesURI(const URLInfo& aURL,
     return false;
   }
 
-  if (mCheckPermissions && !aIgnorePermissions &&
-      !mExtension->CanAccessURI(aURL, false, false, true)) {
+  if (mCheckPermissions && !aIgnorePermissions) {
+    // CanAccessURI() also calls CheckGuarded() internally.
+    if (!mExtension->CanAccessURI(aURL, false, false, true)) {
+      return false;
+    }
+  } else if (mExtension && !mExtension->CheckGuarded(aURL).IsNull()) {
+    // Guards must be enforced regardless of mCheckPermissions.
     return false;
   }
 
+  if (aURL.Scheme() == nsGkAtoms::file && mExtension &&
+      !mExtension->FileSchemeAllowed()) {
+    // Although CanAccessURI above accepts an aAllowFilePermission parameter,
+    // the logic is conditional on mCheckPermissions. We want the file access
+    // to be enforced unconditionally, so check it here instead.
+    return false;
+  }
+
+  if (aURL.Scheme() == nsGkAtoms::moz_extension) {
+    bool allowed = StaticPrefs::
+        extensions_webextensions_allow_executeScript_in_moz_extension();
+
+    // Logging the deprecation warning and collecting telemetry if
+    // the call was originated from MozDocumentMatcher::Matches
+    // (and skip it if the method MatchesURI was called directly
+    // without passing the related DocInfo instance or if the
+    // innerWindowID could not be retrieved).
+    if (aDoc.isSome()) {
+      uint64_t innerWindowID;
+      nsresult rv = aDoc.value().GetInnerWindowID(&innerWindowID);
+      if (NS_SUCCEEDED(rv)) {
+        LogMozExtExecuteScriptDeprecationWarning(aURL, innerWindowID, allowed);
+
+        // Record telemetry events when a moz-extension Window global
+        // is matching a content script in addition to log the deprecation
+        // warning in the webconsole.
+        glean::extensions::match_moz_extension_document.Record(
+            Some(glean::extensions::MatchMozExtensionDocumentExtra(
+                Some(nsAtomCString(mExtension->Id()).get()),
+                Some(aDoc.value().IsTopLevel()), Some(!allowed))));
+      }
+    }
+
+    return allowed;
+  }
+
   return true;
+}
+
+void MozDocumentMatcher::LogMozExtExecuteScriptDeprecationWarning(
+    const URLInfo& aURL, uint64_t aInnerWindowID, bool aAllowed) const {
+  nsCOMPtr<nsIConsoleService> console(
+      do_GetService(NS_CONSOLESERVICE_CONTRACTID));
+  NS_ENSURE_TRUE_VOID(console);
+
+  nsCOMPtr<nsIScriptError> error(do_CreateInstance(NS_SCRIPTERROR_CONTRACTID));
+  NS_ENSURE_TRUE_VOID(error);
+
+  nsPrintfCString warnMsg(
+      "Content Script execution in moz-extension document "
+      "has been deprecated %s (Extension ID: %s).",
+      aAllowed ? "and will be removed in Firefox 152"
+               : "and it has been blocked",
+      nsAtomCString(mExtension->Id()).get());
+
+  nsresult rv = error->InitWithWindowID(
+      NS_ConvertUTF8toUTF16(warnMsg), aURL.CSpec(), 0, 0,
+      nsIScriptError::warningFlag, "content javascript"_ns, aInnerWindowID,
+      true /* from chrome context */);
+  NS_ENSURE_TRUE_VOID(NS_SUCCEEDED(rv));
+  console->LogMessage(error);
 }
 
 bool MozDocumentMatcher::MatchesWindowGlobal(WindowGlobalChild& aWindow,
@@ -1186,6 +1350,17 @@ uint64_t DocInfo::FrameID() const {
     }
   }
   return mFrameID.ref();
+}
+
+nsresult DocInfo::GetInnerWindowID(uint64_t* aInnerWindowID) const {
+  // This method is currently only going to retrieve the innerWindowID
+  // for non-preloading scripts and a Window global is actually available.
+  nsPIDOMWindowOuter* piWindow = GetWindow();
+  NS_ENSURE_TRUE(piWindow, NS_ERROR_FAILURE);
+  RefPtr<dom::Document> docNode = piWindow->GetDoc();
+  NS_ENSURE_TRUE(docNode, NS_ERROR_FAILURE);
+  *aInnerWindowID = docNode->InnerWindowID();
+  return NS_OK;
 }
 
 nsIPrincipal* DocInfo::Principal() const {

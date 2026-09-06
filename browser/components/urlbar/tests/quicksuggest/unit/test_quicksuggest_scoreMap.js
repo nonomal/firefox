@@ -123,6 +123,11 @@ const MERINO_SPONSORED_SUGGESTION = {
   impression_url: "https://example.com/impression",
   advertiser: "TestAdvertiser",
   icon: "1234",
+  custom_details: {
+    amp: {
+      suggestion_id: "amp-suggestion-id",
+    },
+  },
 };
 
 const MERINO_ADDON_SUGGESTION = {
@@ -670,8 +675,8 @@ function makeExpectedAddonResult({ suggestion, source, provider }) {
 
 function makeExpectedDefaultMerinoResult({ suggestion }) {
   return {
-    type: UrlbarUtils.RESULT_TYPE.URL,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.URL,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     heuristic: false,
     payload: {
       source: "merino",
@@ -680,7 +685,6 @@ function makeExpectedDefaultMerinoResult({ suggestion }) {
       isSponsored: !!suggestion.is_sponsored,
       title: suggestion.title,
       url: suggestion.url,
-      displayUrl: suggestion.url.replace(/^https:\/\//, ""),
       icon: suggestion.icon,
       descriptionL10n: suggestion.is_sponsored
         ? { id: "urlbar-result-action-sponsored" }

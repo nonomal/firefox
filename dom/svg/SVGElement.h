@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,15 +10,16 @@
   It implements all the common DOM interfaces and handles attributes.
 */
 
+#include <memory>
+
 #include "NonCustomCSSPropertyId.h"
 #include "gfxMatrix.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/SVGAnimatedClass.h"
-#include "mozilla/SVGContentUtils.h"
-#include "mozilla/UniquePtr.h"
 #include "mozilla/dom/DOMRect.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/SVGLength.h"
 #include "mozilla/gfx/MatrixFwd.h"
 #include "nsChangeHint.h"
 #include "nsCycleCollectionParticipant.h"
@@ -33,7 +32,7 @@
   {0x70db954d, 0xe452, 0x4be3, {0x82, 0xaa, 0xf5, 0x4a, 0x51, 0xcf, 0x78, 0x90}}
 
 nsresult NS_NewSVGElement(mozilla::dom::Element** aResult,
-                          already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+                          already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
 class mozAutoDocUpdate;
 
@@ -71,10 +70,10 @@ using SVGElementBase = nsStyledElement;
 class SVGElement : public SVGElementBase  // nsIContent
 {
  protected:
-  explicit SVGElement(already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+  explicit SVGElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
   friend nsresult(
       ::NS_NewSVGElement(mozilla::dom::Element** aResult,
-                         already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo));
+                         already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo));
   nsresult Init();
   virtual ~SVGElement();
 
@@ -93,6 +92,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 
   NS_IMETHOD QueryInterface(REFNSIID aIID, void** aInstancePtr) override;
 
+  void WillAnimateClass();
   void DidAnimateClass();
 
   void SetNonce(const nsAString& aNonce) {
@@ -120,7 +120,7 @@ class SVGElement : public SVGElementBase  // nsIContent
    */
   void NodeInfoChanged(Document* aOldDoc) override;
 
-  NS_IMETHOD_(bool) IsAttributeMapped(const nsAtom* aAttribute) const override;
+  bool IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const override;
   void UpdateMappedDeclarationBlock();
 
   NS_IMPL_FROMNODE(SVGElement, kNameSpaceID_SVG)
@@ -269,16 +269,6 @@ class SVGElement : public SVGElementBase  // nsIContent
                         info.mInfos[aAttrEnum].mName);
   }
 
-  enum {
-    /**
-     * Flag to indicate to GetAnimatedXxx() methods that the object being
-     * requested should be allocated if it hasn't already been allocated, and
-     * that the method should not return null. Only applicable to methods that
-     * need to allocate the object that they return.
-     */
-    DO_ALLOCATE = 0x1
-  };
-
   SVGAnimatedLength* GetAnimatedLength(uint8_t aAttrEnum);
   SVGAnimatedLength* GetAnimatedLength(const nsAtom* aAttrName);
   void GetAnimatedLengthValues(float* aFirst, ...);
@@ -289,32 +279,22 @@ class SVGElement : public SVGElementBase  // nsIContent
   void GetAnimatedLengthListValues(SVGUserUnitList* aFirst, ...);
   SVGAnimatedLengthList* GetAnimatedLengthList(uint8_t aAttrEnum);
   virtual SVGAnimatedPointList* GetAnimatedPointList() { return nullptr; }
-  virtual SVGAnimatedPathSegList* GetAnimPathSegList() {
-    // DOM interface 'SVGAnimatedPathData' (*inherited* by SVGPathElement)
-    // has a member called 'animatedPathSegList' member, so we have a shorter
-    // name so we don't get hidden by the GetAnimatedPathSegList declared by
-    // NS_DECL_NSIDOMSVGANIMATEDPATHDATA.
-    return nullptr;
-  }
+  virtual SVGAnimatedPathSegList* GetAnimatedPathSegList() { return nullptr; }
   /**
    * Get the SVGAnimatedTransformList for this element.
    *
    * Despite the fact that animated transform lists are used for a variety of
    * attributes, no SVG element uses more than one.
-   *
-   * It's relatively uncommon for elements to have their transform attribute
-   * set, so to save memory the SVGAnimatedTransformList is not allocated
-   * until the attribute is set/animated or its DOM wrapper is created. Callers
-   * that require the SVGAnimatedTransformList to be allocated and for this
-   * method to return non-null must pass the DO_ALLOCATE flag.
    */
-  virtual SVGAnimatedTransformList* GetAnimatedTransformList(
-      uint32_t aFlags = 0) {
+  virtual SVGAnimatedTransformList* GetExistingAnimatedTransformList() const {
+    return nullptr;
+  }
+  virtual SVGAnimatedTransformList* GetOrCreateAnimatedTransformList() {
     return nullptr;
   }
 
-  mozilla::UniquePtr<SMILAttr> GetAnimatedAttr(int32_t aNamespaceID,
-                                               nsAtom* aName) override;
+  std::unique_ptr<SMILAttr> GetAnimatedAttr(int32_t aNamespaceID,
+                                            nsAtom* aName) override;
   void AnimationNeedsResample();
   void FlushAnimations();
 
@@ -325,9 +305,6 @@ class SVGElement : public SVGElementBase  // nsIContent
   virtual nsStaticAtom* GetPathDataAttrName() const { return nullptr; }
   virtual nsStaticAtom* GetTransformListAttrName() const { return nullptr; }
   const nsAttrValue* GetAnimatedClassName() const {
-    if (!mClassAttribute.IsAnimated()) {
-      return nullptr;
-    }
     return mClassAnimAttr.get();
   }
 
@@ -381,7 +358,7 @@ class SVGElement : public SVGElementBase  // nsIContent
     nsStaticAtom* const mName;
     const float mDefaultValue;
     const uint8_t mDefaultUnitType;
-    const uint8_t mCtxType;
+    const SVGLength::Axis mAxis;
   };
 
   template <typename Value, typename InfoValue>
@@ -407,11 +384,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 
   using NumberAttributesInfo = AttributesInfo<SVGAnimatedNumber, NumberInfo>;
 
-  struct NumberPairInfo {
-    nsStaticAtom* const mName;
-    const float mDefaultValue1;
-    const float mDefaultValue2;
-  };
+  using NumberPairInfo = NumberInfo;
 
   using NumberPairAttributesInfo =
       AttributesInfo<SVGAnimatedNumberPair, NumberPairInfo>;
@@ -423,11 +396,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 
   using IntegerAttributesInfo = AttributesInfo<SVGAnimatedInteger, IntegerInfo>;
 
-  struct IntegerPairInfo {
-    nsStaticAtom* const mName;
-    const int32_t mDefaultValue1;
-    const int32_t mDefaultValue2;
-  };
+  using IntegerPairInfo = IntegerInfo;
 
   using IntegerPairAttributesInfo =
       AttributesInfo<SVGAnimatedIntegerPair, IntegerPairInfo>;
@@ -458,7 +427,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 
   struct LengthListInfo {
     nsStaticAtom* const mName;
-    const uint8_t mAxis;
+    const SVGLength::Axis mAxis;
     /**
      * Flag to indicate whether appending zeros to the end of the list would
      * change the rendering of the SVG for the attribute in question. For x and
@@ -515,7 +484,7 @@ class SVGElement : public SVGElementBase  // nsIContent
   void UnsetAttrInternal(int32_t aNameSpaceID, nsAtom* aName, bool aNotify);
 
   SVGAnimatedClass mClassAttribute;
-  UniquePtr<nsAttrValue> mClassAnimAttr;
+  std::unique_ptr<nsAttrValue> mClassAnimAttr;
 };
 
 /**
@@ -524,7 +493,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 #define NS_IMPL_NS_NEW_SVG_ELEMENT(_elementName)                               \
   nsresult NS_NewSVG##_elementName##Element(                                   \
       nsIContent** aResult,                                                    \
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo) {                  \
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo) {                    \
     RefPtr<mozilla::dom::NodeInfo> nodeInfo(aNodeInfo);                        \
     auto* nim = nodeInfo->NodeInfoManager();                                   \
     RefPtr<mozilla::dom::SVG##_elementName##Element> it =                      \
@@ -544,7 +513,7 @@ class SVGElement : public SVGElementBase  // nsIContent
 #define NS_IMPL_NS_NEW_SVG_ELEMENT_CHECK_PARSER(_elementName)                 \
   nsresult NS_NewSVG##_elementName##Element(                                  \
       nsIContent** aResult,                                                   \
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo,                   \
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,                     \
       mozilla::dom::FromParser aFromParser) {                                 \
     RefPtr<mozilla::dom::NodeInfo> nodeInfo(aNodeInfo);                       \
     auto* nim = nodeInfo->NodeInfoManager();                                  \

@@ -1,6 +1,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// @ts-nocheck - TODO - Remove this to type check this file.
+
+/**
+ * @import { TypedArray } from "../ml.d.ts"
+ */
+
 const lazy = {};
 const IN_WORKER = typeof importScripts !== "undefined";
 const ES_MODULES_OPTIONS = IN_WORKER ? { global: "current" } : {};
@@ -9,6 +16,9 @@ ChromeUtils.defineESModuleGetters(
   lazy,
   {
     BLOCK_WORDS_ENCODED: "chrome://global/content/ml/BlockWords.sys.mjs",
+    ModelHub: "chrome://global/content/ml/ModelHub.sys.mjs",
+    MLEngine: "moz-src:///toolkit/components/ml/actors/MLEngineParent.sys.mjs",
+    EngineProcess: "chrome://global/content/ml/EngineProcess.sys.mjs",
     RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
     TranslationsParent: "resource://gre/actors/TranslationsParent.sys.mjs",
     FEATURES: "chrome://global/content/ml/EngineProcess.sys.mjs",
@@ -1077,6 +1087,38 @@ export function featureEngineIdToFluentId(engineId) {
 }
 
 /**
+ * Looks up display info (a human-readable name and a homepage URL) for one
+ * of a downloaded model's files, from the feature registered for one of
+ * engineIds. Features register their file display info via
+ * FEATURES[...].fileDisplayInfoModule, a module whose default export maps
+ * file name to {name, hfUrl}.
+ *
+ * @param {Array<string>} [engineIds] A model with no recorded engineIds has no
+ *   feature to look up, and gets no display info.
+ * @param {Array<string>} files
+ * @returns {Promise<{name: string, hfUrl: string}|null>}
+ */
+export async function fileDisplayInfoForEngineIds(engineIds, files) {
+  for (const config of Object.values(lazy.FEATURES)) {
+    if (
+      !config.fileDisplayInfoModule ||
+      !engineIds?.includes(config.engineId)
+    ) {
+      continue;
+    }
+    const { default: info } = await ChromeUtils.importESModule(
+      config.fileDisplayInfoModule
+    );
+    for (const file of files) {
+      if (info[file]) {
+        return info[file];
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Generates a random uuid to use where Services.uuid is not available,
  * for instance pipelines
  *
@@ -1616,4 +1658,103 @@ export function parseNpy(buffer) {
   }
 
   return { data: typedArray, shape, dtype };
+}
+
+/**
+ * Resolves with all values if all promises succeed, otherwise rejects with all errors.
+ *
+ * @param {Promise[]} promises Promises to wait for.
+ * @returns {Promise<unknown[]>} Fulfilled values in input order.
+ * @throws {AggregateError|Error} If one or more promises are rejected.
+ */
+export async function allSettledOrReject(promises) {
+  const results = await Promise.allSettled(promises);
+
+  const errors = results
+    .filter(r => r.status === "rejected")
+    .map(r => r.reason);
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+
+  if (errors.length) {
+    throw new AggregateError(errors, errors.map(e => e.message).join("; "));
+  }
+
+  return results.map(r => r.value);
+}
+
+/**
+ * Utilities for uninstalling ML features or removing all ML-related data.
+ *
+ * Provides static methods to perform targeted or full uninstalls, with
+ * optional reuse of a shared ModelHub instance.
+ */
+export class MLUninstallService {
+  /**
+   * Lazily created default ModelHub used when no hub is provided.
+   *
+   * @type {ModelHub|null}
+   * @private
+   */
+  static #defaultHub = null;
+
+  /**
+   * Get or create the default ModelHub instance.
+   *
+   * @returns {ModelHub}
+   * @private
+   */
+  static #getDefaultHub() {
+    return (this.#defaultHub ??= new lazy.ModelHub());
+  }
+
+  /**
+   * Uninstall a feature by removing all engine instances it uses and deleting
+   * all associated files for those engines.
+   *
+   * The caller passes all engine IDs that belong to the feature being removed.
+   *
+   * @param {object} params
+   * @param {string[]} params.engineIds Engine IDs used by the feature to uninstall.
+   * @param {string} [params.actor="other"] Identifier indicating who/what initiated the uninstall.
+   * @param {ModelHub} [params.hub] ModelHub instance to use. Use the default if not provided.
+   * @returns {Promise<void>}
+   * @throws {Error} If removing an engine instance or deleting its associated files fails.
+   */
+  static async uninstall({ engineIds, actor = "other", hub }) {
+    const modelHub = hub ?? this.#getDefaultHub();
+
+    const promises = [];
+
+    for (const engineId of engineIds) {
+      promises.push(
+        lazy.MLEngine.removeInstance(engineId).then(() =>
+          modelHub.deleteFilesByEngine({ engineId, deletedBy: actor })
+        )
+      );
+    }
+
+    await allSettledOrReject(promises);
+  }
+
+  /**
+   * Completely remove the ML engine and all associated data.
+   *
+   * This operation destroys all ML-related engine instances and
+   * permanently deletes all cached model data.
+   *
+   * @param {object} params
+   * @param {ModelHub} [params.hub] ModelHub instance to use. Use the default if not provided.
+   *
+   * @throws {Error} If any step of the uninstall process fails.
+   */
+  static async uninstallAll({ hub } = {}) {
+    const modelHub = hub ?? this.#getDefaultHub();
+
+    await lazy.EngineProcess.destroyMLEngine();
+    await lazy.EngineProcess.destroyTranslationsEngine();
+    await modelHub.purgeDatabase();
+  }
 }

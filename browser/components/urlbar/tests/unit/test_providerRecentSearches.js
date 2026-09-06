@@ -13,6 +13,7 @@ let EXPIRE_PREF = "recentsearches.expirationMs";
 let SUGGESTS_PREF = "suggest.recentsearches";
 
 let TEST_SEARCHES = ["Bob Vylan", "Glasgow Weather", "Joy Formidable"];
+let SEARCH_BAR_SAPS = ["searchbar", "newtab_searchbar"];
 let defaultEngine;
 
 function makeRecentSearchResult(context, engine, suggestion) {
@@ -38,17 +39,17 @@ async function addSearches(searches = TEST_SEARCHES) {
 
 add_setup(async () => {
   defaultEngine = await addTestSuggestionsEngine();
-  await Services.search.setDefault(
+  await SearchService.setDefault(
     defaultEngine,
-    Ci.nsISearchService.CHANGE_REASON_ADDON_INSTALL
+    SearchService.CHANGE_REASON.ADDON_INSTALL
   );
 
-  let oldCurrentEngine = Services.search.defaultEngine;
+  let oldCurrentEngine = SearchService.defaultEngine;
 
   registerCleanupFunction(async () => {
-    await Services.search.setDefault(
+    await SearchService.setDefault(
       oldCurrentEngine,
-      Ci.nsISearchService.CHANGE_REASON_ADDON_INSTALL
+      SearchService.CHANGE_REASON.ADDON_INSTALL
     );
     UrlbarPrefs.clear(ENABLED_PREF);
     UrlbarPrefs.clear(SUGGESTS_PREF);
@@ -73,11 +74,25 @@ add_task(async function test_enabled() {
 add_task(async function test_disabled() {
   UrlbarPrefs.set(ENABLED_PREF, false);
   UrlbarPrefs.set(SUGGESTS_PREF, false);
+  info("Check whether prefs disable it in urlbar");
   await addSearches();
   await check_results({
     context: createContext("", { isPrivate: false }),
     matches: [],
   });
+
+  for (let sapName of SEARCH_BAR_SAPS) {
+    info(`Check whether prefs don't disable it in ${sapName}`);
+    let context = createContext("", { isPrivate: false, sapName });
+    await check_results({
+      context,
+      matches: [
+        makeRecentSearchResult(context, defaultEngine, "Joy Formidable"),
+        makeRecentSearchResult(context, defaultEngine, "Glasgow Weather"),
+        makeRecentSearchResult(context, defaultEngine, "Bob Vylan"),
+      ],
+    });
+  }
 });
 
 add_task(async function test_most_recent_shown() {
@@ -99,6 +114,35 @@ add_task(async function test_most_recent_shown() {
   await UrlbarTestUtils.formHistory.clear();
 });
 
+add_task(async function test_most_recent_shown_searchbar() {
+  UrlbarPrefs.set(ENABLED_PREF, true);
+  UrlbarPrefs.set(SUGGESTS_PREF, true);
+
+  info(
+    "Check that browser.urlbar.recentsearches.maxResults doesn't affect a search bar"
+  );
+  for (let sapName of SEARCH_BAR_SAPS) {
+    await addSearches(Array.from(Array(12).keys()).map(i => `Search ${i}`));
+    let context = createContext("", { isPrivate: false, sapName });
+    await check_results({
+      context,
+      matches: [
+        makeRecentSearchResult(context, defaultEngine, "Search 11"),
+        makeRecentSearchResult(context, defaultEngine, "Search 10"),
+        makeRecentSearchResult(context, defaultEngine, "Search 9"),
+        makeRecentSearchResult(context, defaultEngine, "Search 8"),
+        makeRecentSearchResult(context, defaultEngine, "Search 7"),
+        makeRecentSearchResult(context, defaultEngine, "Search 6"),
+        makeRecentSearchResult(context, defaultEngine, "Search 5"),
+        makeRecentSearchResult(context, defaultEngine, "Search 4"),
+        makeRecentSearchResult(context, defaultEngine, "Search 3"),
+        makeRecentSearchResult(context, defaultEngine, "Search 2"),
+      ],
+    });
+    await UrlbarTestUtils.formHistory.clear();
+  }
+});
+
 add_task(async function test_per_engine() {
   UrlbarPrefs.set(ENABLED_PREF, true);
   UrlbarPrefs.set(SUGGESTS_PREF, true);
@@ -109,16 +153,15 @@ add_task(async function test_per_engine() {
   defaultEngine = await addTestSuggestionsEngine(null, {
     name: "NewTestEngine",
   });
-  await Services.search.setDefault(
+  await SearchService.setDefault(
     defaultEngine,
-    Ci.nsISearchService.CHANGE_REASON_ADDON_INSTALL
+    SearchService.CHANGE_REASON.ADDON_INSTALL
   );
 
   await addSearches();
 
   let context = createContext("", {
     isPrivate: false,
-    formHistoryName: "test",
   });
   await check_results({
     context,
@@ -129,10 +172,10 @@ add_task(async function test_per_engine() {
     ],
   });
 
-  defaultEngine = oldEngine;
-  await Services.search.setDefault(
+  [defaultEngine, oldEngine] = [oldEngine, defaultEngine];
+  await SearchService.setDefault(
     defaultEngine,
-    Ci.nsISearchService.CHANGE_REASON_ADDON_INSTALL
+    SearchService.CHANGE_REASON.ADDON_INSTALL
   );
 
   info("We only show searches made since last default engine change");
@@ -140,6 +183,33 @@ add_task(async function test_per_engine() {
   await check_results({
     context,
     matches: [],
+  });
+  info("We show recent searches of all engines in the searchbar");
+  context = createContext("", {
+    isPrivate: false,
+    sapName: "searchbar",
+  });
+  await check_results({
+    context,
+    matches: [
+      makeRecentSearchResult(context, defaultEngine, "Joy Formidable"),
+      makeRecentSearchResult(context, defaultEngine, "Glasgow Weather"),
+      makeRecentSearchResult(context, defaultEngine, "Bob Vylan"),
+    ],
+  });
+  info("Use engine from searchmode in searchbar");
+  context = createContext("", {
+    isPrivate: false,
+    sapName: "searchbar",
+    searchMode: { engineName: oldEngine.name },
+  });
+  await check_results({
+    context,
+    matches: [
+      makeRecentSearchResult(context, oldEngine, "Joy Formidable"),
+      makeRecentSearchResult(context, oldEngine, "Glasgow Weather"),
+      makeRecentSearchResult(context, oldEngine, "Bob Vylan"),
+    ],
   });
   await UrlbarTestUtils.formHistory.clear();
 });
@@ -166,5 +236,15 @@ add_task(async function test_expiry() {
   await check_results({
     context: createContext("", { isPrivate: false }),
     matches: [],
+  });
+
+  // On the searchbar, EXPIRE_PREF should be ignored.
+  await check_results({
+    context: createContext("", { isPrivate: false, sapName: "searchbar" }),
+    matches: [
+      makeRecentSearchResult(context, defaultEngine, "Joy Formidable"),
+      makeRecentSearchResult(context, defaultEngine, "Glasgow Weather"),
+      makeRecentSearchResult(context, defaultEngine, "Bob Vylan"),
+    ],
   });
 });

@@ -23,12 +23,13 @@
 #include "modules/video_capture/video_capture_defines.h"
 #include "modules/video_capture/video_capture_impl.h"
 #include "rtc_base/thread_annotations.h"
+#include "system_wrappers/include/clock.h"
 
 namespace webrtc {
 namespace videocapturemodule {
 class VideoCaptureModulePipeWire : public VideoCaptureImpl {
  public:
-  explicit VideoCaptureModulePipeWire(VideoCaptureOptions* options);
+  VideoCaptureModulePipeWire(Clock* clock, VideoCaptureOptions* options);
   ~VideoCaptureModulePipeWire() override;
   int32_t Init(const char* deviceUniqueId);
   int32_t StartCapture(const VideoCaptureCapability& capability) override;
@@ -62,7 +63,7 @@ class VideoCaptureModulePipeWire : public VideoCaptureImpl {
       RTC_GUARDED_BY(capture_checker_);
 
   struct pw_stream* stream_ RTC_GUARDED_BY(capture_checker_) = nullptr;
-  struct spa_hook stream_listener_ RTC_GUARDED_BY(capture_checker_);
+  struct spa_hook stream_listener_ RTC_GUARDED_BY(api_checker_) = {};
 };
 }  // namespace videocapturemodule
 }  // namespace webrtc

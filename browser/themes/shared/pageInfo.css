@@ -85,7 +85,7 @@
     color: FieldText;
   }
 
-  #viewGroup > radio[selected="true"] {
+  #viewGroup > radio[selected] {
     background-color: SelectedItem;
     color: SelectedItemText;
   }
@@ -97,16 +97,16 @@
   }
 
   #viewGroup > radio:hover {
-    background-color: #e0e8f6;
-    color: black;
+    background-color: light-dark(#e0e8f6, var(--button-background-color-hover));
+    color: light-dark(black, var(--button-text-color-hover));
   }
 
-  #viewGroup > radio[selected="true"] {
-    background-color: #c1d2ee;
-    color: black;
+  #viewGroup > radio[selected] {
+    background-color: light-dark(#c1d2ee, var(--button-background-color-active));
+    color: light-dark(black, var(--button-text-color-active));
   }
 
-  #viewGroup > radio:is(:hover, [selected="true"]) .radio-icon {
+  #viewGroup > radio:is(:hover, [selected]) .radio-icon {
     background-position-y: -32px;
   }
 }
@@ -156,7 +156,7 @@ html|input.header {
 
 #imagecontainerbox {
   margin: 0.5em;
-  background: white;
+  background: Field;
   overflow: auto;
   border: 1px solid ThreeDLightShadow;
 }
@@ -169,6 +169,10 @@ html|input:disabled {
   .help-button {
     appearance: auto;
     -moz-default-appearance: -moz-mac-help-button;
+
+    .button-text {
+      visibility: hidden;
+    }
   }
 }
 

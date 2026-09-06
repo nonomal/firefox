@@ -1,5 +1,3 @@
-/* -*- Mode: JavaScript; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,7 +16,7 @@ async function waitForPasteContextMenu() {
     pasteButton,
     { attributeFilter: ["disabled"] },
     () => !pasteButton.disabled,
-    "Wait for paste button enabled"
+    { msg: "Wait for paste button enabled" }
   );
 }
 
@@ -366,15 +364,21 @@ if (
         set: [["middlemouse.paste", true]],
       });
 
+      // We intentionally turn off this a11y check, because the following click
+      // is send on an arbitrary web content that is not expected to be tested
+      // by itself with the browser mochitests, therefore this rule check shall
+      // be ignored by a11y-checks suite.
+      AccessibilityUtils.setEnv({
+        mustHaveAccessibleRule: false,
+      });
       await SpecialPowers.spawn(browser, [], async () => {
-        EventUtils.synthesizeMouse(
+        EventUtils.synthesizeMouseAtCenter(
           content.document.documentElement,
-          1,
-          1,
           { button: 1 },
           content.window
         );
       });
+      AccessibilityUtils.resetEnv();
     },
     true,
     "middle click"

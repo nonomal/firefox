@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -120,6 +118,10 @@ static void SendPing(void* aClosure, nsIContent* aContent, nsIURI* aURI,
     return;
   }
 
+  if (nsCOMPtr<nsITimedChannel> timedChan = do_QueryInterface(chan)) {
+    timedChan->SetInitiatorType(u"ping"_ns);
+  }
+
   // This is needed in order for 3rd-party cookie blocking to work.
   nsCOMPtr<nsIHttpChannelInternal> httpInternal = do_QueryInterface(httpChan);
   nsresult rv;
@@ -204,7 +206,7 @@ static void SendPing(void* aClosure, nsIContent* aContent, nsIURI* aURI,
   }
 
   uploadChan->ExplicitSetUploadStream(uploadStream, "text/ping"_ns,
-                                      uploadData.Length(), "POST"_ns, false);
+                                      uploadData.Length(), "POST"_ns);
 
   // The channel needs to have a loadgroup associated with it, so that we can
   // cancel the channel and any redirected channels it may create.
@@ -216,7 +218,7 @@ static void SendPing(void* aClosure, nsIContent* aContent, nsIURI* aURI,
   loadGroup->SetNotificationCallbacks(callbacks);
   chan->SetLoadGroup(loadGroup);
 
-  RefPtr<nsPingListener> pingListener = new nsPingListener();
+  RefPtr pingListener = MakeRefPtr<nsPingListener>();
   chan->AsyncOpen(pingListener);
 
   // Even if AsyncOpen failed, we still count this as a successful ping.  It's
@@ -247,8 +249,9 @@ static void ForEachPing(nsIContent* aContent, ForEachPingCallback aCallback,
   //       implemented an interface that exposed an enumeration of nsIURIs.
 
   // Make sure we are dealing with either an <A> or <AREA> element in the HTML
-  // or XHTML namespace.
-  if (!aContent->IsAnyOfHTMLElements(nsGkAtoms::a, nsGkAtoms::area)) {
+  // or XHTML namespace, or an <a> element in the SVG namespace.
+  if (!aContent->IsAnyOfHTMLElements(nsGkAtoms::a, nsGkAtoms::area) &&
+      !aContent->IsSVGElement(nsGkAtoms::a)) {
     return;
   }
 

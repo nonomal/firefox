@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::derives::*;
 use crate::values::AtomIdent;
 use crate::Atom;
 
@@ -84,7 +85,7 @@ pub fn parse_part_mapping(input: &str) -> Option<Mapping<'_>> {
 }
 
 /// <https://drafts.csswg.org/css-shadow-parts/#parsing-mapping-list>
-fn parse_mapping_list(input: &str) -> impl Iterator<Item = Mapping> {
+fn parse_mapping_list(input: &str) -> impl Iterator<Item = Mapping<'_>> {
     // Step 1. Let input be the string being parsed.
     // Step 2. Split the string input on commas. Let unparsed mappings be the resulting list of strings.
     let unparsed_mappings = input.split(',');
@@ -191,7 +192,7 @@ mod tests {
 
     #[test]
     fn parse_valid_mapping_list() {
-        let mut mappings = parse_mapping_list("foo: bar, totally-invalid-mapping,,");
+        let mut mappings = parse_mapping_list("foo: bar, totally-invalid-mapping:,,");
 
         // "foo: bar" is a valid mapping
         assert_eq!(
@@ -201,6 +202,6 @@ mod tests {
         );
         // "totally-invalid-mapping" is not a valid mapping and should be ignored
         // "" is not valid (and consists of nothing but whitespace), so it should be ignored
-        assert!(mappings.next().is_none(), "No more mappings should exist");
+        assert_eq!(mappings.next(), None, "No more mappings should exist");
     }
 }

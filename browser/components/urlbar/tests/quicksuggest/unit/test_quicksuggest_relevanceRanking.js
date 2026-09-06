@@ -58,6 +58,11 @@ const MERINO_SUGGESTIONS = [
     is_sponsored: true,
     categories: [1], // Animals
     score: 0.3,
+    custom_details: {
+      amp: {
+        suggestion_id: "amp-suggestion-id",
+      },
+    },
   },
   {
     title: "Wikipedia Suggestion",
@@ -376,7 +381,8 @@ async function doOfflineTest({ mode, expectedResultArgs }) {
 }
 
 async function applyRanking(suggestions) {
-  let quickSuggestProviderInstance = UrlbarProvidersManager.getProvider(
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
+  let quickSuggestProviderInstance = providersManager.getProvider(
     UrlbarProviderQuickSuggest.name
   );
   for (let s of suggestions) {
@@ -397,6 +403,7 @@ function mockRustAmpSuggestion({ keyword, url, title, categories }) {
     clickUrl: suggestion.click_url,
     blockId: suggestion.id,
     iabCategory: suggestion.iab_category,
+    suggestionId: suggestion.suggestion_id,
     icon: null,
     fullKeyword: keyword,
     source: "rust",

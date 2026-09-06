@@ -1,38 +1,39 @@
-/* -*- Mode: C++; tab-width: 40; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "Theme.h"
-#include <utility>
-#include "ThemeCocoa.h"
 
-#include "ThemeDrawing.h"
-#include "Units.h"
-#include "mozilla/ClearOnShutdown.h"
-#include "mozilla/dom/Document.h"
-#include "mozilla/dom/HTMLMeterElement.h"
-#include "mozilla/dom/HTMLProgressElement.h"
-#include "mozilla/gfx/Rect.h"
-#include "mozilla/gfx/Types.h"
-#include "mozilla/gfx/Filters.h"
-#include "mozilla/RelativeLuminanceUtils.h"
-#include "mozilla/ScrollContainerFrame.h"
-#include "mozilla/StaticPrefs_widget.h"
-#include "mozilla/webrender/WebRenderAPI.h"
-#include "nsCSSColorUtils.h"
-#include "nsCSSRendering.h"
-#include "nsScrollbarFrame.h"
-#include "nsIScrollbarMediator.h"
-#include "nsDeviceContext.h"
-#include "nsLayoutUtils.h"
-#include "nsRangeFrame.h"
+#include <utility>
+
 #include "PathHelpers.h"
 #include "ScrollbarDrawingAndroid.h"
 #include "ScrollbarDrawingCocoa.h"
 #include "ScrollbarDrawingGTK.h"
 #include "ScrollbarDrawingWin.h"
 #include "ScrollbarDrawingWin11.h"
+#include "ThemeCocoa.h"
+#include "ThemeDrawing.h"
+#include "Units.h"
+#include "mozilla/ClearOnShutdown.h"
+#include "mozilla/RelativeLuminanceUtils.h"
+#include "mozilla/ScrollContainerFrame.h"
+#include "mozilla/StaticPrefs_widget.h"
+#include "mozilla/dom/Document.h"
+#include "mozilla/dom/HTMLMeterElement.h"
+#include "mozilla/dom/HTMLProgressElement.h"
+#include "mozilla/gfx/Filters.h"
+#include "mozilla/gfx/Rect.h"
+#include "mozilla/gfx/Types.h"
+#include "mozilla/webrender/WebRenderAPI.h"
+#include "nsCSSColorUtils.h"
+#include "nsCSSRendering.h"
+#include "nsComboboxControlFrame.h"
+#include "nsDeviceContext.h"
+#include "nsIScrollbarMediator.h"
+#include "nsLayoutUtils.h"
+#include "nsRangeFrame.h"
+#include "nsScrollbarFrame.h"
 
 #ifdef XP_WIN
 #  include "mozilla/WindowsVersion.h"
@@ -436,7 +437,7 @@ std::pair<sRGBColor, sRGBColor> Theme::ComputeProgressColors(
     const Colors& aColors) {
   if (aColors.HighContrast()) {
     return aColors.SystemPair(StyleSystemColor::Selecteditem,
-                              StyleSystemColor::Buttontext);
+                              StyleSystemColor::Windowtext);
   }
   return std::make_pair(aColors.Accent().Get(), aColors.Accent().GetDark());
 }
@@ -444,8 +445,8 @@ std::pair<sRGBColor, sRGBColor> Theme::ComputeProgressColors(
 std::pair<sRGBColor, sRGBColor> Theme::ComputeProgressTrackColors(
     const Colors& aColors) {
   if (aColors.HighContrast()) {
-    return aColors.SystemPair(StyleSystemColor::Buttonface,
-                              StyleSystemColor::Buttontext);
+    return aColors.SystemPair(StyleSystemColor::Selecteditemtext,
+                              StyleSystemColor::Windowtext);
   }
   return std::make_pair(sColorGrey10, sColorGrey40);
 }
@@ -475,7 +476,7 @@ void Theme::PaintCheckboxControl(DrawTarget& aDrawTarget,
                                  const Colors& aColors, DPIRatio aDpiRatio) {
   auto [backgroundColor, borderColor, checkColor] =
       ComputeCheckboxColors(aState, StyleAppearance::Checkbox, aColors);
-  const CSSCoord radius = 2.0f;
+  const CSSCoord radius = 4.0f;
   {
     CSSCoord borderWidth = kCheckboxRadioBorderWidth;
     if (backgroundColor == borderColor) {
@@ -503,10 +504,8 @@ void Theme::PaintCheckMark(DrawTarget& aDrawTarget,
                            const sRGBColor& aColor) {
   // Points come from the coordinates on a 14X14 (kCheckboxRadioSize)
   // unit box centered at 0,0
-  const float checkPolygonX[] = {-4.5f, -1.5f, -0.5f, 5.0f, 4.75f,
-                                 3.5f,  -0.5f, -1.5f, -3.5f};
-  const float checkPolygonY[] = {0.5f,  4.0f, 4.0f,  -2.5f, -4.0f,
-                                 -4.0f, 1.0f, 1.25f, -1.0f};
+  const float checkPolygonX[] = {3.5f, -1.3f, -3.9f};
+  const float checkPolygonY[] = {-3.1f, 2.6f, 0.0f};
   const int32_t checkNumPoints = sizeof(checkPolygonX) / sizeof(float);
   const float scale = ThemeDrawing::ScaleToFillRect(aRect, kCheckboxRadioSize);
   auto center = aRect.Center().ToUnknownPoint();
@@ -520,7 +519,11 @@ void Theme::PaintCheckMark(DrawTarget& aDrawTarget,
   }
   RefPtr<Path> path = builder->Finish();
 
-  aDrawTarget.Fill(path, ColorPattern(ToDeviceColor(aColor)));
+  // We want it to be ~2px in the reference space.
+  const float strokeWidth = 2.0f * scale;
+  aDrawTarget.Stroke(
+      path, ColorPattern(ToDeviceColor(aColor)),
+      StrokeOptions(strokeWidth, JoinStyle::ROUND, CapStyle::ROUND));
 }
 
 void Theme::PaintIndeterminateMark(DrawTarget& aDrawTarget,
@@ -564,13 +567,14 @@ void Theme::PaintCircleShadow(WebRenderBackendData& aWrData,
   shadowRect.MoveBy(shadowOffset);
   shadowRect.Inflate(inflation.width, inflation.height);
   const auto boxRect = wr::ToLayoutRect(aBoxRect);
+  const auto borderRadius =
+      wr::ToBorderRadius(gfx::RectCornerRadii(aBoxRect.Size().width));
   aWrData.mBuilder.PushBoxShadow(
       wr::ToLayoutRect(shadowRect), wr::ToLayoutRect(aClipRect),
       kBackfaceIsVisible, boxRect,
       wr::ToLayoutVector2D(aShadowOffset * aDpiRatio),
       wr::ToColorF(DeviceColor(0.0f, 0.0f, 0.0f, aShadowAlpha)), stdDev,
-      /* aSpread = */ 0.0f,
-      wr::ToBorderRadius(gfx::RectCornerRadii(aBoxRect.Size().width)),
+      /* aSpread = */ 0.0f, borderRadius, borderRadius,
       wr::BoxShadowClipMode::Outset);
 }
 
@@ -646,7 +650,7 @@ void Theme::PaintRadioControl(PaintBackendData& aPaintData,
 
   if (isChecked) {
     // See bug 1951930 / bug 1941755 for discussion on this chunk of code.
-    constexpr CSSCoord kInnerBorderWidth = 2.0f;
+    constexpr CSSCoord kInnerBorderWidth = 3.0f;
     LayoutDeviceRect innerCircleBounds(aRect);
     // It's important that these are two different calls so that the snapping of
     // the inner rect matches the one PaintStrokedCircle above does.
@@ -673,7 +677,7 @@ void Theme::PaintTextField(PaintBackendData& aPaintData,
   auto [backgroundColor, borderColor] =
       ComputeTextfieldColors(aState, aColors, OutlineCoversBorder::Yes);
 
-  const CSSCoord radius = 2.0f;
+  const CSSCoord radius = 4.0f;
 
   ThemeDrawing::PaintRoundedRectWithRadius(aPaintData, aRect, backgroundColor,
                                            borderColor, kTextFieldBorderWidth,
@@ -894,7 +898,7 @@ void Theme::PaintRange(nsIFrame* aFrame, PaintBackendData& aPaintData,
   tickMarkOrigin -=
       LayoutDevicePoint(tickMarkSize.width, tickMarkSize.height) / 2;
   auto tickMarkRect = LayoutDeviceRect(tickMarkOrigin, tickMarkSize);
-  for (auto tickMark : tickMarks) {
+  for (const auto& tickMark : tickMarks) {
     auto tickMarkOffset =
         tickMarkDirection *
         float(rangeFrame->GetDoubleAsFractionOfRange(tickMark));
@@ -1520,6 +1524,10 @@ LayoutDeviceIntSize Theme::GetMinimumWidgetSize(nsPresContext* aPresContext,
   LayoutDeviceIntSize result;
   switch (aAppearance) {
     case StyleAppearance::MozMenulistArrowButton:
+      if (nsComboboxControlFrame* cf = do_QueryFrame(aFrame->GetParent());
+          cf && !cf->HasDropDownButton()) {
+        break;
+      }
       result.width = (kMinimumDropdownArrowButtonWidth * dpiRatio).Rounded();
       break;
     case StyleAppearance::SpinnerUpbutton:
@@ -1548,18 +1556,8 @@ nsITheme::Transparency Theme::GetWidgetTransparency(
 
 bool Theme::WidgetAttributeChangeRequiresRepaint(StyleAppearance aAppearance,
                                                  nsAtom* aAttribute) {
-  // Check the attribute to see if it's relevant.
-  // TODO(emilio): The non-native theme doesn't use these attributes. Other
-  // themes do, but not all of them (and not all of the ones they check are
-  // here).
-  return aAttribute == nsGkAtoms::disabled ||
-         aAttribute == nsGkAtoms::checked ||
-         aAttribute == nsGkAtoms::selected ||
-         aAttribute == nsGkAtoms::visuallyselected ||
-         aAttribute == nsGkAtoms::menuactive ||
-         aAttribute == nsGkAtoms::sortDirection ||
-         aAttribute == nsGkAtoms::focused ||
-         aAttribute == nsGkAtoms::_default || aAttribute == nsGkAtoms::open;
+  return aAttribute == nsGkAtoms::_default ||  // Used in IsDefaultButton()
+         aAttribute == nsGkAtoms::open;        // Used in GetContentState()
 }
 
 bool Theme::WidgetAppearanceDependsOnWindowFocus(StyleAppearance aAppearance) {
@@ -1604,17 +1602,6 @@ bool Theme::ThemeSupportsWidget(nsPresContext* aPresContext, nsIFrame* aFrame,
       return !IsWidgetStyled(aPresContext, aFrame, aAppearance);
     default:
       return false;
-  }
-}
-
-bool Theme::WidgetIsContainer(StyleAppearance aAppearance) {
-  switch (aAppearance) {
-    case StyleAppearance::MozMenulistArrowButton:
-    case StyleAppearance::Radio:
-    case StyleAppearance::Checkbox:
-      return false;
-    default:
-      return true;
   }
 }
 

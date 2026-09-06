@@ -9,8 +9,10 @@ import { AdBanner } from "../AdBanner/AdBanner.jsx";
 import { FluentOrText } from "../../FluentOrText/FluentOrText.jsx";
 import React, { useEffect, useRef } from "react";
 import { connect } from "react-redux";
+// @nova-cleanup(remove-pref): Delete this const; see the showNovaHeader read below.
+const PREF_NOVA_ENABLED = "nova.enabled";
 const PREF_SECTIONS_CARDS_ENABLED = "discoverystream.sections.cards.enabled";
-const PREF_THUMBS_UP_DOWN_ENABLED = "discoverystream.thumbsUpDown.enabled";
+const PREF_SECTIONS_ENABLED = "discoverystream.sections.enabled";
 const PREF_TOPICS_ENABLED = "discoverystream.topicLabels.enabled";
 const PREF_TOPICS_SELECTED = "discoverystream.topicSelection.selectedTopics";
 const PREF_TOPICS_AVAILABLE = "discoverystream.topicSelection.topics";
@@ -125,7 +127,6 @@ export class _CardGrid extends React.PureComponent {
 
     const { topicsLoading } = DiscoveryStream;
     const mayHaveSectionsCards = prefs[PREF_SECTIONS_CARDS_ENABLED];
-    const mayHaveThumbsUpDown = prefs[PREF_THUMBS_UP_DOWN_ENABLED];
     const showTopics = prefs[PREF_TOPICS_ENABLED];
     const selectedTopics = prefs[PREF_TOPICS_SELECTED];
     const availableTopics = prefs[PREF_TOPICS_AVAILABLE];
@@ -173,7 +174,6 @@ export class _CardGrid extends React.PureComponent {
             url={rec.url}
             id={rec.id}
             shim={rec.shim}
-            fetchTimestamp={rec.fetchTimestamp}
             type={this.props.type}
             context={rec.context}
             sponsor={rec.sponsor}
@@ -186,9 +186,6 @@ export class _CardGrid extends React.PureComponent {
             bookmarkGuid={rec.bookmarkGuid}
             ctaButtonSponsors={ctaButtonSponsors}
             ctaButtonVariant={ctaButtonVariant}
-            recommendation_id={rec.recommendation_id}
-            firstVisibleTimestamp={this.props.firstVisibleTimestamp}
-            mayHaveThumbsUpDown={mayHaveThumbsUpDown}
             mayHaveSectionsCards={mayHaveSectionsCards}
             corpus_item_id={rec.corpus_item_id}
             scheduled_corpus_item_id={rec.scheduled_corpus_item_id}
@@ -199,6 +196,7 @@ export class _CardGrid extends React.PureComponent {
             isTimeSensitive={rec.isTimeSensitive}
             tabIndex={currentCardIndex === this.state.focusedIndex ? 0 : -1}
             onFocus={() => this.onCardFocus(currentCardIndex)}
+            attribution={rec.attribution}
           />
         );
       }
@@ -287,7 +285,6 @@ export class _CardGrid extends React.PureComponent {
               key={`dscard-${spocToRender.id}`}
               dispatch={this.props.dispatch}
               type={this.props.type}
-              firstVisibleTimestamp={this.props.firstVisibleTimestamp}
               row={row}
               prefs={prefs}
             />
@@ -356,9 +353,23 @@ export class _CardGrid extends React.PureComponent {
     // Handle the case where a user has dismissed all recommendations
     const isEmpty = data.recommendations.length === 0;
 
+    const prefs = this.props.Prefs.values;
+    // @nova-cleanup(remove-conditional): Delete novaEnabled and replace
+    // showNovaHeader with `const showHeader = !sectionsEnabled;`, renaming the
+    // two showNovaHeader uses in the JSX below.
+    const novaEnabled = prefs[PREF_NOVA_ENABLED];
+    const sectionsEnabled = prefs[PREF_SECTIONS_ENABLED];
+    const showNovaHeader = novaEnabled && !sectionsEnabled;
+
     return (
-      <div>
-        {this.props.title && (
+      <div className="ds-card-grid-container">
+        {showNovaHeader && (
+          <h2
+            className="ds-header"
+            data-l10n-id="newtab-section-header-stories"
+          />
+        )}
+        {!showNovaHeader && this.props.title && (
           <div className="ds-header">
             <div className="title">{this.props.title}</div>
             {this.props.context && (

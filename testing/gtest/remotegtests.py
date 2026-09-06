@@ -21,11 +21,11 @@ import traceback
 import mozcrash
 import mozdevice
 import mozinfo
-import mozlog
 import six
+from mozlog import commandline
 
 LOGGER_NAME = "gtest"
-log = mozlog.unstructured.getLogger(LOGGER_NAME)
+log = None
 PERFHERDER_MATCHER = re.compile(r"PERFHERDER_DATA:\s*(\{.*\})\s*$")
 
 
@@ -48,8 +48,6 @@ class RemoteGTests:
         env["MOZ_CRASHREPORTER_NO_REPORT"] = "1"
         env["MOZ_CRASHREPORTER"] = "1"
         env["MOZ_RUN_GTEST"] = "1"
-        # custom output parser is mandatory on Android
-        env["MOZ_TBPL_PARSER"] = "1"
         env["MOZ_GTEST_LOG_PATH"] = self.remote_log
         env["MOZ_GTEST_CWD"] = self.remote_profile
         env["MOZ_GTEST_MINIDUMPS_PATH"] = self.remote_minidumps
@@ -83,6 +81,8 @@ class RemoteGTests:
         Launch the test app, run gtest, collect test results and wait for completion.
         Return False if a crash or other failure is detected, else True.
         """
+        # mach gtest will call run_gtest() directly
+        setup_logging()
         update_mozinfo()
         self.device = mozdevice.ADBDeviceFactory(
             adb=adb_path,
@@ -351,7 +351,7 @@ class AppWaiter:
         """
         top = self.wait_for_start(package)
         if top != package:
-            log.testFail("gtest | %s failed to start" % package)
+            log.error("gtest | %s failed to start" % package)
             return
         while not self.timed_out():
             if not self.update_log():
@@ -362,13 +362,11 @@ class AppWaiter:
             time.sleep(self.output_poll_interval)
         self.update_log()
         if self.timed_out():
-            log.testFail(
-                "gtest | timed out after %d seconds", self.timeout_delta.seconds
-            )
+            log.error("gtest | timed out after %d seconds" % self.timeout_delta.seconds)
         elif self.output_timed_out():
-            log.testFail(
-                "gtest | timed out after %d seconds without output",
-                self.output_timeout_delta.seconds,
+            log.error(
+                "gtest | timed out after %d seconds without output"
+                % self.output_timeout_delta.seconds
             )
         else:
             log.info("gtest | wait for %s complete; top activity=%s" % (package, top))
@@ -413,9 +411,8 @@ class AppWaiter:
 
 class remoteGtestOptions(argparse.ArgumentParser):
     def __init__(self):
-        super(remoteGtestOptions, self).__init__(
-            usage="usage: %prog [options] test_filter"
-        )
+        super().__init__(usage="usage: %prog [options] test_filter")
+        commandline.add_logging_group(self)
         self.add_argument(
             "--package",
             dest="package",
@@ -490,9 +487,16 @@ def update_mozinfo():
     mozinfo.find_and_update_from_json(*dirs)
 
 
+def setup_logging(options=None):
+    global log
+    if log is None:
+        log = commandline.setup_logging("gtest", options, {"raw": sys.stdout})
+
+
 def main():
     parser = remoteGtestOptions()
     options = parser.parse_args()
+    setup_logging(options)
     args = options.args
     if not options.libxul_path:
         parser.error("--libxul is required")

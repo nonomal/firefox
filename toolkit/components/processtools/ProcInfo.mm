@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,8 +8,6 @@
 
 #include "nsMemoryReporterManager.h"
 
-#include <cstdio>
-#include <cstring>
 #include <unistd.h>
 
 #include <sys/sysctl.h>
@@ -100,6 +96,7 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
     info.windows = std::move(request.windowInfo);
     info.utilityActors = std::move(request.utilityInfo);
 
+#ifdef XP_MACOSX
     mach_port_t selectedTask;
     // If we did not get a task from a child process, we use mach_task_self()
     if (request.childTask == MACH_PORT_NULL) {
@@ -191,6 +188,7 @@ ProcInfoPromise::ResolveOrRejectValue GetProcInfoSync(
       thread->name.AssignASCII(threadInfoData.pth_name);
       thread->tid = identifierInfo.thread_id;
     }
+#endif
 
     if (!gathered.put(request.pid, std::move(info))) {
       result.SetReject(NS_ERROR_OUT_OF_MEMORY);

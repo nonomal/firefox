@@ -1,10 +1,6 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-
-#include "vm/Stack-inl.h"
 
 #include "mozilla/Maybe.h"  // mozilla::Maybe
 
@@ -13,6 +9,7 @@
 #include <stdint.h>   // uint8_t, uint32_t
 
 #include "gc/Tracer.h"  // js::TraceRoot
+#include "jit/InlineScriptTree.h"
 #include "jit/JitcodeMap.h"
 #include "jit/JitRuntime.h"
 #include "js/friend/ErrorMessages.h"  // JSMSG_*
@@ -23,6 +20,7 @@
 
 #include "jit/JSJitFrameIter-inl.h"
 #include "vm/Probes-inl.h"
+#include "vm/Stack-inl.h"
 
 using namespace js;
 
@@ -341,6 +339,14 @@ void InterpreterFrame::trace(JSTracer* trc, Value* sp, jsbytecode* pc) {
     TraceRootRange(trc, argc + isConstructing(), argv_, "fp argv");
   }
 
+  // A resumed generator/async frame stores the resume args (ResumeFrameArgs)
+  // after the formals (for function frames) or before the frame (for module
+  // frames).
+  if (isResumingGenerator()) {
+    TraceRootRange(trc, ResumeFrameArgs::NumSlots, resumeArgs(),
+                   "fp resume-args");
+  }
+
   JSScript* script = this->script();
   size_t nfixed = script->nfixed();
   size_t nlivefixed = script->calculateLiveFixed(pc);
@@ -349,6 +355,11 @@ void InterpreterFrame::trace(JSTracer* trc, Value* sp, jsbytecode* pc) {
     // All locals are live.
     traceValues(trc, 0, sp - slots());
   } else {
+    // Make sure we don't incorrectly clear locals of a frame that's still
+    // resuming before we reach JSOp::AfterYield. Currently nothing can trigger
+    // GC between restoring stack slots and setting the pc.
+    MOZ_ASSERT_IF(isResumingGenerator(), JSOp(*pc) == JSOp::AfterYield);
+
     // Trace operand stack.
     traceValues(trc, nfixed, sp - slots());
 
@@ -373,20 +384,19 @@ void InterpreterFrame::traceValues(JSTracer* trc, unsigned start,
   }
 }
 
-static void TraceInterpreterActivation(JSTracer* trc,
-                                       InterpreterActivation* act) {
-  for (InterpreterFrameIterator frames(act); !frames.done(); ++frames) {
+void InterpreterActivation::trace(JSTracer* trc) {
+  traceCommon(trc);
+
+  for (InterpreterFrameIterator frames(this); !frames.done(); ++frames) {
     InterpreterFrame* fp = frames.frame();
     fp->trace(trc, frames.sp(), frames.pc());
   }
 }
 
-void js::TraceInterpreterActivations(JSContext* cx, JSTracer* trc) {
+void js::TraceActivations(JSContext* cx, JSTracer* trc) {
   for (ActivationIterator iter(cx); !iter.done(); ++iter) {
     Activation* act = iter.activation();
-    if (act->isInterpreter()) {
-      TraceInterpreterActivation(trc, act->asInterpreter());
-    }
+    act->trace(trc);
   }
 }
 
@@ -419,22 +429,36 @@ InterpreterFrame* InterpreterStack::pushInvokeFrame(
 
 InterpreterFrame* InterpreterStack::pushExecuteFrame(
     JSContext* cx, HandleScript script, HandleObject envChain,
-    AbstractFramePtr evalInFrame) {
+    AbstractFramePtr evalInFrame, bool reserveResumeArgs) {
   LifoAlloc::Mark mark = allocator_.mark();
 
-  unsigned nvars = script->nslots();
-  uint8_t* buffer =
-      allocateFrame(cx, sizeof(InterpreterFrame) + nvars * sizeof(Value));
+  // For a resumed top-level-await module, reserve the resume args
+  // (ResumeFrameArgs) immediately before the frame.
+  size_t nResumeArgs = reserveResumeArgs ? ResumeFrameArgs::NumSlots : 0;
+  size_t nvars = script->nslots();
+  uint8_t* buffer = allocateFrame(
+      cx, (nResumeArgs + nvars) * sizeof(Value) + sizeof(InterpreterFrame));
   if (!buffer) {
     return nullptr;
   }
 
-  InterpreterFrame* fp = reinterpret_cast<InterpreterFrame*>(buffer);
+  Value* args = reinterpret_cast<Value*>(buffer);
+  SetValueRangeToUndefined(args, nResumeArgs);
+  InterpreterFrame* fp =
+      reinterpret_cast<InterpreterFrame*>(buffer + nResumeArgs * sizeof(Value));
   fp->mark_ = mark;
   fp->initExecuteFrame(cx, script, evalInFrame, envChain);
   fp->initLocals();
 
   return fp;
+}
+
+InterpreterFrame* InterpreterStack::pushGeneratorResumeFrame(
+    JSContext* cx, HandleFunction callee, HandleObject envChain) {
+  // Entry frame: no caller frame or pc/sp.
+  return createGeneratorResumeFrame(cx, callee, envChain, /* prev = */ nullptr,
+                                    /* prevpc = */ nullptr,
+                                    /* prevsp = */ nullptr);
 }
 
 /*****************************************************************************/
@@ -638,7 +662,7 @@ JS::ProfilingFrameIterator::getPhysicalFrameAndEntry(
   MOZ_DIAGNOSTIC_ASSERT(endStackAddress_);
 #ifndef ENABLE_WASM_JSPI
   // The stack addresses are monotonically increasing, except when
-  // suspendable stacks are present (e.g. when JS PI is enabled).
+  // cont stacks are present (e.g. when JS PI is enabled).
   MOZ_DIAGNOSTIC_ASSERT(stackAddr >= endStackAddress_);
 #endif
 
@@ -667,6 +691,8 @@ JS::ProfilingFrameIterator::getPhysicalFrameAndEntry(
     // TODO: get the realm ID of wasm frames. Bug 1596235.
     frame.realmID = 0;
     frame.sourceId = 0;
+    frame.line = 0;
+    frame.column = 0;
     return mozilla::Some(frame);
   }
 
@@ -690,8 +716,8 @@ JS::ProfilingFrameIterator::getPhysicalFrameAndEntry(
   // fallible ones.  The proper solution to this problem is to fix all
   // the jitcode to use frame-pointers and reliably walk the stack with those.
   if (samplePositionInProfilerBuffer_) {
-    *entry = table->lookupForSampler(returnAddr, cx_->runtime(),
-                                     *samplePositionInProfilerBuffer_);
+    *entry =
+        table->lookupForSampler(returnAddr, *samplePositionInProfilerBuffer_);
   } else {
     *entry = table->lookup(returnAddr);
   }
@@ -732,6 +758,10 @@ JS::ProfilingFrameIterator::getPhysicalFrameAndEntry(
   }
   frame.activation = activation_;
   frame.endStackAddress = endStackAddress_;
+  // Initialize line and column info (will be populated later during
+  // extractStack)
+  frame.line = 0;
+  frame.column = 0;
   return mozilla::Some(frame);
 }
 
@@ -761,20 +791,21 @@ uint32_t JS::ProfilingFrameIterator::extractStack(Frame* frames,
     return 1;
   }
 
-  // Extract the stack for the entry.  Assume maximum inlining depth is <64
-  const char* labels[64];
-  uint32_t sourceIds[64];
+  // Extract the stack for the entry.
+  jit::CallStackFrameInfo frameInfos[jit::InlineScriptTree::MaxDepth];
   uint32_t depth = entry->callStackAtAddr(cx_->runtime(),
                                           jsJitIter().resumePCinCurrentFrame(),
-                                          labels, sourceIds, std::size(labels));
-  MOZ_ASSERT(depth < std::size(labels));
+                                          frameInfos, std::size(frameInfos));
+  MOZ_ASSERT(depth <= std::size(frameInfos));
   for (uint32_t i = 0; i < depth; i++) {
     if (offset + i >= end) {
       return i;
     }
     frames[offset + i] = physicalFrame.value();
-    frames[offset + i].label = labels[i];
-    frames[offset + i].sourceId = sourceIds[i];
+    frames[offset + i].label = frameInfos[i].label;
+    frames[offset + i].sourceId = frameInfos[i].sourceId;
+    frames[offset + i].line = frameInfos[i].line;
+    frames[offset + i].column = frameInfos[i].column;
   }
 
   return depth;

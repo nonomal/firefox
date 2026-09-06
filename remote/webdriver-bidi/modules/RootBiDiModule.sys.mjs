@@ -7,7 +7,10 @@ import { Module } from "chrome://remote/content/shared/messagehandler/Module.sys
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  assert: "chrome://remote/content/shared/webdriver/Assert.sys.mjs",
   error: "chrome://remote/content/shared/webdriver/Errors.sys.mjs",
+  isPrivilegedContext:
+    "chrome://remote/content/shared/BrowsingContextUtils.sys.mjs",
   NavigableManager: "chrome://remote/content/shared/NavigableManager.sys.mjs",
   WindowGlobalMessageHandler:
     "chrome://remote/content/shared/messagehandler/WindowGlobalMessageHandler.sys.mjs",
@@ -23,18 +26,40 @@ export class RootBiDiModule extends Module {
    *     The name of the event to be emitted.
    * @param {object} eventPayload
    *     The payload to be sent with the event.
+   *
    * @returns {boolean}
    *     Returns `true` if the event was successfully emitted, otherwise `false`.
    */
   _emitEventForBrowsingContext(browsingContextId, eventName, eventPayload) {
+    return this._emitEventForBrowsingContexts(
+      [browsingContextId],
+      eventName,
+      eventPayload
+    );
+  }
+
+  /**
+   * Emits an event for a set of related browsing contexts.
+   *
+   * @param {Array<string>} browsingContextIds
+   *     An array of browsing context ids to which the event is related.
+   * @param {string} eventName
+   *     The name of the event to be emitted.
+   * @param {object} eventPayload
+   *     The payload to be sent with the event.
+   *
+   * @returns {boolean}
+   *     Returns `true` if the event was successfully emitted, otherwise `false`.
+   */
+  _emitEventForBrowsingContexts(browsingContextIds, eventName, eventPayload) {
     // This event is emitted from the parent process but for a given browsing
     // context. Set the event's contextInfo to the message handler corresponding
     // to this browsing context.
-    const contextInfo = {
-      contextId: browsingContextId,
+    const relatedContexts = browsingContextIds.map(contextId => ({
+      contextId,
       type: lazy.WindowGlobalMessageHandler.type,
-    };
-    return this.emitEvent(eventName, eventPayload, contextInfo);
+    }));
+    return this.emitEvent(eventName, eventPayload, relatedContexts);
   }
 
   /**
@@ -44,6 +69,14 @@ export class RootBiDiModule extends Module {
    *
    * @param {string} navigableId
    *     Unique id of the browsing context.
+   * @param {object=} options
+   * @param {boolean=} options.skipPrivilegeCheck
+   *     If set to `true` the privileged scope check is skipped entirely,
+   *     allowing any browsing context without requiring system access.
+   *     Defaults to `false`.
+   * @param {boolean=} options.supportsPrivilegedScope
+   *     If set to `true` privileged browsing contexts are supported
+   *     for the BiDi command. Defaults to `false`.
    *
    * @returns {BrowsingContext|null}
    *     The browsing context, or null if `navigableId` is null.
@@ -51,7 +84,10 @@ export class RootBiDiModule extends Module {
    * @throws {NoSuchFrameError}
    *     If the browsing context cannot be found.
    */
-  _getNavigable(navigableId) {
+  _getNavigable(navigableId, options = {}) {
+    const { skipPrivilegeCheck = false, supportsPrivilegedScope = false } =
+      options;
+
     if (navigableId === null) {
       // The WebDriver BiDi specification expects `null` to be
       // returned if navigable id is `null`.
@@ -59,6 +95,16 @@ export class RootBiDiModule extends Module {
     }
 
     const context = lazy.NavigableManager.getBrowsingContextById(navigableId);
+
+    if (!skipPrivilegeCheck && context && lazy.isPrivilegedContext(context)) {
+      lazy.assert.hasSystemAccess();
+
+      if (!supportsPrivilegedScope) {
+        throw new lazy.error.UnsupportedOperationError(
+          "The command does not support browsing contexts in privileged scope"
+        );
+      }
+    }
 
     if (context === null) {
       throw new lazy.error.NoSuchFrameError(

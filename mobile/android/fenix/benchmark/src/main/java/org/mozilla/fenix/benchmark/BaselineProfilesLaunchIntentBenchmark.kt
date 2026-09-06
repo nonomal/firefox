@@ -4,8 +4,6 @@
 
 package org.mozilla.fenix.benchmark
 
-import android.content.Intent
-import android.net.Uri
 import androidx.benchmark.macro.BaselineProfileMode
 import androidx.benchmark.macro.CompilationMode
 import androidx.benchmark.macro.StartupMode
@@ -17,7 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.benchmark.utils.HtmlAsset
 import org.mozilla.fenix.benchmark.utils.MockWebServerRule
-import org.mozilla.fenix.benchmark.utils.TARGET_PACKAGE
+import org.mozilla.fenix.benchmark.utils.launchIntentJourney
 import org.mozilla.fenix.benchmark.utils.measureRepeatedDefault
 import org.mozilla.fenix.benchmark.utils.uri
 
@@ -26,8 +24,6 @@ import org.mozilla.fenix.benchmark.utils.uri
  * to verify how effective a Baseline Profile is. It does this by comparing [CompilationMode.None],
  * which represents the app with no Baseline Profiles optimizations, and [CompilationMode.Partial],
  * which uses Baseline Profiles.
- *
- * Before running make sure `autosignReleaseWithDebugKey=true` is present in local.properties.
  *
  * Run this benchmark to see startup measurements and captured system traces for verifying
  * the effectiveness of your Baseline Profiles. You can run it directly from Android
@@ -75,11 +71,7 @@ class BaselineProfilesLaunchIntentBenchmark {
                 killProcess()
             },
         ) {
-            val intent = Intent(Intent.ACTION_VIEW)
-            intent.data = mockRule.uri(HtmlAsset.SIMPLE)
-            intent.setPackage(TARGET_PACKAGE)
-
-            startActivityAndWait(intent = intent)
+            launchIntentJourney(intentData = mockRule.uri(HtmlAsset.SIMPLE))
             killProcess()
         }
 }

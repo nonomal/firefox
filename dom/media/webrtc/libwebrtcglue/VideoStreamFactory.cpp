@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -7,7 +5,6 @@
 #include "VideoStreamFactory.h"
 
 #include <stdint.h>
-#include <stdio.h>
 
 #include <algorithm>
 #include <cmath>
@@ -223,14 +220,19 @@ std::vector<webrtc::VideoStream> VideoStreamFactory::CreateEncoderStreams(
                  __FUNCTION__, encoding.rid.c_str());
     }
 
-    CSFLogInfo(LOGTAG, "%s Stream with RID %s maxFps=%d (global max fps = %u)",
-               __FUNCTION__, encoding.rid.c_str(), video_stream.max_framerate,
-               (unsigned)mMaxFramerateForAllStreams);
-
     SelectBitrates({video_stream.width, video_stream.height}, mMinBitrate,
                    mStartBitrate,
                    SaturatingCast<int>(encoding.constraints.maxBr),
                    mPrefMaxBitrate, mNegotiatedMaxBitrate, video_stream);
+
+    CSFLogInfo(LOGTAG,
+               "%s Stream with RID %s maxFps=%d (global max fps = %u), "
+               "bitrate=[%dkbps, %dkbps, %dkbps]",
+               __FUNCTION__, encoding.rid.c_str(), video_stream.max_framerate,
+               (unsigned)mMaxFramerateForAllStreams,
+               video_stream.min_bitrate_bps / 1000,
+               video_stream.target_bitrate_bps / 1000,
+               video_stream.max_bitrate_bps / 1000);
 
     video_stream.bitrate_priority = aConfig.bitrate_priority;
     video_stream.max_qp = kQpMax;

@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef __nsWindowWatcher_h__
-#define __nsWindowWatcher_h__
+#ifndef _nsWindowWatcher_h_
+#define _nsWindowWatcher_h_
 
 // {a21bfa01-f349-4394-a84c-8de5cf0737d0}
 #define NS_WINDOWWATCHER_CID \
@@ -94,13 +92,13 @@ class nsWindowWatcher : public nsIWindowWatcher,
   // (which means called from script) or called via OpenWindow.
   nsresult OpenWindowInternal(
       mozIDOMWindowProxy* aParent, const nsACString& aUrl,
-      const nsACString& aName, const nsACString& aFeatures,
+      const nsAString& aName, const nsACString& aFeatures,
       const mozilla::dom::UserActivation::Modifiers& aModifiers,
       bool aCalledFromJS, bool aDialog, bool aNavigate, nsIArray* aArgv,
       bool aIsPopupSpam, bool aForceNoOpener, bool aForceNoReferrer, PrintKind,
       nsDocShellLoadState* aLoadState, mozilla::dom::BrowsingContext** aResult);
   nsresult OpenWindowInternal(
-      mozIDOMWindowProxy* aParent, nsIURI* aUri, const nsACString& aName,
+      mozIDOMWindowProxy* aParent, nsIURI* aUri, const nsAString& aName,
       const nsACString& aFeatures,
       const mozilla::dom::UserActivation::Modifiers& aModifiers,
       bool aCalledFromJS, bool aDialog, bool aNavigate, nsIArray* aArgv,
@@ -113,8 +111,7 @@ class nsWindowWatcher : public nsIWindowWatcher,
   static bool ShouldOpenPopup(const mozilla::dom::WindowFeatures& aFeatures);
 
   static uint32_t CalculateChromeFlagsForContent(
-      const mozilla::dom::WindowFeatures& aFeatures,
-      const mozilla::dom::UserActivation::Modifiers& aModifiers,
+      const mozilla::dom::WindowFeatures& aFeatures, bool aCalledFromJS,
       bool* aIsPopupRequested);
 
   static uint32_t CalculateChromeFlagsForSystem(

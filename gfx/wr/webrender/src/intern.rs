@@ -38,7 +38,7 @@ use malloc_size_of::MallocSizeOf;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::{ops, u64};
+use std::ops;
 use crate::util::VecHelper;
 use crate::profiler::TransactionProfile;
 use peek_poke::PeekPoke;
@@ -97,7 +97,7 @@ impl<S> UpdateList<S> {
 /// A globally, unique identifier
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(Debug, Copy, Clone, Eq, Hash, MallocSizeOf, PartialEq, PeekPoke, Default)]
+#[derive(Copy, Clone, Eq, Hash, MallocSizeOf, PartialEq, PeekPoke, Default)]
 pub struct ItemUid {
     uid: u64,
 }
@@ -109,13 +109,30 @@ impl ItemUid {
     }
 }
 
+impl std::fmt::Debug for ItemUid {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "#{}", self.uid)
+    }
+}
+
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(Debug, Hash, MallocSizeOf, PartialEq, Eq)]
+#[derive(Hash, MallocSizeOf, PartialEq, Eq)]
 pub struct Handle<I> {
     index: u32,
     epoch: Epoch,
     _marker: PhantomData<I>,
+}
+
+impl<I> std::fmt::Debug for Handle<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // PartialEq requires more trait bounds
+        if self.uid() == Self::INVALID.uid() {
+            write!(f, "<invalid>")
+        } else {
+            write!(f, "#{}:{}", self.index, self.epoch.0)
+        }
+    }
 }
 
 impl<I> Clone for Handle<I> {
@@ -165,12 +182,16 @@ impl<I: Internable> Default for DataStore<I> {
 
 impl<I: Internable> DataStore<I> {
     /// Apply any updates from the scene builder thread to
-    /// this data store.
+    /// this data store. Returns the (insertion, removal) counts, which the
+    /// caller aggregates across every interner into `INTERN_INSERTIONS` /
+    /// `INTERN_REMOVALS`.
     pub fn apply_updates(
         &mut self,
         update_list: UpdateList<I::Key>,
         profile: &mut TransactionProfile,
-    ) {
+    ) -> (usize, usize) {
+        let counts = (update_list.insertions.len(), update_list.removals.len());
+
         for insertion in update_list.insertions {
             self.items
                 .entry(insertion.index)
@@ -182,22 +203,20 @@ impl<I: Internable> DataStore<I> {
         }
 
         profile.set(I::PROFILE_COUNTER, self.items.len());
+
+        counts
     }
 }
 
-/// Retrieve an item from the store via handle
+/// Retrieve an item from the store via handle.
+///
+/// Interned templates are immutable at frame-build time: all per-frame
+/// state has been relocated to per-frame scratch, so the store only ever
+/// hands out shared references. There is intentionally no `IndexMut` impl.
 impl<I: Internable> ops::Index<Handle<I>> for DataStore<I> {
     type Output = I::StoreData;
     fn index(&self, handle: Handle<I>) -> &I::StoreData {
         self.items[handle.index as usize].as_ref().expect("Bad datastore lookup")
-    }
-}
-
-/// Retrieve a mutable item from the store via handle
-/// Retrieve an item from the store via handle
-impl<I: Internable> ops::IndexMut<Handle<I>> for DataStore<I> {
-    fn index_mut(&mut self, handle: Handle<I>) -> &mut I::StoreData {
-        self.items[handle.index as usize].as_mut().expect("Bad datastore lookup")
     }
 }
 
@@ -364,6 +383,29 @@ impl<I: Internable> Interner<I> {
 
         update_list
     }
+
+    /// Ensure that `store` has an entry for every item currently interned.
+    ///
+    /// The interner (scene builder thread) and the data store (render backend
+    /// thread) are serialized independently and at slightly different points
+    /// when saving a capture. As a result the data store snapshot can lag the
+    /// interner by a scene build: an item interned on the last frame is present
+    /// in the interner's map but its insertion hasn't been applied to the saved
+    /// data store yet. When such a capture is loaded and the scene is rebuilt,
+    /// re-interning that item returns the existing handle without emitting a new
+    /// insertion, leaving the data store slot empty. Reconstruct the missing
+    /// slots from the interned keys so the loaded frame is self-consistent.
+    #[cfg(feature = "replay")]
+    pub fn reconcile_datastore(&self, store: &mut DataStore<I>) {
+        for (key, details) in self.map.iter() {
+            if store.items.len() <= details.index {
+                store.items.resize_with(details.index + 1, || None);
+            }
+            if store.items[details.index].is_none() {
+                store.items[details.index] = Some(key.clone().into());
+            }
+        }
+    }
 }
 
 /// Retrieve the local data for an item from the interner via handle
@@ -385,7 +427,7 @@ macro_rules! enumerate_interners {
     ($macro_name: ident) => {
         $macro_name! {
             clip: ClipIntern,
-            prim: PrimitiveKeyKind,
+            prim: RectanglePrim,
             normal_border: NormalBorderPrim,
             image_border: ImageBorder,
             image: Image,

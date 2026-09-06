@@ -18,7 +18,19 @@ const {
   toCamelCase,
 } = require("resource://devtools/client/inspector/compatibility/utils/cases.js");
 
-async function openCompatibilityView() {
+/**
+ * Open the compatibility view.
+ *
+ * @param {object} options
+ * @param {boolean} options.mockDataset
+ *        Set to false to run against the live MDN compatibility data instead of the mock
+ *        dataset. Only meant for the smoke test checking the live data.
+ */
+async function openCompatibilityView({ mockDataset = true } = {}) {
+  if (mockDataset) {
+    await setMockCompatibilityDataset();
+  }
+
   info("Open the compatibility view");
   const { inspector } = await openInspectorSidebarTab("compatibilityview");
   await Promise.all([
@@ -49,13 +61,12 @@ async function openCompatibilityView() {
  *        For the structure of issue items, see types.js.
  */
 async function assertIssueList(panel, expectedIssues) {
-  info("Check the number of issues");
-  await waitUntil(
+  await waitFor(
     () =>
       panel.querySelectorAll("[data-qa-property]").length ===
-      expectedIssues.length
+      expectedIssues.length,
+    "The number of issues is correct"
   );
-  ok(true, "The number of issues is correct");
 
   if (expectedIssues.length === 0) {
     // No issue.
@@ -127,7 +138,7 @@ async function assertIssueList(panel, expectedIssues) {
               )
               .join("\n"),
           }),
-          "The brower item has the expected title attribute"
+          "The browser item has the expected title attribute"
         );
       }
     }
@@ -191,9 +202,6 @@ async function assertIssueList(panel, expectedIssues) {
         "span",
         `No link rendered for ${property}`
       );
-
-      const { link } = await simulateLinkClick(propertyEl);
-      is(link, null, `Click on ${property} does not navigate`);
     }
   }
 }
@@ -246,7 +254,7 @@ function getIssueItem(property, element) {
  */
 async function togglePropStatusOnRuleView(inspector, ruleIndex, propIndex) {
   const ruleView = inspector.getPanel("ruleview").view;
-  const rule = getRuleViewRuleEditor(ruleView, ruleIndex).rule;
+  const rule = getRuleViewRuleEditorAt(ruleView, ruleIndex).rule;
   // In case of inline style changes, we track the mutations via the
   // inspector's markupmutation event to react to dynamic style changes
   // which Resource Watcher doesn't cover yet.

@@ -16,9 +16,11 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
+#include "absl/base/macros.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/string_view.h"
 #include "api/async_dns_resolver.h"
@@ -36,6 +38,7 @@
 #include "rtc_base/dscp.h"
 #include "rtc_base/ip_address.h"
 #include "rtc_base/logging.h"
+#include "rtc_base/net_helper.h"
 #include "rtc_base/network/received_packet.h"
 #include "rtc_base/network/sent_packet.h"
 #include "rtc_base/socket.h"
@@ -93,7 +96,9 @@ class TurnPort : public Port {
                       .network = args.network,
                       .ice_username_fragment = args.username,
                       .ice_password = args.password,
-                      .lna_permission_factory = args.lna_permission_factory},
+                      .content_name = args.content_name,
+                      .lna_permission_factory = args.lna_permission_factory,
+                      .ice_tiebreaker = args.ice_tiebreaker},
                      socket, *args.server_address, args.config->credentials,
                      args.relative_priority, args.config->tls_alpn_protocols,
                      args.config->tls_elliptic_curves, args.turn_customizer,
@@ -116,6 +121,7 @@ class TurnPort : public Port {
          .network = args.network,
          .ice_username_fragment = args.username,
          .ice_password = args.password,
+         .content_name = args.content_name,
          .lna_permission_factory = args.lna_permission_factory},
         min_port, max_port, *args.server_address, args.config->credentials,
         args.relative_priority, args.config->tls_alpn_protocols,
@@ -142,8 +148,8 @@ class TurnPort : public Port {
 
   void SetTurnLoggingId(absl::string_view turn_logging_id);
 
-  virtual std::vector<std::string> GetTlsAlpnProtocols() const;
-  virtual std::vector<std::string> GetTlsEllipticCurves() const;
+  virtual const std::vector<std::string>& GetTlsAlpnProtocols() const;
+  virtual const std::vector<std::string>& GetTlsEllipticCurves() const;
 
   // Release a TURN allocation by sending a refresh with lifetime 0.
   // Sets state to STATE_RECEIVEONLY.
@@ -152,12 +158,23 @@ class TurnPort : public Port {
   void PrepareAddress() override;
   Connection* CreateConnection(const Candidate& c,
                                PortInterface::CandidateOrigin origin) override;
+  int SendTo(std::span<const uint8_t> data,
+             const SocketAddress& addr,
+             const AsyncSocketPacketOptions& options,
+             bool payload) override;
+
+  ABSL_DEPRECATE_AND_INLINE()
   int SendTo(const void* data,
              size_t size,
              const SocketAddress& addr,
              const AsyncSocketPacketOptions& options,
-             bool payload) override;
+             bool payload) override {
+    return SendTo(std::span(reinterpret_cast<const uint8_t*>(data), size), addr,
+                  options, payload);
+  }
+
   int SetOption(Socket::Option opt, int value) override;
+
   int GetOption(Socket::Option opt, int* value) override;
   int GetError() override;
 
@@ -263,7 +280,7 @@ class TurnPort : public Port {
   void OnLocalNetworkAccessPermissionGranted();
 
   void AddRequestAuthInfo(StunMessage* msg);
-  void OnSendStunPacket(const void* data, size_t size, StunRequest* request);
+  void OnSendStunPacket(std::span<const uint8_t> data, StunRequest* request);
   // Stun address from allocate success response.
   // Currently used only for testing.
   void OnStunAddress(const SocketAddress& address);
@@ -272,23 +289,13 @@ class TurnPort : public Port {
   void OnAllocateError(int error_code, absl::string_view reason);
   void OnAllocateRequestTimeout();
 
-  void HandleDataIndication(const char* data,
-                            size_t size,
-                            int64_t packet_time_us);
-  void HandleChannelData(uint16_t channel_id,
-                         const char* data,
-                         size_t size,
-                         int64_t packet_time_us);
-  void DispatchPacket(const char* data,
-                      size_t size,
-                      const SocketAddress& remote_addr,
-                      ProtocolType proto,
-                      int64_t packet_time_us);
+  void HandleDataIndication(const ReceivedIpPacket& packet);
+  void HandleChannelData(uint16_t channel_id, const ReceivedIpPacket& packet);
+  void DispatchPacket(const ReceivedIpPacket& packet, ProtocolType proto);
 
   bool ScheduleRefresh(uint32_t lifetime);
   void SendRequest(StunRequest* request, int delay);
-  int Send(const void* data,
-           size_t size,
+  int Send(std::span<const uint8_t> data,
            const AsyncSocketPacketOptions& options);
   void UpdateHash();
   bool UpdateNonce(StunMessage* response);
@@ -305,8 +312,7 @@ class TurnPort : public Port {
   void MaybeAddTurnLoggingId(StunMessage* message);
 
   void TurnCustomizerMaybeModifyOutgoingStunMessage(StunMessage* message);
-  bool TurnCustomizerAllowChannelData(const void* data,
-                                      size_t size,
+  bool TurnCustomizerAllowChannelData(std::span<const uint8_t> data,
                                       bool payload);
 
   ProtocolAddress server_address_;
@@ -324,6 +330,7 @@ class TurnPort : public Port {
   AttemptedServerSet attempted_server_addresses_;
 
   AsyncPacketSocket* socket_;
+  std::unique_ptr<AsyncPacketSocket> owned_socket_;
   SocketOptionsMap socket_options_;
   std::unique_ptr<AsyncDnsResolverInterface> resolver_;
   int error_;

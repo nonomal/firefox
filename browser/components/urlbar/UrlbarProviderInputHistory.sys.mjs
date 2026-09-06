@@ -19,9 +19,8 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
-  UrlbarProviderOpenTabs:
-    "moz-src:///browser/components/urlbar/UrlbarProviderOpenTabs.sys.mjs",
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "SQL_ADAPTIVE_QUERY", () => {
@@ -38,6 +37,9 @@ ChromeUtils.defineLazyGetter(lazy, "SQL_ADAPTIVE_QUERY", () => {
           ( SELECT title FROM moz_bookmarks WHERE fk = h.id AND title NOTNULL
             ORDER BY lastModified DESC LIMIT 1
           ) AS bookmark_title,
+          ( SELECT dateAdded FROM moz_bookmarks WHERE fk = h.id
+            ORDER BY dateAdded DESC LIMIT 1
+          ) AS bookmarkDate,
           ( SELECT GROUP_CONCAT(t.title ORDER BY t.title)
             FROM moz_bookmarks b
             JOIN moz_bookmarks t ON t.id = +b.parent AND t.parent = :parent
@@ -72,10 +74,10 @@ ChromeUtils.defineLazyGetter(lazy, "SQL_ADAPTIVE_QUERY", () => {
  */
 export class UrlbarProviderInputHistory extends UrlbarProvider {
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.PROFILE;
+    return lazy.UrlbarShared.PROVIDER_TYPE.PROFILE;
   }
 
   /**
@@ -90,7 +92,7 @@ export class UrlbarProviderInputHistory extends UrlbarProvider {
       (lazy.UrlbarPrefs.get("suggest.history") ||
         lazy.UrlbarPrefs.get("suggest.bookmark") ||
         lazy.UrlbarPrefs.get("suggest.openpage")) &&
-      !queryContext.searchMode
+      !queryContext.restrictInSearchMode()
     );
   }
 
@@ -128,31 +130,35 @@ export class UrlbarProviderInputHistory extends UrlbarProvider {
       let lastVisit = lastVisitPRTime
         ? lazy.PlacesUtils.toDate(lastVisitPRTime).getTime()
         : undefined;
-
+      let bookmarkDatePRTime = row.getResultByName("bookmarkDate");
+      let bookmarkDateMs = bookmarkDatePRTime
+        ? lazy.PlacesUtils.toDate(bookmarkDatePRTime).getTime()
+        : undefined;
       let resultTitle = historyTitle;
+
       if (openPageCount > 0 && lazy.UrlbarPrefs.get("suggest.openpage")) {
         if (url == queryContext.currentPage) {
           // Don't suggest switching to the current page.
           continue;
         }
         let userContextId = row.getResultByName("userContextId") || 0;
-        let { payload, payloadHighlights } =
-          lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-            url: [url, UrlbarUtils.HIGHLIGHT.TYPED],
-            title: [resultTitle, UrlbarUtils.HIGHLIGHT.TYPED],
-            icon: UrlbarUtils.getIconForUrl(url),
-            userContextId,
-            lastVisit,
-          });
-        if (lazy.UrlbarPrefs.get("secondaryActions.switchToTab")) {
-          payload.action =
-            UrlbarUtils.createTabSwitchSecondaryAction(userContextId);
-        }
         let result = new lazy.UrlbarResult({
-          type: UrlbarUtils.RESULT_TYPE.TAB_SWITCH,
-          source: UrlbarUtils.RESULT_SOURCE.TABS,
-          payload,
-          payloadHighlights,
+          type: lazy.UrlbarShared.RESULT_TYPE.TAB_SWITCH,
+          source: lazy.UrlbarShared.RESULT_SOURCE.TABS,
+          payload: {
+            url,
+            title: resultTitle,
+            icon: lazy.UrlbarShared.getIconForUrl(url),
+            userContext: UrlbarUtils.getUserContextData(userContextId),
+            lastVisit,
+            action: lazy.UrlbarPrefs.get("secondaryActions.switchToTab")
+              ? UrlbarUtils.createTabSwitchSecondaryAction(userContextId)
+              : undefined,
+          },
+          highlights: {
+            url: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+            title: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+          },
         });
         addCallback(this, result);
         continue;
@@ -160,10 +166,10 @@ export class UrlbarProviderInputHistory extends UrlbarProvider {
 
       let resultSource;
       if (bookmarked && lazy.UrlbarPrefs.get("suggest.bookmark")) {
-        resultSource = UrlbarUtils.RESULT_SOURCE.BOOKMARKS;
+        resultSource = lazy.UrlbarShared.RESULT_SOURCE.BOOKMARKS;
         resultTitle = bookmarkTitle || historyTitle;
       } else if (lazy.UrlbarPrefs.get("suggest.history")) {
-        resultSource = UrlbarUtils.RESULT_SOURCE.HISTORY;
+        resultSource = lazy.UrlbarShared.RESULT_SOURCE.HISTORY;
       } else {
         continue;
       }
@@ -175,37 +181,47 @@ export class UrlbarProviderInputHistory extends UrlbarProvider {
         );
       });
 
-      let isBlockable = resultSource == UrlbarUtils.RESULT_SOURCE.HISTORY;
+      let isBlockable = resultSource == lazy.UrlbarShared.RESULT_SOURCE.HISTORY;
 
       let result = new lazy.UrlbarResult({
-        type: UrlbarUtils.RESULT_TYPE.URL,
+        type: lazy.UrlbarShared.RESULT_TYPE.URL,
         source: resultSource,
-        ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-          url: [url, UrlbarUtils.HIGHLIGHT.TYPED],
-          title: [resultTitle, UrlbarUtils.HIGHLIGHT.TYPED],
-          tags: [resultTags, UrlbarUtils.HIGHLIGHT.TYPED],
-          icon: UrlbarUtils.getIconForUrl(url),
+        payload: {
+          url,
+          title: resultTitle,
+          tags: resultTags,
+          icon: lazy.UrlbarShared.getIconForUrl(url),
           isBlockable,
           blockL10n: isBlockable
-            ? { id: "urlbar-result-menu-remove-from-history" }
+            ? { id: "urlbar-result-menu-remove-from-history2" }
             : undefined,
           helpUrl: isBlockable
             ? Services.urlFormatter.formatURLPref("app.support.baseURL") +
               "awesome-bar-result-menu"
             : undefined,
           lastVisit,
-        }),
+          bookmarkDateMs,
+        },
+        highlights: {
+          url: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+          title: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+          tags: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+        },
       });
-
       addCallback(this, result);
     }
   }
 
+  /**
+   * @param {UrlbarQueryContext} queryContext
+   * @param {UrlbarParentController} controller
+   * @param {object} details
+   */
   onEngagement(queryContext, controller, details) {
     let { result } = details;
     if (
       details.selType == "dismiss" &&
-      result.type == UrlbarUtils.RESULT_TYPE.URL
+      result.type == lazy.UrlbarShared.RESULT_TYPE.URL
     ) {
       // Even if removing history normally also removes input history, that
       // doesn't happen if the page is bookmarked, so we do remove input history
@@ -236,12 +252,10 @@ export class UrlbarProviderInputHistory extends UrlbarProvider {
         search_string: queryContext.lowerCaseSearchString,
         matchBehavior: Ci.mozIPlacesAutoComplete.MATCH_ANYWHERE,
         searchBehavior: lazy.UrlbarPrefs.get("defaultBehavior"),
-        userContextId: lazy.UrlbarPrefs.get("switchTabs.searchAllContainers")
-          ? lazy.UrlbarProviderOpenTabs.getUserContextIdForOpenPagesTable(
-              null,
-              queryContext.isPrivate
-            )
-          : queryContext.userContextId,
+        userContextId: lazy.UrlbarShared.getUserContextIdForOpenPagesTable(
+          null,
+          queryContext.isPrivate
+        ),
         maxResults: queryContext.maxResults,
       },
     ];

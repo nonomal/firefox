@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsProxyRelease_h__
-#define nsProxyRelease_h__
+#ifndef nsProxyRelease_h_
+#define nsProxyRelease_h_
 
 #include <utility>
 
@@ -143,9 +141,9 @@ inline NS_HIDDEN_(nsresult)
     NS_ProxyRelease(const char* aName, nsIEventTarget* aTarget,
                     already_AddRefed<T> aDoomed, bool aAlwaysProxy = false) {
   return ::detail::ProxyReleaseChooser<
-      std::is_base_of<nsISupports, T>::value>::ProxyRelease(aName, aTarget,
-                                                            std::move(aDoomed),
-                                                            aAlwaysProxy);
+      std::is_base_of_v<nsISupports, T>>::ProxyRelease(aName, aTarget,
+                                                       std::move(aDoomed),
+                                                       aAlwaysProxy);
 }
 
 /**

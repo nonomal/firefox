@@ -38,9 +38,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -56,9 +56,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -74,9 +74,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -92,9 +92,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -107,9 +107,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -122,10 +122,27 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
+      }),
+    ],
+  });
+
+  info("visit url on searchbar (should search)");
+  query = "https://mozilla.org";
+  context = createContext(query, {
+    isPrivate: false,
+    sapName: "searchbar",
+  });
+  await check_results({
+    context,
+    matches: [
+      makeSearchResult(context, {
+        engineName: SUGGESTIONS_ENGINE_NAME,
+        heuristic: true,
+        query,
       }),
     ],
   });
@@ -137,9 +154,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: query,
-        fallbackTitle: query,
+        title: query,
         heuristic: true,
       }),
     ],
@@ -152,9 +169,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -176,9 +193,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}`,
-        fallbackTitle: `${query}`,
+        title: `${query}`,
         iconUri: "page-icon:http://mozilla.org/",
         heuristic: true,
       }),
@@ -225,9 +242,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -243,9 +260,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}`,
-        fallbackTitle: `${query}`,
+        title: `${query}`,
         iconUri: "page-icon:http://firefox/",
         heuristic: true,
       }),
@@ -263,9 +280,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}`,
-        fallbackTitle: `${query}`,
+        title: `${query}`,
         iconUri: "page-icon:http://mozilla/",
         heuristic: true,
       }),
@@ -280,9 +297,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -295,9 +312,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -316,9 +333,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -331,9 +348,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: query,
-        fallbackTitle: query,
+        title: query,
         heuristic: true,
       }),
     ],
@@ -373,6 +390,41 @@ add_task(async function () {
     ],
   });
 
+  info("Forced search through searchbar, keyword.enabled = false");
+  query = "bacon";
+  context = createContext(query, {
+    isPrivate: false,
+    sapName: "searchbar",
+  });
+  await check_results({
+    context,
+    matches: [
+      makeSearchResult(context, {
+        engineName: SUGGESTIONS_ENGINE_NAME,
+        heuristic: true,
+        query: "bacon",
+      }),
+    ],
+  });
+
+  // The address bar gets no result at all for this; a search bar searches it.
+  info("Invalid URL through the newtab search bar, keyword.enabled = false");
+  query = "bacon *";
+  context = createContext(query, {
+    isPrivate: false,
+    sapName: "newtab_searchbar",
+  });
+  await check_results({
+    context,
+    matches: [
+      makeSearchResult(context, {
+        engineName: SUGGESTIONS_ENGINE_NAME,
+        heuristic: true,
+        query,
+      }),
+    ],
+  });
+
   info("Non-search restriction token and invalid URL, keyword.enabled = false");
   query = "bacon *";
   context = createContext(query, { isPrivate: false });
@@ -404,9 +456,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -419,9 +471,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -434,9 +486,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -480,9 +532,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: query,
-        fallbackTitle: query,
+        title: query,
         heuristic: true,
       }),
     ],
@@ -495,9 +547,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: query,
-        fallbackTitle: query,
+        title: query,
         heuristic: true,
       }),
     ],
@@ -517,23 +569,20 @@ add_task(async function () {
   });
 
   info("change default engine");
-  let originalTestEngine = Services.search.getEngineByName(
+  let originalTestEngine = SearchService.getEngineByName(
     SUGGESTIONS_ENGINE_NAME
   );
   await SearchTestUtils.installSearchExtension({
     name: "AliasEngine",
     keyword: "alias",
   });
-  let engine2 = Services.search.getEngineByName("AliasEngine");
+  let engine2 = SearchService.getEngineByName("AliasEngine");
   Assert.notEqual(
-    Services.search.defaultEngine,
+    SearchService.defaultEngine,
     engine2,
     "New engine shouldn't be the current engine yet"
   );
-  await Services.search.setDefault(
-    engine2,
-    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
-  );
+  await SearchService.setDefault(engine2, SearchService.CHANGE_REASON.UNKNOWN);
   query = "toronto";
   context = createContext(query, { isPrivate: false });
   await check_results({
@@ -545,15 +594,15 @@ add_task(async function () {
       }),
     ],
   });
-  await Services.search.setDefault(
+  await SearchService.setDefault(
     originalTestEngine,
-    Ci.nsISearchService.CHANGE_REASON_UNKNOWN
+    SearchService.CHANGE_REASON.UNKNOWN
   );
 
   info(
     "Leading search-mode restriction tokens are removed from the search result."
   );
-  for (let token of UrlbarTokenizer.SEARCH_MODE_RESTRICT) {
+  for (let token of UrlbarShared.SEARCH_MODE_RESTRICT) {
     for (let spaces of TEST_SPACES) {
       query = token + spaces + "query";
       info("Testing: " + JSON.stringify({ query, spaces: codePoints(spaces) }));
@@ -561,13 +610,13 @@ add_task(async function () {
       context = createContext(query, { isPrivate: false });
       info(`Searching for "${query}", expecting "${expectedQuery}"`);
       let payload = {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         heuristic: true,
         query: expectedQuery,
         alias: token,
       };
-      if (token == UrlbarTokenizer.RESTRICT.SEARCH) {
-        payload.source = UrlbarUtils.RESULT_SOURCE.SEARCH;
+      if (token == UrlbarShared.RESTRICT_TOKENS.SEARCH) {
+        payload.source = UrlbarShared.RESULT_SOURCE.SEARCH;
         payload.engineName = SUGGESTIONS_ENGINE_NAME;
       }
       await check_results({
@@ -581,7 +630,7 @@ add_task(async function () {
     "Leading search-mode restriction tokens are removed from the search result with keyword.enabled = false."
   );
   Services.prefs.setBoolPref("keyword.enabled", false);
-  for (let token of UrlbarTokenizer.SEARCH_MODE_RESTRICT) {
+  for (let token of UrlbarShared.SEARCH_MODE_RESTRICT) {
     for (let spaces of TEST_SPACES) {
       query = token + spaces + "query";
       info("Testing: " + JSON.stringify({ query, spaces: codePoints(spaces) }));
@@ -589,13 +638,13 @@ add_task(async function () {
       context = createContext(query, { isPrivate: false });
       info(`Searching for "${query}", expecting "${expectedQuery}"`);
       let payload = {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         heuristic: true,
         query: expectedQuery,
         alias: token,
       };
-      if (token == UrlbarTokenizer.RESTRICT.SEARCH) {
-        payload.source = UrlbarUtils.RESULT_SOURCE.SEARCH;
+      if (token == UrlbarShared.RESTRICT_TOKENS.SEARCH) {
+        payload.source = UrlbarShared.RESULT_SOURCE.SEARCH;
         payload.engineName = SUGGESTIONS_ENGINE_NAME;
       }
       await check_results({
@@ -609,8 +658,8 @@ add_task(async function () {
   info(
     "Leading non-search-mode restriction tokens are not removed from the search result."
   );
-  for (let token of Object.values(UrlbarTokenizer.RESTRICT)) {
-    if (UrlbarTokenizer.SEARCH_MODE_RESTRICT.has(token)) {
+  for (let token of Object.values(UrlbarShared.RESTRICT_TOKENS)) {
+    if (UrlbarShared.SEARCH_MODE_RESTRICT.has(token)) {
       continue;
     }
     for (let spaces of TEST_SPACES) {
@@ -646,9 +695,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -682,9 +731,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: "http://user:pass@not-host/",
-        fallbackTitle: "user:pass@not-host/",
+        title: "user:pass@not-host/",
         heuristic: true,
       }),
     ],
@@ -697,9 +746,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: "http://user@192.168.0.1/",
-        fallbackTitle: "user@192.168.0.1/",
+        title: "user@192.168.0.1/",
         heuristic: true,
       }),
       makeSearchResult(context, {
@@ -725,9 +774,9 @@ add_task(async function () {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.HISTORY,
+        source: UrlbarShared.RESULT_SOURCE.HISTORY,
         uri: `http://test.xn--e1afmkfd.com/`,
-        displayUrl: `test.пример.com`,
+        title: "test.пример.com",
         heuristic: true,
         iconUri: "page-icon:http://test.xn--e1afmkfd.com/",
       }),
@@ -756,9 +805,9 @@ add_task(async function dont_fixup_urls_with_at_symbol() {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://Lorem%20Ipsum%20@mozilla.org/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -769,9 +818,9 @@ add_task(async function dont_fixup_urls_with_at_symbol() {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `https://Lorem%20Ipsum%20@mozilla.org/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
     ],
@@ -783,15 +832,22 @@ add_task(async function dont_fixup_urls_with_at_symbol() {
     context,
     matches: [
       makeVisitResult(context, {
-        source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
+        source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
         uri: `http://${query}/`,
-        fallbackTitle: `${query}/`,
+        title: `${query}/`,
         heuristic: true,
       }),
       makeSearchResult(context, {
         engineName: SUGGESTIONS_ENGINE_NAME,
       }),
     ],
+  });
+
+  query = "";
+  context = createContext(query, { isPrivate: false });
+  await check_results({
+    context,
+    matches: [],
   });
 });
 

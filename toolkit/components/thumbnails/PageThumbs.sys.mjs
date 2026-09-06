@@ -50,9 +50,10 @@ const TaskUtils = {
   /**
    * Read the bytes from a blob, asynchronously.
    *
-   * @return {Promise}
-   * @resolve {ArrayBuffer} In case of success, the bytes contained in the blob.
-   * @reject {DOMException} In case of error, the underlying DOMException.
+   * @return {Promise<ArrayBuffer>}
+   *   Resolves to the bytes contained in the blob.
+   * @rejects {DOMException}
+   *   In case of error, the underlying DOMException.
    */
   readBlob: function readBlob(blob) {
     return new Promise((resolve, reject) => {
@@ -180,8 +181,8 @@ export var PageThumbs = {
    *
    * @param aBrowser The <browser> to capture a thumbnail from.
    * @param aArgs See captureToCanvas for accepted arguments.
-   * @return {Promise}
-   * @resolve {Blob} The thumbnail, as a Blob.
+   * @return {Promise<Blob>}
+   *   Resolves to the thumbnail, as a Blob.
    */
   captureToBlob: function PageThumbs_captureToBlob(aBrowser, aArgs) {
     if (!this._prefEnabled()) {
@@ -189,7 +190,7 @@ export var PageThumbs = {
     }
 
     return new Promise(resolve => {
-      let canvas = this.createCanvas(aBrowser.ownerGlobal);
+      let canvas = this.createCanvas(aBrowser.documentGlobal);
       this.captureToCanvas(aBrowser, canvas, aArgs)
         .then(() => {
           canvas.toBlob(blob => {
@@ -215,7 +216,6 @@ export var PageThumbs = {
    *   isImage - indicate that this should be treated as an image url.
    *   backgroundColor - background color to draw behind images.
    *   targetWidth - desired width for images.
-   *   preserveAspectRatio - resize image height based on targetWidth
    *   isBackgroundThumb - true if request is from the background thumb service.
    *   fullViewport - request that a screenshot for the viewport be
    *     captured. This makes it possible to get a screenshot that reflects
@@ -231,7 +231,6 @@ export var PageThumbs = {
         aArgs?.backgroundColor ?? lazy.PageThumbUtils.THUMBNAIL_BG_COLOR,
       targetWidth:
         aArgs?.targetWidth ?? lazy.PageThumbUtils.THUMBNAIL_DEFAULT_SIZE,
-      preserveAspectRatio: aArgs?.preserveAspectRatio ?? false,
       isBackgroundThumb: aArgs ? aArgs.isBackgroundThumb : false,
       fullViewport: aArgs?.fullViewport ?? false,
     };
@@ -307,7 +306,7 @@ export var PageThumbs = {
   },
 
   /**
-   * Asynchrnously render an appropriately scaled thumbnail to canvas.
+   * Asynchronously render an appropriately scaled thumbnail to canvas.
    *
    * @param aBrowser The browser to capture a thumbnail from.
    * @param aWidth The desired canvas width.
@@ -317,7 +316,6 @@ export var PageThumbs = {
    *   isImage - indicate that this should be treated as an image url.
    *   backgroundColor - background color to draw behind images.
    *   targetWidth - desired width for images.
-   *   preserveAspectRatio - resize image height based on targetWidth
    *   isBackgroundThumb - true if request is from the background thumb service.
    *   fullViewport - request that a screenshot for the viewport be
    *     captured. This makes it possible to get a screenshot that reflects
@@ -346,7 +344,6 @@ export var PageThumbs = {
     if (contentWidth == 0 || contentHeight == 0) {
       throw new Error("IMAGE_ZERO_DIMENSION");
     }
-    let aspectRatio = contentWidth / contentHeight;
 
     if (!aBrowser.isConnected) {
       return null;
@@ -362,7 +359,7 @@ export var PageThumbs = {
       thumbnail.width = contentWidth;
       thumbnail.height = contentHeight;
 
-      let imageData = new aBrowser.ownerGlobal.ImageData(
+      let imageData = new aBrowser.documentGlobal.ImageData(
         contentInfo.imageData,
         contentWidth,
         contentHeight
@@ -370,21 +367,9 @@ export var PageThumbs = {
       ctx.putImageData(imageData, 0, 0);
     } else {
       let fullScale = aArgs ? aArgs.fullScale : false;
-      let targetWidth = aArgs.targetWidth ? aArgs.targetWidth : aWidth;
-      let preserveAspectRatio = aArgs ? aArgs.preserveAspectRatio : false;
-      let scale = 1;
-      if (!fullScale) {
-        let targetScale;
-        if (preserveAspectRatio) {
-          targetScale = targetWidth / contentWidth;
-        } else {
-          targetScale = Math.max(
-            aWidth / contentWidth,
-            aHeight / contentHeight
-          );
-        }
-        scale = Math.min(targetScale, 1);
-      }
+      let scale = fullScale
+        ? 1
+        : Math.min(Math.max(aWidth / contentWidth, aHeight / contentHeight), 1);
 
       let image = await aBrowser.drawSnapshot(
         0,
@@ -399,13 +384,8 @@ export var PageThumbs = {
         return null;
       }
 
-      if (preserveAspectRatio) {
-        thumbnail.width = targetWidth;
-        thumbnail.height = targetWidth / aspectRatio;
-      } else {
-        thumbnail.width = fullScale ? contentWidth : aWidth;
-        thumbnail.height = fullScale ? contentHeight : aHeight;
-      }
+      thumbnail.width = fullScale ? contentWidth : aWidth;
+      thumbnail.height = fullScale ? contentHeight : aHeight;
       ctx.drawImage(image, 0, 0);
     }
 
@@ -489,12 +469,21 @@ export var PageThumbs = {
    *
    * @param aBrowser the content window of this browser will be captured.
    * @param aCanvas the thumbnail will be rendered to this canvas.
+   * @returns {Promise<boolean>} false if the browser went away before the
+   *          thumbnail could be drawn, true otherwise.
    */
   async captureTabPreviewThumbnail(aBrowser, aCanvas) {
     let desiredAspectRatio = aCanvas.width / aCanvas.height;
 
-    let thumbnailsActor =
-      aBrowser.browsingContext.currentWindowGlobal.getActor("Thumbnails");
+    // The browser may be torn down at any point while we await below, for
+    // instance when its tab is closed. Bail out rather than drawing a
+    // half-captured thumbnail.
+    let windowGlobal = aBrowser.browsingContext?.currentWindowGlobal;
+    if (!windowGlobal) {
+      return false;
+    }
+
+    let thumbnailsActor = windowGlobal.getActor("Thumbnails");
     let contentInfo = await thumbnailsActor.sendQuery(
       "Browser:Thumbnail:ContentInfo"
     );
@@ -544,9 +533,13 @@ export var PageThumbs = {
       "transparent",
       false
     );
+    if (!snapshotResult) {
+      return false;
+    }
     aCanvas
       .getContext("2d")
       .drawImage(snapshotResult, renderX, renderY, renderWidth, renderHeight);
+    return true;
   },
 
   /**
@@ -671,7 +664,7 @@ export var PageThumbsStorage = {
   // If two thumbnails with the same URL and revision are in cache at the
   // same time, the image loader may pick the stale thumbnail in some cases.
   // Therefore _revisionRange must be large enough to prevent this, e.g.
-  // in the pathological case image.cache.size (5MB by default) could fill
+  // in the pathological case image.cache.size (20MB by default) could fill
   // with (abnormally small) 10KB thumbnail images if the browser session
   // runs long enough (though this is unlikely as thumbnails are usually
   // only updated every MAX_THUMBNAIL_AGE_SECS).

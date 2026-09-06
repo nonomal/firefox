@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -7,11 +5,11 @@
 #ifndef IPC_GLUE_PROTOCOLMESSAGEUTILS_H
 #define IPC_GLUE_PROTOCOLMESSAGEUTILS_H
 
-#include <stdint.h>
 #include "base/string_util.h"
 #include "chrome/common/ipc_channel.h"
 #include "chrome/common/ipc_message_utils.h"
 #include "ipc/EnumSerializer.h"
+#include "ipc/IPCMessageUtils.h"
 #include "mozilla/ipc/Endpoint.h"
 #include "mozilla/ipc/ProtocolUtils.h"
 
@@ -45,6 +43,29 @@ struct ParamTraits<mozilla::ipc::IProtocol*> {
   static bool Read(MessageReader* aReader, paramType* aResult);
 };
 
+template <mozilla::ipc::IPDLActorType PFooSide>
+struct ParamTraits<PFooSide*> {
+  using paramType = PFooSide*;
+
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    WriteParam(aWriter, static_cast<mozilla::ipc::IProtocol*>(aParam));
+  }
+
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    mozilla::ipc::IProtocol* result = nullptr;
+    if (!ReadParam(aReader, &result)) {
+      return false;
+    }
+
+    *aResult = ActorDynCast<PFooSide>(result);
+    if (result && !*aResult) {
+      aReader->FatalError("Unexpected actor type");
+      return false;
+    }
+    return true;
+  }
+};
+
 template <>
 struct ParamTraits<mozilla::ipc::UntypedEndpoint> {
   using paramType = mozilla::ipc::UntypedEndpoint;
@@ -58,20 +79,8 @@ template <class PFooSide>
 struct ParamTraits<mozilla::ipc::Endpoint<PFooSide>>
     : ParamTraits<mozilla::ipc::UntypedEndpoint> {};
 
-template <>
-struct ParamTraits<mozilla::ipc::EndpointProcInfo> {
-  using paramType = mozilla::ipc::EndpointProcInfo;
-
-  static void Write(MessageWriter* aWriter, const paramType& aParam) {
-    IPC::WriteParam(aWriter, aParam.mPid);
-    IPC::WriteParam(aWriter, aParam.mChildID);
-  }
-
-  static bool Read(MessageReader* aReader, paramType* aResult) {
-    return IPC::ReadParam(aReader, &aResult->mPid) &&
-           IPC::ReadParam(aReader, &aResult->mChildID);
-  }
-};
+DEFINE_IPC_SERIALIZER_WITH_FIELDS(mozilla::ipc::EndpointProcInfo, mPid,
+                                  mChildID);
 
 template <>
 struct ParamTraits<mozilla::ipc::UntypedManagedEndpoint> {
@@ -92,7 +101,8 @@ struct ParamTraits<mozilla::ipc::ManagedEndpoint<PFooSide>> {
 
   static bool Read(IPC::MessageReader* aReader, paramType* aResult) {
     return ParamTraits<mozilla::ipc::UntypedManagedEndpoint>::Read(aReader,
-                                                                   aResult);
+                                                                   aResult) &&
+           aResult->IsForProtocol(PFooSide::kProtocolId);
   }
 };
 

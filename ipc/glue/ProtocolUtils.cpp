@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -129,7 +127,7 @@ bool LoggingEnabledFor(const char* aTopLevelProtocol, Side aSide,
   Tokenizer::Token t;
   while (tokens.Next(t)) {
     if (t.Type() == Tokenizer::TOKEN_WORD) {
-      auto filter = t.AsString();
+      const auto& filter = t.AsString();
 
       // Since aTopLevelProtocol never includes the "Parent" / "Child" suffix,
       // this will only occur when filter doesn't include it either, meaning
@@ -250,7 +248,12 @@ void SentinelReadError(const char* aClassName) {
   MOZ_CRASH_UNSAFE_PRINTF("incorrect sentinel when reading %s", aClassName);
 }
 
-ActorLifecycleProxy::ActorLifecycleProxy(IProtocol* aActor) : mActor(aActor) {
+ActorLifecycleProxy::ActorLifecycleProxy(IProtocol* aActor)
+#ifdef MOZ_THREAD_SAFETY_OWNERSHIP_CHECKS_SUPPORTED
+    : _mOwningThread(aActor->GetActorEventTarget()), mActor(aActor) {
+#else
+    : mActor(aActor) {
+#endif
   MOZ_ASSERT(mActor);
   MOZ_ASSERT(mActor->CanSend(),
              "Cannot create LifecycleProxy for non-connected actor!");
@@ -293,7 +296,9 @@ ActorLifecycleProxy::~ActorLifecycleProxy() {
 }
 
 WeakActorLifecycleProxy::WeakActorLifecycleProxy(ActorLifecycleProxy* aProxy)
-    : mProxy(aProxy), mActorEventTarget(GetCurrentSerialEventTarget()) {}
+    : mProxy(aProxy), mActorEventTarget(aProxy->Get()->GetActorEventTarget()) {
+  MOZ_ASSERT(mActorEventTarget->IsOnCurrentThread());
+}
 
 WeakActorLifecycleProxy::~WeakActorLifecycleProxy() {
   MOZ_DIAGNOSTIC_ASSERT(!mProxy, "Destroyed before mProxy was cleared?");
@@ -433,18 +438,19 @@ bool IProtocol::SetManagerAndRegister(IRefCountedProtocol* aManager,
   SetManager(aManager);
 
   mId = aId == kNullActorId ? mToplevel->NextId() : aId;
-  while (mToplevel->mActorMap.Contains(mId)) {
-    // The ID already existing is an error case, but we want to proceed with
-    // registration so that we can tear down the actor cleanly - generate a new
-    // ID for that case.
-    NS_WARNING("Actor already exists with the selected ID!");
-    mId = mToplevel->NextId();
-    success = false;
-  }
 
   RefPtr<ActorLifecycleProxy> proxy = ActorConnected();
-  mToplevel->mActorMap.InsertOrUpdate(mId, proxy);
   MOZ_ASSERT(proxy->Get() == this);
+
+  mToplevel->mActorMap.WithEntryHandle(mId, [&](auto entry) {
+    if (aId == kNullActorId) {
+      MOZ_RELEASE_ASSERT(!entry, "Entry must not exist for new actor ID");
+    } else {
+      MOZ_RELEASE_ASSERT(entry && !entry.Data(),
+                         "Entry must be a reservation for reserved actor ID");
+    }
+    entry.InsertOrUpdate(proxy);
+  });
 
   UntypedManagedContainer* container =
       aManager->GetManagedActors(GetProtocolId());
@@ -610,9 +616,10 @@ void IProtocol::ActorDisconnected(ActorDestroyReason aWhy) {
 }
 
 void IProtocol::DoomSubtree() {
-  MOZ_ASSERT(
-      mLinkStatus == LinkStatus::Connected || mLinkStatus == LinkStatus::Doomed,
-      "Invalid link status for SetDoomed");
+  // If we're already `Doomed` or `Destroyed`, there's nothing to do.
+  if (mLinkStatus != LinkStatus::Connected) {
+    return;
+  }
   for (ProtocolId id : ManagedProtocolIds()) {
     for (IProtocol* actor : *GetManagedActors(id)) {
       actor->DoomSubtree();
@@ -672,7 +679,7 @@ bool IToplevelProtocol::OpenOnSameThread(IToplevelProtocol* aTarget,
 }
 
 void IToplevelProtocol::NotifyImpendingShutdown() {
-  if (CanRecv()) {
+  if (CanSend()) {
     GetIPCChannel()->NotifyImpendingShutdown();
   }
 }
@@ -696,10 +703,37 @@ int64_t IToplevelProtocol::NextId() {
 }
 
 IProtocol* IToplevelProtocol::Lookup(ActorId aId) {
-  if (auto entry = mActorMap.Lookup(aId)) {
+  if (auto entry = mActorMap.Lookup(aId); entry && entry.Data()) {
     return entry.Data()->Get();
   }
   return nullptr;
+}
+
+bool IToplevelProtocol::TryReserve(ActorId aId) {
+  // The ID must be coming from the other side.
+  // This logic should check for the opposite sign as NextId().
+  if (mozilla::Abs(aId) >= MSG_ROUTING_CONTROL ||
+      (GetSide() == ChildSide && aId <= kNullActorId) ||
+      (GetSide() == ParentSide && aId >= kNullActorId)) {
+    return false;
+  }
+
+  // Ensure the entry isn't already in use, and then insert it into our map.
+  return mActorMap.WithEntryHandle(aId, [&](auto entry) {
+    if (entry) {
+      return false;
+    }
+    entry.Insert(nullptr);
+    return true;
+  });
+}
+
+void IToplevelProtocol::ClearReservation(ActorId aId) {
+  auto entry = mActorMap.Lookup(aId);
+  // Only remove if it's still a placeholder.
+  if (entry && !entry.Data()) {
+    entry.Remove();
+  }
 }
 
 Shmem IToplevelProtocol::CreateSharedMemory(size_t aSize, bool aUnsafe) {
@@ -834,9 +868,7 @@ IPDLResolverInner::~IPDLResolverInner() {
 }
 
 bool IPDLAsyncReturnsCallbacks::EntryKey::operator==(
-    const EntryKey& aOther) const {
-  return mSeqno == aOther.mSeqno && mType == aOther.mType;
-}
+    const EntryKey& aOther) const = default;
 
 bool IPDLAsyncReturnsCallbacks::EntryKey::operator<(
     const EntryKey& aOther) const {

@@ -1,4 +1,3 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 4; -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,18 +14,18 @@
 #ifndef SHARED_SURFACE_H_
 #define SHARED_SURFACE_H_
 
-#include <queue>
 #include <stdint.h>
 
 #include "GLContext.h"  // Bug 1635644
 #include "GLContextTypes.h"
 #include "GLDefs.h"
+#include "SurfaceTypes.h"
 #include "mozilla/Attributes.h"
-#include "mozilla/gfx/Point.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/WeakPtr.h"
-#include "SurfaceTypes.h"
+#include "mozilla/gfx/Point.h"
+#include "mozilla/layers/GpuFence.h"
 
 class nsIThread;
 
@@ -43,6 +42,7 @@ class LayersIPCChannel;
 class SharedSurfaceTextureClient;
 class SurfaceDescriptor;
 class TextureClient;
+class TextureHost;
 enum class TextureFlags : uint32_t;
 enum class TextureType : int8_t;
 }  // namespace layers
@@ -59,18 +59,17 @@ struct PartialSharedSurfaceDesc {
   const layers::TextureType consumerType;
   const bool canRecycle;
 
-  bool operator==(const PartialSharedSurfaceDesc& rhs) const {
-    return gl == rhs.gl && type == rhs.type &&
-           consumerType == rhs.consumerType && canRecycle == rhs.canRecycle;
-  }
+  bool operator==(const PartialSharedSurfaceDesc& rhs) const = default;
 };
 struct SharedSurfaceDesc : public PartialSharedSurfaceDesc {
   gfx::IntSize size = {};
   gfx::ColorSpace2 colorSpace = gfx::ColorSpace2::UNKNOWN;
+  gfx::TransferFunction transferFunction = gfx::TransferFunction::SRGB;
 
   bool operator==(const SharedSurfaceDesc& rhs) const {
     return PartialSharedSurfaceDesc::operator==(rhs) && size == rhs.size &&
-           colorSpace == rhs.colorSpace;
+           colorSpace == rhs.colorSpace &&
+           transferFunction == rhs.transferFunction;
   }
   bool operator!=(const SharedSurfaceDesc& rhs) const {
     return !(*this == rhs);
@@ -85,6 +84,7 @@ class SharedSurface {
  protected:
   bool mIsLocked = false;
   bool mIsProducerAcquired = false;
+  RefPtr<layers::TextureHost> mTextureHost;
 
   SharedSurface(const SharedSurfaceDesc&, UniquePtr<MozFramebuffer>);
 
@@ -100,6 +100,12 @@ class SharedSurface {
 
   // Unlocking is harmless if we're already unlocked.
   void UnlockProd();
+
+  RefPtr<layers::TextureHost> GetTextureHost();
+
+  void SetTextureHost(layers::TextureHost* aTextureHost);
+
+  void ClearTextureHost();
 
   // This surface has been moved to the front buffer and will not be locked
   // again until it is recycled. Do any finalization steps here.
@@ -153,6 +159,7 @@ class SharedSurface {
   virtual bool IsValid() const { return true; };
 
   virtual Maybe<layers::SurfaceDescriptor> ToSurfaceDescriptor() = 0;
+  virtual RefPtr<layers::GpuFence> TakeGpuFence() { return nullptr; }
 
   void BeginWrite() {
     WaitForBufferOwnership();

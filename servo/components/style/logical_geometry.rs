@@ -4,6 +4,7 @@
 
 //! Geometry in flow-relative space.
 
+use crate::derives::*;
 use crate::properties::style_structs;
 use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
 use euclid::num::Zero;
@@ -113,7 +114,7 @@ bitflags!(
         const WRITING_MODE_HORIZONTAL_TB = 0;
         /// * writing-mode: vertical_rl;
         const WRITING_MODE_VERTICAL_RL = WritingMode::VERTICAL.bits();
-        /// * writing-mode: vertcail-lr;
+        /// * writing-mode: vertical-lr;
         const WRITING_MODE_VERTICAL_LR = WritingMode::VERTICAL.bits() |
                                          WritingMode::VERTICAL_LR.bits() |
                                          WritingMode::LINE_INVERTED.bits();
@@ -220,6 +221,11 @@ impl WritingMode {
     #[inline]
     pub fn is_vertical(&self) -> bool {
         self.intersects(WritingMode::VERTICAL)
+    }
+
+    #[inline]
+    pub fn is_vertical_rl(&self) -> bool {
+        self.is_vertical() && !self.is_vertical_lr()
     }
 
     #[inline]
@@ -416,13 +422,11 @@ impl fmt::Display for WritingMode {
 /// (in addition to taking it as a parameter to methods) and check it.
 /// In non-debug builds, make this storage zero-size and the checks no-ops.
 #[cfg(not(debug_assertions))]
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 struct DebugWritingMode;
 
 #[cfg(debug_assertions)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 struct DebugWritingMode {
     mode: WritingMode,
 }
@@ -472,16 +476,14 @@ impl Debug for DebugWritingMode {
 }
 
 // Used to specify the logical direction.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum Direction {
     Inline,
     Block,
 }
 
 /// A 2D size in flow-relative dimensions
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct LogicalSize<T> {
     pub inline: T, // inline-size, a.k.a. logical width, a.k.a. measure
     pub block: T,  // block-size, a.k.a. logical height, a.k.a. extent
@@ -514,8 +516,8 @@ impl<T> LogicalSize<T> {
     #[inline]
     pub fn new(mode: WritingMode, inline: T, block: T) -> LogicalSize<T> {
         LogicalSize {
-            inline: inline,
-            block: block,
+            inline,
+            block,
             debug_writing_mode: DebugWritingMode::new(mode),
         }
     }
@@ -623,8 +625,7 @@ impl<T: Sub<T, Output = T>> Sub for LogicalSize<T> {
 }
 
 /// A 2D point in flow-relative dimensions
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct LogicalPoint<T> {
     /// inline-axis coordinate
     pub i: T,
@@ -659,8 +660,8 @@ impl<T: Copy> LogicalPoint<T> {
     #[inline]
     pub fn new(mode: WritingMode, i: T, b: T) -> LogicalPoint<T> {
         LogicalPoint {
-            i: i,
-            b: b,
+            i,
+            b,
             debug_writing_mode: DebugWritingMode::new(mode),
         }
     }
@@ -709,12 +710,10 @@ impl<T: Copy + Sub<T, Output = T>> LogicalPoint<T> {
             } else {
                 container_size.width - self.b
             }
+        } else if mode.is_bidi_ltr() {
+            self.i
         } else {
-            if mode.is_bidi_ltr() {
-                self.i
-            } else {
-                container_size.width - self.i
-            }
+            container_size.width - self.i
         }
     }
 
@@ -861,8 +860,7 @@ impl<T: Copy + Sub<T, Output = T>> Sub<LogicalSize<T>> for LogicalPoint<T> {
 /// Represents the four sides of the margins, borders, or padding of a CSS box,
 /// or a combination of those.
 /// A positive "margin" can be added to a rectangle to obtain a bigger rectangle.
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct LogicalMargin<T> {
     pub block_start: T,
     pub inline_end: T,
@@ -1001,12 +999,10 @@ impl<T: Clone> LogicalMargin<T> {
             } else {
                 self.block_start.clone()
             }
+        } else if mode.is_bidi_ltr() {
+            self.inline_end.clone()
         } else {
-            if mode.is_bidi_ltr() {
-                self.inline_end.clone()
-            } else {
-                self.inline_start.clone()
-            }
+            self.inline_start.clone()
         }
     }
 
@@ -1019,12 +1015,10 @@ impl<T: Clone> LogicalMargin<T> {
             } else {
                 self.block_start = right
             }
+        } else if mode.is_bidi_ltr() {
+            self.inline_end = right
         } else {
-            if mode.is_bidi_ltr() {
-                self.inline_end = right
-            } else {
-                self.inline_start = right
-            }
+            self.inline_start = right
         }
     }
 
@@ -1065,12 +1059,10 @@ impl<T: Clone> LogicalMargin<T> {
             } else {
                 self.block_end.clone()
             }
+        } else if mode.is_bidi_ltr() {
+            self.inline_start.clone()
         } else {
-            if mode.is_bidi_ltr() {
-                self.inline_start.clone()
-            } else {
-                self.inline_end.clone()
-            }
+            self.inline_end.clone()
         }
     }
 
@@ -1083,12 +1075,10 @@ impl<T: Clone> LogicalMargin<T> {
             } else {
                 self.block_end = left
             }
+        } else if mode.is_bidi_ltr() {
+            self.inline_start = left
         } else {
-            if mode.is_bidi_ltr() {
-                self.inline_start = left
-            } else {
-                self.inline_end = left
-            }
+            self.inline_end = left
         }
     }
 
@@ -1224,8 +1214,7 @@ impl<T: Sub<T, Output = T>> Sub for LogicalMargin<T> {
 }
 
 /// A rectangle in flow-relative dimensions
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "servo", derive(Serialize))]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct LogicalRect<T> {
     pub start: LogicalPoint<T>,
     pub size: LogicalSize<T>,
@@ -1284,8 +1273,8 @@ impl<T: Copy> LogicalRect<T> {
         start.debug_writing_mode.check(mode);
         size.debug_writing_mode.check(mode);
         LogicalRect {
-            start: start,
-            size: size,
+            start,
+            size,
             debug_writing_mode: DebugWritingMode::new(mode),
         }
     }

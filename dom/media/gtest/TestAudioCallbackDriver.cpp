@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -23,6 +21,7 @@ using ::testing::AtMost;
 using ::testing::Eq;
 using ::testing::InSequence;
 using ::testing::NiceMock;
+using ::testing::Return;
 
 NS_IMPL_ISUPPORTS0(MockGraphInterface)
 
@@ -325,8 +324,13 @@ MOZ_CAN_RUN_SCRIPT_BOUNDARY {
 
   // This will block until all events have been queued.
   MOZ_KnownLive(driver)->Shutdown();
+
   // Drain the event queue.
   NS_ProcessPendingEvents(nullptr);
+
+#ifdef DEBUG
+  EXPECT_CALL(*graph, InDriverIteration(_)).WillRepeatedly(Return(false));
+#endif
 }
 
 TEST(TestAudioCallbackDriver, DeviceChangeAfterStop)
@@ -491,6 +495,10 @@ MOZ_CAN_RUN_SCRIPT_BOUNDARY {
 
   // Drain the event queue.
   NS_ProcessPendingEvents(nullptr);
+
+#ifdef DEBUG
+  EXPECT_CALL(*graph, InDriverIteration(_)).WillRepeatedly(Return(false));
+#endif
 }
 
 void TestInputProcessingOnStart(
@@ -551,6 +559,10 @@ void TestInputProcessingOnStart(
   MOZ_KnownLive(driver)->Shutdown();
   EXPECT_FALSE(driver->ThreadRunning()) << "Verify thread is not running";
   EXPECT_FALSE(driver->IsStarted()) << "Verify thread is not started";
+
+#ifdef DEBUG
+  EXPECT_CALL(*graph, InDriverIteration(_)).WillRepeatedly(Return(false));
+#endif
 }
 
 TEST(TestAudioCallbackDriver, InputProcessingOnStart)
@@ -740,6 +752,10 @@ MOZ_CAN_RUN_SCRIPT_BOUNDARY {
   MOZ_KnownLive(driver)->Shutdown();
   EXPECT_FALSE(driver->ThreadRunning()) << "Verify thread is not running";
   EXPECT_FALSE(driver->IsStarted()) << "Verify thread is not started";
+
+#ifdef DEBUG
+  EXPECT_CALL(*graph, InDriverIteration(_)).WillRepeatedly(Return(false));
+#endif
 }
 
 }  // namespace mozilla

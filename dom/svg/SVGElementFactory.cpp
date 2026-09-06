@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -26,28 +24,28 @@ StaticAutoPtr<TagAtomTable> sTagAtomTable;
 #define SVG_TAG(_tag, _classname)                                         \
   nsresult NS_NewSVG##_classname##Element(                                \
       nsIContent** aResult,                                               \
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);              \
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);                \
                                                                           \
   nsresult NS_NewSVG##_classname##Element(                                \
       nsIContent** aResult,                                               \
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo,               \
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,                 \
       FromParser aFromParser) {                                           \
     return NS_NewSVG##_classname##Element(aResult, std::move(aNodeInfo)); \
   }
 
 #define SVG_FROM_PARSER_TAG(_tag, _classname)
 
-#include "SVGTagList.h"
+#include "SVGTagList.inc"
 #undef SVG_TAG
 #undef SVG_FROM_PARSER_TAG
 
 nsresult NS_NewSVGElement(Element** aResult,
-                          already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+                          already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
 enum SVGTag {
 #define SVG_TAG(_tag, _classname) eSVGTag_##_tag,
 #define SVG_FROM_PARSER_TAG(_tag, _classname) eSVGTag_##_tag,
-#include "SVGTagList.h"
+#include "SVGTagList.inc"
 #undef SVG_TAG
 #undef SVG_FROM_PARSER_TAG
   eSVGTag_Count
@@ -64,7 +62,7 @@ void SVGElementFactory::Init() {
   sTagAtomTable->InsertOrUpdate(              \
       nsGkAtoms::_tag,                        \
       SVGContentCreatorFunction(NS_NewSVG##_classname##Element));
-#include "SVGTagList.h"
+#include "SVGTagList.inc"
 #undef SVG_TAG
 #undef SVG_FROM_PARSER_TAG
 }
@@ -72,7 +70,7 @@ void SVGElementFactory::Init() {
 void SVGElementFactory::Shutdown() { sTagAtomTable = nullptr; }
 
 nsresult NS_NewSVGElement(Element** aResult,
-                          already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo,
+                          already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
                           FromParser aFromParser) {
   NS_ASSERTION(sTagAtomTable, "no lookup table, needs SVGElementFactory::Init");
 
@@ -96,7 +94,7 @@ nsresult NS_NewSVGElement(Element** aResult,
 }
 
 nsresult NS_NewSVGUnknownElement(
-    nsIContent** aResult, already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo,
+    nsIContent** aResult, already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
     FromParser aFromParser) {
   RefPtr<mozilla::dom::NodeInfo> ni = aNodeInfo;
   nsCOMPtr<Element> element;

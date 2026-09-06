@@ -9,8 +9,6 @@
  */
 
 #include <cassert>
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -21,22 +19,23 @@
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/data_channel_interface.h"
+#include "api/environment/environment.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
 #include "api/rtc_error.h"
 #include "api/scoped_refptr.h"
 #include "api/test/metrics/global_metrics_logger_and_exporter.h"
 #include "api/test/metrics/metric.h"
-#include "api/test/rtc_error_matchers.h"
 #include "api/units/time_delta.h"
+#include "api/units/timestamp.h"
 #include "p2p/base/transport_description.h"
-#include "pc/sdp_utils.h"
+#include "pc/session_description.h"
 #include "pc/test/mock_peer_connection_observers.h"
 #include "pc/test/peer_connection_test_wrapper.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/thread.h"
-#include "rtc_base/time_utils.h"
 #include "rtc_base/virtual_socket_server.h"
+#include "test/create_test_environment.h"
 #include "test/create_test_field_trials.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
@@ -60,7 +59,8 @@ class PeerConnectionDataChannelOpenTest
                      /*dtls_role=*/ConnectionRole>> {
  public:
   PeerConnectionDataChannelOpenTest()
-      : background_thread_(std::make_unique<Thread>(&vss_)) {
+      : env_(CreateTestEnvironment()),
+        background_thread_(std::make_unique<Thread>(&vss_)) {
     RTC_CHECK(background_thread_->Start());
     // Delay is set to 50ms so we get a 100ms RTT.
     vss_.set_delay_mean(/*delay_mean=*/50);
@@ -70,7 +70,7 @@ class PeerConnectionDataChannelOpenTest
   scoped_refptr<PeerConnectionTestWrapper> CreatePc(
       absl::string_view field_trials = "") {
     auto pc_wrapper = make_ref_counted<PeerConnectionTestWrapper>(
-        "pc", &vss_, background_thread_.get(), background_thread_.get());
+        "pc", env_, &vss_, background_thread_.get(), background_thread_.get());
     pc_wrapper->CreatePc({}, CreateBuiltinAudioEncoderFactory(),
                          CreateBuiltinAudioDecoderFactory(),
                          CreateTestFieldTrialsPtr(field_trials));
@@ -80,8 +80,11 @@ class PeerConnectionDataChannelOpenTest
   void SignalIceCandidates(
       scoped_refptr<PeerConnectionTestWrapper> from_pc_wrapper,
       scoped_refptr<PeerConnectionTestWrapper> to_pc_wrapper) {
-    from_pc_wrapper->SignalOnIceCandidateReady.connect(
-        to_pc_wrapper.get(), &PeerConnectionTestWrapper::AddIceCandidate);
+    from_pc_wrapper->SubscribeOnIceCandidateReady(
+        this, [to_pc = to_pc_wrapper.get()](const std::string& arg1, int arg2,
+                                            const std::string& arg3) {
+          to_pc->AddIceCandidate(arg1, arg2, arg3);
+        });
   }
 
   void Negotiate(scoped_refptr<PeerConnectionTestWrapper> local_pc_wrapper,
@@ -123,8 +126,7 @@ class PeerConnectionDataChannelOpenTest
       scoped_refptr<PeerConnectionTestWrapper> pc_wrapper) {
     auto observer = make_ref_counted<MockCreateSessionDescriptionObserver>();
     pc_wrapper->pc()->CreateOffer(observer.get(), {});
-    EXPECT_THAT(WaitUntil([&] { return observer->called(); }, IsTrue()),
-                IsRtcOk());
+    EXPECT_TRUE(WaitUntil([&] { return observer->called(); }));
     return observer->MoveDescription();
   }
 
@@ -132,8 +134,7 @@ class PeerConnectionDataChannelOpenTest
       scoped_refptr<PeerConnectionTestWrapper> pc_wrapper) {
     auto observer = make_ref_counted<MockCreateSessionDescriptionObserver>();
     pc_wrapper->pc()->CreateAnswer(observer.get(), {});
-    EXPECT_THAT(WaitUntil([&] { return observer->called(); }, IsTrue()),
-                IsRtcOk());
+    EXPECT_TRUE(WaitUntil([&] { return observer->called(); }));
     return observer->MoveDescription();
   }
 
@@ -141,8 +142,8 @@ class PeerConnectionDataChannelOpenTest
       scoped_refptr<PeerConnectionTestWrapper> pc_wrapper,
       SessionDescriptionInterface* sdp) {
     auto observer = make_ref_counted<MockSetSessionDescriptionObserver>();
-    pc_wrapper->pc()->SetLocalDescription(
-        observer.get(), CloneSessionDescription(sdp).release());
+    pc_wrapper->pc()->SetLocalDescription(observer.get(),
+                                          sdp->Clone().release());
     return observer;
   }
 
@@ -150,8 +151,8 @@ class PeerConnectionDataChannelOpenTest
       scoped_refptr<PeerConnectionTestWrapper> pc_wrapper,
       SessionDescriptionInterface* sdp) {
     auto observer = make_ref_counted<MockSetSessionDescriptionObserver>();
-    pc_wrapper->pc()->SetRemoteDescription(
-        observer.get(), CloneSessionDescription(sdp).release());
+    pc_wrapper->pc()->SetRemoteDescription(observer.get(),
+                                           sdp->Clone().release());
     return observer;
   }
 
@@ -171,6 +172,7 @@ class PeerConnectionDataChannelOpenTest
     return true;
   }
 
+  const Environment env_;
   VirtualSocketServer vss_;
   std::unique_ptr<Thread> background_thread_;
 };
@@ -192,12 +194,12 @@ TEST_P(PeerConnectionDataChannelOpenTest, OpenAtCaller) {
 
   auto dc = local_pc_wrapper->CreateDataChannel("test", {});
   Negotiate(local_pc_wrapper, remote_pc_wrapper, role);
-  uint64_t start_time = TimeNanos();
+  Timestamp start_time = env_.clock().CurrentTime();
   EXPECT_TRUE(WaitForDataChannelOpen(dc));
-  uint64_t open_time = TimeNanos();
-  uint64_t setup_time = open_time - start_time;
+  Timestamp open_time = env_.clock().CurrentTime();
+  TimeDelta setup_time = open_time - start_time;
 
-  double setup_time_millis = setup_time / kNumNanosecsPerMillisec;
+  double setup_time_millis = setup_time.ms<double>();
   std::string test_description =
       "emulate_server=" + absl::StrCat(skip_candidates_from_caller) +
       "/dtls_role=" + role_string + "/trials=" + trials;
@@ -222,7 +224,10 @@ INSTANTIATE_TEST_SUITE_P(
             "Enabled/",
             // SPED + DTLS 1.3
             "WebRTC-IceHandshakeDtls/Enabled/WebRTC-ForceDtls13/"
-            "Enabled/"),
+            "Enabled/",
+            // SPED + DTLS 1.3 + SNAP
+            "WebRTC-IceHandshakeDtls/Enabled/WebRTC-ForceDtls13/"
+            "Enabled/WebRTC-Sctp-Snap/Enabled/"),
         testing::Bool(),  // Whether to skip signaling candidates from
                           // first connection.
         testing::Values(

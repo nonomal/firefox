@@ -286,7 +286,10 @@ function waitForSelectedSource(dbg, sourceOrUrl) {
         return allSourceActorsProcessed;
       }
 
-      if (!getBreakableLines(location.source.id)) {
+      if (
+        !location.source.isStyleSheet &&
+        !getBreakableLines(location.source.id)
+      ) {
         return false;
       }
 
@@ -1027,7 +1030,7 @@ function deleteExpression(dbg, input) {
  * @static
  */
 async function reload(dbg, ...sources) {
-  await reloadBrowser();
+  await reloadSelectedTab();
   return waitForSources(dbg, ...sources);
 }
 
@@ -1356,7 +1359,7 @@ function assertSourceIcon(dbg, sourceName, icon) {
   ok(sourceItem, `Found the source item for ${sourceName}`);
   is(
     sourceItem.querySelector(".source-icon").className,
-    `img source-icon ${icon}`,
+    `dbg-img dbg-img-${icon} source-icon`,
     `The icon for ${sourceName} is correct`
   );
 }
@@ -1437,6 +1440,8 @@ async function togglePauseOnExceptions(
  */
 function invokeInTab(fnc, ...args) {
   info(`Invoking in tab: ${fnc}(${args.map(uneval).join(",")})`);
+  // TODO: Switch to SpecialPowers.spawn
+  // eslint-disable-next-line mozilla/reject-contenttask-spawn
   return ContentTask.spawn(gBrowser.selectedBrowser, { fnc, args }, options =>
     content.wrappedJSObject[options.fnc](...options.args)
   );
@@ -1490,6 +1495,10 @@ const keyMappings = {
   toggleCondPanel: { code: "b", modifiers: cmdShift },
   toggleLogPanel: { code: "y", modifiers: cmdShift },
   toggleBreakpoint: { code: "b", modifiers: cmdOrCtrl },
+  toggleAllBreakpoints: {
+    code: "b",
+    modifiers: { ...cmdOrCtrl, altKey: true },
+  },
   inspector: { code: "c", modifiers: shiftOrAlt },
   quickOpen: { code: "p", modifiers: cmdOrCtrl },
   quickOpenFunc: { code: "o", modifiers: cmdShift },
@@ -1844,6 +1853,8 @@ function assertBreakpointSnippet(dbg, index, expectedSnippet) {
 
 const selectors = {
   callStackBody: ".call-stack-pane .pane",
+  domMutationEmpty: ".dom-mutation-empty",
+  domMutationEmptyOpenInspectorButton: ".dom-mutation-empty button",
   domMutationItem: ".dom-mutation-list li",
   expressionNode: i =>
     `.expressions-list .expression-container:nth-child(${i}) .object-label`,
@@ -1915,6 +1926,8 @@ const selectors = {
   stepOut: ".stepOut.active",
   stepIn: ".stepIn.active",
   prettyPrintButton: ".source-footer .prettyPrint",
+  toggleStyleSheetVisibilityButton:
+    ".source-footer .toggleStyleSheetVisibility",
   mappedSourceLink: ".source-footer .mapped-source",
   sourceMapFooterButton: ".debugger-source-map-button",
   sourceNode: i => `.sources-list .tree-node:nth-child(${i}) .node`,
@@ -1946,7 +1959,7 @@ const selectors = {
   searchField: ".search-field",
   blackbox: ".action.black-box",
   projectSearchSearchInput: ".project-text-search .search-field input",
-  projectSearchCollapsed: ".project-text-search .arrow:not(.expanded)",
+  projectSearchCollapsed: ".project-text-search .dbg-img-arrow:not(.expanded)",
   projectSearchExpandedResults: ".project-text-search .result",
   projectSearchFileResults: ".project-text-search .file-result",
   projectSearchModifiersCaseSensitive:
@@ -1974,8 +1987,8 @@ const selectors = {
   previewPopupObjectFunction: ".preview-popup .objectBox-function",
   previewPopupObjectFunctionJumpToDefinition:
     ".preview-popup .objectBox-function .jump-definition",
-  sourceTreeRootNode: ".sources-panel .node .window",
-  sourceTreeFolderNode: ".sources-panel .node .folder",
+  sourceTreeRootNode: ".sources-panel .node .dbg-img-window",
+  sourceTreeFolderNode: ".sources-panel .node .dbg-img-folder",
   excludePatternsInput: ".project-text-search .exclude-patterns-field input",
   fileSearchInput: ".search-bar input",
   fileSearchSummary: ".search-bar .search-field-summary",
@@ -2516,7 +2529,7 @@ function hoverToken(tokenEl) {
     {
       type: "mouseover",
     },
-    tokenEl.ownerGlobal
+    tokenEl.documentGlobal
   );
 
   // This second event helps Popover to have :hover pseudoclass set on the token element
@@ -2526,7 +2539,7 @@ function hoverToken(tokenEl) {
     {
       type: "mousemove",
     },
-    tokenEl.ownerGlobal
+    tokenEl.documentGlobal
   );
 }
 
@@ -2573,7 +2586,7 @@ async function closePreviewForToken(
     {
       type: "mouseout",
     },
-    tokenEl.ownerGlobal
+    tokenEl.documentGlobal
   );
 
   // This second event helps Popover to have :hover pseudoclass removed on the token element
@@ -2590,7 +2603,7 @@ async function closePreviewForToken(
     {
       type: "mousemove",
     },
-    element.ownerGlobal
+    element.documentGlobal
   );
 
   info(`Waiting for preview to be closed (preview type=${previewType})`);
@@ -2855,7 +2868,7 @@ async function assertInlineExceptionPreview(
   info("Wait for top level node to expand and child nodes to load");
   await waitForElementWithSelector(
     dbg,
-    ".exception-popup .exception-message .arrow.expanded"
+    ".exception-popup .exception-message .dbg-img-arrow.expanded"
   );
 
   is(
@@ -3483,7 +3496,7 @@ async function selectBlackBoxContextMenuItem(dbg, itemName) {
 function openOutlinePanel(dbg, waitForOutlineList = true) {
   info("Select the outline panel");
   const outlineTab = findElementWithSelector(dbg, ".outline-tab a");
-  EventUtils.synthesizeMouseAtCenter(outlineTab, {}, outlineTab.ownerGlobal);
+  EventUtils.synthesizeMouseAtCenter(outlineTab, {}, outlineTab.documentGlobal);
 
   if (!waitForOutlineList) {
     return Promise.resolve();

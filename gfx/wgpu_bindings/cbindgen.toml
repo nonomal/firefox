@@ -85,7 +85,6 @@ exclude = [
 	"Option_BufferSize",
 	"Option_NonZeroU32",
 	"Option_NonZeroU8",
-	"ANativeWindow_setBuffersGeometry",
 	"Option_QuerySetId",
 	"Option_DeviceId",
 ]
@@ -97,21 +96,24 @@ include = ["BufferUsages"]
 "nsAString" = "nsAString"
 "nsACString" = "nsACString"
 "nsStringRepr" = "nsString"
-"BufferDescriptor______nsACString" = "WGPUBufferDescriptor"
-"CommandBufferDescriptor______nsACString" = "WGPUCommandBufferDescriptor"
-"CommandEncoderDescriptor______nsACString" = "WGPUCommandEncoderDescriptor"
-"RenderBundleDescriptor______nsACString" = "WGPURenderBundleDescriptor"
-"TextureDescriptor______nsACString__FfiSlice_TextureFormat" = "WGPUTextureDescriptor"
 "ExternalTextureDescriptor______nsACString" = "WGPUExternalTextureDescriptor"
-"SamplerDescriptor______nsACString" = "WGPUSamplerDescriptor"
 "AdapterInformation_nsString" = "WGPUAdapterInformation"
-"QuerySetDescriptor______nsACString" = "WGPUQuerySetDescriptor"
 
 [parse]
 parse_deps = true
-include = ["wgpu-core", "wgpu-types", "wgpu-hal"]
+include = [
+	"naga-types",
+	"wgpu-core-remote",
+	"wgpu-core-remote-types",
+	"wgpu-types",
+]
 
-extra_bindings = ["wgpu-core", "wgpu-types", "wgpu-hal"]
+extra_bindings = [
+	"naga-types",
+	"wgpu-core-remote",
+	"wgpu-core-remote-types",
+	"wgpu-types",
+]
 
 [fn]
 prefix = "WGPU_INLINE"
@@ -125,7 +127,6 @@ derive_eq = true
 [enum]
 prefix_with_name = true
 derive_helper_methods = true
-add_sentinel = true
 
 [macro_expansion]
 bitflags = true
@@ -134,4 +135,3 @@ bitflags = true
 "target_os = windows" = "XP_WIN"
 "target_os = macos" = "XP_MACOSX"
 "target_os = android" = "ANDROID"
-"feature = id32" = "WGPU_FEATURE_ID32"

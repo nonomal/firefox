@@ -1,24 +1,21 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef _LocalAccessible_H_
-#define _LocalAccessible_H_
+#ifndef LocalAccessible_H_
+#define LocalAccessible_H_
 
 #include "mozilla/ComputedStyle.h"
-#include "mozilla/a11y/Accessible.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/a11y/AccTypes.h"
+#include "mozilla/a11y/Accessible.h"
 #include "mozilla/a11y/CacheConstants.h"
 #include "mozilla/a11y/RelationType.h"
 #include "mozilla/a11y/States.h"
-
-#include "mozilla/UniquePtr.h"
-
 #include "nsIContent.h"
-#include "nsTArray.h"
-#include "nsRefPtrHashtable.h"
 #include "nsRect.h"
+#include "nsRefPtrHashtable.h"
+#include "nsTArray.h"
 
 struct nsRoleMapEntry;
 
@@ -88,6 +85,10 @@ typedef nsRefPtrHashtable<nsPtrHashKey<const void>, LocalAccessible>
 class LocalAccessible : public nsISupports, public Accessible {
  public:
   LocalAccessible(nsIContent* aContent, DocAccessible* aDoc);
+
+  LocalAccessible() = delete;
+  LocalAccessible(const LocalAccessible&) = delete;
+  LocalAccessible& operator=(const LocalAccessible&) = delete;
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_CLASS(LocalAccessible)
@@ -226,6 +227,12 @@ class LocalAccessible : public nsISupports, public Accessible {
    * Return true if native unavailable state present.
    */
   virtual bool NativelyUnavailable() const;
+
+  /**
+   * Return true if this accessible and all of its descendants have only
+   * plain-content roles (text, images, generic containers, etc.).
+   */
+  bool IsOnlyPlainContent() const;
 
   virtual already_AddRefed<AccAttributes> Attributes() override;
 
@@ -496,6 +503,8 @@ class LocalAccessible : public nsISupports, public Accessible {
 
   virtual bool DoAction(uint8_t aIndex) const override;
 
+  virtual bool HasCustomActions() const override;
+
   virtual KeyBinding AccessKey() const override;
 
   /**
@@ -691,6 +700,12 @@ class LocalAccessible : public nsISupports, public Accessible {
   }
 
   /**
+   * Return true if this accessible has a parent or ancestor whose value
+   * depends on this accessible.
+   */
+  bool HasValueDependent() const { return mContextFlags & eHasValueDependent; }
+
+  /**
    * Return true if the element is inside an alert.
    */
   bool IsInsideAlert() const { return mContextFlags & eInsideAlert; }
@@ -756,6 +771,8 @@ class LocalAccessible : public nsISupports, public Accessible {
   virtual void DOMNodeID(nsString& aID) const override;
 
   virtual void DOMNodeClass(nsString& aClass) const override;
+
+  virtual int32_t HeadingLevel() const override;
 
   virtual void LiveRegionAttributes(nsAString* aLive, nsAString* aRelevant,
                                     Maybe<bool>* aAtomic,
@@ -853,8 +870,9 @@ class LocalAccessible : public nsISupports, public Accessible {
     eHasNameDependent = 1 << 0,  // See HasNameDependent().
     eInsideAlert = 1 << 1,
     eHasDescriptionDependent = 1 << 2,  // See HasDescriptionDependent().
+    eHasValueDependent = 1 << 3,        // See HasValueDependent().
 
-    eLastContextFlag = eHasDescriptionDependent
+    eLastContextFlag = eHasValueDependent
   };
 
  protected:
@@ -951,6 +969,13 @@ class LocalAccessible : public nsISupports, public Accessible {
   virtual void ARIAGroupPosition(int32_t* aLevel, int32_t* aSetSize,
                                  int32_t* aPosInSet) const override;
 
+  /**
+   * Traverses the accessible's parent chain in search of an accessible with
+   * a frame. Returns the frame when found. Includes special handling for
+   * OOP iframe docs and tab documents.
+   */
+  nsIFrame* FindNearestAccessibleAncestorFrame() const;
+
   // Data Members
   // mContent can be null in a DocAccessible if the document has no body or
   // root element, or if the initial tree hasn't been constructed yet.
@@ -985,7 +1010,7 @@ class LocalAccessible : public nsISupports, public Accessible {
   RefPtr<const ComputedStyle> mOldComputedStyle;
 
   static const uint8_t kStateFlagsBits = 11;
-  static const uint8_t kContextFlagsBits = 3;
+  static const uint8_t kContextFlagsBits = 4;
 
   /**
    * Keep in sync with StateFlags, ContextFlags, and AccTypes.
@@ -1019,22 +1044,15 @@ class LocalAccessible : public nsISupports, public Accessible {
   friend class AccGroupInfo;
 
  private:
-  LocalAccessible() = delete;
-  LocalAccessible(const LocalAccessible&) = delete;
-  LocalAccessible& operator=(const LocalAccessible&) = delete;
-
-  /**
-   * Traverses the accessible's parent chain in search of an accessible with
-   * a frame. Returns the frame when found. Includes special handling for
-   * OOP iframe docs and tab documents.
-   */
-  nsIFrame* FindNearestAccessibleAncestorFrame();
-
   LocalAccessible* GetCommandForDetailsRelation() const;
 
   LocalAccessible* GetPopoverTargetDetailsRelation() const;
 
   LocalAccessible* GetAnchorPositionTargetDetailsRelation() const;
+
+  LocalAccessible* GetPopoverTargetDescribedByRelation() const;
+
+  LocalAccessible* GetCommandForDescribedByRelation() const;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { EventEmitter } from "resource:///modules/syncedtabs/EventEmitter.sys.mjs";
+import { EventEmitter } from "moz-src:///browser/components/syncedtabs/EventEmitter.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 
@@ -237,7 +237,7 @@ export var webrtcUI = {
         // browser can be null when we are in the process of closing a tab
         // and our stream list hasn't been updated yet.
         // gBrowser will be null if a stream is used outside a tabbrowser window.
-        let tab = browser?.ownerGlobal.gBrowser?.getTabForBrowser(browser);
+        let tab = browser?.documentGlobal.gBrowser?.getTabForBrowser(browser);
         return {
           uri: state.documentURI,
           tab,
@@ -568,26 +568,14 @@ export var webrtcUI = {
     for (let stream of activeStreams) {
       let { browser } = stream;
 
-      let gBrowser = browser.getTabBrowser();
-      if (!gBrowser) {
-        console.error("Can't stop sharing stream - cannot find gBrowser.");
-        continue;
-      }
-
-      let tab = gBrowser.getTabForBrowser(browser);
-      if (!tab) {
-        console.error("Can't stop sharing stream - cannot find tab.");
-        continue;
-      }
-
-      this.clearPermissionsAndStopSharing(ids, tab);
+      this.clearPermissionsAndStopSharing(ids, browser);
     }
 
     // Switch to the newest stream's browser.
     let mostRecentStream = activeStreams[activeStreams.length - 1];
     let { browser: browserToSelect } = mostRecentStream;
 
-    let window = browserToSelect.ownerGlobal;
+    let window = browserToSelect.documentGlobal;
     let gBrowser = browserToSelect.getTabBrowser();
     let tab = gBrowser.getTabForBrowser(browserToSelect);
     window.focus();
@@ -600,17 +588,17 @@ export var webrtcUI = {
    *
    * @param {("camera"|"microphone"|"screen")[]} types - Device types to stop
    * and clear permissions for.
-   * @param tab - Tab of the devices to stop and clear permissions.
+   * @param linkedBrowser - Tab's linkedBrowser of the devices to stop and clear permissions.
    */
-  clearPermissionsAndStopSharing(types, tab) {
+  clearPermissionsAndStopSharing(types, linkedBrowser) {
     let invalidTypes = types.filter(
       type => !["camera", "screen", "microphone", "speaker"].includes(type)
     );
     if (invalidTypes.length) {
       throw new Error(`Invalid device types ${invalidTypes.join(",")}`);
     }
-    let browser = tab.linkedBrowser;
-    let sharingState = tab._sharingState?.webRTC;
+    let browser = linkedBrowser;
+    let sharingState = browser._sharingState?.webRTC;
 
     // If we clear a WebRTC permission we need to remove all permissions of
     // the same type across device ids. We also need to stop active WebRTC
@@ -722,7 +710,7 @@ export var webrtcUI = {
    *        undefined / null if no such event exists.
    */
   showSharingDoorhanger(aActiveStream, aEvent) {
-    let browserWindow = aActiveStream.browser.ownerGlobal;
+    let browserWindow = aActiveStream.browser.documentGlobal;
     if (aActiveStream.tab) {
       browserWindow.gBrowser.selectedTab = aActiveStream.tab;
     } else {

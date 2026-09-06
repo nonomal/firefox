@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -236,6 +234,11 @@ struct ReflowInput : public SizeComputationInput {
   // This takes on an arbitrary value the first time a block is reflowed
   nscoord mBlockDelta = 0;
 
+  // Distance from top of the line clamp root block to the top of this block.
+  // Necessary due to BStart() and GetRect() not being initialised before
+  // reflow.
+  nscoord mBOffsetToLineClampRoot = 0;
+
   // Physical accessors for the private fields. They are needed for
   // compatibility with not-yet-updated code. New code should use the accessors
   // for logical coordinates, unless the code really works on physical
@@ -275,6 +278,19 @@ struct ReflowInput : public SizeComputationInput {
   }
   nscoord ComputedMaxBSize() const {
     return mComputedMaxSize.BSize(mWritingMode);
+  }
+
+  // The block-size to resolve percentages against when they are resolved
+  // against our own content-box size, e.g. percentage gaps in a flex or grid
+  // container.
+  nscoord ComputedBSizeAsPercentageBasis() const {
+    if (mFlags.mTreatBSizeAsIndefinite) {
+      return NS_UNCONSTRAINEDSIZE;
+    }
+    if (mPercentageBasisInBlockAxis) {
+      return *mPercentageBasisInBlockAxis;
+    }
+    return ComputedBSize();
   }
 
   // WARNING: In general, adjusting available inline-size or block-size is not
@@ -368,6 +384,12 @@ struct ReflowInput : public SizeComputationInput {
   // unconstrained dimensions replaced by zero.
   nsSize ComputedSizeAsContainerIfConstrained() const;
 
+  // Return the physical content box relative to the frame itself.
+  nsRect ComputedPhysicalContentBoxRelativeToSelf() const {
+    auto bp = ComputedPhysicalBorderPadding();
+    return nsRect(nsPoint(bp.left, bp.top), ComputedPhysicalSize());
+  }
+
   // Get the writing mode of the containing block, to resolve float/clear
   // logical sides appropriately.
   WritingMode GetCBWritingMode() const;
@@ -381,11 +403,6 @@ struct ReflowInput : public SizeComputationInput {
   const nsStyleBorder* mStyleBorder = nullptr;
   const nsStyleMargin* mStyleMargin = nullptr;
 
-  enum class BreakType : uint8_t {
-    Auto,
-    Column,
-    Page,
-  };
   BreakType mBreakType = BreakType::Auto;
 
   // a frame (e.g. nsTableCellFrame) which may need to generate a special
@@ -464,6 +481,15 @@ struct ReflowInput : public SizeComputationInput {
     // unconstrained.
     bool mIsInLastColumnBalancingReflow : 1;
 
+    // We have an ancestor nsColumnSetFrame performing a measuring reflow. The
+    // available block-size becomes unconstrained.
+    //
+    // Note: only the top-level fragmentainer (multicol or print page sequence)
+    // can initiate a measuring reflow, so nested fragmentainers will do a
+    // measuring reflow only when the top-level one is doing it. See
+    // nsColumnSetFrame::Reflow() and nsPageSequenceFrame::Reflow() for details.
+    bool mIsInFragmentainerMeasuringReflow : 1;
+
     // True if ColumnSetWrapperFrame has a constrained block-size, and is going
     // to consume all of its block-size in this fragment. This bit is passed to
     // nsColumnSetFrame to determine whether to give up balancing and create
@@ -482,9 +508,10 @@ struct ReflowInput : public SizeComputationInput {
     // a "fake" reflow input made in order to be the parent of a real one
     bool mDummyParentReflowInput : 1;
 
-    // Should this frame reflow its place-holder children? If the available
-    // height of this frame didn't change, but its in a paginated environment
-    // (e.g. columns), it should always reflow its placeholder children.
+    // Should this frame reflow its placeholder children? If the available
+    // block-size of this frame didn't change, but it's in a fragmented
+    // environment (e.g. columns), it should always reflow its placeholder
+    // children.
     bool mMustReflowPlaceholders : 1;
 
     // the STATIC_POS_IS_CB_ORIGIN ctor flag
@@ -528,13 +555,23 @@ struct ReflowInput : public SizeComputationInput {
     // for paginated reflow.
     bool mCanHaveClassABreakpoints : 1;
 
-    // If set:
-    // (1) This frame is absolutely-positioned,
-    // (2) Inset in that axis are non-auto, and
-    // (3) Size in that axis is `auto` & resolved as fit-content size.
-    // Automatic margin computation in this case requires waiting until
-    // the frame reflows to compute the fit-content size.
-    bool mDeferAutoMarginComputation : 1;
+    // If true, indicates that an ancestor of this frame has requested
+    // text-box-trim on the start side of this frame.
+    // https://drafts.csswg.org/css-inline-3/#text-box-trim
+    bool mShouldApplyTextBoxTrimStart : 1;
+
+    // These two flags indicate that an ancestor of this frame has requested
+    // text-box-trim on the end side of this frame's block. Note that two
+    // flags are required -- one for trimming the last line of the block,
+    // and one for trimming the last line of each fragment -- because whether
+    // this particular frame is an intermediate fragment is not known until
+    // it is actually reflowed.
+    // https://drafts.csswg.org/css-inline-3/#text-box-trim
+    bool mShouldApplyTextBoxTrimAtBlockEnd : 1;
+    bool mShouldApplyTextBoxTrimAtFragmentEnd : 1;
+
+    // True if the block is a line-clamp container or a descendant thereof
+    bool mIsInLineClampContainer : 1;
   };
   Flags mFlags;
 
@@ -670,11 +707,6 @@ struct ReflowInput : public SizeComputationInput {
    * Calculate the used line-height property without a reflow input instance.
    * The return value will be >= 0.
    *
-   * @param aBlockBSize The computed block size of the content rect of the block
-   *                    that the line should fill. Only used with
-   *                    line-height:-moz-block-height. NS_UNCONSTRAINEDSIZE
-   *                    results in a normal line-height for
-   *                    line-height:-moz-block-height.
    * @param aFontSizeInflation The result of the appropriate
    *                           nsLayoutUtils::FontSizeInflationFor call,
    *                           or 1.0 if during intrinsic size
@@ -682,15 +714,13 @@ struct ReflowInput : public SizeComputationInput {
    */
   static nscoord CalcLineHeight(const ComputedStyle&,
                                 nsPresContext* aPresContext,
-                                const nsIContent* aContent, nscoord aBlockBSize,
+                                const nsIContent* aContent,
                                 float aFontSizeInflation);
-
   static nscoord CalcLineHeight(const StyleLineHeight&,
                                 const nsStyleFont& aRelativeToFont,
                                 nsPresContext* aPresContext, bool aIsVertical,
-                                const nsIContent* aContent, nscoord aBlockBSize,
+                                const nsIContent* aContent,
                                 float aFontSizeInflation);
-
   static nscoord CalcLineHeightForCanvas(const StyleLineHeight& aLh,
                                          const nsFont& aRelativeToFont,
                                          nsAtom* aLanguage,
@@ -781,9 +811,7 @@ struct ReflowInput : public SizeComputationInput {
   // https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum
   bool ShouldApplyAutomaticMinimumOnBlockAxis() const;
 
-  // Returns true if mFrame has a constrained available block-size, or if mFrame
-  // is a continuation. When this method returns true, mFrame can be considered
-  // to be in a "fragmented context."
+  // Returns true if mFrame can be considered to be in a "fragmented context."
   //
   // Note: this method usually returns true when mFrame is in a paged
   // environment (e.g. printing) or has a multi-column container ancestor.
@@ -976,14 +1004,5 @@ struct ReflowInput : public SizeComputationInput {
 };
 
 }  // namespace mozilla
-
-inline AnchorPosResolutionParams AnchorPosResolutionParams::From(
-    const mozilla::ReflowInput* aRI, bool aIgnorePositionArea) {
-  const mozilla::StylePositionArea posArea =
-      aIgnorePositionArea ? mozilla::StylePositionArea{}
-                          : aRI->mStylePosition->mPositionArea;
-  return {aRI->mFrame, aRI->mStyleDisplay->mPosition, posArea,
-          aRI->mAnchorPosResolutionCache};
-}
 
 #endif  // mozilla_ReflowInput_h

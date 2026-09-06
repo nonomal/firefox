@@ -34,6 +34,7 @@ use std::println;
 
 pub(crate) type Result<'a, T> = core::result::Result<T, Box<Error<'a>>>;
 
+#[derive(Debug)]
 pub struct Frontend {
     parser: Parser,
     options: Options,
@@ -46,13 +47,15 @@ impl Frontend {
             options: Options::new(),
         }
     }
+
     pub const fn new_with_options(options: Options) -> Self {
         Self {
             parser: Parser::new(),
             options,
         }
     }
-    pub fn set_options(&mut self, options: Options) {
+
+    pub const fn set_options(&mut self, options: Options) {
         self.options = options;
     }
 

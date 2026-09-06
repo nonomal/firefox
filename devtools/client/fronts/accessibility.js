@@ -44,7 +44,6 @@ class AccessibleFront extends FrontClassWithSpec(accessibleSpec) {
   get role() {
     return this._form.role;
   }
-
   get name() {
     return this._form.name;
   }
@@ -87,6 +86,10 @@ class AccessibleFront extends FrontClassWithSpec(accessibleSpec) {
 
   get checks() {
     return this._form.checks;
+  }
+
+  get level() {
+    return this._form.level;
   }
 
   form(form) {
@@ -569,13 +572,8 @@ class ParentAccessibilityFront extends FrontClassWithSpec(
 
 const SimulatorFront = FrontClassWithSpec(simulatorSpec);
 
-exports.AccessibleFront = AccessibleFront;
 registerFront(AccessibleFront);
-exports.AccessibleWalkerFront = AccessibleWalkerFront;
 registerFront(AccessibleWalkerFront);
-exports.AccessibilityFront = AccessibilityFront;
 registerFront(AccessibilityFront);
-exports.ParentAccessibilityFront = ParentAccessibilityFront;
 registerFront(ParentAccessibilityFront);
-exports.SimulatorFront = SimulatorFront;
 registerFront(SimulatorFront);

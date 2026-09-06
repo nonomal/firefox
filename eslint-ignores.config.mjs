@@ -58,10 +58,6 @@ export default [
   // Test files that are really json not js, and don't need to be linted.
   "browser/components/sessionstore/test/unit/data/sessionstore_valid.js",
   "browser/components/sessionstore/test/unit/data/sessionstore_invalid.js",
-  // This file is split into two in order to keep it as a valid json file
-  // for documentation purposes (policies.json) but to be accessed by the
-  // code as a .sys.mjs (schema.sys.mjs)
-  "browser/components/enterprisepolicies/schemas/schema.sys.mjs",
   // Include the Storybook config files.
   "!browser/components/storybook/.storybook/",
   "!browser/components/storybook/.storybook/*.js",
@@ -73,9 +69,6 @@ export default [
   "browser/locales/",
   // Generated data files
   "browser/extensions/formautofill/phonenumberutils/PhoneNumberMetaData.sys.mjs",
-
-  // JS file using the #include pre-processor macro, leading to syntax errors.
-  "browser/extensions/webcompat/run.js",
 
   // Ignore newtab files
   "browser/extensions/newtab/logs/",
@@ -150,6 +143,9 @@ export default [
   // Service workers fixtures which require specific resource caching.
   "dom/base/test/file_js_cache.js",
   "dom/serviceworkers/test/file_js_cache.js",
+
+  // ESLint parse does not support import source yet (Bug 2063547)
+  "dom/base/test/test_wasm_offthread_compile.html",
 
   // Intentional broken files
   "dom/base/test/file_js_cache_syntax_error.js",
@@ -248,11 +244,11 @@ export default [
   "servo/",
 
   // Rust/Cargo output from running `cargo` directly
-  "/target/",
-  "/servo/ports/geckolib/target/",
-  "/dom/base/rust/target/",
-  "/servo/components/style/target/",
-  "/dom/webgpu/tests/cts/vendor/target/",
+  "target/",
+  "servo/ports/geckolib/target/",
+  "dom/base/rust/target/",
+  "servo/components/style/target/",
+  "dom/webgpu/tests/cts/vendor/target/",
 
   // Test files that we don't want to lint (preprocessed, minified etc)
   "testing/condprofile/condprof/tests/profile",
@@ -275,6 +271,7 @@ export default [
   // Intentionally invalid files
   "toolkit/components/workerloader/tests/moduleF-syntax-error.js",
   "toolkit/components/enterprisepolicies/tests/browser/config_broken_json.json",
+  "toolkit/components/normandy/test/unit/mock_api/api/v1/extension/index.json",
   "toolkit/mozapps/extensions/test/xpcshell/data/test_AddonRepository_fail.json",
 
   // Built files
@@ -311,4 +308,6 @@ export default [
   // Test files for circular import in modules.
   "dom/base/test/jsmodules/import_circular.mjs",
   "dom/base/test/jsmodules/import_circular_1.mjs",
+  "dom/base/test/jsmodules/importmaps/multiple/import_circular.mjs",
+  "dom/base/test/jsmodules/importmaps/multiple/import_circular_1.mjs",
 ];

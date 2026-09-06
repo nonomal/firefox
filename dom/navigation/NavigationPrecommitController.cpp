@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,9 +23,11 @@ NS_INTERFACE_MAP_END
 
 NavigationPrecommitController::NavigationPrecommitController(
     NavigateEvent* aEvent, nsIGlobalObject* aGlobalObject)
-    : mGlobalObject(aGlobalObject), mEvent(aEvent) {}
+    : mGlobalObject(aGlobalObject), mEvent(aEvent) {
+  MOZ_DIAGNOSTIC_ASSERT(mEvent);
+}
 
-NavigationPrecommitController::~NavigationPrecommitController() {}
+NavigationPrecommitController::~NavigationPrecommitController() = default;
 
 JSObject* NavigationPrecommitController::WrapObject(
     JSContext* aCx, JS::Handle<JSObject*> aGivenProto) {
@@ -45,7 +45,6 @@ void NavigationPrecommitController::Redirect(
   // The redirect(url, options) method steps are:
 
   // 1. Assert: this's event's interception state is not "none".
-  MOZ_DIAGNOSTIC_ASSERT(mEvent);
   MOZ_DIAGNOSTIC_ASSERT(mEvent->InterceptionState() !=
                         NavigateEvent::InterceptionState::None);
 
@@ -148,6 +147,32 @@ void NavigationPrecommitController::Redirect(
   if (!aOptions.mInfo.isUndefined()) {
     mEvent->SetInfo(aOptions.mInfo);
   }
+}
+
+// https://html.spec.whatwg.org/#dom-navigationprecommitcontroller-addhandler
+void NavigationPrecommitController::AddHandler(
+    NavigationInterceptHandler& aHandler, ErrorResult& aRv) {
+  // 1. Assert: this's event's interception state is not "none".
+  MOZ_DIAGNOSTIC_ASSERT(mEvent->InterceptionState() !=
+                        NavigateEvent::InterceptionState::None);
+
+  // 2. Perform shared checks given this's event.
+  mEvent->PerformSharedChecks(aRv);
+  if (aRv.Failed()) {
+    return;
+  }
+
+  // 3. If this's event's interception state is not "intercepted", then throw
+  //    an "InvalidStateError" DOMException.
+  if (mEvent->InterceptionState() !=
+      NavigateEvent::InterceptionState::Intercepted) {
+    aRv.ThrowInvalidStateError(
+        "Cannot add handler after navigation has committed");
+    return;
+  }
+
+  // 4. Append handler to this's event's navigation handler list.
+  mEvent->NavigationHandlerList().AppendElement(&aHandler);
 }
 
 }  // namespace mozilla::dom

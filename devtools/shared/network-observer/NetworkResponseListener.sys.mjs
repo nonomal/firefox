@@ -32,7 +32,7 @@ ChromeUtils.defineESModuleGetters(
  *   http://www.softwareishard.com/blog/firebug/
  *      nsitraceablechannel-intercept-http-traffic/
  *
- * @constructor
+ * @class
  * @param {object} httpActivity
  *        HttpActivity object associated with this request. See NetworkObserver
  *        more information.
@@ -279,7 +279,7 @@ export class NetworkResponseListener {
   /**
    * Stores the received data, if request/response body logging is enabled. It
    * also does limit the number of stored bytes, based on the
-   * `devtools.netmonitor.responseBodyLimit` pref.
+   * `devtools.netmonitor.bodyLimit` pref.
    *
    * Learn more about nsIStreamListener at:
    * https://developer.mozilla.org/en/XPCOM_Interface_Reference/nsIStreamListener
@@ -447,18 +447,7 @@ export class NetworkResponseListener {
       this.#httpActivity,
       this.#decodedCertificateCache
     );
-    let isRacing = false;
-    try {
-      const channel = this.#httpActivity.channel;
-      if (channel instanceof Ci.nsICacheInfoChannel) {
-        isRacing = channel.isRacing();
-      }
-    } catch (err) {
-      // See the following bug for more details:
-      // https://bugzilla.mozilla.org/show_bug.cgi?id=1582589
-    }
-
-    this.#httpActivity.owner.addSecurityInfo(info, isRacing);
+    this.#httpActivity.owner.addSecurityInfo(info);
   }
 
   /**
@@ -588,7 +577,19 @@ export class NetworkResponseListener {
     }
 
     response.bodySize = this.#bodySize;
-    response.size = this.#receivedBodySize;
+
+    try {
+      response.size = lazy.NetworkUtils.isRedirect(
+        this.#httpActivity.channel.responseStatus
+      )
+        ? 0
+        : this.#receivedBodySize;
+    } catch (e) {
+      // this.#httpActivity.channel.responseStatus is likely to throw
+      // NS_ERROR_NOT_AVAILABLE if the response has not been received.
+      response.size = 0;
+    }
+
     response.headersSize = this.#httpActivity.headersSize;
     response.transferredSize = this.#bodySize + this.#httpActivity.headersSize;
 
@@ -636,17 +637,17 @@ export class NetworkResponseListener {
   #getResponseContentComplete() {
     // Check any errors or blocking scenarios which happen late in the cycle
     // e.g If a host is not found (NS_ERROR_UNKNOWN_HOST) or CORS blocking.
-    const { blockingExtension, blockedReason } =
-      lazy.NetworkUtils.getBlockedReason(
-        this.#httpActivity.channel,
-        this.#httpActivity.fromCache
-      );
+    const { extension, blockedReason } = lazy.NetworkUtils.getBlockedReason(
+      this.#httpActivity.channel,
+      this.#httpActivity.fromCache
+    );
 
     this.#httpActivity.owner.addResponseContentComplete({
       blockedReason,
-      blockingExtension,
+      extension,
       discardResponseBody: this.#httpActivity.discardResponseBody,
       truncated: this.#truncated,
+      channel: this.#httpActivity.channel,
     });
 
     // Make sure all the security and response content info are sent

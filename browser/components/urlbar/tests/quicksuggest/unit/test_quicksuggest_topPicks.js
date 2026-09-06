@@ -20,7 +20,6 @@
 const SUGGESTION_SEARCH_STRING = "example";
 const SUGGESTION_URL = "http://example.com/";
 const SUGGESTION_URL_WWW = "http://www.example.com/";
-const SUGGESTION_URL_DISPLAY = "http://example.com";
 
 const MERINO_SUGGESTIONS = [
   {
@@ -93,7 +92,8 @@ add_task(async function heuristicDeduplication() {
     [SUGGESTION_URL_WWW, false],
     ["http://exampledomain.com/", true],
   ];
-  let quickSuggestProviderInstance = UrlbarProvidersManager.getProvider(
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
+  let quickSuggestProviderInstance = providersManager.getProvider(
     UrlbarProviderQuickSuggest.name
   );
 
@@ -115,7 +115,10 @@ add_task(async function heuristicDeduplication() {
   });
 
   for (let [url, expectBestMatch] of scenarios) {
-    await PlacesTestUtils.addVisits(url);
+    await PlacesTestUtils.addVisits({
+      url,
+      transition: PlacesUtils.history.TRANSITION_TYPED,
+    });
 
     // Do a search and check the results.
     let context = createContext(SUGGESTION_SEARCH_STRING, {
@@ -163,15 +166,14 @@ function makeExpectedResult({
   let result = {
     isBestMatch,
     suggestedIndex,
-    type: UrlbarUtils.RESULT_TYPE.URL,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.URL,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     heuristic: false,
     payload: {
       dupedHeuristic,
       telemetryType,
       title: "title",
       url: SUGGESTION_URL,
-      displayUrl: SUGGESTION_URL_DISPLAY,
       icon: "icon",
       isSponsored: false,
       shouldShowUrl: true,

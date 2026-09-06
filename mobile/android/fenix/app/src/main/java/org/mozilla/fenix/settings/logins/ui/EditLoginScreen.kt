@@ -20,28 +20,37 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
-import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
+import kotlinx.coroutines.flow.map
+import mozilla.components.compose.base.annotation.FlexibleWindowPreview
 import mozilla.components.compose.base.button.IconButton
+import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.base.textfield.TextField
-import mozilla.components.compose.base.theme.AcornTheme
-import mozilla.components.lib.state.ext.observeAsState
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
+import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
-import mozilla.components.ui.icons.R as iconsR
 
 @Composable
 internal fun EditLoginScreen(store: LoginsStore) {
-    val state by store.observeAsState(store.state) { it }
+    val state by store.stateFlow.collectAsState()
     val editState = state.loginsEditLoginState ?: return
 
     Scaffold(
@@ -51,11 +60,10 @@ internal fun EditLoginScreen(store: LoginsStore) {
                 loginItem = editState.login,
             )
         },
+        modifier = Modifier.semantics { testTagsAsResourceId = true },
     ) { paddingValues ->
         Column(
-            modifier = Modifier
-                .padding(paddingValues)
-                .fillMaxWidth(),
+            modifier = Modifier.padding(paddingValues).fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(modifier = Modifier.height(FirefoxTheme.layout.space.static200))
@@ -71,19 +79,28 @@ internal fun EditLoginScreen(store: LoginsStore) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun EditLoginTopBar(store: LoginsStore, loginItem: LoginItem) {
-    val state by store.observeAsState(store.state.loginsEditLoginState) { it.loginsEditLoginState }
+    val state by remember {
+        store.stateFlow.map { it.loginsEditLoginState }
+    }
+        .collectAsState(initial = store.state.loginsEditLoginState)
+    val updateState by remember {
+        store.stateFlow.map { it.updateLoginState }
+    }
+        .collectAsState(initial = store.state.updateLoginState)
     val username = state?.newUsername ?: loginItem.username
     val password = state?.newPassword ?: loginItem.password
 
-    val validModifiedUser = username.isNotBlank() && username != loginItem.username
+    val validModifiedUser =
+        username.isNotBlank() && username != loginItem.username && updateState != UpdateLoginState.Duplicate
     val validModifiedPassword = password.isNotBlank() && password != loginItem.password
     val isLoginValid = validModifiedUser || validModifiedPassword
 
     TopAppBar(
-        windowInsets = WindowInsets(
-            top = 0.dp,
-            bottom = 0.dp,
-        ),
+        windowInsets =
+            WindowInsets(
+                top = 0.dp,
+                bottom = 0.dp,
+            ),
         title = {
             Text(
                 text = stringResource(R.string.edit_2),
@@ -93,9 +110,7 @@ internal fun EditLoginTopBar(store: LoginsStore, loginItem: LoginItem) {
         navigationIcon = {
             IconButton(
                 onClick = { store.dispatch(EditLoginBackClicked) },
-                contentDescription = stringResource(
-                    R.string.edit_login_navigate_back_button_content_description,
-                ),
+                contentDescription = stringResource(R.string.edit_login_navigate_back_button_content_description),
             ) {
                 Icon(
                     painter = painterResource(iconsR.drawable.mozac_ic_back_24),
@@ -106,13 +121,9 @@ internal fun EditLoginTopBar(store: LoginsStore, loginItem: LoginItem) {
         actions = {
             IconButton(
                 onClick = {
-                    store.dispatch(
-                        EditLoginAction.SaveEditClicked(loginItem),
-                    )
+                    store.dispatch(EditLoginAction.SaveEditClicked(loginItem))
                 },
-                contentDescription = stringResource(
-                    R.string.edit_login_button_content_description,
-                ),
+                contentDescription = stringResource(R.string.edit_login_button_content_description),
                 enabled = isLoginValid,
             ) {
                 Icon(
@@ -128,29 +139,35 @@ internal fun EditLoginTopBar(store: LoginsStore, loginItem: LoginItem) {
 private fun EditLoginUrl(url: String) {
     Text(
         text = stringResource(R.string.preferences_passwords_saved_logins_site),
-        style = AcornTheme.typography.caption,
-        color = AcornTheme.colors.textPrimary,
-        modifier = Modifier
-            .padding(horizontal = FirefoxTheme.layout.space.static200)
-            .width(FirefoxTheme.layout.size.containerMaxWidth),
+        style = FirefoxTheme.typography.caption,
+        modifier =
+            Modifier.padding(horizontal = FirefoxTheme.layout.space.static200)
+                .width(FirefoxTheme.layout.size.containerMaxWidth),
     )
 
     Text(
         text = url,
-        style = AcornTheme.typography.subtitle1,
+        style = FirefoxTheme.typography.subtitle1,
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-        modifier = Modifier
-            .padding(
-                horizontal = FirefoxTheme.layout.space.static200,
-                vertical = FirefoxTheme.layout.space.static100,
-            )
-            .width(FirefoxTheme.layout.size.containerMaxWidth),
+        modifier =
+            Modifier.padding(
+                    horizontal = FirefoxTheme.layout.space.static200,
+                    vertical = FirefoxTheme.layout.space.static100,
+                )
+                .width(FirefoxTheme.layout.size.containerMaxWidth),
     )
 }
 
 @Composable
 private fun EditLoginUsername(store: LoginsStore, user: String) {
-    val editState by store.observeAsState(store.state.loginsEditLoginState) { it.loginsEditLoginState }
+    val editState by remember {
+        store.stateFlow.map { it.loginsEditLoginState }
+    }
+        .collectAsState(initial = store.state.loginsEditLoginState)
+    val updateLoginState by remember {
+        store.stateFlow.map { it.updateLoginState }
+    }
+        .collectAsState(initial = store.state.updateLoginState)
     val username = editState?.newUsername ?: user
 
     TextField(
@@ -159,18 +176,26 @@ private fun EditLoginUsername(store: LoginsStore, user: String) {
             store.dispatch(EditLoginAction.UsernameChanged(newUsername))
         },
         placeholder = "",
-        errorText = stringResource(R.string.saved_login_username_required_2),
-        isError = username.isBlank(),
-        modifier = Modifier
-            .padding(
-                horizontal = FirefoxTheme.layout.space.static200,
-                vertical = FirefoxTheme.layout.space.static100,
-            )
-            .width(FirefoxTheme.layout.size.containerMaxWidth),
+        errorText =
+            if (username.isBlank()) {
+                stringResource(R.string.saved_login_username_required_2)
+            } else {
+                stringResource(R.string.saved_login_duplicate)
+            },
+        isError = username.isBlank() || updateLoginState == UpdateLoginState.Duplicate,
+        modifier =
+            Modifier.padding(
+                    horizontal = FirefoxTheme.layout.space.static200,
+                    vertical = FirefoxTheme.layout.space.static100,
+                )
+                .width(FirefoxTheme.layout.size.containerMaxWidth)
+                .semantics {
+                    testTag = LoginsTestingTags.EDIT_LOGIN_USERNAME_TEXT_FIELD
+                },
         label = stringResource(R.string.preferences_passwords_saved_logins_username),
         trailingIcon = {
             if (editState?.newUsername?.isNotEmpty() == true) {
-                CrossTextFieldButton {
+                CrossTextFieldButton(contentDescription = Text.Resource(R.string.saved_login_clear_username)) {
                     store.dispatch(EditLoginAction.UsernameChanged(""))
                 }
             }
@@ -180,9 +205,17 @@ private fun EditLoginUsername(store: LoginsStore, user: String) {
 
 @Composable
 private fun EditLoginPassword(store: LoginsStore, pass: String) {
-    val editState by store.observeAsState(store.state.loginsEditLoginState) { it.loginsEditLoginState }
+    val editState by remember {
+        store.stateFlow.map { it.loginsEditLoginState }
+    }
+        .collectAsState(initial = store.state.loginsEditLoginState)
     val isPasswordVisible = editState?.isPasswordVisible ?: true
     val password = editState?.newPassword ?: pass
+
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         TextField(
@@ -193,69 +226,70 @@ private fun EditLoginPassword(store: LoginsStore, pass: String) {
             placeholder = "",
             errorText = stringResource(R.string.saved_login_password_required_2),
             isError = password.isBlank(),
-            modifier = Modifier
-                .padding(
-                    horizontal = FirefoxTheme.layout.space.static200,
-                    vertical = FirefoxTheme.layout.space.static100,
-                )
-                .width(FirefoxTheme.layout.size.containerMaxWidth),
+            modifier =
+                Modifier.padding(
+                        horizontal = FirefoxTheme.layout.space.static200,
+                        vertical = FirefoxTheme.layout.space.static100,
+                    )
+                    .width(FirefoxTheme.layout.size.containerMaxWidth)
+                    .semantics {
+                        testTag = LoginsTestingTags.EDIT_LOGIN_PASSWORD_TEXT_FIELD
+                    }
+                    .focusRequester(focusRequester),
             label = stringResource(R.string.preferences_passwords_saved_logins_password),
             trailingIcon = {
                 EyePasswordIconButton(
+                    contentDescription =
+                        if (isPasswordVisible) {
+                            Text.Resource(R.string.saved_login_hide_password)
+                        } else {
+                            Text.Resource(R.string.saved_login_reveal_password)
+                        },
                     isPasswordVisible = isPasswordVisible,
                     onTrailingIconClick = {
-                        store.dispatch(
-                            EditLoginAction.PasswordVisibilityChanged(
-                                !isPasswordVisible,
-                            ),
-                        )
+                        store.dispatch(EditLoginAction.PasswordVisibilityChanged(!isPasswordVisible))
                     },
                 )
                 if (editState?.newPassword?.isNotEmpty() == true) {
-                    CrossTextFieldButton {
+                    CrossTextFieldButton(contentDescription = Text.Resource(R.string.saved_logins_clear_password)) {
                         store.dispatch(EditLoginAction.PasswordChanged(""))
                     }
                 }
             },
-            visualTransformation = if (isPasswordVisible) {
-                VisualTransformation.None
-            } else {
-                PasswordVisualTransformation()
-            },
+            visualTransformation =
+                if (isPasswordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
         )
     }
 }
 
-private fun createStore() = LoginsStore(
-    initialState = LoginsState.default.copy(
-        loginsEditLoginState = LoginsEditLoginState(
-            login = LoginItem(
-                guid = "123",
-                url = "https://www.justanothersite123.com",
-                username = "username 123",
-                password = "password 123",
-            ),
-            newUsername = "username 456",
-            newPassword = "password 456",
-            isPasswordVisible = true,
-        ),
-    ),
-)
+private fun createStore() =
+    LoginsStore(
+        initialState =
+            LoginsState.default.copy(
+                loginsEditLoginState =
+                    LoginsEditLoginState(
+                        login =
+                            LoginItem(
+                                guid = "123",
+                                url = "https://www.justanothersite123.com",
+                                username = "username 123",
+                                password = "password 123",
+                            ),
+                        newUsername = "username 456",
+                        newPassword = "password 456",
+                        isPasswordVisible = true,
+                    )
+            )
+    )
 
+@FlexibleWindowPreview
 @Composable
-@FlexibleWindowLightDarkPreview
-private fun EditLoginScreenPreview() {
-    FirefoxTheme {
-        Surface {
-            EditLoginScreen(store = createStore())
-        }
-    }
-}
-
-@Composable
-@Preview
-private fun EditLoginScreenPrivatePreview() {
-    FirefoxTheme(theme = Theme.Private) {
+private fun EditLoginScreenPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         Surface {
             EditLoginScreen(store = createStore())
         }

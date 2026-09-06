@@ -7,6 +7,7 @@
 //!
 //! [position]: https://drafts.csswg.org/css-backgrounds-3/#position
 
+use crate::derives::*;
 use crate::logical_geometry::{LogicalAxis, LogicalSide, PhysicalSide, WritingMode};
 use crate::parser::{Parse, ParserContext};
 use crate::selector_map::PrecomputedHashMap;
@@ -14,23 +15,24 @@ use crate::str::HTML_SPACE_CHARACTERS;
 use crate::values::computed::LengthPercentage as ComputedLengthPercentage;
 use crate::values::computed::{Context, Percentage, ToComputedValue};
 use crate::values::generics::length::GenericAnchorSizeFunction;
-use crate::values::generics::position::Position as GenericPosition;
 use crate::values::generics::position::PositionComponent as GenericPositionComponent;
 use crate::values::generics::position::PositionOrAuto as GenericPositionOrAuto;
 use crate::values::generics::position::ZIndex as GenericZIndex;
 use crate::values::generics::position::{AspectRatio as GenericAspectRatio, GenericAnchorSide};
-use crate::values::generics::position::{GenericAnchorFunction, GenericInset};
+use crate::values::generics::position::{GenericAnchorFunction, GenericInset, TreeScoped};
+use crate::values::generics::position::{IsTreeScoped, Position as GenericPosition};
 use crate::values::specified;
 use crate::values::specified::align::AlignFlags;
+use crate::values::specified::percentage::NoCalcPercentage;
 use crate::values::specified::{AllowQuirks, Integer, LengthPercentage, NonNegativeNumber};
-use crate::values::DashedIdent;
-use crate::{Atom, Zero};
-use cssparser::Parser;
+use crate::values::{AtomIdent, DashedIdent};
+use crate::Atom;
+use cssparser::{match_ignore_ascii_case, Parser};
+use hashbrown::hash_map::Entry;
 use num_traits::FromPrimitive;
 use selectors::parser::SelectorParseErrorKind;
 use servo_arc::Arc;
 use smallvec::{smallvec, SmallVec};
-use std::collections::hash_map::Entry;
 use std::fmt::{self, Write};
 use style_traits::arc_slice::ArcSlice;
 use style_traits::values::specified::AllowedNumericType;
@@ -50,7 +52,8 @@ pub type HorizontalPosition = PositionComponent<HorizontalPositionKeyword>;
 pub type VerticalPosition = PositionComponent<VerticalPositionKeyword>;
 
 /// The specified value of a component of a CSS `<position>`.
-#[derive(Clone, Debug, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToCss, ToShmem)]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToCss, ToShmem, ToTyped)]
+#[typed(todo_derive_fields)]
 pub enum PositionComponent<S> {
     /// `center`
     Center,
@@ -107,13 +110,10 @@ pub enum VerticalPositionKeyword {
 }
 
 impl Parse for Position {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let position = Self::parse_three_value_quirky(context, input, AllowQuirks::No)?;
         if position.is_three_value_syntax() {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         Ok(position)
     }
@@ -121,11 +121,11 @@ impl Parse for Position {
 
 impl Position {
     /// Parses a `<bg-position>`, with quirks.
-    pub fn parse_three_value_quirky<'i, 't>(
+    pub fn parse_three_value_quirky(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         allow_quirks: AllowQuirks,
-    ) -> Result<Self, ParseError<'i>> {
+    ) -> Result<Self, ParseError> {
         match input.try_parse(|i| PositionComponent::parse_quirky(context, i, allow_quirks)) {
             Ok(x_pos @ PositionComponent::Center) => {
                 if let Ok(y_pos) =
@@ -221,18 +221,12 @@ impl ToCss for Position {
         W: Write,
     {
         match (&self.horizontal, &self.vertical) {
-            (
-                x_pos @ &PositionComponent::Side(_, Some(_)),
-                &PositionComponent::Length(ref y_lp),
-            ) => {
+            (x_pos @ &PositionComponent::Side(_, Some(_)), PositionComponent::Length(y_lp)) => {
                 x_pos.to_css(dest)?;
                 dest.write_str(" top ")?;
                 y_lp.to_css(dest)
             },
-            (
-                &PositionComponent::Length(ref x_lp),
-                y_pos @ &PositionComponent::Side(_, Some(_)),
-            ) => {
+            (PositionComponent::Length(x_lp), y_pos @ &PositionComponent::Side(_, Some(_))) => {
                 dest.write_str("left ")?;
                 x_lp.to_css(dest)?;
                 dest.write_char(' ')?;
@@ -248,21 +242,18 @@ impl ToCss for Position {
 }
 
 impl<S: Parse> Parse for PositionComponent<S> {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         Self::parse_quirky(context, input, AllowQuirks::No)
     }
 }
 
 impl<S: Parse> PositionComponent<S> {
     /// Parses a component of a CSS position, with quirks.
-    pub fn parse_quirky<'i, 't>(
+    pub fn parse_quirky(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         allow_quirks: AllowQuirks,
-    ) -> Result<Self, ParseError<'i>> {
+    ) -> Result<Self, ParseError> {
         if input
             .try_parse(|i| i.expect_ident_matching("center"))
             .is_ok()
@@ -286,9 +277,11 @@ impl<S> GenericPositionComponent for PositionComponent<S> {
     fn is_center(&self) -> bool {
         match *self {
             PositionComponent::Center => true,
-            PositionComponent::Length(LengthPercentage::Percentage(ref per)) => per.0 == 0.5,
+            PositionComponent::Length(LengthPercentage::Percentage(ref per)) => per.get() == 0.5,
             // 50% from any side is still the center.
-            PositionComponent::Side(_, Some(LengthPercentage::Percentage(ref per))) => per.0 == 0.5,
+            PositionComponent::Side(_, Some(LengthPercentage::Percentage(ref per))) => {
+                per.get() == 0.5
+            },
             _ => false,
         }
     }
@@ -297,7 +290,7 @@ impl<S> GenericPositionComponent for PositionComponent<S> {
 impl<S> PositionComponent<S> {
     /// `0%`
     pub fn zero() -> Self {
-        PositionComponent::Length(LengthPercentage::Percentage(Percentage::zero()))
+        PositionComponent::Length(LengthPercentage::Percentage(NoCalcPercentage::zero()))
     }
 
     /// Returns the count of this component.
@@ -348,8 +341,8 @@ impl<S: Side> PositionComponent<S> {
 }
 
 /// https://drafts.csswg.org/css-anchor-position-1/#propdef-anchor-name
-#[repr(transparent)]
 #[derive(
+    Animate,
     Clone,
     Debug,
     MallocSizeOf,
@@ -362,46 +355,55 @@ impl<S: Side> PositionComponent<S> {
     ToTyped,
 )]
 #[css(comma)]
-pub struct AnchorName(
+#[repr(transparent)]
+#[typed(todo_derive_fields)]
+pub struct AnchorNameIdent(
     #[css(iterable, if_empty = "none")]
     #[ignore_malloc_size_of = "Arc"]
+    #[animation(constant)]
     pub crate::ArcSlice<DashedIdent>,
 );
 
-impl AnchorName {
+impl AnchorNameIdent {
     /// Return the `none` value.
     pub fn none() -> Self {
         Self(Default::default())
     }
-
-    /// Returns whether this is the `none` value.
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
-impl Parse for AnchorName {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
-        let location = input.current_source_location();
+impl Parse for AnchorNameIdent {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let first = input.expect_ident()?;
         if first.eq_ignore_ascii_case("none") {
             return Ok(Self::none());
         }
         // The common case is probably just to have a single anchor name, so
         // space for four on the stack should be plenty.
-        let mut idents: SmallVec<[DashedIdent; 4]> =
-            smallvec![DashedIdent::from_ident(location, first,)?];
+        let mut idents: SmallVec<[DashedIdent; 4]> = smallvec![DashedIdent::from_ident(first,)?];
         while input.try_parse(|input| input.expect_comma()).is_ok() {
             idents.push(DashedIdent::parse(context, input)?);
         }
-        Ok(AnchorName(ArcSlice::from_iter(idents.drain(..))))
+        Ok(AnchorNameIdent(ArcSlice::from_iter(idents.drain(..))))
     }
 }
 
-/// https://drafts.csswg.org/css-anchor-position-1/#propdef-scope
+impl IsTreeScoped for AnchorNameIdent {
+    fn is_tree_scoped(&self) -> bool {
+        !self.0.is_empty()
+    }
+}
+
+/// https://drafts.csswg.org/css-anchor-position-1/#propdef-anchor-name
+pub type AnchorName = TreeScoped<AnchorNameIdent>;
+
+impl AnchorName {
+    /// Return the `none` value.
+    pub fn none() -> Self {
+        Self::with_default_level(AnchorNameIdent::none())
+    }
+}
+
+/// List of scoped names, or none.
 #[derive(
     Clone,
     Debug,
@@ -414,54 +416,78 @@ impl Parse for AnchorName {
     ToShmem,
     ToTyped,
 )]
-#[repr(u8)]
-pub enum AnchorScope {
-    /// `none`
-    None,
-    /// `all`
-    All,
-    /// `<dashed-ident>#`
-    #[css(comma)]
-    Idents(
-        #[css(iterable)]
-        #[ignore_malloc_size_of = "Arc"]
-        crate::ArcSlice<DashedIdent>,
-    ),
-}
+#[repr(transparent)]
+#[css(comma)]
+#[typed(todo_derive_fields)]
+#[value_info(other_values = "all")]
+pub struct ScopedNameList(
+    /// `none | all | <dashed-ident>#`
+    #[css(iterable, if_empty = "none")]
+    #[ignore_malloc_size_of = "Arc"]
+    crate::ArcSlice<AtomIdent>,
+);
 
-impl AnchorScope {
+impl ScopedNameList {
     /// Return the `none` value.
     pub fn none() -> Self {
-        Self::None
+        Self(crate::ArcSlice::default())
     }
 
-    /// Returns whether this is the `none` value.
+    /// Whether we're the `none` value.
     pub fn is_none(&self) -> bool {
-        *self == Self::None
+        self.0.is_empty()
+    }
+
+    /// Return the `all` value.
+    pub fn all() -> Self {
+        static ALL: std::sync::LazyLock<ScopedNameList> = std::sync::LazyLock::new(|| {
+            ScopedNameList(crate::ArcSlice::from_iter_leaked(std::iter::once(
+                AtomIdent::new(atom!("all")),
+            )))
+        });
+        ALL.clone()
     }
 }
 
-impl Parse for AnchorScope {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
-        let location = input.current_source_location();
+impl Parse for ScopedNameList {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let first = input.expect_ident()?;
         if first.eq_ignore_ascii_case("none") {
-            return Ok(Self::None);
+            return Ok(Self::none());
         }
         if first.eq_ignore_ascii_case("all") {
-            return Ok(Self::All);
+            return Ok(Self::all());
         }
         // Authors using more than a handful of anchored elements is likely
         // uncommon, so we only pre-allocate for 8 on the stack here.
-        let mut idents: SmallVec<[DashedIdent; 8]> =
-            smallvec![DashedIdent::from_ident(location, first,)?];
+        let mut idents = SmallVec::<[AtomIdent; 8]>::new();
+        idents.push(AtomIdent::new(DashedIdent::from_ident(first)?.0));
         while input.try_parse(|input| input.expect_comma()).is_ok() {
-            idents.push(DashedIdent::parse(context, input)?);
+            idents.push(AtomIdent::new(DashedIdent::parse(context, input)?.0));
         }
-        Ok(AnchorScope::Idents(ArcSlice::from_iter(idents.drain(..))))
+        Ok(Self(ArcSlice::from_iter(idents.drain(..))))
+    }
+}
+
+impl IsTreeScoped for ScopedNameList {
+    fn is_tree_scoped(&self) -> bool {
+        !self.is_none()
+    }
+}
+
+/// A scoped name type, such as:
+/// * https://drafts.csswg.org/css-anchor-position-1/#propdef-scope
+pub type ScopedName = TreeScoped<ScopedNameList>;
+
+impl ScopedName {
+    /// Return the `none` value.
+    pub fn none() -> Self {
+        Self::with_default_level(ScopedNameList::none())
+    }
+
+    /// Returns true if no scoped name is specified.
+    pub fn is_none(&self) -> bool {
+        self.value.is_none()
     }
 }
 
@@ -480,13 +506,35 @@ impl Parse for AnchorScope {
     ToTyped,
 )]
 #[repr(u8)]
-pub enum PositionAnchor {
+#[typed(todo_derive_fields)]
+pub enum PositionAnchorKeyword {
+    /// `normal`
+    Normal,
     /// `none`
     None,
     /// `auto`
     Auto,
     /// `<dashed-ident>`
     Ident(DashedIdent),
+}
+
+impl IsTreeScoped for PositionAnchorKeyword {
+    fn is_tree_scoped(&self) -> bool {
+        match *self {
+            Self::Normal | Self::None | Self::Auto => false,
+            Self::Ident(_) => true,
+        }
+    }
+}
+
+/// https://drafts.csswg.org/css-anchor-position-1/#propdef-position-anchor
+pub type PositionAnchor = TreeScoped<PositionAnchorKeyword>;
+
+impl PositionAnchor {
+    /// Return the `normal` value.
+    pub fn normal() -> Self {
+        Self::with_default_level(PositionAnchorKeyword::Normal)
+    }
 }
 
 #[derive(
@@ -542,16 +590,13 @@ pub struct PositionTryFallbacksTryTactic(
 );
 
 impl Parse for PositionTryFallbacksTryTactic {
-    fn parse<'i, 't>(
-        _context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(_context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let mut result = ThinVec::with_capacity(5);
         // Collect up to 5 keywords, disallowing duplicates.
         for _ in 0..5 {
             if let Ok(kw) = input.try_parse(PositionTryFallbacksTryTacticKeyword::parse) {
                 if result.contains(&kw) {
-                    return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                    return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                 }
                 result.push(kw);
             } else {
@@ -559,7 +604,7 @@ impl Parse for PositionTryFallbacksTryTactic {
             }
         }
         if result.is_empty() {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         Ok(Self(result))
     }
@@ -601,10 +646,7 @@ pub struct DashedIdentAndOrTryTactic {
 }
 
 impl Parse for DashedIdentAndOrTryTactic {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let mut result = Self {
             ident: DashedIdent::empty(),
             try_tactic: PositionTryFallbacksTryTactic::default(),
@@ -629,9 +671,9 @@ impl Parse for DashedIdentAndOrTryTactic {
         }
 
         if result.ident.is_empty() && result.try_tactic.is_empty() {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
-        return Ok(result);
+        Ok(result)
     }
 }
 
@@ -673,14 +715,21 @@ pub enum PositionTryFallbacksItem {
 )]
 #[css(comma)]
 #[repr(C)]
+#[typed(todo_derive_fields)]
 /// https://drafts.csswg.org/css-anchor-position-1/#position-try-fallbacks
-pub struct PositionTryFallbacks(
+pub struct PositionTryFallbacksList(
     #[css(iterable, if_empty = "none")]
     #[ignore_malloc_size_of = "Arc"]
     pub crate::ArcSlice<PositionTryFallbacksItem>,
 );
 
-impl PositionTryFallbacks {
+impl IsTreeScoped for PositionTryFallbacksList {
+    fn is_tree_scoped(&self) -> bool {
+        !self.is_none()
+    }
+}
+
+impl PositionTryFallbacksList {
     #[inline]
     /// Return the `none` value.
     pub fn none() -> Self {
@@ -693,11 +742,8 @@ impl PositionTryFallbacks {
     }
 }
 
-impl Parse for PositionTryFallbacks {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+impl Parse for PositionTryFallbacksList {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
             return Ok(Self::none());
         }
@@ -709,6 +755,16 @@ impl Parse for PositionTryFallbacks {
             items.push(PositionTryFallbacksItem::parse(context, input)?);
         }
         Ok(Self(ArcSlice::from_iter(items.drain(..))))
+    }
+}
+
+/// https://drafts.csswg.org/css-anchor-position-1/#position-try-fallbacks
+pub type PositionTryFallbacks = TreeScoped<PositionTryFallbacksList>;
+
+impl PositionTryFallbacks {
+    /// Returns the default value, `none`.
+    pub fn none() -> Self {
+        Self::with_default_level(PositionTryFallbacksList::none())
     }
 }
 
@@ -746,12 +802,12 @@ pub enum PositionTryOrder {
 
 impl PositionTryOrder {
     #[inline]
-    /// Return the `auto` value.
+    /// Return the `normal` value.
     pub fn normal() -> Self {
         Self::Normal
     }
 
-    /// Returns whether this is the `auto` value.
+    /// Returns whether this is the `normal` value.
     pub fn is_normal(&self) -> bool {
         *self == Self::Normal
     }
@@ -1177,10 +1233,13 @@ impl PositionAreaKeyword {
     }
 
     /// Returns a value for the self-alignment properties in order to resolve
-    /// `normal`.
+    /// `normal`, in terms of the containing block's writing mode.
+    ///
+    /// Note that the caller must have converted the position-area to physical
+    /// values.
     ///
     /// <https://drafts.csswg.org/css-anchor-position/#position-area-alignment>
-    pub fn to_self_alignment(self) -> Option<AlignFlags> {
+    pub fn to_self_alignment(self, axis: LogicalAxis, cb_wm: &WritingMode) -> Option<AlignFlags> {
         let track = self.track()?;
         Some(match track {
             // "If the only the center track in an axis is selected, the default alignment in that axis is center."
@@ -1190,10 +1249,24 @@ impl PositionAreaKeyword {
             // "Otherwise, the default alignment in that axis is toward the non-specified side track: if it’s
             // specifying the “start” track of its axis, the default alignment in that axis is end; etc."
             _ => {
-                if track.start() {
-                    AlignFlags::END
+                debug_assert_eq!(self.group_type(), PositionAreaType::Physical);
+                if axis == LogicalAxis::Inline {
+                    // For the inline axis, map 'start' to 'end' unless the axis is inline-reversed,
+                    // meaning that its logical flow is counter to physical coordinates and therefore
+                    // physical 'start' already corresponds to logical 'end'.
+                    if track.start() == cb_wm.intersects(WritingMode::INLINE_REVERSED) {
+                        AlignFlags::START
+                    } else {
+                        AlignFlags::END
+                    }
                 } else {
-                    AlignFlags::START
+                    // For the block axis, only vertical-rl has reversed flow and therefore
+                    // does not map 'start' to 'end' here.
+                    if track.start() == cb_wm.is_vertical_rl() {
+                        AlignFlags::START
+                    } else {
+                        AlignFlags::END
+                    }
                 }
             },
         })
@@ -1214,6 +1287,7 @@ impl PositionAreaKeyword {
     ToTyped,
 )]
 #[repr(C)]
+#[typed(todo_derive_fields)]
 /// https://drafts.csswg.org/css-anchor-position-1/#propdef-position-area
 pub struct PositionArea {
     /// First keyword, if any.
@@ -1240,10 +1314,10 @@ impl PositionArea {
     }
 
     /// Parses a <position-area> without allowing `none`.
-    pub fn parse_except_none<'i, 't>(
+    pub fn parse_except_none(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+        input: &mut Parser,
+    ) -> Result<Self, ParseError> {
         Self::parse_internal(context, input, /*allow_none*/ false)
     }
 
@@ -1269,25 +1343,23 @@ impl PositionArea {
         first
     }
 
-    fn parse_internal<'i, 't>(
+    fn parse_internal(
         _: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         allow_none: bool,
-    ) -> Result<Self, ParseError<'i>> {
-        let mut location = input.current_source_location();
+    ) -> Result<Self, ParseError> {
         let mut first = PositionAreaKeyword::parse(input)?;
         if first.is_none() {
             if allow_none {
                 return Ok(Self::none());
             }
-            return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
 
-        location = input.current_source_location();
         let second = input.try_parse(PositionAreaKeyword::parse);
         if let Ok(PositionAreaKeyword::None) = second {
             // `none` is only allowed as a single value
-            return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         let mut second = second.unwrap_or(PositionAreaKeyword::None);
         if second.is_none() {
@@ -1302,7 +1374,7 @@ impl PositionArea {
         let pair_type = Self { first, second }.get_type();
         if pair_type == PositionAreaType::None {
             // Mismatched types or what not.
-            return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         // For types that have a canonical order, remove 'span-all' (the default behavior;
         // unnecessary for keyword pairs with a known order).
@@ -1362,9 +1434,21 @@ impl PositionArea {
     /// Turns this <position-area> value into a physical <position-area>.
     pub fn to_physical(mut self, cb_wm: WritingMode, self_wm: WritingMode) -> Self {
         self.make_missing_second_explicit();
-        self.first = self.first.to_physical(cb_wm, self_wm, LogicalAxis::Block);
-        self.second = self.second.to_physical(cb_wm, self_wm, LogicalAxis::Inline);
-        self.canonicalize_order();
+        // If both axes are None, to_physical and canonicalize_order are not useful.
+        // The first value refers to the block axis, the second to the inline axis;
+        // but as a physical type, they will be interpreted as the x- and y-axis
+        // respectively, so if the writing mode is horizontal we need to swap the
+        // values (block -> y, inline -> x).
+        if self.first.axis() == PositionAreaAxis::None
+            && self.second.axis() == PositionAreaAxis::None
+            && !cb_wm.is_vertical()
+        {
+            std::mem::swap(&mut self.first, &mut self.second);
+        } else {
+            self.first = self.first.to_physical(cb_wm, self_wm, LogicalAxis::Block);
+            self.second = self.second.to_physical(cb_wm, self_wm, LogicalAxis::Inline);
+            self.canonicalize_order();
+        }
         self
     }
 
@@ -1416,10 +1500,7 @@ impl PositionArea {
 }
 
 impl Parse for PositionArea {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         Self::parse_internal(context, input, /* allow_none = */ true)
     }
 }
@@ -1587,6 +1668,7 @@ pub enum MasonryItemOrder {
     ToTyped,
 )]
 #[repr(C)]
+#[typed(todo_derive_fields)]
 /// Controls how the Masonry layout algorithm works
 /// specifying exactly how auto-placed items get flowed in the masonry axis.
 pub struct MasonryAutoFlow {
@@ -1621,15 +1703,11 @@ impl MasonryAutoFlow {
 
 impl Parse for MasonryAutoFlow {
     /// [ definite-first | ordered ] || [ pack | next ]
-    fn parse<'i, 't>(
-        _context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<MasonryAutoFlow, ParseError<'i>> {
+    fn parse(_context: &ParserContext, input: &mut Parser) -> Result<MasonryAutoFlow, ParseError> {
         let mut value = MasonryAutoFlow::initial();
         let mut got_placement = false;
         let mut got_order = false;
         while !input.is_exhausted() {
-            let location = input.current_source_location();
             let ident = input.expect_ident()?;
             let success = match_ignore_ascii_case! { &ident,
                 "pack" if !got_placement => {
@@ -1653,16 +1731,77 @@ impl Parse for MasonryAutoFlow {
                 _ => false
             };
             if !success {
-                return Err(location
-                    .new_custom_error(SelectorParseErrorKind::UnexpectedIdent(ident.clone())));
+                return Err(ParseError::custom(SelectorParseErrorKind::UnexpectedIdent));
             }
         }
 
         if got_placement || got_order {
             Ok(value)
         } else {
-            Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
+            Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError))
         }
+    }
+}
+
+/// Whether the `balance` value of `flex-wrap` is enabled.
+#[inline]
+fn flex_wrap_balance_enabled() -> bool {
+    crate::pref!("layout.flexbox.balance", gecko = false)
+}
+
+/// The specified and computed value of the `flex-wrap` property:
+/// `nowrap | [ wrap | wrap-reverse ] || balance`
+///
+/// <https://drafts.csswg.org/css-flexbox-2/#flex-wrap-property>
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    MallocSizeOf,
+    Parse,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+    ToTyped,
+)]
+#[css(bitflags(
+    single = "nowrap",
+    mixed = "wrap,wrap-reverse,balance",
+    validate_mixed = "Self::validate_and_simplify"
+))]
+#[repr(C)]
+pub struct FlexWrap(u8);
+bitflags! {
+    impl FlexWrap: u8 {
+        /// `nowrap`
+        const NOWRAP = 0;
+        /// `wrap` - mutually exclusive with `wrap-reverse`
+        const WRAP = 1 << 0;
+        /// `wrap-reverse` - mutually exclusive with `wrap`
+        const WRAP_REVERSE = 1 << 1;
+        /// `balance`
+        const BALANCE = 1 << 2;
+    }
+}
+
+impl FlexWrap {
+    /// `nowrap | [ wrap | wrap-reverse ] || balance`
+    fn validate_and_simplify(&mut self) -> bool {
+        if self.contains(Self::WRAP | Self::WRAP_REVERSE) {
+            return false;
+        }
+        if self.contains(Self::BALANCE) {
+            if !flex_wrap_balance_enabled() {
+                return false;
+            }
+            // `wrap balance` computes to `balance`.
+            self.remove(Self::WRAP);
+        }
+        true
     }
 }
 
@@ -1706,13 +1845,10 @@ pub struct TemplateAreasParser {
 
 impl TemplateAreasParser {
     /// Parse a single string.
-    pub fn try_parse_string<'i>(
-        &mut self,
-        input: &mut Parser<'i, '_>,
-    ) -> Result<(), ParseError<'i>> {
+    pub fn try_parse_string(&mut self, input: &mut Parser) -> Result<(), ParseError> {
         input.try_parse(|input| {
             self.parse_string(input.expect_string()?)
-                .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
+                .map_err(|()| ParseError::custom(StyleParseErrorKind::UnspecifiedError))
         })
     }
 
@@ -1823,12 +1959,9 @@ impl TemplateAreas {
 }
 
 impl Parse for TemplateAreas {
-    fn parse<'i, 't>(
-        _: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(_: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         Self::parse_internal(input)
-            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
+            .map_err(|()| ParseError::custom(StyleParseErrorKind::UnspecifiedError))
     }
 }
 
@@ -1848,10 +1981,7 @@ impl Parse for TemplateAreas {
 pub struct TemplateAreasArc(#[ignore_malloc_size_of = "Arc"] pub Arc<TemplateAreas>);
 
 impl Parse for TemplateAreasArc {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let parsed = TemplateAreas::parse(context, input)?;
         Ok(TemplateAreasArc(Arc::new(parsed)))
     }
@@ -1926,11 +2056,11 @@ impl<'a> Iterator for TemplateAreasTokenizer<'a> {
 }
 
 fn is_name_code_point(c: char) -> bool {
-    c >= 'A' && c <= 'Z'
-        || c >= 'a' && c <= 'z'
+    c.is_ascii_uppercase()
+        || c.is_ascii_lowercase()
         || c >= '\u{80}'
         || c == '_'
-        || c >= '0' && c <= '9'
+        || c.is_ascii_digit()
         || c == '-'
 }
 
@@ -1953,6 +2083,7 @@ fn is_name_code_point(c: char) -> bool {
     ToShmem,
     ToTyped,
 )]
+#[typed(todo_derive_fields)]
 pub enum GridTemplateAreas {
     /// The `none` value.
     None,
@@ -1975,14 +2106,10 @@ pub type ZIndex = GenericZIndex<Integer>;
 pub type AspectRatio = GenericAspectRatio<NonNegativeNumber>;
 
 impl Parse for AspectRatio {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         use crate::values::generics::position::PreferredRatio;
         use crate::values::specified::Ratio;
 
-        let location = input.current_source_location();
         let mut auto = input.try_parse(|i| i.expect_ident_matching("auto"));
         let ratio = input.try_parse(|i| Ratio::parse(context, i));
         if auto.is_err() {
@@ -1990,7 +2117,7 @@ impl Parse for AspectRatio {
         }
 
         if auto.is_err() && ratio.is_err() {
-            return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
 
         Ok(AspectRatio {
@@ -2025,29 +2152,25 @@ impl Inset {
     /// Parses an inset type, allowing the unitless length quirk.
     /// <https://quirks.spec.whatwg.org/#the-unitless-length-quirk>
     #[inline]
-    pub fn parse_quirky<'i, 't>(
+    pub fn parse_quirky(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         allow_quirks: AllowQuirks,
-    ) -> Result<Self, ParseError<'i>> {
+    ) -> Result<Self, ParseError> {
         if let Ok(l) = input.try_parse(|i| LengthPercentage::parse_quirky(context, i, allow_quirks))
         {
             return Ok(Self::LengthPercentage(l));
         }
-        match input.try_parse(|i| i.expect_ident_matching("auto")) {
-            Ok(_) => return Ok(Self::Auto),
-            Err(e) if !static_prefs::pref!("layout.css.anchor-positioning.enabled") => {
-                return Err(e.into())
-            },
-            Err(_) => (),
-        };
+        if input.try_parse(|i| i.expect_ident_matching("auto")).is_ok() {
+            return Ok(Self::Auto);
+        }
         Self::parse_anchor_functions_quirky(context, input, allow_quirks)
     }
 
-    fn parse_as_anchor_function_fallback<'i, 't>(
+    fn parse_as_anchor_function_fallback(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+        input: &mut Parser,
+    ) -> Result<Self, ParseError> {
         if let Ok(l) =
             input.try_parse(|i| LengthPercentage::parse_quirky(context, i, AllowQuirks::No))
         {
@@ -2056,15 +2179,11 @@ impl Inset {
         Self::parse_anchor_functions_quirky(context, input, AllowQuirks::No)
     }
 
-    fn parse_anchor_functions_quirky<'i, 't>(
+    fn parse_anchor_functions_quirky(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         allow_quirks: AllowQuirks,
-    ) -> Result<Self, ParseError<'i>> {
-        debug_assert!(
-            static_prefs::pref!("layout.css.anchor-positioning.enabled"),
-            "How are we parsing with pref off?"
-        );
+    ) -> Result<Self, ParseError> {
         if let Ok(inner) = input.try_parse(|i| AnchorFunction::parse(context, i)) {
             return Ok(Self::AnchorFunction(Box::new(inner)));
         }
@@ -2080,10 +2199,7 @@ impl Inset {
 }
 
 impl Parse for Inset {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         Self::parse_quirky(context, input, AllowQuirks::No)
     }
 }
@@ -2092,13 +2208,7 @@ impl Parse for Inset {
 pub type AnchorFunction = GenericAnchorFunction<specified::Percentage, Inset>;
 
 impl Parse for AnchorFunction {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
-        if !static_prefs::pref!("layout.css.anchor-positioning.enabled") {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
-        }
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         input.expect_function_matching("anchor")?;
         input.parse_nested_block(|i| {
             let target_element = i.try_parse(|i| DashedIdent::parse(context, i)).ok();
@@ -2115,7 +2225,9 @@ impl Parse for AnchorFunction {
                 })
                 .ok();
             Ok(Self {
-                target_element: target_element.unwrap_or_else(DashedIdent::empty),
+                target_element: TreeScoped::with_default_level(
+                    target_element.unwrap_or_else(DashedIdent::empty),
+                ),
                 side,
                 fallback: fallback.into(),
             })

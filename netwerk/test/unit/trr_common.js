@@ -369,6 +369,10 @@ async function test_strict_native_fallback() {
   }
 
   info("Now a successful case.");
+  // Cancel connections to let TRR recover after the connection/decode error cases
+  // above. On Android (ADB port forwarding) reconnection is slower.
+  Services.obs.notifyObservers(null, "net:cancel-all-connections");
+  await new Promise(resolve => do_timeout(500, resolve));
   Services.dns.clearCache(true);
   setModeAndURI(2, "doh?responseIP=2.2.2.2");
   if (!mozinfo.socketprocess_networking) {
@@ -469,6 +473,8 @@ async function test_mode_1_and_4() {
 
 async function test_CNAME() {
   info("Checking that we follow a CNAME correctly");
+  // cnameHandler for dns-cname in head_trr doesn't currently suppport GET
+  Services.prefs.setBoolPref("network.trr.useGET", false);
   Services.dns.clearCache(true);
   // The dns-cname path alternates between sending us a CNAME pointing to
   // another domain, and an A record. If we follow the cname correctly, doing
@@ -504,6 +510,7 @@ async function test_CNAME() {
   setModeAndURI(3, "dns-cname-a");
 
   await new TRRDNSListener("cname-a.example.com", "9.8.7.6");
+  Services.prefs.clearUserPref("network.trr.useGET");
 }
 
 async function test_name_mismatch() {

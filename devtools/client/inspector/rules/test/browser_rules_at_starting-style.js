@@ -51,6 +51,7 @@ const TEST_URI = `
         --check-my-overridden-color: var(--my-overridden-color);
         --check-my-registered-color: var(--my-registered-color);
         --check-my-unset-registered-color: var(--my-unset-registered-color);
+        color: var(--my-color);
         background-color: dodgerblue;
         padding-top: 1px;
         margin-top: 1px !important;
@@ -116,7 +117,12 @@ add_task(async function () {
 
   await selectNode("body", inspector);
   await checkRuleViewContent(view, [
-    { selector: `element`, ancestorRulesData: null, declarations: [] },
+    {
+      selector: `element`,
+      ancestorRulesData: null,
+      selectorEditable: false,
+      declarations: [],
+    },
     {
       selector: `body, ~~[data-test="in-starting-style"]~~`,
       ancestorRulesData: ["@starting-style {"],
@@ -132,7 +138,12 @@ add_task(async function () {
 
   await selectNode("h1", inspector);
   await checkRuleViewContent(view, [
-    { selector: `element`, ancestorRulesData: null, declarations: [] },
+    {
+      selector: `element`,
+      ancestorRulesData: null,
+      selectorEditable: false,
+      declarations: [],
+    },
     {
       selector: `h1, ~~[data-test="in-starting-style"]~~`,
       ancestorRulesData: ["@starting-style {"],
@@ -159,7 +170,12 @@ add_task(async function () {
 
   await selectNode("main", inspector);
   await checkRuleViewContent(view, [
-    { selector: `element`, ancestorRulesData: null, declarations: [] },
+    {
+      selector: `element`,
+      ancestorRulesData: null,
+      selectorEditable: false,
+      declarations: [],
+    },
     {
       selector: ``,
       ancestorRulesData: [
@@ -269,6 +285,12 @@ add_task(async function () {
           value: "var(--my-unset-registered-color)",
         },
         {
+          name: "color",
+          value: "var(--my-color)",
+          // color value in top-level starting style rule is overridden
+          overridden: true,
+        },
+        {
           name: "background-color",
           value: "dodgerblue",
           // background-color value in top-level starting style rule is overridden
@@ -361,6 +383,23 @@ add_task(async function () {
   ]);
 
   info(
+    "Check that the inline color swatch for a var() property in @starting-style uses the starting-style variable value"
+  );
+  {
+    const { valueSpan } = getRuleViewProperty(
+      view,
+      `main, [data-test="in-starting-style"]`,
+      "color"
+    );
+    const swatchContainer = valueSpan.querySelector(".color-swatch-container");
+    is(
+      swatchContainer?.getAttribute("data-color"),
+      "black",
+      "color swatch for var(--my-color) in @starting-style shows the starting-style value (black), not the computed value from outside (white)"
+    );
+  }
+
+  info(
     "Check that CSS variables set in starting-style are not impacting the var() tooltip"
   );
   ok(
@@ -438,13 +477,8 @@ add_task(async function () {
           '</span>' +
           '<span class="ruleview-color">white</span>' +
         '</span>',
-      computed:
-        // prettier-ignore
-        '<span xmlns="http://www.w3.org/1999/xhtml" data-color="white" class="color-swatch-container">' +
-          '<span class="inspector-swatch inspector-colorswatch" style="background-color:white">' +
-          '</span>' +
-          '<span class="ruleview-color">white</span>' +
-        '</span>',
+      // Computed value isn't displayed when it's the same as we put in the header
+      computed: null,
       // The starting-style rule is overridden, so we don't show a starting-style section in the tooltip
       startingStyle: null,
     }

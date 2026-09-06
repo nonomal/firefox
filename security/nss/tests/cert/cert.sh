@@ -106,6 +106,9 @@ cert_init()
   fi
   # NOTE: curve is added later, so the full command would be '-k ec -q curve'
   cert_add_algorithm "ECC" "-ec" "-k ec -q" "true" 10000
+  cert_add_algorithm "ML-DSA-44" "-ml-dsa-44" "-k mldsa -q ml-dsa-44" "false" 30000
+  cert_add_algorithm "ML-DSA-65" "-ml-dsa-65" "-k mldsa -q ml-dsa-65" "false" 40000
+  cert_add_algorithm "ML-DSA-87" "-ml-dsa-87" "-k mldsa -q ml-dsa-87" "false" 50000
   # currently rsa-pss is only enabled for a subset of tests
   # this will enable a full suite of RSA-PSS certs, and we would
   # then remove the explicit ones
@@ -114,9 +117,7 @@ cert_init()
   #cert_add_algorithm "RSA-PSS" "-rsa-pss" "-k rsa -pss -Z sha256" "true"
   #cert_add_algorithm "RSA-PSS-SHA1" "-rsa-pss-sha1" "-k rsa -pss -Z sha1" "true"
 
-  if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-	ROOTCERTSFILE=`cygpath -m ${ROOTCERTSFILE}`
-  fi
+  ROOTCERTSFILE=`native_path "${ROOTCERTSFILE}"`
 }
 
 cert_log() ######################    write the cert_status file
@@ -258,10 +259,7 @@ cert_init_cert()
     cd "${CERTDIR}"
     CERTDIR="."
 
-    PROFILEDIR=`cd ${CERTDIR}; pwd`
-    if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-        PROFILEDIR=`cygpath -m ${PROFILEDIR}`
-    fi
+    PROFILEDIR=`(cd "${CERTDIR}" && native_path)`
     if [ -n "${MULTIACCESS_DBM}" ]; then
 	PROFILEDIR="multiaccess:${DOMAIN}"
     fi
@@ -529,6 +527,15 @@ cert_CA()
   RSA-PSS)
       cert_rsa_pss_CA "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}" "${ALG}"
       ;;
+  ML-DSA-44)
+      cert_ml_dsa_CA ml-dsa-44 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
+      ;;
+  ML-DSA-65)
+      cert_ml_dsa_CA ml-dsa-65 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
+      ;;
+  ML-DSA-87)
+      cert_ml_dsa_CA ml-dsa-65 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
+      ;;
   *)
       Exit 9 "Fatal - unknown key type ${KEY_TYPE}, failed to create CA cert"
       ;;
@@ -558,10 +565,7 @@ cert_rsa_CA()
   cd ${CUR_CADIR}
   pwd
 
-  LPROFILE=`pwd`
-  if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-     LPROFILE=`cygpath -m ${LPROFILE}`
-  fi
+  LPROFILE=`native_path`
   if [ -n "${MULTIACCESS_DBM}" ]; then
 	LPROFILE="multiaccess:${DOMAIN}"
   fi
@@ -685,9 +689,68 @@ CERTSCRIPT
   cp root-dsa.cert ${NICKNAME}.ca.cert
 }
 
++################################ cert_ml_dsa_CA #############################
+# local shell function to build the Temp. Certificate Authority (CA)
+# used for testing purposes, creating  a CA Certificate and a root cert
+# This is the ML-DSA version of cert_CA.
+##########################################################################
+cert_ml_dsa_CA()
+{
+  PARAM_SET=$1
+  CUR_CADIR=$2
+  NICKNAME=$3
+  SIGNER=$4
+  TRUSTARG=$5
+  DOMAIN=$6
+  CERTSERIAL=$7
 
+  echo "$SCRIPTNAME: Creating a ML-DSA ($PARAM_SET) CA Certificate $NICKNAME =========================="
 
+  if [ ! -d "${CUR_CADIR}" ]; then
+      mkdir -p "${CUR_CADIR}"
+  fi
+  cd ${CUR_CADIR}
+  pwd
 
+  LPROFILE=.
+  if [ -n "${MULTIACCESS_DBM}" ]; then
+	LPROFILE="multiaccess:${DOMAIN}"
+  fi
+
+  ################# Creating a ML-DSA CA Cert ###############################
+  #
+  CU_ACTION="Creating ML-DSA ($PARAM_SET) CA Cert $NICKNAME "
+  CU_SUBJECT=$ALL_CU_SUBJECT
+  certu -S -n $NICKNAME -k mldsa -q $PARAM_SET -t $TRUSTARG -v 600 $SIGNER \
+    -d ${LPROFILE} -1 -2 -5 -f ${R_PWFILE} -z ${R_NOISE_FILE} \
+    -m $CERTSERIAL 2>&1 <<CERTSCRIPT
+5
+6
+9
+n
+y
+-1
+n
+5
+6
+7
+9
+n
+CERTSCRIPT
+
+  if [ "$RET" -ne 0 ]; then
+      echo "return value is $RET"
+      Exit 6 "Fatal - failed to create ML-DSA ($PARAM_SET) CA cert"
+  fi
+
+  ################# Exporting ML-DSA Root Cert ###############################
+  #
+  CU_ACTION="Exporting ML-DSA ($PARAM_SET) Root Cert"
+  certu -L -n  $NICKNAME -r -d ${LPROFILE} -o ${NICKNAME}.ca.cert
+  if [ "$RET" -ne 0 ]; then
+      Exit 7 "Fatal - failed to export $PARAM_SET root cert"
+  fi
+}
 
 ################################ cert_rsa_pss_CA #############################
 # local shell function to build the Temp. Certificate Authority (CA)
@@ -1176,10 +1239,7 @@ cert_stresscerts()
   CERTDIR="$CLIENTDIR"
   cd "${CERTDIR}"
 
-  PROFILEDIR=`cd ${CERTDIR}; pwd`
-  if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-     PROFILEDIR=`cygpath -m ${PROFILEDIR}`
-  fi
+  PROFILEDIR=`(cd "${CERTDIR}" && native_path)`
   if [ -n "${MULTIACCESS_DBM}" ]; then
      PROFILEDIR="multiaccess:${D_CLIENT}"
   fi
@@ -1210,7 +1270,7 @@ cert_stresscerts()
 cert_fips()
 {
   CERTFAILED=0
-  echo "$SCRIPTNAME: Creating FIPS 140 DSA Certificates =============="
+  echo "$SCRIPTNAME: Creating FIPS 140 Certificates =============="
   cert_init_cert "${FIPSDIR}" "FIPS PUB 140 Test Certificate" 1000 "${D_FIPS}"
 
   CU_ACTION="Initializing ${CERTNAME}'s Cert DB"
@@ -1637,10 +1697,7 @@ cert_crl_ssl()
 
   cd $CADIR
 
-  PROFILEDIR=`cd ${CLIENTDIR}; pwd`
-  if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
-     PROFILEDIR=`cygpath -m ${PROFILEDIR}`
-  fi
+  PROFILEDIR=`(cd "${CLIENTDIR}" && native_path)`
   CRL_GRPS_END=`expr ${CRL_GRP_1_BEGIN} + ${TOTAL_CRL_RANGE} - 1`
   echo "$SCRIPTNAME: Creating Client CA Issued Certificates Range $CRL_GRP_1_BEGIN - $CRL_GRPS_END ==="
   CU_ACTION="Creating client test certs"

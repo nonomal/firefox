@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,7 +8,9 @@
 #include "CookieStoreNotificationWatcherWrapper.h"
 #include "CookieStoreNotifier.h"
 #include "ThirdPartyUtil.h"
+#include "mozilla/Components.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPrefs_network.h"
 #include "mozilla/StorageAccess.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Promise.h"
@@ -23,6 +23,7 @@
 #include "mozilla/net/NeckoChannelParams.h"
 #include "nsGlobalWindowInner.h"
 #include "nsICookie.h"
+#include "nsIEffectiveTLDService.h"
 #include "nsIGlobalObject.h"
 #include "nsIPrincipal.h"
 #include "nsIURL.h"
@@ -34,15 +35,6 @@ using namespace mozilla::net;
 namespace mozilla::dom {
 
 namespace {
-
-int64_t ComputeExpiry(const CookieInit& aOptions) {
-  if (aOptions.mExpires.IsNull()) {  // Session cookie
-    return INT64_MAX;
-  }
-
-  return CookieCommons::MaybeCapExpiry(PR_Now() / PR_USEC_PER_MSEC,
-                                       aOptions.mExpires.Value());
-}
 
 int32_t SameSiteToConst(const CookieSameSite& aSameSite) {
   switch (aSameSite) {
@@ -122,6 +114,11 @@ bool ValidateCookieNameAndValue(const nsAString& aName, const nsAString& aValue,
     return false;
   }
 
+  if (aName.IsEmpty() && StaticPrefs::network_cookie_valueless_cookie()) {
+    aPromise->MaybeRejectWithTypeError("Cookie name cannot be empty");
+    return false;
+  }
+
   if (aName.Length() + aValue.Length() > 4096) {
     aPromise->MaybeRejectWithTypeError(
         "Cookie name and value size cannot be greater than 4096 bytes");
@@ -174,12 +171,57 @@ bool ValidateCookieDomain(nsIPrincipal* aPrincipal, const nsAString& aName,
           "Cookie domain must domain-match current host");
       return false;
     }
+
+    // Step 12.3 of Set a cookie:
+    // If domain is not a registrable domain suffix of and is not equal to host,
+    // then return failure.
+    if (nsCOMPtr<nsIEffectiveTLDService> etld =
+            mozilla::components::EffectiveTLD::Service()) {
+      nsAutoCString baseDomain;
+      NS_ConvertUTF16toUTF8 utf8CookieDomain(aRetDomain);
+      rv = etld->GetBaseDomainFromHost(utf8CookieDomain, 0, baseDomain);
+      if (rv == NS_ERROR_INSUFFICIENT_DOMAIN_LEVELS) {
+        aPromise->MaybeRejectWithTypeError(
+            "Cookie domain must not be a public suffix");
+        return false;
+      }
+    }
   }
 
   if (aRetDomain.Length() > 1024) {
     aPromise->MaybeRejectWithTypeError(
         "Cookie domain size cannot be greater than 1024 bytes");
     return false;
+  }
+
+  return true;
+}
+
+bool ValidateExpiresAndMaxAge(const Nullable<double>& aExpires,
+                              const Nullable<int64_t>& aMaxAge,
+                              int64_t& aComputedExpiry, Promise* aPromise) {
+  MOZ_ASSERT(aPromise);
+
+  if (aExpires.IsNull() && aMaxAge.IsNull()) {
+    // Session cookie
+    aComputedExpiry = INT64_MAX;
+    return true;
+  }
+
+  if (!aExpires.IsNull() && !aMaxAge.IsNull()) {
+    aPromise->MaybeRejectWithTypeError(
+        "Cookie expires and maxAge attributes cannot both be set");
+    return false;
+  }
+
+  int64_t creationTimeInMSec = PR_Now() / PR_USEC_PER_MSEC;
+
+  if (!aExpires.IsNull()) {
+    aComputedExpiry =
+        CookieCommons::MaybeCapExpiry(creationTimeInMSec, aExpires.Value());
+  } else {
+    aComputedExpiry =
+        CookieCommons::MaybeCapMaxAge(creationTimeInMSec, aMaxAge.Value());
   }
 
   return true;
@@ -275,11 +317,13 @@ bool ValidateCookieNamePrefix(const nsAString& aName, const nsAString& aValue,
   return true;
 }
 
-void CookieStructToList(const nsTArray<CookieStruct>& aData,
-                        nsTArray<CookieListItem>& aResult) {
-  for (const CookieStruct& data : aData) {
+void CookieStoreGetItemsToList(const nsTArray<CookieStoreGetItem>& aData,
+                               nsTArray<CookieListItem>& aResult) {
+  aResult.SetCapacity(aData.Length());
+  for (const CookieStoreGetItem& data : aData) {
     CookieListItem* item = aResult.AppendElement();
-    CookieStore::CookieStructToItem(data, item);
+    item->mName.Construct(data.name());
+    item->mValue.Construct(data.value());
   }
 }
 
@@ -419,7 +463,7 @@ already_AddRefed<Promise> CookieStore::Set(const nsAString& aName,
 
 already_AddRefed<Promise> CookieStore::Set(const CookieInit& aOptions,
                                            ErrorResult& aRv) {
-  RefPtr<Promise> promise = Promise::Create(GetOwnerGlobal(), aRv);
+  RefPtr<Promise> promise = Promise::Create(GetRelevantGlobal(), aRv);
   if (NS_WARN_IF(!promise)) {
     return nullptr;
   }
@@ -458,6 +502,12 @@ already_AddRefed<Promise> CookieStore::Set(const CookieInit& aOptions,
         nsString domain;
         if (!ValidateCookieDomain(cookiePrincipal, name, aOptions.mDomain,
                                   domain, promise)) {
+          return;
+        }
+
+        int64_t expiry;
+        if (!ValidateExpiresAndMaxAge(aOptions.mExpires, aOptions.mMaxAge,
+                                      expiry, promise)) {
           return;
         }
 
@@ -506,10 +556,8 @@ already_AddRefed<Promise> CookieStore::Set(const CookieInit& aOptions,
                 mozilla::WrapNotNull(cookieURI.get()),
                 cookiePrincipal->OriginAttributesRef(), thirdPartyContext,
                 partitionForeign, usingStorageAccess, isOn3PCBExceptionList,
-                name, value,
-                // If expires is not set, it's a session cookie.
-                aOptions.mExpires.IsNull(), ComputeExpiry(aOptions), domain,
-                path, SameSiteToConst(aOptions.mSameSite),
+                name, value, /* session cookie: */ expiry == INT64_MAX, expiry,
+                domain, path, SameSiteToConst(aOptions.mSameSite),
                 aOptions.mPartitioned, operationID);
         if (NS_WARN_IF(!ipcPromise)) {
           promise->MaybeResolveWithUndefined();
@@ -558,7 +606,7 @@ already_AddRefed<Promise> CookieStore::Delete(const nsAString& aName,
 
 already_AddRefed<Promise> CookieStore::Delete(
     const CookieStoreDeleteOptions& aOptions, ErrorResult& aRv) {
-  RefPtr<Promise> promise = Promise::Create(GetOwnerGlobal(), aRv);
+  RefPtr<Promise> promise = Promise::Create(GetRelevantGlobal(), aRv);
   if (NS_WARN_IF(!promise)) {
     return nullptr;
   }
@@ -696,7 +744,7 @@ bool CookieStore::MaybeCreateActor() {
 already_AddRefed<Promise> CookieStore::GetInternal(
     const CookieStoreGetOptions& aOptions, bool aOnlyTheFirstMatch,
     ErrorResult& aRv) {
-  RefPtr<Promise> promise = Promise::Create(GetOwnerGlobal(), aRv);
+  RefPtr<Promise> promise = Promise::Create(GetRelevantGlobal(), aRv);
   if (NS_WARN_IF(!promise)) {
     return nullptr;
   }
@@ -859,7 +907,7 @@ already_AddRefed<Promise> CookieStore::GetInternal(
               }
 
               nsTArray<CookieListItem> list;
-              CookieStructToList(aResult.ResolveValue(), list);
+              CookieStoreGetItemsToList(aResult.ResolveValue(), list);
 
               if (!aOnlyTheFirstMatch) {
                 promise->MaybeResolve(list);
@@ -901,39 +949,6 @@ void CookieStore::CookieStructToItem(const CookieStruct& aData,
                                      CookieListItem* aItem) {
   aItem->mName.Construct(aData.name());
   aItem->mValue.Construct(aData.value());
-  aItem->mPath.Construct(aData.path());
-
-  if (aData.host().IsEmpty() || aData.host()[0] != '.') {
-    aItem->mDomain.Construct(VoidCString());
-  } else {
-    aItem->mDomain.Construct(nsDependentCSubstring(aData.host(), 1));
-  }
-
-  if (!aData.isSession()) {
-    aItem->mExpires.Construct(aData.expiryInMSec());
-  } else {
-    aItem->mExpires.Construct(nullptr);
-  }
-
-  aItem->mSecure.Construct(aData.isSecure());
-
-  CookieSameSite sameSite = CookieSameSite::None;
-  switch (aData.sameSite()) {
-    case nsICookie::SAMESITE_STRICT:
-      sameSite = CookieSameSite::Strict;
-      break;
-
-    case nsICookie::SAMESITE_LAX:
-      sameSite = CookieSameSite::Lax;
-      break;
-
-    default:
-      // FIXME: lax by default?
-      break;
-  }
-
-  aItem->mSameSite.Construct(sameSite);
-  aItem->mPartitioned.Construct(aData.isPartitioned());
 }
 
 }  // namespace mozilla::dom

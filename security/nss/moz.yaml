@@ -9,14 +9,14 @@ origin:
   description: nss
   url: https://hg-edge.mozilla.org/projects/nss
 
-  release: cd2ce1a24014a9afaff0df7b484f6065d845de7a (2025-10-29T01:57:49Z).
-  revision: cd2ce1a24014a9afaff0df7b484f6065d845de7a
+  release: 7b5f00bfd3835fee76be428c55e60cdb3366182c (2026-08-27T18:27:51Z).
+  revision: 7b5f00bfd3835fee76be428c55e60cdb3366182c
 
   license: MPL-2.0
   license-file: COPYING
 
 vendoring:
-  url: https://github.com/nss-dev/nss
+  url: https://github.com/mozilla/nss
   source-hosting: github
   vendor-directory: security/nss/
   skip-vendoring-steps:
@@ -42,4 +42,4 @@ updatebot:
     - type: vendoring
       enabled: true
       frequency: 1 week
-      blocking: 1992446
+      blocking: 2066767

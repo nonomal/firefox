@@ -10,12 +10,12 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.81.0"
+edition = "2024"
+rust-version = "1.90.0"
 name = "neqo-transport"
-version = "0.19.0"
+version = "0.31.1"
 authors = ["The Neqo Authors <necko@mozilla.com>"]
-build = "build.rs"
+build = false
 autolib = false
 autobins = false
 autoexamples = false
@@ -39,21 +39,93 @@ categories = [
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mozilla/neqo/"
 
+[package.metadata.cargo-machete]
+ignored = ["criterion"]
+
+[[package.metadata.bench]]
+name = "transfer_walltime"
+
+[package.metadata.bench.codspeed]
+mode = "walltime"
+memory = false
+
+[[package.metadata.bench]]
+name = "transfer_simulated"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+
+[[package.metadata.bench]]
+name = "rx_stream_orderer"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+
+[[package.metadata.bench]]
+name = "range_tracker"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+
+[[package.metadata.bench]]
+name = "sent_packets"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+memory = false
+
+[[package.metadata.bench]]
+name = "min_bandwidth"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+memory = false
+
+[[package.metadata.bench]]
+name = "pacer"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+memory = false
+
+[[package.metadata.bench]]
+name = "frame_decode"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+memory = false
+
+[[package.metadata.bench]]
+name = "packet_codec"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+
+[[package.metadata.bench]]
+name = "send_streams"
+
+[package.metadata.bench.codspeed]
+mode = "simulation"
+
 [features]
 bench = [
     "neqo-common/bench",
-    "neqo-crypto/bench",
+    "nss/bench",
+    "blapi",
+    "test-fixture/bench",
     "log/release_max_level_info",
 ]
+blapi = ["nss/blapi"]
 build-fuzzing-corpus = [
     "neqo-common/build-fuzzing-corpus",
-    "neqo-crypto/disable-encryption",
-    "neqo-crypto/disable-random",
+    "nss/disable-encryption",
+    "nss/disable-random",
     "test-fixture/disable-random",
 ]
-disable-encryption = ["neqo-crypto/disable-encryption"]
+default = ["blapi"]
+disable-encryption = ["nss/disable-encryption"]
 draft-29 = []
-gecko = ["mtu/gecko"]
+gecko = []
 
 [lib]
 name = "neqo_transport"
@@ -89,8 +161,26 @@ name = "stats"
 path = "tests/stats.rs"
 
 [[bench]]
+name = "frame_decode"
+path = "benches/frame_decode.rs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
 name = "min_bandwidth"
 path = "benches/min_bandwidth.rs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "pacer"
+path = "benches/pacer.rs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "packet_codec"
+path = "benches/packet_codec.rs"
 harness = false
 required-features = ["bench"]
 
@@ -107,14 +197,26 @@ harness = false
 required-features = ["bench"]
 
 [[bench]]
+name = "send_streams"
+path = "benches/send_streams.rs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
 name = "sent_packets"
 path = "benches/sent_packets.rs"
 harness = false
 required-features = ["bench"]
 
 [[bench]]
-name = "transfer"
-path = "benches/transfer.rs"
+name = "transfer_simulated"
+path = "benches/transfer_simulated.rs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "transfer_walltime"
+path = "benches/transfer_walltime.rs"
 harness = false
 required-features = ["bench"]
 
@@ -127,7 +229,7 @@ version = "1.1"
 default-features = false
 
 [dependencies.indexmap]
-version = "2.2"
+version = "2"
 default-features = false
 
 [dependencies.log]
@@ -140,11 +242,13 @@ path = "../mtu"
 [dependencies.neqo-common]
 path = "../neqo-common"
 
-[dependencies.neqo-crypto]
-path = "../neqo-crypto"
+[dependencies.nss]
+version = "0.14"
+git = "https://github.com/mozilla/nss-rs"
+package = "nss-rs"
 
 [dependencies.qlog]
-version = "0.15.1"
+version = "0.16.0"
 default-features = false
 
 [dependencies.rustc-hash]
@@ -153,7 +257,7 @@ features = ["std"]
 default-features = false
 
 [dependencies.smallvec]
-version = "1.13"
+version = "1"
 features = [
     "union",
     "const_generics",
@@ -174,13 +278,14 @@ version = "2.0.12"
 default-features = false
 
 [dev-dependencies.criterion]
-version = "4"
+version = "5"
 default-features = false
 package = "codspeed-criterion-compat"
 
 [dev-dependencies.neqo-transport]
 path = "."
 features = ["draft-29"]
+default-features = false
 
 [dev-dependencies.test-fixture]
 path = "../test-fixture"
@@ -188,6 +293,7 @@ path = "../test-fixture"
 [lints.clippy]
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
+assert_is_empty = "allow"
 cfg_not_test = "warn"
 clone_on_ref_ptr = "warn"
 create_dir = "warn"
@@ -200,12 +306,13 @@ float_cmp_const = "warn"
 fn_to_numeric_cast_any = "warn"
 get_unwrap = "warn"
 if_then_some_else_none = "warn"
+impl_trait_in_params = "warn"
 infinite_loop = "warn"
 iter_over_hash_type = "warn"
 large_include_file = "warn"
 let_underscore_must_use = "warn"
 let_underscore_untyped = "warn"
-literal_string_with_formatting_args = "allow"
+literal_string_with_formatting_args = "warn"
 lossy_float_literal = "warn"
 map_with_unused_argument_over_ranges = "warn"
 mem_forget = "warn"
@@ -260,10 +367,12 @@ priority = -1
 
 [lints.rust]
 absolute_paths_not_starting_with_crate = "warn"
+ambiguous_negative_literals = "warn"
 explicit_outlives_requirements = "warn"
 macro_use_extern_crate = "warn"
 missing_abi = "warn"
 non_ascii_idents = "warn"
+redundant_imports = "warn"
 redundant_lifetimes = "warn"
 trivial_numeric_casts = "warn"
 unit_bindings = "warn"
@@ -275,4 +384,4 @@ unused_qualifications = "warn"
 [lints.rust.unexpected_cfgs]
 level = "warn"
 priority = 0
-check-cfg = ["cfg(coverage,coverage_nightly)"]
+check-cfg = ["cfg(coverage,coverage_nightly,fuzzing)"]

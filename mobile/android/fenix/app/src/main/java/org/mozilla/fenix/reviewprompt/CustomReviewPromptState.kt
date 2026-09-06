@@ -15,11 +15,12 @@ import org.mozilla.fenix.reviewprompt.ui.CustomReviewPrompt
 class CustomReviewPromptStore(
     initialState: CustomReviewPromptState,
     middleware: List<Middleware<CustomReviewPromptState, CustomReviewPromptAction>> = emptyList(),
-) : Store<CustomReviewPromptState, CustomReviewPromptAction>(
-    initialState = initialState,
-    reducer = ::reduceCustomReviewPromptActions,
-    middleware = middleware,
-) {
+) :
+    Store<CustomReviewPromptState, CustomReviewPromptAction>(
+        initialState = initialState,
+        reducer = ::reduceCustomReviewPromptActions,
+        middleware = middleware,
+    ) {
     val navigationEvents = MutableSharedFlow<CustomReviewPromptNavigationEvent>()
 }
 
@@ -59,11 +60,12 @@ sealed class CustomReviewPromptAction : Action {
 internal fun reduceCustomReviewPromptActions(
     state: CustomReviewPromptState,
     action: CustomReviewPromptAction,
-): CustomReviewPromptState = when (action) {
-    CustomReviewPromptAction.NegativePrePromptButtonClicked -> CustomReviewPromptState.Feedback
-    CustomReviewPromptAction.PositivePrePromptButtonClicked -> CustomReviewPromptState.Rate
-    CustomReviewPromptAction.RateButtonClicked -> state
-    CustomReviewPromptAction.LeaveFeedbackButtonClicked -> state
-    CustomReviewPromptAction.Displayed -> state
-    CustomReviewPromptAction.Dismissed -> state
-}
+): CustomReviewPromptState =
+    when (action) {
+        CustomReviewPromptAction.NegativePrePromptButtonClicked -> CustomReviewPromptState.Feedback
+        CustomReviewPromptAction.PositivePrePromptButtonClicked -> CustomReviewPromptState.Rate
+        CustomReviewPromptAction.RateButtonClicked -> state
+        CustomReviewPromptAction.LeaveFeedbackButtonClicked -> state
+        CustomReviewPromptAction.Displayed -> state
+        CustomReviewPromptAction.Dismissed -> state
+    }

@@ -9,14 +9,13 @@ import androidx.navigation.fragment.navArgs
 import androidx.preference.PreferenceFragmentCompat
 import org.mozilla.fenix.R
 import org.mozilla.fenix.browser.browsingmode.BrowsingMode
-import org.mozilla.fenix.ext.settings
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
+import org.mozilla.fenix.ext.requireComponents
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.utils.view.addToRadioGroup
 
-/**
- * Lets the user choose how open links in apps feature behaves.
- */
-class OpenLinksInAppsFragment : PreferenceFragmentCompat() {
+/** Lets the user choose how open links in apps feature behaves. */
+class OpenLinksInAppsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragment {
     private lateinit var radioAlways: RadioButtonPreference
     private lateinit var radioAskBeforeOpening: RadioButtonPreference
     private lateinit var radioNever: RadioButtonPreference
@@ -30,7 +29,7 @@ class OpenLinksInAppsFragment : PreferenceFragmentCompat() {
         radioNever = requirePreference(R.string.pref_key_open_links_in_apps_never)
 
         // only show the Always option in normal browsing mode
-        radioAlways.isVisible = requireContext().settings().lastKnownMode == BrowsingMode.Normal
+        radioAlways.isVisible = requireComponents.settings.lastKnownMode == BrowsingMode.Normal
     }
 
     override fun onResume() {
@@ -39,14 +38,14 @@ class OpenLinksInAppsFragment : PreferenceFragmentCompat() {
 
         setupPreferences()
         args.preferenceToScrollTo?.let {
-            scrollToPreference(it)
+            scrollToPreferenceWithHighlight(it)
         }
     }
 
     private fun setupPreferences() {
-        when (requireContext().settings().openLinksInExternalApp) {
+        when (requireComponents.settings.openLinksInExternalApp) {
             getString(R.string.pref_key_open_links_in_apps_always) ->
-                if (requireContext().settings().lastKnownMode == BrowsingMode.Normal) {
+                if (requireComponents.settings.lastKnownMode == BrowsingMode.Normal) {
                     radioAlways.setCheckedWithoutClickListener(true)
                     radioAskBeforeOpening.setCheckedWithoutClickListener(false)
                 } else {
@@ -55,8 +54,7 @@ class OpenLinksInAppsFragment : PreferenceFragmentCompat() {
                 }
             getString(R.string.pref_key_open_links_in_apps_ask) ->
                 radioAskBeforeOpening.setCheckedWithoutClickListener(true)
-            getString(R.string.pref_key_open_links_in_apps_never) ->
-                radioNever.setCheckedWithoutClickListener(true)
+            getString(R.string.pref_key_open_links_in_apps_never) -> radioNever.setCheckedWithoutClickListener(true)
         }
 
         radioAlways.onClickListener(::onClickAlwaysOption)
@@ -75,17 +73,14 @@ class OpenLinksInAppsFragment : PreferenceFragmentCompat() {
     }
 
     private fun onClickAlwaysOption() {
-        requireContext().settings().openLinksInExternalApp =
-            getString(R.string.pref_key_open_links_in_apps_always)
+        requireComponents.settings.openLinksInExternalApp = getString(R.string.pref_key_open_links_in_apps_always)
     }
 
     private fun onClickAskOption() {
-        requireContext().settings().openLinksInExternalApp =
-            getString(R.string.pref_key_open_links_in_apps_ask)
+        requireComponents.settings.openLinksInExternalApp = getString(R.string.pref_key_open_links_in_apps_ask)
     }
 
     private fun onClickNeverOption() {
-        requireContext().settings().openLinksInExternalApp =
-            getString(R.string.pref_key_open_links_in_apps_never)
+        requireComponents.settings.openLinksInExternalApp = getString(R.string.pref_key_open_links_in_apps_never)
     }
 }

@@ -175,6 +175,12 @@ add_task(async function testPreferencesCert() {
   await BrowserTestUtils.withNewTab(
     { gBrowser, url },
     async function (browser) {
+      if (
+        Services.prefs.getBoolPref("browser.settings-redesign.enabled", false)
+      ) {
+        await browser.contentWindow.gotoPref("connectionSecurity");
+        await new Promise(r => browser.contentWindow.requestAnimationFrame(r));
+      }
       checkAndClickButton(browser.contentDocument, "viewCertificatesButton");
 
       let certDialogLoaded = promiseLoadSubDialog(
@@ -186,6 +192,10 @@ add_task(async function testPreferencesCert() {
 
       doc.getElementById("certmanagertabs").selectedTab =
         doc.getElementById("ca_tab");
+      await TestUtils.waitForCondition(
+        () => !!doc.getElementById("ca-tree").view.rowCount,
+        "ca list populated"
+      );
       let treeView = doc.getElementById("ca-tree").view;
       let selectedCert;
 

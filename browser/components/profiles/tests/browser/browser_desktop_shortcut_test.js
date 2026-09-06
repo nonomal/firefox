@@ -55,9 +55,9 @@ add_task(async function test_create_shortcut() {
         let shortcutToggle = editProfileCard.shortcutToggle;
 
         Assert.equal(
-          shortcutToggle.buttonEl.getAttribute("aria-label"),
+          shortcutToggle.labelEl.textContent.trim(),
           "Create desktop shortcut",
-          "The desktop shortcut toggle should have the expected aria-label"
+          "The desktop shortcut toggle should have the expected label"
         );
 
         Assert.ok(
@@ -65,7 +65,11 @@ add_task(async function test_create_shortcut() {
           "The desktop shortcut toggle should initially be in the off position"
         );
 
-        EventUtils.synthesizeMouseAtCenter(shortcutToggle, {}, content);
+        EventUtils.synthesizeMouseAtCenter(
+          shortcutToggle.buttonEl,
+          {},
+          content
+        );
 
         await ContentTaskUtils.waitForCondition(
           () => shortcutToggle.pressed,
@@ -79,6 +83,9 @@ add_task(async function test_create_shortcut() {
     createShortcutCalled,
     "ShellService.createShortcut should have been called"
   );
+
+  await assertGlean("profiles", "existing", "shortcut", "create");
+
   sandbox.restore();
 });
 
@@ -126,7 +133,11 @@ add_task(async function test_delete_shortcut() {
           "The desktop shortcut toggle should initially be in the on position"
         );
 
-        EventUtils.synthesizeMouseAtCenter(shortcutToggle, {}, content);
+        EventUtils.synthesizeMouseAtCenter(
+          shortcutToggle.buttonEl,
+          {},
+          content
+        );
 
         await ContentTaskUtils.waitForCondition(
           () => !shortcutToggle.pressed,
@@ -140,5 +151,8 @@ add_task(async function test_delete_shortcut() {
     deleteShortcutCalled,
     "ShellService.deleteShortcut should have been called"
   );
+
+  await assertGlean("profiles", "existing", "shortcut", "delete");
+
   sandbox.restore();
 });

@@ -1,10 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "LargestContentfulPaint.h"
 
+#include "GeckoProfiler.h"
 #include "Performance.h"
 #include "PerformanceMainThread.h"
 #include "imgRequest.h"
@@ -13,12 +12,13 @@
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/DOMIntersectionObserver.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/nsVideoFrame.h"
 #include "nsContentUtils.h"
 #include "nsGkAtoms.h"
+#include "nsIContentInlines.h"
 #include "nsLayoutUtils.h"
-#include "nsRFPService.h"
 
 namespace mozilla::dom {
 
@@ -43,16 +43,6 @@ static double GetAreaInDoublePixelsFromAppUnits(const nsSize& aSize) {
 static double GetAreaInDoublePixelsFromAppUnits(const nsRect& aRect) {
   return NSAppUnitsToDoublePixels(aRect.Width(), AppUnitsPerCSSPixel()) *
          NSAppUnitsToDoublePixels(aRect.Height(), AppUnitsPerCSSPixel());
-}
-
-static DOMHighResTimeStamp GetReducedTimePrecisionDOMHighRes(
-    Performance* aPerformance, const TimeStamp& aRawTimeStamp) {
-  MOZ_ASSERT(aPerformance);
-  DOMHighResTimeStamp rawValue =
-      aPerformance->GetDOMTiming()->TimeStampToDOMHighRes(aRawTimeStamp);
-  return nsRFPService::ReduceTimePrecisionAsMSecs(
-      rawValue, aPerformance->GetRandomTimelineSeed(),
-      aPerformance->GetRTPCallerType());
 }
 
 LargestContentfulPaint::LargestContentfulPaint(
@@ -151,9 +141,8 @@ void LargestContentfulPaint::MaybeProcessImageForElementTiming(
     return;
   }
 
-  nsPresContext* pc =
-      aElement->GetPresContext(Element::PresContextFor::eForComposedDoc);
-  if (!pc) {
+  nsPresContext* pc = document->GetPresContext();
+  if (!pc || pc->HasStoppedGeneratingLCP()) {
     return;
   }
 
@@ -300,7 +289,7 @@ DOMHighResTimeStamp LargestContentfulPaint::RenderTime() const {
   if (!mShouldExposeRenderTime) {
     return 0;
   }
-  return GetReducedTimePrecisionDOMHighRes(mPerformance, mRenderTime);
+  return mPerformance->GetReducedTimePrecisionDOMHighRes(mRenderTime);
 }
 
 DOMHighResTimeStamp LargestContentfulPaint::LoadTime() const {
@@ -308,7 +297,7 @@ DOMHighResTimeStamp LargestContentfulPaint::LoadTime() const {
     return 0;
   }
 
-  return GetReducedTimePrecisionDOMHighRes(mPerformance, mLoadTime.ref());
+  return mPerformance->GetReducedTimePrecisionDOMHighRes(mLoadTime.ref());
 }
 
 DOMHighResTimeStamp LargestContentfulPaint::StartTime() const {
@@ -529,7 +518,26 @@ void LargestContentfulPaint::ReportLCPToNavigationTimings() {
   if (!document->IsTopLevelContentDocument()) {
     return;
   }
+
+  // These values are going to be used for the LCP profiler markers. Don't
+  // compute them if the profiler is not running.
+  nsAutoString elementStr;
+  nsCString imageURL;
+  if (profiler_is_active_and_unpaused()) {
+    element->NodeInfo()->NameAtom()->ToString(elementStr);
+    if (mId) {
+      elementStr.Append(u'#');
+      nsAutoString idStr;
+      mId->ToString(idStr);
+      elementStr.Append(idStr);
+    }
+
+    imageURL = mURI ? nsContentUtils::TruncatedURLForDisplay(mURI, 1024)
+                    : EmptyCString();
+  }
+
   timing->NotifyLargestContentfulRenderForRootContentDocument(
-      GetReducedTimePrecisionDOMHighRes(mPerformance, mRenderTime));
+      mPerformance->GetReducedTimePrecisionDOMHighRes(mRenderTime), elementStr,
+      imageURL);
 }
 }  // namespace mozilla::dom

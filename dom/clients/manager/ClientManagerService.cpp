@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +12,7 @@
 #include "ClientSourceParent.h"
 #include "jsfriendapi.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/Components.h"
 #include "mozilla/MozPromise.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/ScopeExit.h"
@@ -77,7 +76,7 @@ RefPtr<GenericPromise> OnShutdown() {
   nsCOMPtr<nsIRunnable> r =
       NS_NewRunnableFunction("ClientManagerServer::OnShutdown", [ref]() {
         nsCOMPtr<nsIAsyncShutdownService> svc =
-            services::GetAsyncShutdownService();
+            components::AsyncShutdown::Service();
         if (!svc) {
           ref->Resolve(true, __func__);
           return;
@@ -716,7 +715,7 @@ RefPtr<ClientOpPromise> ClientManagerService::OpenWindow(
 }
 
 bool ClientManagerService::HasWindow(
-    const Maybe<ContentParentId>& aContentParentId,
+    ThreadsafeContentParentHandle* aContentParentHandle,
     const PrincipalInfo& aPrincipalInfo, const nsID& aClientId) {
   AssertIsOnBackgroundThread();
 
@@ -733,7 +732,7 @@ bool ClientManagerService::HasWindow(
     return false;
   }
 
-  if (aContentParentId && !source->IsOwnedByProcess(aContentParentId.value())) {
+  if (!source->IsOwnedByProcess(aContentParentHandle)) {
     return false;
   }
 

@@ -1,36 +1,24 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: sw=2 ts=8 et :
- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "base/basictypes.h"
+#include "PuppetWidget.h"
 
 #include "gfxPlatform.h"
-#include "nsRefreshDriver.h"
-#include "mozilla/dom/BrowserChild.h"
+#include "imgIContainer.h"
 #include "mozilla/EventForwards.h"
-#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/IMEStateManager.h"
-#include "mozilla/layers/APZChild.h"
-#include "mozilla/layers/WebRenderLayerManager.h"
 #include "mozilla/NativeKeyBindingsType.h"
-#include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/SchedulerGroup.h"
-#include "mozilla/StaticPrefs_browser.h"
-#include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/TextComposition.h"
 #include "mozilla/TextEventDispatcher.h"
 #include "mozilla/TextEvents.h"
-#include "PuppetWidget.h"
+#include "mozilla/dom/BrowserChild.h"
+#include "mozilla/layers/CompositorBridgeChild.h"
+#include "mozilla/layers/WebRenderLayerManager.h"
 #include "nsContentUtils.h"
-#include "nsView.h"
-#include "nsIWidgetListener.h"
-#include "imgIContainer.h"
-#include "nsXPLookAndFeel.h"
-#include "nsPrintfCString.h"
+#include "nsRefreshDriver.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -95,7 +83,6 @@ void PuppetWidget::InfallibleCreate(nsIWidget* aParent,
                                     const LayoutDeviceIntRect& aRect,
                                     const widget::InitData& aInitData) {
   BaseCreate(aParent, aInitData);
-  MOZ_ASSERT(GetDesktopToDeviceScale().scale == 1.0);
 
   mBounds = aRect;
   mEnabled = true;
@@ -165,7 +152,6 @@ void PuppetWidget::Show(bool aState) {
 }
 
 void PuppetWidget::Resize(const DesktopSize& aSize, bool aRepaint) {
-  MOZ_ASSERT(GetDesktopToDeviceScale().scale == 1.0);
   LayoutDeviceIntRect oldBounds = mBounds;
   mBounds.SizeTo(LayoutDeviceIntSize::Round(aSize * GetDesktopToDeviceScale()));
 
@@ -183,10 +169,9 @@ void PuppetWidget::Resize(const DesktopSize& aSize, bool aRepaint) {
   if (!oldBounds.IsEqualEdges(mBounds) && mAttachedWidgetListener) {
     if (auto* paintListener = GetPaintListener();
         paintListener && paintListener != mAttachedWidgetListener) {
-      paintListener->WindowResized(this, mBounds.Width(), mBounds.Height());
+      paintListener->WindowResized(this, mBounds.Size());
     }
-    mAttachedWidgetListener->WindowResized(this, mBounds.Width(),
-                                           mBounds.Height());
+    mAttachedWidgetListener->WindowResized(this, mBounds.Size());
   }
 }
 
@@ -279,22 +264,11 @@ nsEventStatus PuppetWidget::DispatchEvent(WidgetGUIEvent* aEvent) {
   if (aEvent->mClass == eCompositionEventClass ||
       aEvent->mClass == eKeyboardEventClass) {
     TextEventDispatcher* dispatcher = GetTextEventDispatcher();
-    // However, if the event is being dispatched by the text event dispatcher
-    // or, there is native text event dispatcher listener, that means that
-    // native text input event handler is in this process like on Android,
-    // and the event is not synthesized for tests, the event is coming from
-    // the TextEventDispatcher.  In these cases, we shouldn't notify
-    // TextEventDispatcher of dispatching the event.
-    if (!dispatcher->IsDispatchingEvent() &&
-        !(mNativeTextEventDispatcherListener &&
-          !aEvent->mFlags.mIsSynthesizedForTests)) {
-      DebugOnly<nsresult> rv =
-          dispatcher->BeginInputTransactionFor(aEvent, this);
-      NS_WARNING_ASSERTION(
-          NS_SUCCEEDED(rv),
-          "The text event dispatcher should always succeed to start input "
-          "transaction for the event");
-    }
+    DebugOnly<nsresult> rv = dispatcher->BeginInputTransactionFor(aEvent, this);
+    NS_WARNING_ASSERTION(
+        NS_SUCCEEDED(rv),
+        "The text event dispatcher should always succeed to start input "
+        "transaction for the event");
   }
 
   return nsIWidget::DispatchEvent(aEvent);
@@ -338,7 +312,7 @@ nsIWidget::ContentAndAPZEventStatus PuppetWidget::DispatchInputEvent(
 
 nsresult PuppetWidget::SynthesizeNativeKeyEvent(
     int32_t aNativeKeyboardLayout, int32_t aNativeKeyCode,
-    uint32_t aModifierFlags, const nsAString& aCharacters,
+    nsIWidget::NativeModifiers aModifierFlags, const nsAString& aCharacters,
     const nsAString& aUnmodifiedCharacters,
     nsISynthesizedEventCallback* aCallback) {
   AutoSynthesizedEventCallbackNotifier notifier(aCallback);
@@ -353,16 +327,14 @@ nsresult PuppetWidget::SynthesizeNativeKeyEvent(
 
 nsresult PuppetWidget::SynthesizeNativeMouseEvent(
     mozilla::LayoutDeviceIntPoint aPoint, NativeMouseMessage aNativeMessage,
-    MouseButton aButton, nsIWidget::Modifiers aModifierFlags,
+    MouseButton aButton, nsIWidget::NativeModifiers aModifierFlags,
     nsISynthesizedEventCallback* aCallback) {
   AutoSynthesizedEventCallbackNotifier notifier(aCallback);
   if (!mBrowserChild) {
     return NS_ERROR_FAILURE;
   }
   mBrowserChild->SendSynthesizeNativeMouseEvent(
-      aPoint, static_cast<uint32_t>(aNativeMessage),
-      static_cast<int16_t>(aButton), static_cast<uint32_t>(aModifierFlags),
-      notifier.SaveCallback());
+      aPoint, aNativeMessage, aButton, aModifierFlags, notifier.SaveCallback());
   return NS_OK;
 }
 
@@ -379,8 +351,9 @@ nsresult PuppetWidget::SynthesizeNativeMouseMove(
 
 nsresult PuppetWidget::SynthesizeNativeMouseScrollEvent(
     mozilla::LayoutDeviceIntPoint aPoint, uint32_t aNativeMessage,
-    double aDeltaX, double aDeltaY, double aDeltaZ, uint32_t aModifierFlags,
-    uint32_t aAdditionalFlags, nsISynthesizedEventCallback* aCallback) {
+    double aDeltaX, double aDeltaY, double aDeltaZ,
+    nsIWidget::NativeModifiers aModifierFlags, uint32_t aAdditionalFlags,
+    nsISynthesizedEventCallback* aCallback) {
   AutoSynthesizedEventCallbackNotifier notifier(aCallback);
   if (!mBrowserChild) {
     return NS_ERROR_FAILURE;
@@ -466,11 +439,12 @@ nsresult PuppetWidget::SynthesizeNativeTouchpadPan(
   return NS_OK;
 }
 
-void PuppetWidget::LockNativePointer() {
+void PuppetWidget::LockNativePointer(
+    NativePointerLockMode aNativePointerLockMode) {
   if (!mBrowserChild) {
     return;
   }
-  mBrowserChild->SendLockNativePointer();
+  mBrowserChild->SendLockNativePointer(aNativePointerLockMode);
 }
 
 void PuppetWidget::UnlockNativePointer() {
@@ -478,6 +452,14 @@ void PuppetWidget::UnlockNativePointer() {
     return;
   }
   mBrowserChild->SendUnlockNativePointer();
+}
+
+void PuppetWidget::SetNativePointerLockMode(
+    NativePointerLockMode aNativePointerLockMode) {
+  if (!mBrowserChild) {
+    return;
+  }
+  mBrowserChild->SendSetNativePointerLockMode(aNativePointerLockMode);
 }
 
 void PuppetWidget::SetConfirmedTargetAPZC(
@@ -538,10 +520,16 @@ WindowRenderer* PuppetWidget::GetWindowRenderer() {
 
 bool PuppetWidget::CreateRemoteLayerManager(
     const std::function<bool(WebRenderLayerManager*)>& aInitializeFunc) {
-  RefPtr<WebRenderLayerManager> lm = new WebRenderLayerManager(this);
   MOZ_ASSERT(mBrowserChild);
+  auto* const cbc = CompositorBridgeChild::Get();
+  if (!cbc) {
+    return false;
+  }
 
-  if (!aInitializeFunc(lm)) {
+  nsCString error;
+  RefPtr<WebRenderLayerManager> lm = WebRenderLayerManager::Create(
+      this, cbc, wr::AsPipelineId(mBrowserChild->GetLayersId()), error);
+  if (!lm || !aInitializeFunc(lm)) {
     return false;
   }
 
@@ -604,7 +592,7 @@ nsresult PuppetWidget::RequestIMEToCommitComposition(bool aCancel) {
   // Dispatch eCompositionCommit event.
   WidgetCompositionEvent compositionCommitEvent(true, eCompositionCommit, this);
   InitEvent(compositionCommitEvent, nullptr);
-  compositionCommitEvent.mData = committedString;
+  compositionCommitEvent.mData = std::move(committedString);
   DispatchEvent(&compositionCommitEvent);
 
 #ifdef DEBUG
@@ -704,7 +692,7 @@ nsresult PuppetWidget::NotifyIMEOfFocusChange(
   }
 
   mIMENotificationRequestsOfParent =
-      IMENotificationRequests(IMENotificationRequests::NOTIFY_ALL);
+      IMENotificationRequests(AllIMENotificationRequests);
   RefPtr<PuppetWidget> self = this;
   mBrowserChild->SendNotifyIMEFocus(mContentCache, aIMENotification)
       ->Then(
@@ -759,8 +747,9 @@ nsresult PuppetWidget::NotifyIMEOfTextChange(
   }
 
   // BrowserParent doesn't this this to cache.  we don't send the notification
-  // if parent process doesn't request NOTIFY_TEXT_CHANGE.
-  if (mIMENotificationRequestsOfParent.WantTextChange()) {
+  // if parent process doesn't request text changes.
+  if (mIMENotificationRequestsOfParent.contains(
+          IMENotificationRequest::TextChange)) {
     mBrowserChild->SendNotifyIMETextChange(mContentCache, aIMENotification);
   } else {
     mBrowserChild->SendUpdateContentCache(mContentCache);
@@ -822,7 +811,8 @@ nsresult PuppetWidget::NotifyIMEOfPositionChange(
           !mContentCache.CacheCaretAndTextRects(this, &aIMENotification))) {
     return NS_ERROR_FAILURE;
   }
-  if (mIMENotificationRequestsOfParent.WantPositionChanged()) {
+  if (mIMENotificationRequestsOfParent.contains(
+          IMENotificationRequest::PositionChange)) {
     mBrowserChild->SendNotifyIMEPositionChange(mContentCache, aIMENotification);
   } else {
     mBrowserChild->SendUpdateContentCache(mContentCache);
@@ -896,18 +886,11 @@ PuppetWidget::WidgetPaintTask::Run() {
 }
 
 void PuppetWidget::Paint() {
-  if (!GetPaintListener()) {
-    return;
-  }
-
   mWidgetPaintTask.Revoke();
 
   RefPtr<PuppetWidget> strongThis(this);
-
-  GetPaintListener()->WillPaintWindow(this);
-
   if (auto* listener = GetPaintListener()) {
-    listener->DidPaintWindow();
+    listener->PaintWindow(this);
   }
 }
 
@@ -922,6 +905,12 @@ void PuppetWidget::OnMemoryPressure(layers::MemoryPressureReason aWhy) {
       mWindowRenderer && mWindowRenderer->AsWebRender() &&
       XRE_IsContentProcess()) {
     mWindowRenderer->AsWebRender()->ClearCachedResources();
+  }
+}
+
+void PuppetWidget::PerformHapticFeedback(mozilla::HapticFeedbackType aType) {
+  if (mBrowserChild) {
+    mBrowserChild->SendPerformHapticFeedback(aType);
   }
 }
 
@@ -1060,10 +1049,9 @@ PuppetWidget::NotifyIME(TextEventDispatcher* aTextEventDispatcher,
 
 NS_IMETHODIMP_(IMENotificationRequests)
 PuppetWidget::GetIMENotificationRequests() {
-  return IMENotificationRequests(
-      mIMENotificationRequestsOfParent.mWantUpdates |
-      IMENotificationRequests::NOTIFY_TEXT_CHANGE |
-      IMENotificationRequests::NOTIFY_POSITION_CHANGE);
+  return mIMENotificationRequestsOfParent +
+         IMENotificationRequests{IMENotificationRequest::TextChange,
+                                 IMENotificationRequest::PositionChange};
 }
 
 NS_IMETHODIMP_(void)

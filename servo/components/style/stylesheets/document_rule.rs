@@ -6,13 +6,14 @@
 //! initially in CSS Conditional Rules Module Level 3, @document has been postponed to the level 4.
 //! We implement the prefixed `@-moz-document`.
 
-use crate::media_queries::Device;
+use crate::derives::*;
+use crate::device::Device;
 use crate::parser::{Parse, ParserContext};
 use crate::shared_lock::{DeepCloneWithLock, Locked};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::stylesheets::CssRules;
 use crate::values::CssUrl;
-use cssparser::{BasicParseErrorKind, Parser, SourceLocation};
+use cssparser::{match_ignore_ascii_case, BasicParseErrorKind, Parser, SourceLocation};
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
 use servo_arc::Arc;
@@ -60,7 +61,7 @@ impl DeepCloneWithLock for DocumentRule {
         DocumentRule {
             condition: self.condition.clone(),
             rules: Arc::new(lock.wrap(rules.deep_clone_with_lock(lock, guard))),
-            source_location: self.source_location.clone(),
+            source_location: self.source_location,
         }
     }
 }
@@ -106,10 +107,6 @@ pub enum DocumentMatchingFunction {
     /// Matching function for a plain-text document.
     #[css(function)]
     PlainTextDocument(()),
-    /// Matching function for a document that can be observed by other content
-    /// documents.
-    #[css(function)]
-    UnobservableDocument(()),
 }
 
 macro_rules! parse_quoted_or_unquoted_string {
@@ -131,15 +128,11 @@ macro_rules! parse_quoted_or_unquoted_string {
 
 impl DocumentMatchingFunction {
     /// Parse a URL matching function for a`@document` rule's condition.
-    pub fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if let Ok(url) = input.try_parse(|input| CssUrl::parse(context, input)) {
             return Ok(DocumentMatchingFunction::Url(url));
         }
 
-        let location = input.current_source_location();
         let function = input.expect_function()?.clone();
         match_ignore_ascii_case! { &function,
             "url-prefix" => {
@@ -169,16 +162,9 @@ impl DocumentMatchingFunction {
                 })
             },
 
-            "unobservable-document" => {
-                input.parse_nested_block(|input| {
-                    input.expect_exhausted()?;
-                    Ok(DocumentMatchingFunction::UnobservableDocument(()))
-                })
-            },
-
             _ => {
-                Err(location.new_custom_error(
-                    StyleParseErrorKind::UnexpectedFunction(function.clone())
+                Err(ParseError::custom(
+                    StyleParseErrorKind::UnexpectedFunction
                 ))
             },
         }
@@ -202,9 +188,6 @@ impl DocumentMatchingFunction {
             DocumentMatchingFunction::PlainTextDocument(..) => {
                 GeckoDocumentMatchingFunction::PlainTextDocument
             },
-            DocumentMatchingFunction::UnobservableDocument(..) => {
-                GeckoDocumentMatchingFunction::UnobservableDocument
-            },
         };
 
         let pattern = nsCStr::from(match *self {
@@ -217,8 +200,7 @@ impl DocumentMatchingFunction {
                 MediaDocumentKind::Image => "image",
                 MediaDocumentKind::Video => "video",
             },
-            DocumentMatchingFunction::PlainTextDocument(())
-            | DocumentMatchingFunction::UnobservableDocument(()) => "",
+            DocumentMatchingFunction::PlainTextDocument(()) => "",
         });
         unsafe { Gecko_DocumentRule_UseForPresentation(device.document(), &*pattern, func) }
     }
@@ -243,16 +225,15 @@ pub struct DocumentCondition(#[css(iterable)] Vec<DocumentMatchingFunction>);
 
 impl DocumentCondition {
     /// Parse a document condition.
-    pub fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let conditions =
             input.parse_comma_separated(|input| DocumentMatchingFunction::parse(context, input))?;
 
         let condition = DocumentCondition(conditions);
         if !condition.allowed_in(context) {
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid("-moz-document".into())));
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::AtRuleInvalid,
+            ));
         }
         Ok(condition)
     }

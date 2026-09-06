@@ -75,10 +75,9 @@ async function createTempFile() {
       createSymlink
     );
     ok(!symlinkCreated.ok, "created a symlink in temp failed");
-    const expectedError = isLinux() ? lazy.LIBC.EACCES : lazy.LIBC.EPERM;
     is(
       symlinkCreated.code,
-      expectedError,
+      lazy.LIBC.EPERM,
       "created a symlink in temp failed with access denied"
     );
   }
@@ -635,6 +634,24 @@ async function testFileAccessLinuxOnly() {
   }
 
   await runTestsList(tests);
+
+  // A null path passed to unlink()/unlinkat() must be rejected by the sandbox
+  // syscall traps with EFAULT instead of crashing the content process
+  // (Coverity CID 1678881, 1679420). If the content process crashed, this
+  // SpecialPowers.spawn would not return and the harness would report a child
+  // process crash.
+  const EFAULT = 14;
+  let unlinkNull = await SpecialPowers.spawn(webBrowser, [], unlinkNullPath);
+  ok(
+    unlinkNull.ok,
+    "unlink/unlinkat with a null path did not crash the content process"
+  );
+  is(unlinkNull.unlinkErrno, EFAULT, "unlink(NULL) was rejected with EFAULT");
+  is(
+    unlinkNull.unlinkatErrno,
+    EFAULT,
+    "unlinkat(AT_FDCWD, NULL, 0) was rejected with EFAULT"
+  );
 }
 
 async function testFileAccessLinuxSnap() {
@@ -682,6 +699,13 @@ async function testFileAccessWindowsOnly() {
   let tests = [];
 
   let extDir = GetPerUserExtensionDir();
+  // We used to unconditionally create this directory from Firefox, but that
+  // was dropped in bug 2001887. The value of this directory is questionable;
+  // the test was added in Firefox 56 (bug 1403744) to cover legacy add-ons,
+  // but legacy add-on support was discontinued in Firefox 57, and we stopped
+  // sideloading add-ons from this directory on all builds except ESR in
+  // Firefox 74 (bug 1602840).
+  await IOUtils.makeDirectory(extDir.path);
   tests.push({
     desc: "per-user extensions dir",
     ok: true,

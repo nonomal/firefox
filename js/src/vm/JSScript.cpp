@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -8,26 +6,24 @@
  * JS script operations.
  */
 
-#include "vm/JSScript-inl.h"
-
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/CheckedInt.h"
-#include "mozilla/DebugOnly.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/Span.h"  // mozilla::{Span,Span}
-#include "mozilla/Sprintf.h"
 #include "mozilla/Utf8.h"
 #include "mozilla/Vector.h"
 
 #include <algorithm>
 #include <new>
 #include <string.h>
+#include <string_view>
 #include <utility>
 
 #include "jstypes.h"
 
+#include "builtin/Number.h"  // js::Int32ToCStringBuf, js::Uint32ToCString
 #include "frontend/BytecodeSection.h"
 #include "frontend/CompilationStencil.h"  // frontend::CompilationStencil, frontend::InitialStencilAndDelazifications
 #include "frontend/FrontendContext.h"  // AutoReportFrontendContext
@@ -43,6 +39,7 @@
 #include "jit/JitCode.h"
 #include "jit/JitOptions.h"
 #include "jit/JitRuntime.h"
+#include "jit/JitZone.h"
 #include "js/CharacterEncoding.h"  // JS_EncodeStringToUTF8
 #include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin, JS::ColumnNumberOneOrigin, JS::ColumnNumberOffset
 #include "js/CompileOptions.h"
@@ -75,6 +72,8 @@
 #include "vm/StringType.h"    // JSString, JSAtom
 #include "vm/Time.h"          // AutoIncrementalTimer
 #include "vm/ToSource.h"      // JS::ValueToSource
+
+#include "vm/JSScript-inl.h"
 #ifdef MOZ_VTUNE
 #  include "vtune/VTuneWrapper.h"
 #endif
@@ -121,55 +120,13 @@ void js::BaseScript::setEnclosingScope(Scope* enclosingScope) {
 }
 
 void js::BaseScript::finalize(JS::GCContext* gcx) {
-  // Scripts with bytecode may have optional data stored in per-runtime or
-  // per-zone maps. Note that a failed compilation must not have entries since
-  // the script itself will not be marked as having bytecode.
-  if (hasBytecode()) {
-    JSScript* script = this->asJSScript();
-
-    if (coverage::IsLCovEnabled()) {
-      coverage::CollectScriptCoverage(script, true);
-    }
-
-    script->destroyScriptCounts();
-  }
-
-  {
-    JSRuntime* rt = gcx->runtime();
-    if (rt->hasJitRuntime() && rt->jitRuntime()->hasInterpreterEntryMap()) {
-      rt->jitRuntime()->getInterpreterEntryMap()->remove(this);
-    }
-
-    rt->geckoProfiler().onScriptFinalized(this);
-  }
-
-#ifdef MOZ_VTUNE
-  if (zone()->scriptVTuneIdMap) {
-    // Note: we should only get here if the VTune JIT profiler is running.
-    zone()->scriptVTuneIdMap->remove(this);
-  }
-#endif
+  // Per-zone script side-tables such as scriptCountsMap, scriptLCovMap,
+  // scriptVTuneIdMap, scriptFinalWarmUpCountMap are WeakCaches and are swept
+  // automatically.
 
   if (warmUpData_.isJitScript()) {
     JSScript* script = this->asJSScript();
-#ifdef JS_CACHEIR_SPEW
-    maybeUpdateWarmUpCount(script);
-#endif
     script->releaseJitScriptOnFinalize(gcx);
-  }
-
-#ifdef JS_CACHEIR_SPEW
-  if (hasBytecode()) {
-    maybeSpewScriptFinalWarmUpCount(this->asJSScript());
-  }
-#endif
-
-  if (data_) {
-    // We don't need to triger any barriers here, just free the memory.
-    size_t size = data_->allocationSize();
-    AlwaysPoison(data_, JS_POISONED_JSSCRIPT_DATA_PATTERN, size,
-                 MemCheckKind::MakeNoAccess);
-    gcx->free_(this, data_, size, MemoryUse::ScriptPrivateData);
   }
 
   freeSharedData();
@@ -181,19 +138,22 @@ js::Scope* js::BaseScript::releaseEnclosingScope() {
   return enclosing;
 }
 
-void js::BaseScript::swapData(UniquePtr<PrivateScriptData>& other) {
-  if (data_) {
-    RemoveCellMemory(this, data_->allocationSize(),
-                     MemoryUse::ScriptPrivateData);
-  }
-
+void js::BaseScript::swapData(MutableHandleBuffer<PrivateScriptData> other) {
   PrivateScriptData* old = data_;
-  data_.set(zone(), other.release());
-  other.reset(old);
 
-  if (data_) {
-    AddCellMemory(this, data_->allocationSize(), MemoryUse::ScriptPrivateData);
-  }
+  // GCBuffer performs write barrier for the buffer and the data.
+  data_.set(zone(), other);
+
+  other.set(old);
+}
+
+void js::BaseScript::freeData() {
+  PrivateScriptData* old = data_;
+
+  // GCBuffer performs write barrier for the buffer and the data.
+  data_.set(zone(), nullptr);
+
+  gc::FreeBuffer(zone(), old);
 }
 
 js::Scope* js::BaseScript::enclosingScope() const {
@@ -463,7 +423,7 @@ bool JSScript::initScriptCounts(JSContext* cx) {
 
   // Create zone's scriptCountsMap if necessary.
   if (!zone()->scriptCountsMap) {
-    auto map = cx->make_unique<ScriptCountsMap>();
+    auto map = cx->make_unique<JS::WeakCache<ScriptCountsMap>>(zone());
     if (!map) {
       return false;
     }
@@ -480,7 +440,7 @@ bool JSScript::initScriptCounts(JSContext* cx) {
   MOZ_ASSERT(this->hasBytecode());
 
   // Register the current ScriptCounts in the zone's map.
-  if (!zone()->scriptCountsMap->putNew(this, std::move(sc))) {
+  if (!zone()->scriptCountsMap->get().putNew(this, std::move(sc))) {
     ReportOutOfMemory(cx);
     return false;
   }
@@ -501,7 +461,8 @@ bool JSScript::initScriptCounts(JSContext* cx) {
 
 static inline ScriptCountsMap::Ptr GetScriptCountsMapEntry(JSScript* script) {
   MOZ_ASSERT(script->hasScriptCounts());
-  ScriptCountsMap::Ptr p = script->zone()->scriptCountsMap->lookup(script);
+  ScriptCountsMap::Ptr p =
+      script->zone()->scriptCountsMap->get().lookup(script);
   MOZ_ASSERT(p);
   return p;
 }
@@ -659,7 +620,7 @@ jit::IonScriptCounts* JSScript::getIonCounts() {
 void JSScript::releaseScriptCounts(ScriptCounts* counts) {
   ScriptCountsMap::Ptr p = GetScriptCountsMapEntry(this);
   *counts = std::move(*p->value().get());
-  zone()->scriptCountsMap->remove(p);
+  zone()->scriptCountsMap->get().remove(p);
   clearHasScriptCounts();
 }
 
@@ -689,7 +650,9 @@ void JSScript::resetScriptCounts() {
 void ScriptSourceObject::finalize(JS::GCContext* gcx, JSObject* obj) {
   MOZ_ASSERT(gcx->onMainThread());
   ScriptSourceObject* sso = &obj->as<ScriptSourceObject>();
-  sso->source()->Release();
+  if (sso->hasSource()) {
+    sso->source()->Release();
+  }
 
   // Clear the private value, calling the release hook if necessary.
   sso->setPrivate(gcx->runtime(), UndefinedValue());
@@ -698,16 +661,7 @@ void ScriptSourceObject::finalize(JS::GCContext* gcx, JSObject* obj) {
 }
 
 static const JSClassOps ScriptSourceObjectClassOps = {
-    nullptr,                       // addProperty
-    nullptr,                       // delProperty
-    nullptr,                       // enumerate
-    nullptr,                       // newEnumerate
-    nullptr,                       // resolve
-    nullptr,                       // mayResolve
-    ScriptSourceObject::finalize,  // finalize
-    nullptr,                       // call
-    nullptr,                       // construct
-    nullptr,                       // trace
+    .finalize = ScriptSourceObject::finalize,
 };
 
 const JSClass ScriptSourceObject::class_ = {
@@ -735,6 +689,18 @@ ScriptSourceObject* ScriptSourceObject::create(JSContext* cx,
 
   obj->initReservedSlot(STENCILS_SLOT, UndefinedValue());
 
+  return obj;
+}
+
+/* static */
+ScriptSourceObject* ScriptSourceObject::createForWasmModule(JSContext* cx) {
+  ScriptSourceObject* obj =
+      NewObjectWithGivenProto<ScriptSourceObject>(cx, nullptr);
+  if (!obj) {
+    return nullptr;
+  }
+
+  // Wasm modules have no ScriptSource, so we leave SOURCE_SLOT undefined.
   return obj;
 }
 
@@ -774,6 +740,7 @@ bool ScriptSourceObject::initFromOptions(
       source->getReservedSlot(ELEMENT_PROPERTY_SLOT).isMagic(JS_GENERIC_MAGIC));
   MOZ_ASSERT(source->getReservedSlot(INTRODUCTION_SCRIPT_SLOT)
                  .isMagic(JS_GENERIC_MAGIC));
+  MOZ_ASSERT(source->hasSource());
 
   if (!MaybeValidateFilename(cx, source, options)) {
     return false;
@@ -833,120 +800,132 @@ void ScriptSourceObject::clearPrivate(JSRuntime* rt) {
   getSlotRef(PRIVATE_SLOT).setUndefinedUnchecked();
 }
 
-// Main-thread source loader that can retrieve sources via the source hook.
-class ScriptSource::LoadSourceMatcher {
-  JSContext* const cx_;
-  ScriptSource* const ss_;
-  bool* const loaded_;
+ScriptSource::DataWriter::DataWriter(mozilla::Maybe<DataReader>&& reader)
+    : source_(reader->source_), guard_(source_->sourceDataState_.lock()) {
+  if (reader->hasSourceText()) {
+    guard_->removeReaderForWrite();
+  }
+  reader->source_ = nullptr;
+  reader.reset();
+  hasWriteAccess_ = !guard_->hasReaders();
+}
 
- public:
-  explicit LoadSourceMatcher(JSContext* cx, ScriptSource* ss, bool* loaded)
-      : cx_(cx), ss_(ss), loaded_(loaded) {}
+template <typename Unit>
+bool ScriptSource::setRetrievedSource(
+    JSContext* cx, mozilla::Maybe<ScriptSource::DataReader>& readerIn,
+    mozilla::Maybe<ScriptSource::DataReader>& readerOut, Unit* source,
+    size_t length) {
+  mozilla::Maybe<DataWriter> writer;
+  writer.emplace(std::move(readerIn));
 
-  template <typename Unit, SourceRetrievable CanRetrieve>
-  bool operator()(const Compressed<Unit, CanRetrieve>&) const {
-    *loaded_ = true;
+  MOZ_ASSERT((*writer).getConst()->isRetrievable<mozilla::Utf8Unit>() ||
+             (*writer).getConst()->isRetrievable<char16_t>());
+  MOZ_ASSERT((*writer).hasWriteAccess(),
+             "The transition from Retrievable to Uncompressed should always "
+             "be possible");
+
+  if (!(*writer)->setRetrievedSource(cx, EntryUnits<Unit>(source), length)) {
+    return false;
+  }
+
+  readerOut.emplace(std::move(writer));
+  MOZ_ASSERT((*readerOut).hasSourceText());
+  return true;
+}
+
+bool ScriptSource::tryLoadSource(
+    JSContext* cx, mozilla::Maybe<ScriptSource::DataReader>& reader,
+    bool* loaded) {
+  MOZ_ASSERT(reader.isNothing());
+
+  // In order to keep the implicit or explicit lock on the source, we use
+  // two DataReader and one DataWriter, and convert between them.
+  mozilla::Maybe<ScriptSource::DataReader> localReader;
+  localReader.emplace(this);
+  if ((*localReader).hasSourceText()) {
+    *loaded = true;
+    reader.emplace(std::move(localReader));
     return true;
   }
 
-  template <typename Unit, SourceRetrievable CanRetrieve>
-  bool operator()(const Uncompressed<Unit, CanRetrieve>&) const {
-    *loaded_ = true;
+  if (!(*localReader).isRetrievable()) {
+    *loaded = false;
+    reader.emplace(std::move(localReader));
     return true;
   }
 
-  bool operator()(const Missing&) const {
-    *loaded_ = false;
+  if (!cx->runtime()->sourceHook.ref()) {
+    *loaded = false;
+    reader.emplace(std::move(localReader));
     return true;
   }
 
-  template <typename Unit>
-  bool operator()(const Retrievable<Unit>&) {
-    if (!cx_->runtime()->sourceHook.ref()) {
-      *loaded_ = false;
-      return true;
-    }
-
+  if ((*localReader).isTwoByteString()) {
     size_t length;
-
-    // The first argument is just for overloading -- its value doesn't matter.
-    if (!tryLoadAndSetSource(Unit('0'), &length)) {
-      return false;
-    }
-
-    return true;
-  }
-
- private:
-  bool tryLoadAndSetSource(const Utf8Unit&, size_t* length) const {
-    char* utf8Source;
-    if (!cx_->runtime()->sourceHook->load(cx_, ss_->filename(), nullptr,
-                                          &utf8Source, length)) {
-      return false;
-    }
-
-    if (!utf8Source) {
-      *loaded_ = false;
-      return true;
-    }
-
-    if (!ss_->setRetrievedSource(
-            cx_, EntryUnits<Utf8Unit>(reinterpret_cast<Utf8Unit*>(utf8Source)),
-            *length)) {
-      return false;
-    }
-
-    *loaded_ = true;
-    return true;
-  }
-
-  bool tryLoadAndSetSource(const char16_t&, size_t* length) const {
     char16_t* utf16Source;
-    if (!cx_->runtime()->sourceHook->load(cx_, ss_->filename(), &utf16Source,
-                                          nullptr, length)) {
+    if (!cx->runtime()->sourceHook->load(cx, filename(), &utf16Source, nullptr,
+                                         &length)) {
       return false;
     }
-
     if (!utf16Source) {
-      *loaded_ = false;
+      *loaded = false;
+      reader.emplace(std::move(localReader));
       return true;
     }
-
-    if (!ss_->setRetrievedSource(cx_, EntryUnits<char16_t>(utf16Source),
-                                 *length)) {
+    if (!setRetrievedSource(cx, localReader, reader, utf16Source, length)) {
       return false;
     }
-
-    *loaded_ = true;
+    MOZ_ASSERT(reader.isSome());
+    *loaded = true;
     return true;
   }
-};
 
-/* static */
-bool ScriptSource::loadSource(JSContext* cx, ScriptSource* ss, bool* loaded) {
-  return ss->data.match(LoadSourceMatcher(cx, ss, loaded));
+  size_t length;
+  char* utf8Source;
+  if (!cx->runtime()->sourceHook->load(cx, filename(), nullptr, &utf8Source,
+                                       &length)) {
+    return false;
+  }
+  if (!utf8Source) {
+    *loaded = false;
+    reader.emplace(std::move(localReader));
+    return true;
+  }
+  if (!setRetrievedSource(cx, localReader, reader,
+                          reinterpret_cast<Utf8Unit*>(utf8Source), length)) {
+    return false;
+  }
+  MOZ_ASSERT(reader.isSome());
+  *loaded = true;
+  return true;
 }
 
 // Matcher to get source properties: whether source is present and whether
 // it is retrievable.
-class ScriptSource::SourcePropertiesGetter {
+class ScriptSource::ExclusiveSourceData::SourcePropertiesGetter {
   bool* const hasSourceText_;
   bool* const retrievable_;
+  bool* const isTwoByteString_;
 
  public:
-  explicit SourcePropertiesGetter(bool* hasSourceText, bool* retrievable)
-      : hasSourceText_(hasSourceText), retrievable_(retrievable) {}
+  explicit SourcePropertiesGetter(bool* hasSourceText, bool* retrievable,
+                                  bool* isTwoByteString)
+      : hasSourceText_(hasSourceText),
+        retrievable_(retrievable),
+        isTwoByteString_(isTwoByteString) {}
 
   template <typename Unit, SourceRetrievable CanRetrieve>
   void operator()(const Compressed<Unit, CanRetrieve>&) const {
     *hasSourceText_ = true;
     *retrievable_ = false;
+    *isTwoByteString_ = std::is_same_v<Unit, char16_t>;
   }
 
   template <typename Unit, SourceRetrievable CanRetrieve>
   void operator()(const Uncompressed<Unit, CanRetrieve>&) const {
     *hasSourceText_ = true;
     *retrievable_ = false;
+    *isTwoByteString_ = std::is_same_v<Unit, char16_t>;
   }
 
   template <typename Unit>
@@ -954,31 +933,27 @@ class ScriptSource::SourcePropertiesGetter {
     // Retrievable requires the main thread. Do not attempt to retrieve it.
     *hasSourceText_ = false;
     *retrievable_ = true;
+    *isTwoByteString_ = std::is_same_v<Unit, char16_t>;
   }
 
   void operator()(const Missing&) const {
     *hasSourceText_ = false;
     *retrievable_ = false;
+    *isTwoByteString_ = false;
   }
 };
 
-void ScriptSource::getSourceProperties(ScriptSource* ss, bool* hasSourceText,
-                                       bool* retrievable) {
-  ss->data.match(SourcePropertiesGetter(hasSourceText, retrievable));
-}
-
-/* static */
-JSLinearString* JSScript::sourceData(JSContext* cx, HandleScript script) {
-  MOZ_ASSERT(script->scriptSource()->hasSourceText());
-  return script->scriptSource()->substring(cx, script->sourceStart(),
-                                           script->sourceEnd());
+void ScriptSource::ExclusiveSourceData::getSourceProperties(
+    bool* hasSourceText, bool* retrievable, bool* isTwoByteString) const {
+  data_.match(
+      SourcePropertiesGetter(hasSourceText, retrievable, isTwoByteString));
 }
 
 bool BaseScript::appendSourceDataForToString(JSContext* cx,
                                              StringBuilder& buf) {
-  MOZ_ASSERT(scriptSource()->hasSourceText());
-  return scriptSource()->appendSubstring(cx, buf, toStringStart(),
-                                         toStringEnd());
+  ScriptSource::DataReader reader(scriptSource());
+  MOZ_ASSERT(reader.hasSourceText());
+  return reader->appendSubstring(cx, buf, toStringStart(), toStringEnd());
 }
 
 void UncompressedSourceCache::holdEntry(AutoHoldEntry& holder,
@@ -997,7 +972,6 @@ template <typename Unit>
 const Unit* UncompressedSourceCache::lookup(const ScriptSourceChunk& ssc,
                                             AutoHoldEntry& holder) {
   MOZ_ASSERT(!holder_);
-  MOZ_ASSERT(ssc.ss->isCompressed<Unit>());
 
   if (!map_) {
     return nullptr;
@@ -1035,9 +1009,9 @@ void UncompressedSourceCache::purge() {
     return;
   }
 
-  for (Map::Range r = map_->all(); !r.empty(); r.popFront()) {
-    if (holder_ && r.front().key() == holder_->sourceChunk()) {
-      holder_->deferDelete(std::move(r.front().value()));
+  for (auto iter = map_->modIter(); !iter.done(); iter.next()) {
+    if (holder_ && iter.get().key() == holder_->sourceChunk()) {
+      holder_->deferDelete(std::move(iter.get().value()));
       holder_ = nullptr;
     }
   }
@@ -1050,17 +1024,17 @@ size_t UncompressedSourceCache::sizeOfExcludingThis(
   size_t n = 0;
   if (map_ && !map_->empty()) {
     n += map_->shallowSizeOfIncludingThis(mallocSizeOf);
-    for (Map::Range r = map_->all(); !r.empty(); r.popFront()) {
-      n += mallocSizeOf(r.front().value().get());
+    for (auto iter = map_->iter(); !iter.done(); iter.next()) {
+      n += mallocSizeOf(iter.get().value().get());
     }
   }
   return n;
 }
 
 template <typename Unit>
-const Unit* ScriptSource::chunkUnits(
+const Unit* ScriptSource::ExclusiveSourceData::chunkUnits(
     JSContext* maybeCx, UncompressedSourceCache::AutoHoldEntry& holder,
-    size_t chunk) {
+    size_t chunk) const {
   const CompressedData<Unit>& c = *compressedData<Unit>();
 
   // Try cache lookup only if we have a JSContext
@@ -1116,77 +1090,165 @@ const Unit* ScriptSource::chunkUnits(
 }
 
 template <typename Unit>
-void ScriptSource::convertToCompressedSource(SharedImmutableString compressed,
-                                             size_t uncompressedLength) {
+void ScriptSource::ExclusiveSourceData::convertToCompressedSource(
+    SharedImmutableString compressed, size_t uncompressedLength) {
   MOZ_ASSERT(isUncompressed<Unit>());
   MOZ_ASSERT(uncompressedData<Unit>()->length() == uncompressedLength);
 
-  if (data.is<Uncompressed<Unit, SourceRetrievable::Yes>>()) {
-    data = SourceType(Compressed<Unit, SourceRetrievable::Yes>(
+  if (data_.is<Uncompressed<Unit, SourceRetrievable::Yes>>()) {
+    data_ = SourceType(Compressed<Unit, SourceRetrievable::Yes>(
         std::move(compressed), uncompressedLength));
   } else {
-    data = SourceType(Compressed<Unit, SourceRetrievable::No>(
+    data_ = SourceType(Compressed<Unit, SourceRetrievable::No>(
         std::move(compressed), uncompressedLength));
   }
 }
 
-template <typename Unit>
-void ScriptSource::performDelayedConvertToCompressedSource(
-    ExclusiveData<ReaderInstances>::Guard& g) {
-  // There might not be a conversion to compressed source happening at all.
-  if (g->pendingCompressed.empty()) {
-    return;
+struct ScriptSource::ExclusiveSourceData::
+    TriggerConvertToCompressedSourceFromTask {
+  ExclusiveSourceData* const sourceData_;
+  SharedImmutableString& compressed_;
+
+  TriggerConvertToCompressedSourceFromTask(ExclusiveSourceData* sourceData,
+                                           SharedImmutableString& compressed)
+      : sourceData_(sourceData), compressed_(compressed) {}
+
+  template <typename Unit, SourceRetrievable CanRetrieve>
+  void operator()(const Uncompressed<Unit, CanRetrieve>& u) {
+    sourceData_->convertToCompressedSource<Unit>(std::move(compressed_),
+                                                 u.length());
   }
 
-  CompressedData<Unit>& pending =
-      g->pendingCompressed.ref<CompressedData<Unit>>();
+  template <typename Unit, SourceRetrievable CanRetrieve>
+  void operator()(const Compressed<Unit, CanRetrieve>&) {
+    MOZ_CRASH(
+        "can't set compressed source when source is already compressed -- "
+        "ScriptSource::tryCompressOffThread shouldn't have queued up this "
+        "task?");
+  }
 
-  convertToCompressedSource<Unit>(std::move(pending.raw),
-                                  pending.uncompressedLength);
+  template <typename Unit>
+  void operator()(const Retrievable<Unit>&) {
+    MOZ_CRASH("shouldn't compressing unloaded-but-retrievable source");
+  }
 
-  g->pendingCompressed.destroy();
-}
+  void operator()(const Missing&) {
+    MOZ_CRASH(
+        "doesn't make sense to set compressed source for missing source -- "
+        "ScriptSource::tryCompressOffThread shouldn't have queued up this "
+        "task?");
+  }
+};
 
-void ScriptSource::PinnedUnitsBase::addReader() {
-  auto guard = source_->readers_.lock();
-  guard->count++;
+void ScriptSource::ExclusiveSourceData::
+    triggerConvertToCompressedSourceFromTask(SharedImmutableString compressed) {
+  data_.match(TriggerConvertToCompressedSourceFromTask(this, compressed));
 }
 
 template <typename Unit>
-void ScriptSource::PinnedUnitsBase::removeReader() {
+void ScriptSource::ExclusiveSourceDataLockState::setPendingCompressed(
+    SharedImmutableString compressed, size_t uncompressedLength) {
+  MOZ_ASSERT(pendingCompressed_.empty(),
+             "shouldn't be multiple conversions happening");
+  pendingCompressed_.construct<CompressedData<Unit>>(std::move(compressed),
+                                                     uncompressedLength);
+}
+
+struct ScriptSource::ExclusiveSourceData::SetPendingCompressedFor {
+  ExclusiveData<ExclusiveSourceDataLockState>::Guard& guard_;
+  SharedImmutableString& compressed_;
+
+  SetPendingCompressedFor(
+      ExclusiveData<ExclusiveSourceDataLockState>::Guard& guard,
+      SharedImmutableString& compressed)
+      : guard_(guard), compressed_(compressed) {}
+
+  template <typename Unit, SourceRetrievable CanRetrieve>
+  void operator()(const Uncompressed<Unit, CanRetrieve>& u) {
+    guard_->setPendingCompressed<Unit>(std::move(compressed_), u.length());
+  }
+
+  template <typename Unit, SourceRetrievable CanRetrieve>
+  void operator()(const Compressed<Unit, CanRetrieve>&) {
+    MOZ_CRASH(
+        "can't set compressed source when source is already compressed -- "
+        "ScriptSource::tryCompressOffThread shouldn't have queued up this "
+        "task?");
+  }
+
+  template <typename Unit>
+  void operator()(const Retrievable<Unit>&) {
+    MOZ_CRASH("shouldn't compressing unloaded-but-retrievable source");
+  }
+
+  void operator()(const Missing&) {
+    MOZ_CRASH(
+        "doesn't make sense to set compressed source for missing source -- "
+        "ScriptSource::tryCompressOffThread shouldn't have queued up this "
+        "task?");
+  }
+};
+
+void ScriptSource::ExclusiveSourceData::setPendingCompressedFor(
+    ExclusiveData<ExclusiveSourceDataLockState>::Guard& guard,
+    SharedImmutableString compressed) const {
+  data_.match(SetPendingCompressedFor(guard, compressed));
+}
+
+template <typename Unit>
+void ScriptSource::ExclusiveSourceDataLockState::
+    performDelayedConvertToCompressedSource(DataReader& reader) {
+  MOZ_ASSERT(readers_ == 0);
+
+  CompressedData<Unit>& pending =
+      pendingCompressed_.ref<CompressedData<Unit>>();
+
+  ExclusiveSourceData* sourceData =
+      reader.getMutableForDelayedConvertToCompressedSource();
+  sourceData->convertToCompressedSource<Unit>(std::move(pending.raw),
+                                              pending.uncompressedLength);
+
+  pendingCompressed_.destroy();
+}
+
+void ScriptSource::ExclusiveSourceDataLockState::addReader() { readers_++; }
+
+void ScriptSource::ExclusiveSourceDataLockState::removeReader(
+    ScriptSource* ss, DataReader& reader) {
+  MOZ_ASSERT(readers_ > 0);
+  MOZ_ASSERT(reader->hasSourceText());
+
   // If the off-thread compression task couldn't perform
   // convertToCompressedSource, the conversion is pending on
-  // the pendingCompressed field.
+  // the pendingCompressed_ field.
   //
   // If there's no other reader at this point, perform the pending conversion
   // here.
   //
-  // See also ScriptSource::triggerConvertToCompressedSource.
-  auto guard = source_->readers_.lock();
-  MOZ_ASSERT(guard->count > 0);
-  if (--guard->count == 0) {
-    source_->performDelayedConvertToCompressedSource<Unit>(guard);
+  // See also ExclusiveSourceDataLockState::triggerConvertToCompressedSource.
+  if (--readers_ > 0) {
+    return;
+  }
+  if (pendingCompressed_.empty()) {
+    return;
+  }
+
+  if (reader->hasSourceType<Utf8Unit>()) {
+    performDelayedConvertToCompressedSource<Utf8Unit>(reader);
+  } else {
+    performDelayedConvertToCompressedSource<char16_t>(reader);
   }
 }
 
-template <typename Unit>
-ScriptSource::PinnedUnits<Unit>::~PinnedUnits() {
-  if (units_) {
-    removeReader<Unit>();
-  }
+void ScriptSource::ExclusiveSourceDataLockState::removeReaderForWrite() {
+  MOZ_ASSERT(readers_ > 0);
+  readers_--;
 }
 
 template <typename Unit>
-ScriptSource::PinnedUnitsIfUncompressed<Unit>::~PinnedUnitsIfUncompressed() {
-  if (units_) {
-    removeReader<Unit>();
-  }
-}
-
-template <typename Unit>
-const Unit* ScriptSource::units(JSContext* maybeCx,
-                                UncompressedSourceCache::AutoHoldEntry& holder,
-                                size_t begin, size_t len) {
+const Unit* ScriptSource::ExclusiveSourceData::units(
+    JSContext* maybeCx, UncompressedSourceCache::AutoHoldEntry& holder,
+    size_t begin, size_t len) const {
   MOZ_ASSERT(begin <= length());
   MOZ_ASSERT(begin + len <= length());
 
@@ -1198,11 +1260,11 @@ const Unit* ScriptSource::units(JSContext* maybeCx,
     return units + begin;
   }
 
-  if (data.is<Missing>()) {
+  if (data_.is<Missing>()) {
     MOZ_CRASH("ScriptSource::units() on ScriptSource with missing source");
   }
 
-  if (data.is<Retrievable<Unit>>()) {
+  if (data_.is<Retrievable<Unit>>()) {
     MOZ_CRASH("ScriptSource::units() on ScriptSource with retrievable source");
   }
 
@@ -1292,7 +1354,17 @@ const Unit* ScriptSource::units(JSContext* maybeCx,
 }
 
 template <typename Unit>
-const Unit* ScriptSource::uncompressedUnits(size_t begin, size_t len) {
+const typename SourceTypeTraits<Unit>::CharT*
+ScriptSource::ExclusiveSourceData::unitsChars(
+    JSContext* maybeCx, UncompressedSourceCache::AutoHoldEntry& holder,
+    size_t begin, size_t len) const {
+  return SourceTypeTraits<Unit>::toString(
+      units<Unit>(maybeCx, holder, begin, len));
+}
+
+template <typename Unit>
+const Unit* ScriptSource::ExclusiveSourceData::uncompressedUnits(
+    size_t begin, size_t len) const {
   MOZ_ASSERT(begin <= length());
   MOZ_ASSERT(begin + len <= length());
 
@@ -1307,43 +1379,13 @@ const Unit* ScriptSource::uncompressedUnits(size_t begin, size_t len) {
   return units + begin;
 }
 
-template <typename Unit>
-ScriptSource::PinnedUnits<Unit>::PinnedUnits(
-    JSContext* maybeCx, ScriptSource* source,
-    UncompressedSourceCache::AutoHoldEntry& holder, size_t begin, size_t len)
-    : PinnedUnitsBase(source) {
-  MOZ_ASSERT(source->hasSourceType<Unit>(), "must pin units of source's type");
+template const Utf8Unit* ScriptSource::ExclusiveSourceData::uncompressedUnits<
+    Utf8Unit>(size_t begin, size_t len) const;
+template const char16_t* ScriptSource::ExclusiveSourceData::uncompressedUnits<
+    char16_t>(size_t begin, size_t len) const;
 
-  addReader();
-
-  units_ = source->units<Unit>(maybeCx, holder, begin, len);
-  if (!units_) {
-    removeReader<Unit>();
-  }
-}
-
-template class ScriptSource::PinnedUnits<Utf8Unit>;
-template class ScriptSource::PinnedUnits<char16_t>;
-
-template <typename Unit>
-ScriptSource::PinnedUnitsIfUncompressed<Unit>::PinnedUnitsIfUncompressed(
-    ScriptSource* source, size_t begin, size_t len)
-    : PinnedUnitsBase(source) {
-  MOZ_ASSERT(source->hasSourceType<Unit>(), "must pin units of source's type");
-
-  addReader();
-
-  units_ = source->uncompressedUnits<Unit>(begin, len);
-  if (!units_) {
-    removeReader<Unit>();
-  }
-}
-
-template class ScriptSource::PinnedUnitsIfUncompressed<Utf8Unit>;
-template class ScriptSource::PinnedUnitsIfUncompressed<char16_t>;
-
-JSLinearString* ScriptSource::substring(JSContext* cx, size_t start,
-                                        size_t stop) {
+JSLinearString* ScriptSource::ExclusiveSourceData::substring(
+    JSContext* cx, size_t start, size_t stop) const {
   MOZ_ASSERT(start <= stop);
 
   size_t len = stop - start;
@@ -1354,26 +1396,25 @@ JSLinearString* ScriptSource::substring(JSContext* cx, size_t start,
 
   // UTF-8 source text.
   if (hasSourceType<Utf8Unit>()) {
-    PinnedUnits<Utf8Unit> units(cx, this, holder, start, len);
-    if (!units.asChars()) {
+    const char* str = unitsChars<Utf8Unit>(cx, holder, start, len);
+    if (!str) {
       return nullptr;
     }
 
-    const char* str = units.asChars();
     return NewStringCopyUTF8N(cx, JS::UTF8Chars(str, len));
   }
 
   // UTF-16 source text.
-  PinnedUnits<char16_t> units(cx, this, holder, start, len);
-  if (!units.asChars()) {
+  const char16_t* str = unitsChars<char16_t>(cx, holder, start, len);
+  if (!str) {
     return nullptr;
   }
 
-  return NewStringCopyN<CanGC>(cx, units.asChars(), len);
+  return NewStringCopyN<CanGC>(cx, str, len);
 }
 
-JSLinearString* ScriptSource::substringDontDeflate(JSContext* cx, size_t start,
-                                                   size_t stop) {
+JSLinearString* ScriptSource::ExclusiveSourceData::substringDontDeflate(
+    JSContext* cx, size_t start, size_t stop) const {
   MOZ_ASSERT(start <= stop);
 
   size_t len = stop - start;
@@ -1384,12 +1425,10 @@ JSLinearString* ScriptSource::substringDontDeflate(JSContext* cx, size_t start,
 
   // UTF-8 source text.
   if (hasSourceType<Utf8Unit>()) {
-    PinnedUnits<Utf8Unit> units(cx, this, holder, start, len);
-    if (!units.asChars()) {
+    const char* str = unitsChars<Utf8Unit>(cx, holder, start, len);
+    if (!str) {
       return nullptr;
     }
-
-    const char* str = units.asChars();
 
     // There doesn't appear to be a non-deflating UTF-8 string creation
     // function -- but then again, it's not entirely clear how current
@@ -1398,15 +1437,16 @@ JSLinearString* ScriptSource::substringDontDeflate(JSContext* cx, size_t start,
   }
 
   // UTF-16 source text.
-  PinnedUnits<char16_t> units(cx, this, holder, start, len);
-  if (!units.asChars()) {
+  const char16_t* str = unitsChars<char16_t>(cx, holder, start, len);
+  if (!str) {
     return nullptr;
   }
 
-  return NewStringCopyNDontDeflate<CanGC>(cx, units.asChars(), len);
+  return NewStringCopyNDontDeflate<CanGC>(cx, str, len);
 }
 
-SubstringCharsResult ScriptSource::substringChars(size_t start, size_t stop) {
+SubstringCharsResult ScriptSource::ExclusiveSourceData::substringChars(
+    size_t start, size_t stop) const {
   MOZ_ASSERT(start <= stop);
 
   size_t len = stop - start;
@@ -1419,13 +1459,12 @@ SubstringCharsResult ScriptSource::substringChars(size_t start, size_t stop) {
     // Pass nullptr JSContext - this method is designed to be called
     // off-main-thread where JSContext is not available. Decompression still
     // works but without caching.
-    PinnedUnits<Utf8Unit> units(nullptr, this, holder, start, len);
-    if (!units.asChars()) {
+    const char* str = unitsChars<Utf8Unit>(nullptr, holder, start, len);
+    if (!str) {
       // Allocation failure or decompression error.
       return SubstringCharsResult(JS::UniqueChars(nullptr));
     }
 
-    const char* str = units.asChars();
     // For UTF-8 source, create a copy of the char data.
     // Note: We allocate exactly `len` bytes without a null terminator.
     // Callers must track the length separately.
@@ -1443,8 +1482,8 @@ SubstringCharsResult ScriptSource::substringChars(size_t start, size_t stop) {
   // Pass nullptr JSContext - this method is designed to be called
   // off-main-thread where JSContext is not available. Decompression still works
   // but without caching.
-  PinnedUnits<char16_t> units(nullptr, this, holder, start, len);
-  if (!units.asChars()) {
+  const char16_t* str = unitsChars<char16_t>(nullptr, holder, start, len);
+  if (!str) {
     // Allocation failure or decompression error.
     return SubstringCharsResult(JS::UniqueTwoByteChars(nullptr));
   }
@@ -1458,55 +1497,61 @@ SubstringCharsResult ScriptSource::substringChars(size_t start, size_t stop) {
     return SubstringCharsResult(JS::UniqueTwoByteChars(nullptr));
   }
 
-  mozilla::PodCopy(copy, units.asChars(), len);
+  mozilla::PodCopy(copy, str, len);
   return SubstringCharsResult(JS::UniqueTwoByteChars(copy));
 }
 
-bool ScriptSource::appendSubstring(JSContext* cx, StringBuilder& buf,
-                                   size_t start, size_t stop) {
+bool ScriptSource::ExclusiveSourceData::appendSubstring(JSContext* cx,
+                                                        StringBuilder& buf,
+                                                        size_t start,
+                                                        size_t stop) const {
   MOZ_ASSERT(start <= stop);
 
   size_t len = stop - start;
   UncompressedSourceCache::AutoHoldEntry holder;
 
   if (hasSourceType<Utf8Unit>()) {
-    PinnedUnits<Utf8Unit> pinned(cx, this, holder, start, len);
-    if (!pinned.get()) {
+    const Utf8Unit* u = units<Utf8Unit>(cx, holder, start, len);
+    if (!u) {
       return false;
     }
+
     if (len > SourceDeflateLimit && !buf.ensureTwoByteChars()) {
       return false;
     }
 
-    const Utf8Unit* units = pinned.get();
-    return buf.append(units, len);
+    return buf.append(u, len);
   } else {
-    PinnedUnits<char16_t> pinned(cx, this, holder, start, len);
-    if (!pinned.get()) {
+    const char16_t* u = units<char16_t>(cx, holder, start, len);
+    if (!u) {
       return false;
     }
+
     if (len > SourceDeflateLimit && !buf.ensureTwoByteChars()) {
       return false;
     }
 
-    const char16_t* units = pinned.get();
-    return buf.append(units, len);
+    return buf.append(u, len);
   }
 }
 
-JSLinearString* ScriptSource::functionBodyString(JSContext* cx) {
-  MOZ_ASSERT(isFunctionBody());
+JSLinearString* ScriptSource::ExclusiveSourceData::functionBodyString(
+    JSContext* cx, ScriptSource* source) const {
+  MOZ_ASSERT(source->isFunctionBody());
 
-  size_t start = parameterListEnd_ + FunctionConstructorMedialSigils.length();
+  size_t start =
+      source->parameterListEnd_ + FunctionConstructorMedialSigils.length();
   size_t stop = length() - FunctionConstructorFinalBrace.length();
   return substring(cx, start, stop);
 }
 
-SubstringCharsResult ScriptSource::functionBodyStringChars(size_t* outLength) {
-  MOZ_ASSERT(isFunctionBody());
+SubstringCharsResult ScriptSource::ExclusiveSourceData::functionBodyStringChars(
+    ScriptSource* source, size_t* outLength) const {
+  MOZ_ASSERT(source->isFunctionBody());
   MOZ_ASSERT(outLength);
 
-  size_t start = parameterListEnd_ + FunctionConstructorMedialSigils.length();
+  size_t start =
+      source->parameterListEnd_ + FunctionConstructorMedialSigils.length();
   size_t stop = length() - FunctionConstructorFinalBrace.length();
   *outLength = stop - start;
 
@@ -1520,7 +1565,8 @@ SubstringCharsResult ScriptSource::functionBodyStringChars(size_t* outLength) {
 }
 
 template <typename ContextT, typename Unit>
-[[nodiscard]] bool ScriptSource::setUncompressedSourceHelper(
+[[nodiscard]] bool
+ScriptSource::ExclusiveSourceData::setUncompressedSourceHelper(
     ContextT* cx, EntryUnits<Unit>&& source, size_t length,
     SourceRetrievable retrievable) {
   auto& cache = SharedImmutableStringsCache::getSingleton();
@@ -1533,20 +1579,19 @@ template <typename ContextT, typename Unit>
   }
 
   if (retrievable == SourceRetrievable::Yes) {
-    data = SourceType(
+    data_ = SourceType(
         Uncompressed<Unit, SourceRetrievable::Yes>(std::move(deduped)));
   } else {
-    data = SourceType(
+    data_ = SourceType(
         Uncompressed<Unit, SourceRetrievable::No>(std::move(deduped)));
   }
   return true;
 }
 
 template <typename Unit>
-[[nodiscard]] bool ScriptSource::setRetrievedSource(JSContext* cx,
-                                                    EntryUnits<Unit>&& source,
-                                                    size_t length) {
-  MOZ_ASSERT(data.is<Retrievable<Unit>>(),
+[[nodiscard]] bool ScriptSource::ExclusiveSourceData::setRetrievedSource(
+    JSContext* cx, EntryUnits<Unit>&& source, size_t length) {
+  MOZ_ASSERT(data_.is<Retrievable<Unit>>(),
              "retrieved source can only overwrite the corresponding "
              "retrievable source");
   return setUncompressedSourceHelper(cx, std::move(source), length,
@@ -1576,7 +1621,8 @@ bool ScriptSource::tryCompressOffThread(JSContext* cx) {
     return true;
   }
 
-  if (!hasUncompressedSource()) {
+  DataReader reader(this);
+  if (!reader.hasSourceText() || !reader->hasUncompressedSource()) {
     // This excludes compressed, missing, and retrievable source.
     return true;
   }
@@ -1589,54 +1635,24 @@ bool ScriptSource::tryCompressOffThread(JSContext* cx) {
   // Otherwise, enqueue a compression task to be processed when a major
   // GC is requested.
 
-  if (length() < ScriptSource::MinimumCompressibleLength ||
+  if (reader->length() < ScriptSource::MinimumCompressibleLength ||
       !IsOffThreadSourceCompressionEnabled()) {
     return true;
   }
 
-  // Heap allocate the task. It will be freed upon compression
-  // completing in AttachFinishedCompressedSources.
-  auto task = MakeUnique<SourceCompressionTask>(cx->runtime(), this);
-  if (!task) {
+  if (!cx->runtime()->addPendingCompressionEntry(this)) {
     ReportOutOfMemory(cx);
     return false;
   }
-  return EnqueueOffThreadCompression(cx, std::move(task));
+  return true;
 }
 
 template <typename Unit>
-void ScriptSource::triggerConvertToCompressedSource(
-    SharedImmutableString compressed, size_t uncompressedLength) {
-  MOZ_ASSERT(isUncompressed<Unit>(),
-             "should only be triggering compressed source installation to "
-             "overwrite identically-encoded uncompressed source");
-  MOZ_ASSERT(uncompressedData<Unit>()->length() == uncompressedLength);
-
-  // If units aren't pinned -- and they probably won't be, we'd have to have a
-  // GC in the small window of time where a |PinnedUnits| was live -- then we
-  // can immediately convert.
-  {
-    auto guard = readers_.lock();
-    if (MOZ_LIKELY(!guard->count)) {
-      convertToCompressedSource<Unit>(std::move(compressed),
-                                      uncompressedLength);
-      return;
-    }
-
-    // Otherwise, set aside the compressed-data info.  The conversion is
-    // performed when the last |PinnedUnits| dies.
-    MOZ_ASSERT(guard->pendingCompressed.empty(),
-               "shouldn't be multiple conversions happening");
-    guard->pendingCompressed.construct<CompressedData<Unit>>(
-        std::move(compressed), uncompressedLength);
-  }
-}
-
-template <typename Unit>
-[[nodiscard]] bool ScriptSource::initializeWithUnretrievableCompressedSource(
+[[nodiscard]] bool
+ScriptSource::ExclusiveSourceData::initializeWithUnretrievableCompressedSource(
     FrontendContext* fc, UniqueChars&& compressed, size_t rawLength,
     size_t sourceLength) {
-  MOZ_ASSERT(data.is<Missing>(), "shouldn't be double-initializing");
+  MOZ_ASSERT(data_.is<Missing>(), "shouldn't be double-initializing");
   MOZ_ASSERT(compressed != nullptr);
 
   auto& cache = SharedImmutableStringsCache::getSingleton();
@@ -1646,46 +1662,37 @@ template <typename Unit>
     return false;
   }
 
-#ifdef DEBUG
-  {
-    auto guard = readers_.lock();
-    MOZ_ASSERT(
-        guard->count == 0,
-        "shouldn't be initializing a ScriptSource while its characters "
-        "are pinned -- that only makes sense with a ScriptSource actively "
-        "being inspected");
-  }
-#endif
-
-  data = SourceType(Compressed<Unit, SourceRetrievable::No>(std::move(deduped),
-                                                            sourceLength));
+  data_ = SourceType(Compressed<Unit, SourceRetrievable::No>(std::move(deduped),
+                                                             sourceLength));
 
   return true;
 }
 
-template bool ScriptSource::initializeWithUnretrievableCompressedSource<
+template bool
+ScriptSource::ExclusiveSourceData::initializeWithUnretrievableCompressedSource<
     Utf8Unit>(FrontendContext* fc, UniqueChars&& compressed, size_t rawLength,
               size_t sourceLength);
-template bool ScriptSource::initializeWithUnretrievableCompressedSource<
+template bool
+ScriptSource::ExclusiveSourceData::initializeWithUnretrievableCompressedSource<
     char16_t>(FrontendContext* fc, UniqueChars&& compressed, size_t rawLength,
               size_t sourceLength);
 
 template <typename Unit>
-bool ScriptSource::assignSource(FrontendContext* fc,
-                                const ReadOnlyCompileOptions& options,
-                                SourceText<Unit>& srcBuf) {
-  MOZ_ASSERT(data.is<Missing>(),
+bool ScriptSource::ExclusiveSourceData::assignSource(
+    FrontendContext* fc, const ReadOnlyCompileOptions& options,
+    ScriptSource* ss, SourceText<Unit>& srcBuf) {
+  MOZ_ASSERT(data_.is<Missing>(),
              "source assignment should only occur on fresh ScriptSources");
 
-  mutedErrors_ = options.mutedErrors();
-  delazificationMode_ = options.eagerDelazificationStrategy();
+  ss->mutedErrors_ = options.mutedErrors();
+  ss->delazificationMode_ = options.eagerDelazificationStrategy();
 
   if (options.discardSource) {
     return true;
   }
 
   if (options.sourceIsLazy) {
-    data = SourceType(Retrievable<Unit>());
+    data_ = SourceType(Retrievable<Unit>());
     return true;
   }
 
@@ -1701,17 +1708,17 @@ bool ScriptSource::assignSource(FrontendContext* fc,
     return false;
   }
 
-  data =
+  data_ =
       SourceType(Uncompressed<Unit, SourceRetrievable::No>(std::move(deduped)));
   return true;
 }
 
-template bool ScriptSource::assignSource(FrontendContext* fc,
-                                         const ReadOnlyCompileOptions& options,
-                                         SourceText<char16_t>& srcBuf);
-template bool ScriptSource::assignSource(FrontendContext* fc,
-                                         const ReadOnlyCompileOptions& options,
-                                         SourceText<Utf8Unit>& srcBuf);
+template bool ScriptSource::ExclusiveSourceData::assignSource(
+    FrontendContext* fc, const ReadOnlyCompileOptions& options,
+    ScriptSource* ss, SourceText<char16_t>& srcBuf);
+template bool ScriptSource::ExclusiveSourceData::assignSource(
+    FrontendContext* fc, const ReadOnlyCompileOptions& options,
+    ScriptSource* ss, SourceText<Utf8Unit>& srcBuf);
 
 [[nodiscard]] static bool reallocUniquePtr(UniqueChars& unique, size_t size) {
   auto newPtr = static_cast<char*>(js_realloc(unique.get(), size));
@@ -1726,27 +1733,32 @@ template bool ScriptSource::assignSource(FrontendContext* fc,
 }
 
 template <typename Unit>
-void SourceCompressionTask::workEncodingSpecific() {
-  MOZ_ASSERT(source_->isUncompressed<Unit>());
+void SourceCompressionTaskEntry::workEncodingSpecific(Compressor& comp) {
+  ScriptSource::DataReader reader(source_);
+  MOZ_ASSERT(reader.hasSourceText());
+  MOZ_ASSERT(reader->isUncompressed<Unit>());
 
   // Try to keep the maximum memory usage down by only allocating half the
-  // size of the string, first.
-  size_t inputBytes = source_->length() * sizeof(Unit);
-  size_t firstSize = inputBytes / 2;
+  // size of the string, first. Small source strings are more likely to compress
+  // poorly, and don't use much memory to start with.
+  size_t inputBytes = reader->length() * sizeof(Unit);
+  const size_t MinimumSizeForOptimisticAllocation = 5000;
+  bool allocateOptimistically = inputBytes > MinimumSizeForOptimisticAllocation;
+  size_t firstSize = allocateOptimistically ? inputBytes / 2 : inputBytes;
   UniqueChars compressed(js_pod_malloc<char>(firstSize));
   if (!compressed) {
     return;
   }
 
-  const Unit* chars = source_->uncompressedData<Unit>()->units();
-  Compressor comp(reinterpret_cast<const unsigned char*>(chars), inputBytes);
-  if (!comp.init()) {
+  const Unit* chars = reader->uncompressedData<Unit>()->units();
+  if (!comp.setInput(reinterpret_cast<const unsigned char*>(chars),
+                     inputBytes)) {
     return;
   }
 
   comp.setOutput(reinterpret_cast<unsigned char*>(compressed.get()), firstSize);
   bool cont = true;
-  bool reallocated = false;
+  bool canReallocate = allocateOptimistically;
   while (cont) {
     if (shouldCancel()) {
       return;
@@ -1756,7 +1768,7 @@ void SourceCompressionTask::workEncodingSpecific() {
       case Compressor::CONTINUE:
         break;
       case Compressor::MOREOUTPUT: {
-        if (reallocated) {
+        if (!canReallocate) {
           // The compressed string is longer than the original string.
           return;
         }
@@ -1769,7 +1781,7 @@ void SourceCompressionTask::workEncodingSpecific() {
 
         comp.setOutput(reinterpret_cast<unsigned char*>(compressed.get()),
                        inputBytes);
-        reallocated = true;
+        canReallocate = false;
         break;
       }
       case Compressor::DONE:
@@ -1797,14 +1809,22 @@ void SourceCompressionTask::workEncodingSpecific() {
   resultString_ = strings.getOrCreate(std::move(compressed), totalBytes);
 }
 
-struct SourceCompressionTask::PerformTaskWork {
-  SourceCompressionTask* const task_;
+PendingSourceCompressionEntry::PendingSourceCompressionEntry(
+    JSRuntime* rt, ScriptSource* source)
+    : majorGCNumber_(rt->gc.majorGCCount()), source_(source) {
+  source->noteSourceCompressionTask();
+}
 
-  explicit PerformTaskWork(SourceCompressionTask* task) : task_(task) {}
+struct SourceCompressionTaskEntry::PerformTaskWork {
+  SourceCompressionTaskEntry* const task_;
+  Compressor& comp_;
+
+  PerformTaskWork(SourceCompressionTaskEntry* task, Compressor& comp)
+      : task_(task), comp_(comp) {}
 
   template <typename Unit, SourceRetrievable CanRetrieve>
   void operator()(const ScriptSource::Uncompressed<Unit, CanRetrieve>&) {
-    task_->workEncodingSpecific<Unit>();
+    task_->workEncodingSpecific<Unit>(comp_);
   }
 
   template <typename T>
@@ -1815,19 +1835,33 @@ struct SourceCompressionTask::PerformTaskWork {
   }
 };
 
-void ScriptSource::performTaskWork(SourceCompressionTask* task) {
+void ScriptSource::ExclusiveSourceData::performTaskWork(
+    SourceCompressionTaskEntry* task, Compressor& comp) const {
   MOZ_ASSERT(hasUncompressedSource());
-  data.match(SourceCompressionTask::PerformTaskWork(task));
+  data_.match(SourceCompressionTaskEntry::PerformTaskWork(task, comp));
 }
 
-void SourceCompressionTask::runTask() {
+void SourceCompressionTaskEntry::runTask(Compressor& comp) {
   if (shouldCancel()) {
     return;
   }
 
-  MOZ_ASSERT(source_->hasUncompressedSource());
+  ScriptSource::DataReader reader(source_);
+  MOZ_ASSERT(reader.hasSourceText());
+  reader->performTaskWork(this, comp);
+}
 
-  source_->performTaskWork(this);
+void SourceCompressionTask::runTask() {
+  MOZ_ASSERT(!entries_.empty());
+  // Note: here and in workEncodingSpecific we abort compression work on OOM
+  // since source compression is optional.
+  Compressor comp;
+  if (!comp.init()) {
+    return;
+  }
+  for (auto& entry : entries_) {
+    entry.runTask(comp);
+  }
 }
 
 void SourceCompressionTask::runHelperThreadTask(
@@ -1845,14 +1879,27 @@ void SourceCompressionTask::runHelperThreadTask(
   }
 }
 
-void ScriptSource::triggerConvertToCompressedSourceFromTask(
+void ScriptSource::DataWriter::triggerConvertToCompressedSourceFromTask(
     SharedImmutableString compressed) {
-  data.match(TriggerConvertToCompressedSourceFromTask(this, compressed));
+  if (!hasWriteAccess()) {
+    getConst()->setPendingCompressedFor(guard_, std::move(compressed));
+    return;
+  }
+
+  getMutable()->triggerConvertToCompressedSourceFromTask(std::move(compressed));
+}
+
+void SourceCompressionTaskEntry::complete() {
+  if (!shouldCancel() && resultString_) {
+    ScriptSource::DataWriter writer(source_);
+    writer.triggerConvertToCompressedSourceFromTask(std::move(resultString_));
+  }
 }
 
 void SourceCompressionTask::complete() {
-  if (!shouldCancel() && resultString_) {
-    source_->triggerConvertToCompressedSourceFromTask(std::move(resultString_));
+  MOZ_ASSERT(!entries_.empty());
+  for (auto& entry : entries_) {
+    entry.complete();
   }
 }
 
@@ -1873,20 +1920,25 @@ bool js::SynchronouslyCompressSource(JSContext* cx,
   ScriptSource* ss = script->scriptSource();
 #ifdef DEBUG
   {
-    auto guard = ss->readers_.lock();
-    MOZ_ASSERT(guard->count == 0,
-               "can't synchronously compress while source units are in use");
+    ScriptSource::DataWriter writer(ss);
+    MOZ_ASSERT(writer.hasWriteAccess(),
+               "can't synchronously compress while the source data is in use");
   }
 #endif
 
-  // In principle a previously-triggered compression on a helper thread could
-  // have already completed.  If that happens, there's nothing more to do.
-  if (ss->hasCompressedSource()) {
-    return true;
-  }
+  {
+    ScriptSource::DataReader reader(ss);
+    MOZ_ASSERT(reader.hasSourceText(),
+               "Should be called only when the source exists");
+    // In principle a previously-triggered compression on a helper thread could
+    // have already completed.  If that happens, there's nothing more to do.
+    if (reader->hasCompressedSource()) {
+      return true;
+    }
 
-  MOZ_ASSERT(ss->hasUncompressedSource(),
-             "shouldn't be compressing uncompressible source");
+    MOZ_ASSERT(reader->hasUncompressedSource(),
+               "shouldn't be compressing uncompressible source");
+  }
 
   // Use an explicit scope to delineate the lifetime of |task|, for simplicity.
   {
@@ -1895,10 +1947,11 @@ bool js::SynchronouslyCompressSource(JSContext* cx,
 #endif
     MOZ_ASSERT(sourceRefs > 0, "at least |script| here should have a ref");
 
-    // |SourceCompressionTask::shouldCancel| can periodically result in source
-    // compression being canceled if we're not careful.  Guarantee that two refs
-    // to |ss| are always live in this function (at least one preexisting and
-    // one held by the task) so that compression is never canceled.
+    // |SourceCompressionTaskEntry::shouldCancel| can periodically result in
+    // source compression being canceled if we're not careful. Guarantee that
+    // two refs to |ss| are always live in this function (at least one
+    // preexisting and one held by the task) so that compression is never
+    // canceled.
     auto task = MakeUnique<SourceCompressionTask>(cx->runtime(), ss);
     if (!task) {
       ReportOutOfMemory(cx);
@@ -1910,7 +1963,7 @@ bool js::SynchronouslyCompressSource(JSContext* cx,
     // Attempt to compress.  This may not succeed if OOM happens, but (because
     // it ordinarily happens on a helper thread) no error will ever be set here.
     MOZ_ASSERT(!cx->isExceptionPending());
-    ss->performTaskWork(task.get());
+    task->runTask();
     MOZ_ASSERT(!cx->isExceptionPending());
 
     // Convert |ss| from uncompressed to compressed data.
@@ -1919,8 +1972,9 @@ bool js::SynchronouslyCompressSource(JSContext* cx,
     MOZ_ASSERT(!cx->isExceptionPending());
   }
 
+  ScriptSource::DataReader reader(ss);
   // The only way source won't be compressed here is if OOM happened.
-  return ss->hasCompressedSource();
+  return reader->hasCompressedSource();
 }
 
 void ScriptSource::addSizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf,
@@ -2012,16 +2066,19 @@ bool ScriptSourceObject::isSharingDelazifications() const {
 }
 
 template <typename Unit>
-[[nodiscard]] bool ScriptSource::initializeUnretrievableUncompressedSource(
+[[nodiscard]] bool
+ScriptSource::ExclusiveSourceData::initializeUnretrievableUncompressedSource(
     FrontendContext* fc, EntryUnits<Unit>&& source, size_t length) {
-  MOZ_ASSERT(data.is<Missing>(), "must be initializing a fresh ScriptSource");
+  MOZ_ASSERT(data_.is<Missing>(), "must be initializing a fresh ScriptSource");
   return setUncompressedSourceHelper(fc, std::move(source), length,
                                      SourceRetrievable::No);
 }
 
-template bool ScriptSource::initializeUnretrievableUncompressedSource(
+template bool
+ScriptSource::ExclusiveSourceData::initializeUnretrievableUncompressedSource(
     FrontendContext* fc, EntryUnits<Utf8Unit>&& source, size_t length);
-template bool ScriptSource::initializeUnretrievableUncompressedSource(
+template bool
+ScriptSource::ExclusiveSourceData::initializeUnretrievableUncompressedSource(
     FrontendContext* fc, EntryUnits<char16_t>&& source, size_t length);
 
 // Format and return a cx->pod_malloc'ed URL for a generated script like:
@@ -2031,26 +2088,36 @@ template bool ScriptSource::initializeUnretrievableUncompressedSource(
 // indicating code compiled by the call to 'eval' on line 7 of foo.js.
 UniqueChars js::FormatIntroducedFilename(const char* filename, uint32_t lineno,
                                          const char* introducer) {
+  static constexpr std::string_view LineSeparator = " line ";
+  static constexpr std::string_view IntroducerSeparator = " > ";
+
+  Int32ToCStringBuf linenoBuf;
+  size_t linenoLen;
+  const char* linenoChars = Uint32ToCString(&linenoBuf, lineno, &linenoLen);
+
   // Compute the length of the string in advance, so we can allocate a
   // buffer of the right size on the first shot.
-  //
-  // (JS_smprintf would be perfect, as that allocates the result
-  // dynamically as it formats the string, but it won't allocate from cx,
-  // and wants us to use a special free function.)
-  char linenoBuf[15];
   size_t filenameLen = strlen(filename);
-  size_t linenoLen = SprintfLiteral(linenoBuf, "%u", lineno);
   size_t introducerLen = strlen(introducer);
-  size_t len = filenameLen + 6 /* == strlen(" line ") */ + linenoLen +
-               3 /* == strlen(" > ") */ + introducerLen + 1 /* \0 */;
+  size_t len = filenameLen + LineSeparator.length() + linenoLen +
+               IntroducerSeparator.length() + introducerLen + 1 /* \0 */;
   UniqueChars formatted(js_pod_malloc<char>(len));
   if (!formatted) {
     return nullptr;
   }
 
-  mozilla::DebugOnly<size_t> checkLen = snprintf(
-      formatted.get(), len, "%s line %s > %s", filename, linenoBuf, introducer);
-  MOZ_ASSERT(checkLen == len - 1);
+  char* out = formatted.get();
+  auto append = [&out](const char* chars, size_t length) {
+    memcpy(out, chars, length);
+    out += length;
+  };
+  append(filename, filenameLen);
+  append(LineSeparator.data(), LineSeparator.length());
+  append(linenoChars, linenoLen);
+  append(IntroducerSeparator.data(), IntroducerSeparator.length());
+  append(introducer, introducerLen);
+  *out = '\0';
+  MOZ_ASSERT(size_t(out - formatted.get()) == len - 1);
 
   return formatted;
 }
@@ -2135,8 +2202,7 @@ bool ScriptSource::setFilename(FrontendContext* fc, UniqueChars&& filename) {
   MOZ_ASSERT(!filename_);
   filename_ = getOrCreateStringZ(fc, std::move(filename));
   if (filename_) {
-    filenameHash_ =
-        mozilla::HashStringKnownLength(filename_.chars(), filename_.length());
+    filenameHash_ = mozilla::HashString(filename_.chars(), filename_.length());
     return true;
   }
   return false;
@@ -2253,7 +2319,7 @@ js::UniquePtr<ImmutableScriptData> js::ImmutableScriptData::new_(
     return nullptr;
   }
 
-  // Constuct the ImmutableScriptData. Trailing arrays are uninitialized but
+  // Construct the ImmutableScriptData. Trailing arrays are uninitialized but
   // GCPtrs are put into a safe state.
   UniquePtr<ImmutableScriptData> result(new (raw) ImmutableScriptData(
       codeLength, noteLength, numResumeOffsets, numScopeNotes, numTryNotes));
@@ -2319,7 +2385,6 @@ SharedImmutableScriptData* SharedImmutableScriptData::createWith(
 
 void JSScript::relazify(JSRuntime* rt) {
   js::Scope* scope = enclosingScope();
-  UniquePtr<PrivateScriptData> scriptData;
 
   // Any JIT compiles should have been released, so we already point to the
   // interpreter trampoline which supports lazy scripts.
@@ -2332,10 +2397,11 @@ void JSScript::relazify(JSRuntime* rt) {
   destroyScriptCounts();
 
   // Release the bytecode and gcthings list.
-  // NOTE: We clear the PrivateScriptData to nullptr. This is fine because we
-  //       only allowed relazification (via AllowRelazify) if the original lazy
-  //       script we compiled from had a nullptr PrivateScriptData.
-  swapData(scriptData);
+  // NOTE: This clears the PrivateScriptData to nullptr. This is fine because we
+  // only allowed relazification (via AllowRelazify) if the original lazy script
+  // we compiled from had a nullptr PrivateScriptData.
+  freeData();
+
   freeSharedData();
 
   // We should not still be in any side-tables for the debugger or
@@ -2396,12 +2462,11 @@ static void SweepScriptDataTable(SharedImmutableScriptDataTable& table) {
   // Entries are removed from the table when their reference count is one,
   // i.e. when the only reference to them is from the table entry.
 
-  for (SharedImmutableScriptDataTable::Enum e(table); !e.empty();
-       e.popFront()) {
-    SharedImmutableScriptData* sharedData = e.front();
+  for (auto iter = table.modIter(); !iter.done(); iter.next()) {
+    SharedImmutableScriptData* sharedData = iter.get();
     if (sharedData->refCount() == 1) {
       sharedData->Release();
-      e.removeFront();
+      iter.remove();
     }
   }
 }
@@ -2443,21 +2508,17 @@ PrivateScriptData* PrivateScriptData::new_(JSContext* cx, uint32_t ngcthings) {
     return nullptr;
   }
 
-  // Allocate contiguous raw buffer for the trailing arrays.
-  void* raw = cx->pod_malloc<uint8_t>(size.value());
-  MOZ_ASSERT(uintptr_t(raw) % alignof(PrivateScriptData) == 0);
-  if (!raw) {
-    return nullptr;
-  }
-
-  // Constuct the PrivateScriptData. Trailing arrays are uninitialized but
-  // GCPtrs are put into a safe state.
-  PrivateScriptData* result = new (raw) PrivateScriptData(ngcthings);
+  // Allocate contiguous raw buffer and construct the PrivateScriptData in
+  // it. Trailing arrays are uninitialized but GCPtrs are put into a safe state.
+  auto* result = gc::NewSizedBuffer<PrivateScriptData>(cx->zone(), size.value(),
+                                                       false, ngcthings);
   if (!result) {
+    ReportOutOfMemory(cx);
     return nullptr;
   }
 
   // Sanity check.
+  MOZ_ASSERT(uintptr_t(result) % alignof(PrivateScriptData) == 0);
   MOZ_ASSERT(result->endOffset() == size.value());
 
   return result;
@@ -2475,12 +2536,17 @@ bool PrivateScriptData::InitFromStencil(
 
   MOZ_ASSERT(ngcthings <= INDEX_LIMIT);
 
-  // Create and initialize PrivateScriptData
-  if (!JSScript::createPrivateScriptData(cx, script, ngcthings)) {
+  // Create and initialize PrivateScriptData.
+  //
+  // NOTE: If you use PrivateScriptData::new_ directly instead of via
+  // fullyInitFromStencil, you are responsible for notifying the debugger after
+  // successfully creating the script.
+  RootedBuffer<PrivateScriptData> data(cx,
+                                       PrivateScriptData::new_(cx, ngcthings));
+  if (!data) {
     return false;
   }
 
-  js::PrivateScriptData* data = script->data_;
   if (ngcthings) {
     if (!EmitScriptThingsVector(cx, atomCache, stencil, gcOutput,
                                 scriptStencil.gcthings(stencil),
@@ -2488,6 +2554,13 @@ bool PrivateScriptData::InitFromStencil(
       return false;
     }
   }
+
+  // Memory fence so concurrent marking sees the initialized PrivateScriptData
+  // memory.
+  MemoryReleaseFence(cx->zone());
+
+  script->swapData(&data);
+  MOZ_ASSERT(!data);
 
   return true;
 }
@@ -2510,7 +2583,7 @@ JSScript* JSScript::Create(JSContext* cx, JS::Handle<JSFunction*> function,
 #ifdef MOZ_VTUNE
 uint32_t JSScript::vtuneMethodID() {
   if (!zone()->scriptVTuneIdMap) {
-    auto map = MakeUnique<ScriptVTuneIdMap>();
+    auto map = MakeUnique<JS::WeakCache<ScriptVTuneIdMap>>(zone());
     if (!map) {
       MOZ_CRASH("Failed to allocate ScriptVTuneIdMap");
     }
@@ -2518,7 +2591,8 @@ uint32_t JSScript::vtuneMethodID() {
     zone()->scriptVTuneIdMap = std::move(map);
   }
 
-  ScriptVTuneIdMap::AddPtr p = zone()->scriptVTuneIdMap->lookupForAdd(this);
+  ScriptVTuneIdMap::AddPtr p =
+      zone()->scriptVTuneIdMap->get().lookupForAdd(this);
   if (p) {
     return p->value();
   }
@@ -2526,29 +2600,13 @@ uint32_t JSScript::vtuneMethodID() {
   MOZ_ASSERT(this->hasBytecode());
 
   uint32_t id = vtune::GenerateUniqueMethodID();
-  if (!zone()->scriptVTuneIdMap->add(p, this, id)) {
+  if (!zone()->scriptVTuneIdMap->get().add(p, this, id)) {
     MOZ_CRASH("Failed to add vtune method id");
   }
 
   return id;
 }
 #endif
-
-/* static */
-bool JSScript::createPrivateScriptData(JSContext* cx, HandleScript script,
-                                       uint32_t ngcthings) {
-  cx->check(script);
-
-  UniquePtr<PrivateScriptData> data(PrivateScriptData::new_(cx, ngcthings));
-  if (!data) {
-    return false;
-  }
-
-  script->swapData(data);
-  MOZ_ASSERT(!data);
-
-  return true;
-}
 
 /* static */
 bool JSScript::fullyInitFromStencil(
@@ -2565,7 +2623,7 @@ bool JSScript::fullyInitFromStencil(
   // This is initialized by BaseScript::swapData() which will run pre-barriers
   // for us. On successful conversion to non-lazy script, the old script data
   // here will be released by the UniquePtr.
-  Rooted<UniquePtr<PrivateScriptData>> lazyData(cx);
+  RootedBuffer<PrivateScriptData> lazyData(cx);
 
   // Whether we are a newborn script or an existing lazy script, we should
   // already be pointing to the interpreter trampoline.
@@ -2577,7 +2635,7 @@ bool JSScript::fullyInitFromStencil(
   if (script->isReadyForDelazification()) {
     lazyMutableFlags = script->mutableFlags_;
     lazyEnclosingScope = script->releaseEnclosingScope();
-    script->swapData(lazyData.get());
+    script->swapData(&lazyData);
     MOZ_ASSERT(script->sharedData_ == nullptr);
   }
 
@@ -2587,7 +2645,7 @@ bool JSScript::fullyInitFromStencil(
     if (lazyEnclosingScope) {
       script->mutableFlags_ = lazyMutableFlags;
       script->warmUpData_.initEnclosingScope(lazyEnclosingScope);
-      script->swapData(lazyData.get());
+      script->swapData(&lazyData);
       script->sharedData_ = nullptr;
 
       MOZ_ASSERT(script->isReadyForDelazification());
@@ -2701,6 +2759,8 @@ JSScript* JSScript::fromStencil(JSContext* cx,
 void JSScript::assertValidJumpTargets() const {
   BytecodeLocation mainLoc = mainLocation();
   BytecodeLocation endLoc = endLocation();
+  uint32_t numSuspends = 0;
+  uint32_t numTableSwitchCases = 0;
   AllBytecodesIterable iter(this);
   for (BytecodeLocation loc : iter) {
     // Check jump instructions' target.
@@ -2744,8 +2804,22 @@ void JSScript::assertValidJumpTargets() const {
         MOZ_ASSERT(mainLoc <= switchCase && switchCase < endLoc);
         MOZ_ASSERT(switchCase.is(JSOp::JumpTarget));
       }
+      numTableSwitchCases += high - low + 1;
+    }
+
+    // Yield and await ops have the first entries in resumeOffsets(), in
+    // bytecode order, followed by the JSOp::TableSwitch case targets. Each of
+    // these entries is the offset of the op's JSOp::AfterYield.
+    if (loc.is(JSOp::InitialYield) || loc.is(JSOp::Yield) ||
+        loc.is(JSOp::Await)) {
+      MOZ_ASSERT(numSuspends < resumeOffsets().size());
+      MOZ_ASSERT(loc.getResumeIndex() == numSuspends);
+      MOZ_ASSERT(resumeOffsets()[numSuspends] ==
+                 loc.next().bytecodeToOffset(this));
+      numSuspends++;
     }
   }
+  MOZ_ASSERT(numSuspends + numTableSwitchCases == resumeOffsets().size());
 
   // Check catch/finally blocks as jump targets.
   for (const TryNote& tn : trynotes()) {
@@ -2764,6 +2838,10 @@ void JSScript::assertValidJumpTargets() const {
 }
 #endif
 
+size_t BaseScript::sizeOfExcludingThis() {
+  return gc::GetAllocSize(zone(), data_);
+}
+
 void JSScript::addSizeOfJitScript(mozilla::MallocSizeOf mallocSizeOf,
                                   size_t* sizeOfJitScript,
                                   size_t* sizeOfAllocSites) const {
@@ -2776,6 +2854,47 @@ void JSScript::addSizeOfJitScript(mozilla::MallocSizeOf mallocSizeOf,
 }
 
 js::GlobalObject& JSScript::uninlinedGlobal() const { return global(); }
+
+SourceLocationIterator::SourceLocationIterator(
+    unsigned startLine, JS::LimitedColumnNumberOneOrigin startCol,
+    SrcNote* notes, SrcNote* notesEnd, jsbytecode* code)
+    : iter_(notes, notesEnd),
+      offset_(0),
+      line_(startLine),
+      column_(startCol),
+      startLine_(startLine),
+      code_(code) {}
+
+void SourceLocationIterator::advanceToPC(const jsbytecode* pc) {
+  ptrdiff_t target = pc - code_;
+  while (offset_ < target && !iter_.atEnd()) {
+    const auto* sn = *iter_;
+    ptrdiff_t nextOffset = offset_ + sn->delta();
+    if (nextOffset > target) {
+      break;
+    }
+    offset_ = nextOffset;
+
+    SrcNoteType type = sn->type();
+    if (type == SrcNoteType::SetLine) {
+      line_ = SrcNote::SetLine::getLine(sn, startLine_);
+      column_ = JS::LimitedColumnNumberOneOrigin();
+    } else if (type == SrcNoteType::SetLineColumn) {
+      line_ = SrcNote::SetLineColumn::getLine(sn, startLine_);
+      column_ = SrcNote::SetLineColumn::getColumn(sn);
+    } else if (type == SrcNoteType::NewLine) {
+      line_++;
+      column_ = JS::LimitedColumnNumberOneOrigin();
+    } else if (type == SrcNoteType::NewLineColumn) {
+      line_++;
+      column_ = SrcNote::NewLineColumn::getColumn(sn);
+    } else if (type == SrcNoteType::ColSpan) {
+      column_ += SrcNote::ColSpan::getSpan(sn);
+    }
+
+    ++iter_;
+  }
+}
 
 unsigned js::PCToLineNumber(unsigned startLine,
                             JS::LimitedColumnNumberOneOrigin startCol,
@@ -2916,45 +3035,42 @@ JS_PUBLIC_API unsigned js::GetScriptLineExtent(
 #ifdef JS_CACHEIR_SPEW
 void js::maybeUpdateWarmUpCount(JSScript* script) {
   if (script->needsFinalWarmUpCount()) {
-    ScriptFinalWarmUpCountMap* map =
-        script->zone()->scriptFinalWarmUpCountMap.get();
     // If needsFinalWarmUpCount is true, ScriptFinalWarmUpCountMap must have
     // already been created and thus must be asserted.
-    MOZ_ASSERT(map);
-    ScriptFinalWarmUpCountMap::Ptr p = map->lookup(script);
+    MOZ_ASSERT(script->zone()->scriptFinalWarmUpCountMap);
+    ScriptFinalWarmUpCountMap& map =
+        script->zone()->scriptFinalWarmUpCountMap->get();
+    ScriptFinalWarmUpCountMap::Ptr p = map.lookup(script);
     MOZ_ASSERT(p);
 
     std::get<0>(p->value()) += script->jitScript()->warmUpCount();
   }
 }
 
+// Spew the accumulated final warm-up count for `script`.
 void js::maybeSpewScriptFinalWarmUpCount(JSScript* script) {
-  if (script->needsFinalWarmUpCount()) {
-    ScriptFinalWarmUpCountMap* map =
-        script->zone()->scriptFinalWarmUpCountMap.get();
-    // If needsFinalWarmUpCount is true, ScriptFinalWarmUpCountMap must have
-    // already been created and thus must be asserted.
-    MOZ_ASSERT(map);
-    ScriptFinalWarmUpCountMap::Ptr p = map->lookup(script);
-    MOZ_ASSERT(p);
-    auto& tuple = p->value();
-    uint32_t warmUpCount = std::get<0>(tuple);
-    SharedImmutableString& scriptName = std::get<1>(tuple);
-
-    JSContext* cx = TlsContext.get();
-    cx->spewer().enableSpewing();
-
-    // In the case that we care about a script's final warmup count but the
-    // spewer is not enabled, AutoSpewChannel automatically sets and unsets
-    // the proper channel for the duration of spewing a health report's warm
-    // up count.
-    AutoSpewChannel channel(cx, SpewChannel::CacheIRHealthReport, script);
-    jit::CacheIRHealth cih;
-    cih.spewScriptFinalWarmUpCount(cx, scriptName.chars(), script, warmUpCount);
-
-    script->zone()->scriptFinalWarmUpCountMap->remove(script);
-    script->setNeedsFinalWarmUpCount(false);
+  if (!script->needsFinalWarmUpCount()) {
+    return;
   }
+  MOZ_ASSERT(script->zone()->scriptFinalWarmUpCountMap);
+  ScriptFinalWarmUpCountMap& map =
+      script->zone()->scriptFinalWarmUpCountMap->get();
+  ScriptFinalWarmUpCountMap::Ptr p = map.lookup(script);
+  MOZ_ASSERT(p);
+  auto& tuple = p->value();
+  uint32_t warmUpCount = std::get<0>(tuple);
+  SharedImmutableString& scriptName = std::get<1>(tuple);
+
+  JSContext* cx = TlsContext.get();
+  cx->spewer().enableSpewing();
+
+  // In the case that we care about a script's final warmup count but the
+  // spewer is not enabled, AutoSpewChannel automatically sets and unsets
+  // the proper channel for the duration of spewing a health report's warm
+  // up count.
+  AutoSpewChannel channel(cx, SpewChannel::CacheIRHealthReport, script);
+  jit::CacheIRHealth cih;
+  cih.spewScriptFinalWarmUpCount(cx, scriptName.chars(), script, warmUpCount);
 }
 #endif
 
@@ -3074,10 +3190,13 @@ js::UniquePtr<ImmutableScriptData> ImmutableScriptData::new_(
 }
 
 void ScriptWarmUpData::trace(JSTracer* trc) {
-  uintptr_t tag = data_ & TagMask;
+  uintptr_t data = data_.getForTracing();
+  uintptr_t tag = data & TagMask;
+  uintptr_t untagged = data & ~TagMask;
+
   switch (tag) {
     case EnclosingScriptTag: {
-      BaseScript* enclosingScript = toEnclosingScript();
+      auto* enclosingScript = reinterpret_cast<BaseScript*>(untagged);
       BaseScript* prior = enclosingScript;
       TraceManuallyBarrieredEdge(trc, &enclosingScript, "enclosingScript");
       if (enclosingScript != prior) {
@@ -3087,7 +3206,7 @@ void ScriptWarmUpData::trace(JSTracer* trc) {
     }
 
     case EnclosingScopeTag: {
-      Scope* enclosingScope = toEnclosingScope();
+      auto* enclosingScope = reinterpret_cast<Scope*>(untagged);
       Scope* prior = enclosingScope;
       TraceManuallyBarrieredEdge(trc, &enclosingScope, "enclosingScope");
       if (enclosingScope != prior) {
@@ -3097,7 +3216,11 @@ void ScriptWarmUpData::trace(JSTracer* trc) {
     }
 
     case JitScriptTag: {
-      toJitScript()->trace(trc);
+      auto* jitScript = reinterpret_cast<jit::JitScript*>(untagged);
+      // Memory fence so that concurrent marking sees initialized JitScript
+      // data. For GC things this happens in MarkingTracerT::markAndTraverse.
+      gc::MemoryAcquireFence(trc);
+      jitScript->trace(trc);
       break;
     }
 
@@ -3288,6 +3411,7 @@ BaseScript::BaseScript(uint8_t* stubEntry, JSFunction* function,
   MOZ_ASSERT(extent_.toStringStart <= extent_.sourceStart);
   MOZ_ASSERT(extent_.sourceStart <= extent_.sourceEnd);
   MOZ_ASSERT(extent_.sourceEnd <= extent_.toStringEnd);
+  MOZ_ASSERT(sourceObject->hasSource());
 }
 
 /* static */
@@ -3328,11 +3452,12 @@ BaseScript* BaseScript::CreateRawLazy(JSContext* cx, uint32_t ngcthings,
   // This condition is implicit in BaseScript::hasPrivateScriptData, and should
   // be mirrored on InputScript::hasPrivateScriptData.
   if (ngcthings || lazy->useMemberInitializers()) {
-    UniquePtr<PrivateScriptData> data(PrivateScriptData::new_(cx, ngcthings));
+    RootedBuffer<PrivateScriptData> data(
+        cx, PrivateScriptData::new_(cx, ngcthings));
     if (!data) {
       return nullptr;
     }
-    lazy->swapData(data);
+    lazy->swapData(&data);
     MOZ_ASSERT(!data);
   }
 
@@ -3359,11 +3484,16 @@ void JSScript::updateJitCodeRaw(JSRuntime* rt) {
     setJitCodeRaw(baselineScript()->method()->raw());
   } else if (hasJitScript() && js::jit::IsBaselineInterpreterEnabled()) {
     bool usingEntryTrampoline = false;
-    if (js::jit::JitOptions.emitInterpreterEntryTrampoline) {
-      auto p = rt->jitRuntime()->getInterpreterEntryMap()->lookup(this);
-      if (p) {
-        setJitCodeRaw(p->value().raw());
-        usingEntryTrampoline = true;
+    if (jit::JitOptions.emitInterpreterEntryTrampoline) {
+      if (jit::JitZone* jz = zone()->jitZone()) {
+        if (jit::EntryTrampolineMap* map = jz->maybeInterpreterEntryMap()) {
+          // Unbarriered because the JitCode doesn't escape and we can be called
+          // from inside GC.
+          if (auto ptr = map->lookupUnbarriered(this)) {
+            setJitCodeRaw(ptr->value()->raw());
+            usingEntryTrampoline = true;
+          }
+        }
       }
     }
     if (!usingEntryTrampoline) {
@@ -3392,6 +3522,11 @@ bool JSScript::hasLoops() {
     }
   }
   return false;
+}
+
+js::SourceLocationIterator JSScript::sourceLocationIter() const {
+  return SourceLocationIterator(lineno(), column(), notes(), notesEnd(),
+                                code());
 }
 
 bool JSScript::mayReadFrameArgsDirectly() {
@@ -3718,8 +3853,6 @@ static const char* TryNoteName(TryNoteKind kind) {
       return "for-of";
     case TryNoteKind::Loop:
       return "loop";
-    case TryNoteKind::ForOfIterClose:
-      return "for-of-iterclose";
     case TryNoteKind::Destructuring:
       return "destructuring";
   }
@@ -3842,30 +3975,12 @@ bool JSScript::dumpGCThings(JSContext* cx, JS::Handle<JSScript*> script,
 
 #endif  // defined(DEBUG) || defined(JS_JITSPEW)
 
-void JSScript::AutoDelazify::holdScript(JS::HandleFunction fun) {
-  if (fun) {
-    JSAutoRealm ar(cx_, fun);
-    script_ = JSFunction::getOrCreateScript(cx_, fun);
-    if (script_) {
-      oldAllowRelazify_ = script_->allowRelazify();
-      script_->clearAllowRelazify();
-    }
-  }
-}
-
-void JSScript::AutoDelazify::dropScript() {
-  if (script_) {
-    script_->setAllowRelazify(oldAllowRelazify_);
-  }
-  script_ = nullptr;
-}
-
 JS::ubi::Base::Size JS::ubi::Concrete<BaseScript>::size(
     mozilla::MallocSizeOf mallocSizeOf) const {
   BaseScript* base = &get();
 
   Size size = gc::Arena::thingSize(base->getAllocKind());
-  size += base->sizeOfExcludingThis(mallocSizeOf);
+  size += base->sizeOfExcludingThis();
 
   // Include any JIT data if it exists.
   if (base->hasJitScript()) {

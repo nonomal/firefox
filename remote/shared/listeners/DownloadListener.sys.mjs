@@ -144,6 +144,28 @@ export class DownloadListener {
   }
 
   /**
+   * Emit the "download-stopped" event for a download.
+   *
+   * For succeeded downloads the event is delayed until the platform specific
+   * post-processing performed by `DownloadIntegration.downloadDone` completed.
+   * `download.stopped` is already set when this step starts, and on Windows the
+   * target file is still opened at that point. Waiting for `whenSucceeded` ensures
+   * that Firefox no longer holds a handle on the file when consumers receive the event.
+   *
+   * @param {Download} download
+   *     The download object which stopped.
+   */
+  async #emitDownloadStopped(download) {
+    if (download.succeeded) {
+      await download.whenSucceeded();
+    }
+
+    this.emit("download-stopped", {
+      download,
+    });
+  }
+
+  /**
    * DownloadList view callback triggered when a download is added.
    * Note that this will be triggered for all existing downloads when a new view
    * is added to the DownloadList.
@@ -162,17 +184,22 @@ export class DownloadListener {
    * @param {Download} download
    *     The download object which changed.
    */
-  #onDownloadChanged = download => {
+  #onDownloadChanged = async download => {
     const state = this.#getDownloadState(download);
     this.#maybeEmitDownloadStarted(state, download);
 
     // canceled + hasPartialData corresponds to a paused download.
     const paused = download.canceled && download.hasPartialData;
-    if (!state.stopped && download.stopped && !paused) {
+    // intercepted flag means that the download was paused by `DownloadBehaviorManager`
+    // to cleanup potential partial data.
+    if (
+      !state.stopped &&
+      download.stopped &&
+      !paused &&
+      !download.intercepted
+    ) {
       state.stopped = true;
-      this.emit("download-stopped", {
-        download,
-      });
+      await this.#emitDownloadStopped(download);
     }
   };
 

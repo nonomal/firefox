@@ -2,8 +2,6 @@
 
 Algorithm.h:
   functions:
-    - AllOf
-    - AnyOf
     - TransformIfAbortOnErr
     - TransformAbortOnErr
 
@@ -57,7 +55,7 @@ Assertions.h:
     - MOZ_DIAGNOSTIC_ASSERT
     - MOZ_ASSERT
     - MOZ_RELEASE_ASSERT
-    - MOZ_CRASH_UNSAFE_FMT
+    - MOZ_CRASH_UNSAFE
     - MOZ_CRASH_UNSAFE_PRINTF
     - MOZ_DIAGNOSTIC_CRASH
     - MOZ_CRASH
@@ -77,6 +75,7 @@ Atomics.h:
 Attributes.h:
   macros:
     - MOZ_ALWAYS_INLINE_EVEN_DEBUG
+    - MOZ_TRIVIAL_ABI
     - MOZ_NO_UNIQUE_ADDRESS
     - MOZ_ALWAYS_INLINE
     - MOZ_NEVER_INLINE
@@ -102,7 +101,9 @@ Attributes.h:
     - MOZ_GSL_POINTER
     - MOZ_LIFETIME_BOUND
     - MOZ_LIFETIME_CAPTURE_BY
+    - MOZ_LIFETIME_CAPTURE_BY_THIS
     - MOZ_STANDALONE_DEBUG
+    - MOZ_NULL_AFTER_MOVE
     - MOZ_PUSH_DISABLE_NONTRIVIAL_UNION_WARNINGS
     - MOZ_POP_DISABLE_NONTRIVIAL_UNION_WARNINGS
     - MOZ_CAN_RUN_SCRIPT
@@ -146,12 +147,14 @@ Attributes.h:
     - MOZ_KNOWN_LIVE
     - MOZ_UNANNOTATED
     - MOZ_ANNOTATED
+    - MOZ_ENUM_SERIALIZER_ALLOW_SENTINEL_UPPER_BOUND
+    - MOZ_ENUM_SERIALIZER_ALLOW_MIN_MISMATCH
     - MOZ_FORMAT_PRINTF
     - MOZ_FORMAT_WPRINTF
     - MOZ_XPCOM_ABI
     - MOZ_EMPTY_BASES
-    - MOZ_CONSTINIT
     - MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA
+    - MOZ_REINITIALIZES
 
 BinarySearch.h:
   functions:
@@ -276,10 +279,6 @@ DoublyLinkedList.h:
     - SafeDoublyLinkedList
 
 EndianUtils.h:
-  macros:
-    - MOZ_LITTLE_ENDIAN
-    - MOZ_BIG_ENDIAN
-
   functions:
     - byteswap
 
@@ -387,8 +386,8 @@ HashFunctions.h:
     - ScrambleHashCode
     - AddToHash
     - HashGeneric
-    - HashStringUntilZero
-    - HashStringKnownLength
+    - HashLatin1AsUTF16
+    - HashUTF8AsUTF16
     - HashString
     - HashBytes
 
@@ -499,14 +498,7 @@ MacroForEach.h:
 
 MathAlgorithms.h:
   functions:
-    - DeprecatedAbs
     - Abs
-    - CountLeadingZeroes32
-    - CountTrailingZeroes32
-    - CountPopulation32
-    - CountPopulation64
-    - CountLeadingZeroes64
-    - CountTrailingZeroes64
     - CeilingLog2
     - CeilingLog2Size
     - FindMostSignificantBit
@@ -515,8 +507,6 @@ MathAlgorithms.h:
     - RoundUpPow2
     - RotateLeft
     - RotateRight
-    - IsPowerOfTwo
-    - CountTrailingZeroes
     - GCD
 
 Maybe.h:
@@ -718,6 +708,7 @@ RollingMean.h:
 
 Saturate.h:
   types:
+    - Saturate
     - SaturateInt8
     - SaturateInt16
     - SaturateInt32
@@ -819,6 +810,14 @@ TextUtils.h:
     - IsAsciiAlphanumeric
     - AsciiAlphanumericToNumber
 
+TiedFields.h:
+  types:
+    - PaddingField
+  functions:
+    - AreAllBytesTiedFields
+    - AssertTiedFieldsAreExhaustive
+    - TiedFields
+
 ThreadLocal.h:
   macros:
     - MOZ_THREAD_LOCAL
@@ -906,6 +905,23 @@ UniquePtr.h:
     - WrapUnique
     - TempPtrToSetter
 
+Utf16.h:
+  variables:
+    - kPlane1Base
+    - kReplacementChar
+    - kUnicodeMax
+  functions:
+    - IsInBMP
+    - IsHighSurrogate
+    - IsLowSurrogate
+    - IsSurrogate
+    - IsSurrogatePair
+    - IsValidCodePoint
+    - HighSurrogate
+    - LowSurrogate
+    - SurrogateToUCS4
+    - DecodeOneUtf16CodePoint
+
 Utf8.h:
   functions:
     - encoding_utf8_valid_up_to
@@ -921,6 +937,7 @@ Utf8.h:
     - IsTrailingUnit
     - DecodeOneUtf8CodePointInline
     - DecodeOneUtf8CodePoint
+    - LossyDecodeOneUtf8CodePoint
   types:
     - Utf8Unit
 

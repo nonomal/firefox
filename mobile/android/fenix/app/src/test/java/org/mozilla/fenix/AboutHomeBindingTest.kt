@@ -7,28 +7,25 @@ package org.mozilla.fenix
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import mozilla.components.browser.state.action.ContentAction
 import mozilla.components.browser.state.state.BrowserState
 import mozilla.components.browser.state.state.TabSessionState
 import mozilla.components.browser.state.state.createTab
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.engine.utils.ABOUT_HOME_URL
-import mozilla.components.support.test.mock
-import mozilla.components.support.test.rule.MainCoroutineRule
-import mozilla.components.support.test.rule.runTestOnMain
-import mozilla.components.support.test.whenever
 import org.junit.Assert.assertEquals
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.mockito.Mockito.never
-import org.mockito.Mockito.verify
 
 @RunWith(AndroidJUnit4::class)
 class AboutHomeBindingTest {
-    @get:Rule
-    val coroutineRule = MainCoroutineRule()
+    private val testDispatcher = StandardTestDispatcher()
 
     private lateinit var browserStore: BrowserStore
     private lateinit var tabId: String
@@ -39,109 +36,193 @@ class AboutHomeBindingTest {
 
     @Before
     fun setUp() {
-        navController = mock()
+        navController = mockk(relaxed = true)
 
-        val tab = createTab(url = "https://www.mozilla.org").also {
-            tabId = it.id
+        val tab =
+            createTab(url = "https://www.mozilla.org").also {
+                tabId = it.id
+            }
+        browserStore =
+            BrowserStore(
+                initialState =
+                    BrowserState(
+                        tabs = listOf(tab),
+                        selectedTabId = tabId,
+                    )
+            )
+    }
+
+    @Test
+    fun `WHEN URL is updated to ABOUT_HOME_URL THEN navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                    mainDispatcher = testDispatcher,
+                )
+
+            binding.start()
+
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tab.id,
+                    url = ABOUT_HOME_URL,
+                )
+            )
+
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(ABOUT_HOME_URL, tab.content.url)
+
+            verify { navController.navigate(NavGraphDirections.actionGlobalHome()) }
         }
-        browserStore = BrowserStore(
-            initialState = BrowserState(
-                tabs = listOf(tab),
-                selectedTabId = tabId,
-            ),
-        )
-    }
 
     @Test
-    fun `WHEN URL is updated to ABOUT_HOME THEN navigate to the homepage`() = runTestOnMain {
-        val binding = AboutHomeBinding(
-            browserStore = browserStore,
-            navController = navController,
-        )
+    fun `GIVEN homepage is the currently shown WHEN URL is updated to ABOUT_HOME_URL THEN do not navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val mockDestination: NavDestination = mockk()
+            every { mockDestination.id } returns R.id.homeFragment
+            every { navController.currentDestination } returns mockDestination
 
-        binding.start()
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                    mainDispatcher = testDispatcher,
+                )
 
-        browserStore.dispatch(
-            ContentAction.UpdateUrlAction(
-                sessionId = tab.id,
-                url = ABOUT_HOME_URL,
-            ),
-        )
+            binding.start()
 
-        assertEquals(ABOUT_HOME_URL, tab.content.url)
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tabId,
+                    url = ABOUT_HOME_URL,
+                )
+            )
 
-        verify(navController).navigate(NavGraphDirections.actionGlobalHome())
-    }
+            testDispatcher.scheduler.advanceUntilIdle()
 
-    @Test
-    fun `GIVEN homepage is the currently shown WHEN URL is updated to ABOUT_HOME THEN do not navigate to the homepage`() = runTestOnMain {
-        val mockDestination: NavDestination = mock()
-        whenever(mockDestination.id).thenReturn(R.id.homeFragment)
-        whenever(navController.currentDestination).thenReturn(mockDestination)
+            assertEquals(ABOUT_HOME_URL, tab.content.url)
 
-        val binding = AboutHomeBinding(
-            browserStore = browserStore,
-            navController = navController,
-        )
-
-        binding.start()
-
-        browserStore.dispatch(
-            ContentAction.UpdateUrlAction(
-                sessionId = tabId,
-                url = ABOUT_HOME_URL,
-            ),
-        )
-
-        assertEquals(ABOUT_HOME_URL, tab.content.url)
-
-        verify(navController, never()).navigate(NavGraphDirections.actionGlobalHome())
-    }
+            verify(exactly = 0) { navController.navigate(NavGraphDirections.actionGlobalHome()) }
+        }
 
     @Test
-    fun `GIVEN onboarding is the currently shown WHEN URL is updated to ABOUT_HOME THEN do not navigate to the homepage`() = runTestOnMain {
-        val mockDestination: NavDestination = mock()
-        whenever(mockDestination.id).thenReturn(R.id.onboardingFragment)
-        whenever(navController.currentDestination).thenReturn(mockDestination)
+    fun `GIVEN onboarding is the currently shown WHEN URL is updated to ABOUT_HOME_URL THEN do not navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val mockDestination: NavDestination = mockk()
+            every { mockDestination.id } returns R.id.onboardingFragment
+            every { navController.currentDestination } returns mockDestination
 
-        val binding = AboutHomeBinding(
-            browserStore = browserStore,
-            navController = navController,
-        )
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                    mainDispatcher = testDispatcher,
+                )
 
-        binding.start()
+            binding.start()
 
-        browserStore.dispatch(
-            ContentAction.UpdateUrlAction(
-                sessionId = tabId,
-                url = ABOUT_HOME_URL,
-            ),
-        )
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tabId,
+                    url = ABOUT_HOME_URL,
+                )
+            )
 
-        assertEquals(ABOUT_HOME_URL, tab.content.url)
+            // Wait for ContentAction.UpdateUrlAction
+            testDispatcher.scheduler.advanceUntilIdle()
 
-        verify(navController, never()).navigate(NavGraphDirections.actionGlobalHome())
-    }
+            assertEquals(ABOUT_HOME_URL, tab.content.url)
+
+            verify(exactly = 0) { navController.navigate(NavGraphDirections.actionGlobalHome()) }
+        }
 
     @Test
-    fun `WHEN URL is updated to a URL that is not ABOUT_HOME THEN do not navigate to the homepage`() = runTestOnMain {
-        val binding = AboutHomeBinding(
-            browserStore = browserStore,
-            navController = navController,
-        )
+    fun `GIVEN the tabs tray is the currently shown WHEN URL is updated to ABOUT_HOME_URL THEN do not navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val mockDestination: NavDestination = mockk()
+            every { mockDestination.id } returns R.id.tabManagementFragment
+            every { navController.currentDestination } returns mockDestination
 
-        binding.start()
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                    mainDispatcher = testDispatcher,
+                )
 
-        val newUrl = "https://www.firefox.com"
-        browserStore.dispatch(
-            ContentAction.UpdateUrlAction(
-                sessionId = tabId,
-                url = newUrl,
-            ),
-        )
+            binding.start()
 
-        assertEquals(newUrl, tab.content.url)
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tabId,
+                    url = ABOUT_HOME_URL,
+                )
+            )
 
-        verify(navController, never()).navigate(NavGraphDirections.actionGlobalHome())
-    }
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(ABOUT_HOME_URL, tab.content.url)
+
+            verify(exactly = 0) { navController.navigate(NavGraphDirections.actionGlobalHome()) }
+        }
+
+    @Test
+    fun `GIVEN the unlock tabs tray screen is the currently shown WHEN URL is updated to ABOUT_HOME_URL THEN do not navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val mockDestination: NavDestination = mockk()
+            every { mockDestination.id } returns R.id.unlockPrivateTabsFragment
+            every { navController.currentDestination } returns mockDestination
+
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                    mainDispatcher = testDispatcher,
+                )
+
+            binding.start()
+
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tabId,
+                    url = ABOUT_HOME_URL,
+                )
+            )
+
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(ABOUT_HOME_URL, tab.content.url)
+
+            verify(exactly = 0) { navController.navigate(NavGraphDirections.actionGlobalHome()) }
+        }
+
+    @Test
+    fun `WHEN URL is updated to a URL that is not ABOUT_HOME_URL THEN do not navigate to the homepage`() =
+        runTest(testDispatcher) {
+            val binding =
+                AboutHomeBinding(
+                    browserStore = browserStore,
+                    navController = navController,
+                )
+
+            binding.start()
+
+            val newUrl = "https://www.firefox.com"
+            browserStore.dispatch(
+                ContentAction.UpdateUrlAction(
+                    sessionId = tabId,
+                    url = newUrl,
+                )
+            )
+
+            // Wait for ContentAction.UpdateUrlAction
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(newUrl, tab.content.url)
+
+            verify(exactly = 0) { navController.navigate(NavGraphDirections.actionGlobalHome()) }
+        }
 }

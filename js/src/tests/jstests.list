@@ -36,20 +36,40 @@ skip script test262/built-ins/Function/prototype/arguments/prop-desc.js
 # Test262 tests disabled when features are only conditionally available #
 #########################################################################
 
-skip-if(!String.prototype.normalize) include test262/built-ins/String/prototype/normalize/jstests.list
-
 # Requires ICU to detect Final_Sigma case mapping context
 skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/toLowerCase/Final_Sigma_U180E.js
 skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/toLowerCase/special_casing_conditional.js
 skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/toLocaleLowerCase/Final_Sigma_U180E.js
 skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/toLocaleLowerCase/special_casing_conditional.js
 
+# Unicode RegExps require ICU support.
+skip-if(!this.hasOwnProperty("Intl")) include test262/built-ins/RegExp/property-escapes/jstests.list
+skip-if(!this.hasOwnProperty("Intl")) include test262/built-ins/RegExp/unicodeSets/jstests.list
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/unicode_full_case_folding.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/prototype/exec/regexp-builtin-exec-v-u-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-lower-b.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-lower-p.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-lower-w.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-upper-b.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-upper-p.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-slash-upper-w.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-slash-lower-p.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-slash-upper-p.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/match/regexp-prototype-match-v-u-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/matchAll/regexp-prototype-matchAll-v-u-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/replace/regexp-prototype-replace-v-u-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/search/regexp-prototype-search-v-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/built-ins/String/prototype/search/regexp-prototype-search-v-u-flag.js
+skip-if(!this.hasOwnProperty("Intl")) script test262/language/literals/regexp/u-case-mapping.js
+
 # Skip intl402 tests when Intl isn't available.
 skip-if(!this.hasOwnProperty("Intl")) include test262/intl402/jstests.list
+skip-if(!this.hasOwnProperty("Intl")) include non262/Intl/jstests.list
 
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1415303
 skip-if(!this.hasOwnProperty("Atomics")) include test262/built-ins/Atomics/jstests.list
 skip-if(!this.hasOwnProperty("SharedArrayBuffer")) include test262/built-ins/SharedArrayBuffer/jstests.list
+
 
 #####################################
 # Test262 tests disabled on browser #
@@ -440,11 +460,6 @@ fails-if(!xulRuntime.shell) script test262/staging/sm/Atomics/cross-compartment.
 fails-if(!xulRuntime.shell) script test262/staging/built-ins/Reflect/preventExtensions/preventExtensions-variable-length-typed-arrays.js
 fails-if(!xulRuntime.shell) script test262/staging/built-ins/Object/seal/seal-variable-length-typed-arrays.js
 
-# https://github.com/tc39/test262/pull/3955
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1892186
-skip script test262/language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js
-
-
 ##################################################
 # Test262 tests skipped due to SpiderMonkey bugs #
 ##################################################
@@ -643,6 +658,7 @@ ignore-flag(--more-compartments) script test262/built-ins/Proxy/construct/return
 ignore-flag(--more-compartments) script test262/built-ins/Proxy/construct/return-not-object-throws-boolean-realm.js
 ignore-flag(--more-compartments) script test262/built-ins/Proxy/construct/return-not-object-throws-boolean-realm.js
 ignore-flag(--more-compartments) script test262/staging/sm/extensions/dataview.js
+skip-if(!xulRuntime.shell) ignore-flag(--more-compartments) script test262/intl402/FallbackSymbol/per-realm.js
 
 # Time zone canonicalization proposal.
 skip script test262/intl402/DateTimeFormat/timezone-not-canonicalized.js
@@ -658,86 +674,42 @@ skip script test262/language/statements/with/set-mutable-binding-idref-with-prox
 skip script test262/language/statements/with/get-binding-value-idref-with-proxy-env.js
 skip script test262/language/statements/with/set-mutable-binding-idref-compound-assign-with-proxy-env.js
 
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1934808
-skip script test262/built-ins/Iterator/concat/fresh-iterator-result.js
-skip script test262/built-ins/Iterator/concat/next-method-returns-throwing-value.js
-
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1970162
-# https://github.com/tc39/ecma402/pull/989
-skip script test262/intl402/PluralRules/constructor-options-throwing-getters.js
-skip script test262/intl402/PluralRules/default-options-object-prototype.js
-skip script test262/intl402/PluralRules/constructor-option-read-order.js
-skip script test262/intl402/PluralRules/prototype/select/notation.js
-skip script test262/intl402/PluralRules/prototype/resolvedOptions/properties.js
-skip script test262/intl402/PluralRules/prototype/resolvedOptions/order.js
-skip script test262/intl402/PluralRules/prototype/constructor/notation.js
-skip script test262/intl402/PluralRules/notation.js
-
-# See https://bugzilla.mozilla.org/show_bug.cgi?id=1983837
-skip script test262/staging/top-level-await/tla-hang-entry.js
-
-# See https://bugzilla.mozilla.org/show_bug.cgi?id=2000201
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/basic-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/since/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/since/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/since/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/until/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/until/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/until/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/basic-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/leap-months-chinese.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/leap-months-dangi.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/basic-hebrew.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/leap-months-hebrew.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/since/leap-months-chinese.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/since/leap-months-dangi.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/since/leap-months-hebrew.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/until/leap-months-chinese.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/until/leap-months-dangi.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/until/leap-months-hebrew.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/leap-months-chinese.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/leap-months-dangi.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/basic-hebrew.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/basic-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/since/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDate/prototype/since/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDate/prototype/since/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/until/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDate/prototype/until/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDate/prototype/until/leap-months-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/leap-months-chinese.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/leap-months-dangi.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/era-boundary-ethiopic.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/basic-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/leap-months-hebrew.js
+# Before Hijri era not implemented in ICU: <https://unicode-org.atlassian.net/browse/ICU-23327>
+# Missing localizations for Before Hijri era: <https://unicode-org.atlassian.net/browse/CLDR-19320>
 skip script test262/intl402/DateTimeFormat/prototype/formatToParts/era.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/constrain-day-islamic-umalqura.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/subtract/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/constrain-day-islamic-umalqura.js
-skip script test262/intl402/Temporal/ZonedDateTime/prototype/add/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/constrain-day-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDate/prototype/subtract/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDate/prototype/add/constrain-day-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/constrain-day-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/subtract/basic-islamic-umalqura.js
-skip script test262/intl402/Temporal/PlainDateTime/prototype/add/constrain-day-islamic-umalqura.js
+
+# Bug 2046165 (Source phase imports)
+skip script test262/language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-import-source-and-export.js
+skip script test262/language/module-code/source-phase-import/reexport-source-binding-namespace-get.js
+skip script test262/language/module-code/source-phase-import/reexport-source-binding-named-import.js
+
+# Bug 2062664 (Source phase imports prototype chain)
+skip script test262/staging/source-phase-imports/module-source-prototype-chain.js
+
+# Bug 2057270 (asyncDispose regression)
+skip script test262/built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/invokes-return.js
+
+# Bug 2045859 (Error stack accessor proposal)
+skip script test262/staging/sm/Error/constructor-proto.js
+skip script test262/staging/sm/Error/prototype.js
+skip script test262/staging/sm/Error/prototype-properties.js
+skip script test262/built-ins/Error/prototype/stack/setter-non-writable-stack.js
+skip script test262/built-ins/Error/prototype/stack/setter-proxy-trap-throws.js
+skip script test262/built-ins/Error/prototype/stack/setter-existing-own-property.js
+skip script test262/built-ins/Error/prototype/stack/getter-error-as-prototype.js
+skip script test262/built-ins/Error/prototype/stack/getter-no-error-data.js
+skip script test262/built-ins/Error/prototype/stack/setter-non-string-value.js
+skip script test262/built-ins/Error/prototype/stack/setter-receiver-is-prototype.js
+skip script test262/built-ins/Error/prototype/stack/setter-proxy-wrapping-prototype.js
+skip script test262/built-ins/Error/prototype/stack/setter-cross-realm.js
+skip script test262/built-ins/Error/prototype/stack/setter-own-accessor.js
+skip script test262/built-ins/Error/prototype/stack/setter-via-assignment.js
+skip script test262/built-ins/Error/prototype/stack/setter-creates-own-property.js
+skip script test262/built-ins/Error/prototype/stack/setter-proxy-trap-rejects.js
+skip script test262/built-ins/Error/prototype/stack/setter-receiver-is-proxy.js
+skip script test262/built-ins/Error/prototype/stack/getter-receiver-is-proxy.js
+skip script test262/built-ins/Error/prototype/stack/getter-error-prototype.js
+skip script test262/built-ins/Error/prototype/stack/getter-cross-realm.js
 
 ###########################################################
 # Tests disabled due to issues in test262 importer script #
@@ -771,98 +743,6 @@ skip script test262/staging/sm/TypedArray/getter-name.js
 # These tests seem incorrect, see https://github.com/tc39/test262/pull/3907
 skip script test262/language/statements/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
 skip script test262/language/expressions/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
-
-# https://github.com/rbuckton/ecma262/pull/14
-skip script test262/staging/explicit-resource-management/call-dispose-methods.js
-skip script test262/staging/explicit-resource-management/await-using-in-switch-case-block.js
-
-# https://github.com/tc39/test262/pull/4623
-skip script test262/built-ins/ThrowTypeError/distinct-cross-realm.js
-
-# https://github.com/tc39/test262/issues/4639
-skip script test262/intl402/Intl/supportedValuesOf/calendars-required-by-intl-era-monthcode.js
-
-# https://github.com/tc39/test262/pull/4649
-skip-if(!xulRuntime.shell) script test262/built-ins/Math/sumPrecise/throws-on-non-number.js
-
-# Not yet updated for Unicode 17.
-skip script test262/staging/sm/String/string-upper-lower-mapping.js
-
-# Not yet updated for Unicode 17.
-# https://github.com/tc39/test262/pull/4572
-# https://github.com/tc39/test262/pull/4573
-skip script test262/built-ins/RegExp/property-escapes/generated/Cased.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Tangut.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Inherited.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Inherited.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Extender.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Latin.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_Casefolded.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Alphabetic.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Syriac.js
-skip script test262/built-ins/RegExp/property-escapes/generated/XID_Start.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Arabic.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Unified_Ideograph.js
-skip script test262/built-ins/RegExp/property-escapes/generated/XID_Continue.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Math.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Han.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Cased_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Math_Symbol.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Sharada.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_Casemapped.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Tirhuta.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Tifinagh.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_Titlecased.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Lowercase.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Newa.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Tangut.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Nonspacing_Mark.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Ideographic.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_Lowercased.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Emoji.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Kannada.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Modifier_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Number.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Other.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Nandinagari.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Latin.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Grapheme_Extend.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Uppercase_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Kannada.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Case_Ignorable.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Spacing_Mark.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_Uppercased.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Uppercase.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Other_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Telugu.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Han.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Telugu.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Common.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Extended_Pictographic.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Decimal_Number.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Mark.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Symbol.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Punctuation.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Common.js
-skip script test262/built-ins/RegExp/property-escapes/generated/ID_Continue.js
-skip script test262/built-ins/RegExp/property-escapes/generated/ID_Start.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Unassigned.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Grapheme_Base.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Currency_Symbol.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Assigned.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Other_Symbol.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_Extensions_-_Sharada.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Emoji_Presentation.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Lowercase_Letter.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Letter_Number.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Changes_When_NFKC_Casefolded.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Diacritic.js
-skip script test262/built-ins/RegExp/property-escapes/generated/General_Category_-_Other_Punctuation.js
-skip script test262/built-ins/RegExp/property-escapes/generated/Script_-_Arabic.js
-
-# https://github.com/tc39/test262/pull/4659
-skip script test262/staging/Intl402/Temporal/old/indian-calendar.js
 
 
 ##############################################
@@ -1051,63 +931,3 @@ skip script test262/built-ins/Temporal/ZonedDateTime/from/argument-string-limits
 skip script test262/built-ins/Temporal/ZonedDateTime/prototype/equals/argument-string-limits.js
 skip script test262/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-limits.js
 skip script test262/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-limits.js
-
-# See Bug 1950425, skip tests for calendars disabled in release or beta
-skip-if(release_or_beta) script non262/Temporal/Intl/defaults.js
-skip-if(release_or_beta) script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic-umalqura.js
-skip-if(release_or_beta) script test262/staging/Intl402/Temporal/old/islamic-calendars-islamic.js
-skip-if(release_or_beta) script test262/staging/Intl402/Temporal/old/islamic-calendars-islamic-rgsa.js
-skip-if(release_or_beta) script test262/staging/Intl402/Temporal/old/islamic-calendars-islamic-umalqura.js
-skip-if(release_or_beta) script test262/intl402/Temporal/PlainMonthDay/from/constrain-to-leap-day.js
-
-# Try re-enabling when Bug 1954138 or Bug 1955545 are fixed.
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic-rgsa.js
-skip script test262/intl402/DateTimeFormat/constructor-options-calendar-islamic-fallback.js
-skip script test262/staging/Intl402/Temporal/old/islamic-calendars-islamic-rgsa.js
-
-# https://github.com/tc39/proposal-intl-era-monthcode/issues/23. ICU4X 2.0 doesn't have inverse type
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-coptic.js
-
-# https://github.com/tc39/proposal-intl-era-monthcode/issues/4. ICU4X 2.0 doesn't have inverse type
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-ethiopic.js
-
-# https://github.com/tc39/proposal-intl-era-monthcode/issues/23 and https://github.com/tc39/proposal-intl-era-monthcode/issues/4
-skip script test262/staging/sm/Temporal/PlainDate/non-positive-era-year.js
-
-# Canonical era names have changed.
-skip script test262/intl402/Temporal/ZonedDateTime/from/canonicalize-era-codes.js
-skip script test262/staging/Intl402/Temporal/old/japanese-before-era.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-gregory.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamicc.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic-civil.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic-tbla.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-islamic-umalqura.js
-skip script test262/staging/Intl402/Temporal/old/islamic-calendars-islamic.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-ethioaa.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-hebrew.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-buddhist.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-indian.js
-skip script test262/staging/Intl402/Temporal/old/non-iso-calendars-persian.js
-skip script test262/intl402/Temporal/PlainYearMonth/from/calendar-not-supporting-eras.js
-skip script test262/intl402/Temporal/PlainYearMonth/from/reference-day-chinese.js
-skip script test262/intl402/Temporal/PlainYearMonth/from/reference-day-hebrew.js
-skip script test262/intl402/Temporal/PlainDate/from/calendar-not-supporting-eras.js
-skip script test262/intl402/Temporal/PlainDateTime/from/calendar-not-supporting-eras.js
-
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1971346
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/until/bubble-time-unit.js
-skip script test262/built-ins/Temporal/PlainDateTime/prototype/since/bubble-time-unit.js
-skip script test262/built-ins/Temporal/Duration/prototype/round/bubble-time-unit.js
-
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1998672
-skip script test262/built-ins/Temporal/ZonedDateTime/prototype/toString/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/since/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainDate/prototype/until/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/since/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainTime/prototype/until/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/Instant/prototype/since/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/Instant/prototype/until/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/Instant/prototype/toString/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/since/options-read-before-algorithmic-validation.js
-skip script test262/built-ins/Temporal/PlainYearMonth/prototype/until/options-read-before-algorithmic-validation.js

@@ -3,13 +3,17 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-import { createEngine } from "chrome://global/content/ml/EngineProcess.sys.mjs";
+import {
+  createEngine,
+  FEATURES,
+} from "chrome://global/content/ml/EngineProcess.sys.mjs";
 import {
   cosSim,
   KeywordExtractor,
 } from "chrome://global/content/ml/NLPUtils.sys.mjs";
 
 import {
+  agglomerativeClusterCosine,
   computeCentroidFrom2DArray,
   computeRandScore,
   euclideanDistance,
@@ -18,13 +22,22 @@ import {
   silhouetteCoefficients,
 } from "chrome://global/content/ml/ClusterAlgos.sys.mjs";
 
+import { AIFeature } from "chrome://global/content/ml/AIFeature.sys.mjs";
+import { embeddingsGeneratorFactory } from "chrome://global/content/ml/EmbeddingsGenerator.sys.mjs";
+
+/**
+ * @typedef {import("chrome://global/content/ml/EmbeddingsGenerator.sys.mjs").EmbeddingsGenerator} EmbeddingsGenerator
+ */
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   NLP: "resource://gre/modules/NLP.sys.mjs",
-  MLEngineParent: "resource://gre/actors/MLEngineParent.sys.mjs",
+  MLEngineParent:
+    "moz-src:///toolkit/components/ml/actors/MLEngineParent.sys.mjs",
   MultiProgressAggregator: "chrome://global/content/ml/Utils.sys.mjs",
   Progress: "chrome://global/content/ml/Utils.sys.mjs",
+  MLUninstallService: "chrome://global/content/ml/Utils.sys.mjs",
 });
 
 const LATEST_MODEL_REVISION = "latest";
@@ -48,10 +61,21 @@ XPCOMUtils.defineLazyPreferenceGetter(
   "browser.tabs.groups.smart.topicModelRevision"
 );
 
+// Test/Nimbus override to pick the clustering method, e.g. "AGGLOMERATIVE".
 XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
-  "embeddingModelRevision",
-  "browser.tabs.groups.smart.embeddingModelRevision"
+  "clusterMethod",
+  "browser.tabs.groups.smart.clusterMethod",
+  ""
+);
+
+// AGGLOMERATIVE cosine-distance cutoff, as an int in thousandths (800 => 0.80).
+// 0 keeps the config default. Stored as an int since prefs have no float type.
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "agglomerativeThresholdInt",
+  "browser.tabs.groups.smart.agglomerativeThresholdInt",
+  0
 );
 
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -61,8 +85,12 @@ XPCOMUtils.defineLazyPreferenceGetter(
 );
 
 const EMBED_TEXT_KEY = "combined_text";
+// Cap the items compared when scoring cluster cohesion so the O(n^2) pairwise
+// cost stays bounded for unexpectedly large clusters (20 items => 190 pairs).
+const MAX_COHESION_ITEMS = 20;
 export const CLUSTER_METHODS = {
   KMEANS: "KMEANS",
+  AGGLOMERATIVE: "AGGLOMERATIVE", // hierarchical, average-linkage cosine + threshold
 };
 
 // Methods for finding similar items for an existing cluster
@@ -78,14 +106,15 @@ export const PREGROUPED_HANDLING_METHODS = {
 };
 
 const EXPECTED_TOPIC_MODEL_OBJECTS = 6;
-const EXPECTED_EMBEDDING_MODEL_OBJECTS = 4;
 
 const MAX_NON_SUMMARIZED_SEARCH_LENGTH = 26;
 
 export const DIM_REDUCTION_METHODS = {};
 const MISSING_ANCHOR_IN_CLUSTER_PENALTY = 0.2;
-const MAX_NN_GROUPED_TABS = 4;
+const MAX_GROUPED_TABS = 3;
 const MAX_SUGGESTED_TABS = 10;
+// limit number of tabs to be processed so inference process doesn't crash
+const MAX_TABS_TO_PROCESS = 300;
 
 const DISSIMILAR_TAB_LABEL = "none";
 const ADULT_TAB_LABEL = "adult content";
@@ -93,6 +122,9 @@ const LABELS_TO_EXCLUDE = [DISSIMILAR_TAB_LABEL, ADULT_TAB_LABEL];
 
 const ML_TASK_FEATURE_EXTRACTION = "feature-extraction";
 const ML_TASK_TEXT2TEXT = "text2text-generation";
+
+const STG_FEATURE_ID = "smart-tab-grouping";
+const STG_TOPIC_FEATURE_ID = "smart-tab-topic";
 
 const LABEL_REASONS = {
   DEFAULT: "DEFAULT",
@@ -102,21 +134,15 @@ const LABEL_REASONS = {
 };
 
 export const SMART_TAB_GROUPING_CONFIG = {
-  embedding: {
-    dtype: "q8",
-    timeoutMS: 2 * 60 * 1000, // 2 minutes
-    taskName: ML_TASK_FEATURE_EXTRACTION,
-    featureId: "smart-tab-embedding",
-    backend: "onnx-native",
-    fallbackBackend: "onnx",
-  },
+  // Embeddings use the shared embeddingsGeneratorFactory.forGeneral() model;
+  // see _generateEmbeddings.
   topicGeneration: {
     dtype: "q8",
     timeoutMS: 2 * 60 * 1000, // 2 minutes
     taskName: ML_TASK_TEXT2TEXT,
-    featureId: "smart-tab-topic",
-    backend: "onnx-native",
-    fallbackBackend: "onnx",
+    featureId: STG_TOPIC_FEATURE_ID,
+    engineId: FEATURES[STG_TOPIC_FEATURE_ID].engineId,
+    backend: "best-onnx",
   },
   dataConfig: {
     titleKey: "label",
@@ -124,8 +150,11 @@ export const SMART_TAB_GROUPING_CONFIG = {
   },
   clustering: {
     dimReductionMethod: null, // Not completed.
-    clusterImplementation: CLUSTER_METHODS.KMEANS,
+    clusterImplementation: CLUSTER_METHODS.AGGLOMERATIVE,
     clusteringTriesPerK: 3,
+    // AGGLOMERATIVE cosine-distance cutoff; lower = stricter (more, smaller
+    // groups), higher = more lenient (fewer, larger groups).
+    agglomerativeThreshold: 0.85,
     anchorMethod: ANCHOR_METHODS.FIXED,
     pregroupedHandlingMethod: PREGROUPED_HANDLING_METHODS.EXCLUDE,
     pregroupedSilhouetteBoost: 2, // Relative weight of the cluster's score and all other cluster's combined
@@ -135,19 +164,25 @@ export const SMART_TAB_GROUPING_CONFIG = {
 
 // these parameters were generated by training a logistic regression
 // model on synthetic data. see https://github.com/mozilla/smart-tab-grouping
-// for more info
+// and https://github.com/mozilla/smart-tab-grouping/pull/12 for more info
 const LOGISTIC_REGRESSION_PARAMS = {
+  // Logistic WITH group name
+  // Features: s_gc, s_tt_max, s_dd in [0, 1]
   TITLE_WITH_GROUP_NAME: {
-    GROUP_SIMILARITY_WEIGHT: 6.76420017,
-    TITLE_SIMILARITY_WEIGHT: 2.95779555,
-    INTERCEPT: -3.06862155,
-    THRESHOLD: 0.45,
+    GROUP_SIMILARITY_WEIGHT: 0.10249,
+    TITLE_SIMILARITY_WEIGHT: 0.54897,
+    DOMAIN_SIMILARITY_WEIGHT: 0.34854,
+    INTERCEPT: -0.07397,
+    THRESHOLD: 0.59,
   },
+  // Logistic WITHOUT group name
+  // Features: s_tt_max, s_dd in [0, 1]
   TITLE_ONLY: {
-    GROUP_SIMILARITY_WEIGHT: 0,
-    TITLE_SIMILARITY_WEIGHT: 2.50596721,
-    INTERCEPT: -0.54293376,
-    THRESHOLD: 0.6,
+    GROUP_SIMILARITY_WEIGHT: 0, // unused in this variant
+    TITLE_SIMILARITY_WEIGHT: 0.92513,
+    DOMAIN_SIMILARITY_WEIGHT: 0.07487,
+    INTERCEPT: -2.58574,
+    THRESHOLD: 0.123,
   },
 };
 
@@ -157,6 +192,7 @@ const TAB_URLS_TO_EXCLUDE = [
   "about:privatebrowsing",
   "chrome://browser/content/blanktab.html",
   "about:firefoxview",
+  "about:opentabs",
 ];
 
 const TITLE_DELIMETER_SET = new Set(["-", "|", "—"]);
@@ -215,14 +251,163 @@ export function isSearchTab(tab) {
   return false;
 }
 
-export class SmartTabGroupingManager {
+export class SmartTabGroupingManager extends AIFeature {
   /**
    * Creates the SmartTabGroupingManager object.
    *
    * @param {object} config configuration options
    */
   constructor(config) {
+    super();
     this.config = config || structuredClone(SMART_TAB_GROUPING_CONFIG);
+    // Optional pref overrides for the clustering method and AGGLOMERATIVE tau.
+    const clustering = this.config.clustering;
+    if (lazy.clusterMethod in CLUSTER_METHODS) {
+      clustering.clusterImplementation = lazy.clusterMethod;
+    }
+    if (lazy.agglomerativeThresholdInt > 0) {
+      clustering.agglomerativeThreshold = lazy.agglomerativeThresholdInt / 1000;
+    }
+  }
+
+  /**
+   * Returns the feature identifier for Smart Tab Grouping.
+   *
+   * @returns {string}
+   */
+  static get id() {
+    return STG_FEATURE_ID;
+  }
+
+  /**
+   * Returns whether Smart Tab Grouping exposes a distinct "Enabled" AI
+   * Controls state.
+   *
+   * @returns {boolean}
+   */
+  static get hasDistinctEnabledState() {
+    // Smart Tab Grouping has a distinct opt-in flow in the tab group UI.
+    // It is not immediately enabled when the feature is "Available" and must
+    // still be manually enabled by the user.
+    return true;
+  }
+
+  /**
+   * Returns whether the current device can run Smart Tab Grouping.
+   *
+   * @returns {boolean}
+   */
+  static get canRunOnDevice() {
+    // Smart Tab Grouping has no known restrictions based on device hardware.
+    return true;
+  }
+
+  /**
+   * Enables Smart Tab Grouping.
+   *
+   * @returns {Promise<void>}
+   */
+  static async enable() {
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.enabled", true);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.userEnabled", true);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.optin", true);
+  }
+
+  /**
+   * Blocks Smart Tab Grouping and deletes its model artifacts.
+   *
+   * @returns {Promise<void>}
+   */
+  static async block() {
+    // disable prefs associated with stg
+    // opt-in flow is kept as in unless we decide to disable and re-enable later
+    // which would make the user have to go through the flow twice
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.enabled", false);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.userEnabled", false);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.optin", false);
+
+    // delete models associated with stg
+    await SmartTabGroupingManager.deleteSmartTabModels();
+  }
+
+  /**
+   * Returns whether Smart Tab Grouping is enabled.
+   *
+   * @returns {boolean}
+   */
+  static get isEnabled() {
+    // note that both `browser.tabs.groups.smart.enabled` and
+    // `browser.tabs.smart.userEnabled` disable the UI but not
+    // `browser.tabs.groups.smart.optin`
+    return (
+      Services.prefs.getBoolPref("browser.ml.enable") &&
+      Services.prefs.getBoolPref("browser.tabs.groups.smart.enabled") &&
+      Services.prefs.getBoolPref("browser.tabs.groups.smart.userEnabled") &&
+      Services.prefs.getBoolPref("browser.tabs.groups.smart.optin")
+    );
+  }
+
+  /**
+   * Returns whether Smart Tab Grouping is allowed.
+   *
+   * @returns {boolean}
+   */
+  static get isAllowed() {
+    return Services.locale.appLocaleAsBCP47.startsWith("en");
+  }
+
+  /**
+   * Makes Smart Tab Grouping available and removes artifacts.
+   *
+   * @returns {Promise<void>}
+   */
+  static async makeAvailable() {
+    // Set explicitly rather than clearing, so that a non-locked policy default
+    // of "blocked" does not prevent the user from switching back to "available".
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.enabled", true);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.userEnabled", true);
+    Services.prefs.setBoolPref("browser.tabs.groups.smart.optin", false);
+
+    // remove local models
+    await SmartTabGroupingManager.deleteSmartTabModels();
+  }
+
+  /**
+   * Returns whether Smart Tab Grouping is blocked.
+   *
+   * @returns {boolean}
+   */
+  static get isBlocked() {
+    return (
+      !Services.prefs.getBoolPref("browser.tabs.groups.smart.enabled") ||
+      !Services.prefs.getBoolPref("browser.tabs.groups.smart.userEnabled")
+    );
+  }
+
+  /**
+   * Checks if the feature is managed by enterprise policy.
+   *
+   * @returns {boolean}
+   */
+  static get isManagedByPolicy() {
+    return Services.prefs.prefIsLocked("browser.tabs.groups.smart.userEnabled");
+  }
+
+  /**
+   * Deletes model artifacts associated with Smart Tab Grouping.
+   *
+   * @returns {Promise<void>}
+   */
+  static async deleteSmartTabModels() {
+    // The embedding model is shared (forGeneral); only the topic model is
+    // STG-owned, so don't uninstall the embedding model here.
+    const engineIds = [FEATURES[STG_TOPIC_FEATURE_ID].engineId];
+    // Remove all ML Engine files associated with this feature.
+    await lazy.MLUninstallService.uninstall({
+      engineIds,
+      // Used only for attribution/telemetry; the specific value is not significant.
+      actor: "SmartTabGrouping",
+    });
   }
 
   /**
@@ -235,21 +420,86 @@ export class SmartTabGroupingManager {
   }
 
   /**
-   * Initializes the embedding engine by running a test request
-   * This helps remove the init latency
+   * Shared embeddings generator (forGeneral), created on first use.
+   *
+   * @returns {EmbeddingsGenerator}
+   */
+  getEmbeddingsGenerator() {
+    if (!this.embeddingsGenerator) {
+      this.embeddingsGenerator = embeddingsGeneratorFactory.forGeneral();
+    }
+    return this.embeddingsGenerator;
+  }
+
+  /**
+   * Warms up the embedding engine to remove first-use init latency.
    */
   async initEmbeddingEngine() {
-    if (!SmartTabGroupingManager.isEngineClosed(this.embeddingEngine)) {
-      return;
-    }
     try {
-      this.embeddingEngine = await this._createMLEngine(this.config.embedding);
-      const request = {
-        args: ["Test"],
-        options: { pooling: "mean", normalize: true },
-      };
-      this.embeddingEngine.run(request);
+      await this.getEmbeddingsGenerator().ensureEngine();
+      // warm up the engine
+      await this.getEmbeddingsGenerator().embedMany(["test"]);
     } catch (e) {}
+  }
+
+  /**
+   * Generates tabs to process with a limit. First MAX_GROUPED_TABS are tabs that are
+   * present in the group of the anchor tab. The remaining "ungrouped" tabs fill the
+   * slots up to MAX_TABS_TO_PROCESS
+   *
+   * @param {Array} tabsInGroup active tabs in anchor group we are adding tabs to
+   * @param {Array} allTabs list of tabs from gbrowser, some of which may be grouped in other groups
+   * @param {number} max_limit_to_process max number of tabs we want to process as part of the flow
+   * @returns a list of suggested new tabs. If no new tabs are suggested an empty list is returned.
+   */
+  getTabsToProcess(
+    tabsInGroup,
+    allTabs,
+    max_limit_to_process = MAX_TABS_TO_PROCESS
+  ) {
+    const seen = new Set();
+    let tabsToProcess = [];
+
+    const shouldInclude = tab => {
+      if (tab.pinned) {
+        return false;
+      }
+      if (!tab?.linkedBrowser?.currentURI?.spec) {
+        return false;
+      }
+      return true;
+    };
+
+    // include tabs in the anchor group first
+    for (const tab of tabsInGroup) {
+      if (!shouldInclude(tab)) {
+        continue;
+      }
+      if (!seen.has(tab)) {
+        // make sure we have "seen" all the
+        // tabs already in the current group
+        seen.add(tab);
+        tabsToProcess.push(tab);
+      }
+    }
+
+    // when generating embeddings, we only look at the first MAX_GROUPED_TABS
+    // so use that limit here
+    tabsToProcess = tabsToProcess.slice(0, MAX_GROUPED_TABS);
+    // fill remaining slots with ungrouped tabs from the window
+    for (const tab of allTabs) {
+      if (tabsToProcess.length >= max_limit_to_process) {
+        break;
+      }
+      if (!shouldInclude(tab)) {
+        continue;
+      }
+      if (!seen.has(tab)) {
+        seen.add(tab);
+        tabsToProcess.push(tab);
+      }
+    }
+    return tabsToProcess;
   }
 
   /**
@@ -262,21 +512,14 @@ export class SmartTabGroupingManager {
   async smartTabGroupingForGroup(group, tabs) {
     // Add tabs to suggested group
     const groupTabs = group.tabs;
-    const allTabs = tabs.filter(tab => {
-      // Don't include tabs already pinned
-      if (tab.pinned) {
-        return false;
+    const allTabs = this.getTabsToProcess(groupTabs, tabs, MAX_TABS_TO_PROCESS);
+    // first (1 up to MAX_GROUPED_TABS) are tabs in the group
+    const groupIndices = [];
+    for (let i = 0; i < MAX_GROUPED_TABS; i++) {
+      if (groupTabs.includes(allTabs[i])) {
+        groupIndices.push(i);
       }
-      if (!tab?.linkedBrowser?.currentURI?.spec) {
-        return false;
-      }
-      return true;
-    });
-
-    // find tabs that are part of the group
-    const groupIndices = groupTabs
-      .map(a => allTabs.indexOf(a))
-      .filter(a => a >= 0);
+    }
 
     // find tabs that are part of other groups
     const alreadyGroupedIndices = allTabs
@@ -402,7 +645,7 @@ export class SmartTabGroupingManager {
       let closestScore = null;
       for (
         let j = 0;
-        j < Math.min(groupedIndices.length, MAX_NN_GROUPED_TABS);
+        j < Math.min(groupedIndices.length, MAX_GROUPED_TABS);
         j++
       ) {
         const cosineSim = cosSim(
@@ -442,8 +685,8 @@ export class SmartTabGroupingManager {
   /**
    * Calculates the average similarity between the anchor embeddings and the candidate embeddings
    *
-   * @param {list[Number]} anchorEmbeddings title embeddings for the anchor tabs
-   * @param {list[Number]} candidateEmbeddings title embeddings for the candidate tabs
+   * @param {number[]} anchorEmbeddings title embeddings for the anchor tabs
+   * @param {number[]} candidateEmbeddings title embeddings for the candidate tabs
    */
   getAverageSimilarity(anchorEmbeddings, candidateEmbeddings) {
     let averageSimilarities = [];
@@ -455,6 +698,96 @@ export class SmartTabGroupingManager {
       averageSimilarities.push(averageSimilarity / anchorEmbeddings.length);
     }
     return averageSimilarities;
+  }
+
+  /**
+   * Calculates the max similarity between the anchor embeddings and the candidate embeddings
+   * (used for s_tt_max).
+   *
+   * @param {number[]} anchorEmbeddings title embeddings for the anchor tabs
+   * @param {number[]} candidateEmbeddings title embeddings for the candidate tabs
+   */
+  getMaxSimilarity(anchorEmbeddings, candidateEmbeddings) {
+    let maxSimilarities = [];
+    for (let candidate_embedding of candidateEmbeddings) {
+      let maxSimilarity = -1;
+      for (let anchor_embedding of anchorEmbeddings) {
+        const sim = cosSim(candidate_embedding, anchor_embedding);
+        if (sim > maxSimilarity) {
+          maxSimilarity = sim;
+        }
+      }
+      maxSimilarities.push(maxSimilarity);
+    }
+    return maxSimilarities;
+  }
+
+  /**
+   * Extract base domain from a URL with error handling
+   *
+   * @param {string} url
+   * @return {string}
+   */
+  static getBaseDomain(url) {
+    if (!url) {
+      return "";
+    }
+
+    let hostname;
+    try {
+      ({ hostname } = new URL(url));
+    } catch (_e) {
+      // invalid URL
+      return "";
+    }
+
+    if (!hostname) {
+      return "";
+    }
+
+    try {
+      // additionalParts = 1 → one label above the registrable domain
+      // then remove 'www'
+      // https://www.example.com -> www.example.com -> example.com
+      // https://www.docs.google.com -> docs.google.com
+      // https://localhost -> error
+      return Services.eTLD
+        .getBaseDomain(Services.io.newURI(url.toLowerCase()), 1)
+        .replace(/^www\./, "");
+    } catch (_e) {
+      // localhost, IPs, internal hosts, etc.
+      // bucket by the hostname.
+      return hostname.toLowerCase();
+    }
+  }
+
+  /**
+   * For each candidate tab, compute s_dd = fraction of anchors whose base domain
+   * matches the candidate's base domain.
+   *
+   * @param {Array} anchorTabsPrep  output of _prepareTabData for anchor tabs
+   * @param {Array} candidateTabsPrep output of _prepareTabData for candidate tabs
+   * @return {number[]} array of s_dd values in [0, 1]
+   */
+  getDomainMatchFractions(anchorTabsPrep, candidateTabsPrep) {
+    const anchorDomains = anchorTabsPrep.map(t =>
+      SmartTabGroupingManager.getBaseDomain(t.url)
+    );
+    const numAnchors = anchorDomains.length || 1;
+
+    return candidateTabsPrep.map(tab => {
+      const candDomain = SmartTabGroupingManager.getBaseDomain(tab.url);
+      if (!candDomain) {
+        return 0;
+      }
+      let same = 0;
+      for (const ad of anchorDomains) {
+        if (ad && ad === candDomain) {
+          same++;
+        }
+      }
+      return same / numAnchors;
+    });
   }
 
   /**
@@ -470,38 +803,62 @@ export class SmartTabGroupingManager {
   /**
    * Calculates the probability using the linear combination of the parameters
    *
-   * @param {number} groupSimilarity how similar a candidate tab is to the group name
-   * @param {number} titleSimilarity how similar a candidate tab is to the anchors
+   * @param {number} groupSimilarity s_gc in [0,1]
+   * @param {number} titleSimilarity s_tt_max in [0,1]
+   * @param {number} domainSimilarity s_dd in [0,1]
    * @param {object} params the logistic regression weights assigned to each parameter
    * @return {number}
    */
-  calculateProbability(groupSimilarity, titleSimilarity, params) {
-    return this.sigmoid(
-      groupSimilarity * params.GROUP_SIMILARITY_WEIGHT +
-        titleSimilarity * params.TITLE_SIMILARITY_WEIGHT +
-        params.INTERCEPT
-    );
+  calculateProbability(
+    groupSimilarity,
+    titleSimilarity,
+    domainSimilarity,
+    params
+  ) {
+    const wGroup = params.GROUP_SIMILARITY_WEIGHT || 0;
+    const wTitle = params.TITLE_SIMILARITY_WEIGHT || 0;
+    const wDomain = params.DOMAIN_SIMILARITY_WEIGHT || 0;
+    const z =
+      groupSimilarity * wGroup +
+      titleSimilarity * wTitle +
+      domainSimilarity * wDomain +
+      params.INTERCEPT;
+    return this.sigmoid(z);
   }
 
   /**
-   * Calculates the probabilities given two lists of the same length
+   * Calculates the probabilities given similarity lists (cosine) and domain fractions.
    *
-   * @param {list[Number]} groupSimilarities cosine similarity between the candidate tabs and the group name
-   * @param {list[Number]} titleSimilarities average cosine similarity between the candidate tabs and anchors
-   * @return {list[Number]} probabilities for each candidate tab
+   * @param {number[]|null} groupSimilaritiesCos cosine(group, candidate) in [-1,1] or null
+   * @param {number[]} titleSimilaritiesCos max cosine(anchor, candidate) in [-1,1]
+   * @param {number[]} domainSimilarities s_dd in [0,1]
+   * @return {number[]} probabilities for each candidate tab
    */
-  calculateAllProbabilities(groupSimilarities, titleSimilarities) {
-    const hasGroupSimilarity = Boolean(groupSimilarities);
-    let probabilities = [];
-    for (let i = 0; i < titleSimilarities.length; i++) {
+  calculateAllProbabilities(
+    groupSimilaritiesCos,
+    titleSimilaritiesCos,
+    domainSimilarities
+  ) {
+    const hasGroupSimilarity =
+      Array.isArray(groupSimilaritiesCos) && groupSimilaritiesCos.length;
+    const useDomain =
+      Array.isArray(domainSimilarities) && domainSimilarities.length;
+
+    const probabilities = [];
+    for (let i = 0; i < titleSimilaritiesCos.length; i++) {
+      // groupTitleSim and titleSim are (cos + 1)/2 -> [0,1]
+      const groupTitleSim = hasGroupSimilarity
+        ? 0.5 * (groupSimilaritiesCos[i] + 1)
+        : 0;
+      const titleSim = 0.5 * (titleSimilaritiesCos[i] + 1);
+      const domainSim = useDomain ? domainSimilarities[i] : 0;
+
+      const params = hasGroupSimilarity
+        ? LOGISTIC_REGRESSION_PARAMS.TITLE_WITH_GROUP_NAME
+        : LOGISTIC_REGRESSION_PARAMS.TITLE_ONLY;
+
       probabilities.push(
-        this.calculateProbability(
-          hasGroupSimilarity ? groupSimilarities[i] : 0,
-          titleSimilarities[i],
-          hasGroupSimilarity
-            ? LOGISTIC_REGRESSION_PARAMS.TITLE_WITH_GROUP_NAME
-            : LOGISTIC_REGRESSION_PARAMS.TITLE_ONLY
-        )
+        this.calculateProbability(groupTitleSim, titleSim, domainSim, params)
       );
     }
     return probabilities;
@@ -533,7 +890,7 @@ export class SmartTabGroupingManager {
 
     const anchorTabsPrep = groupedIndices
       .map(gi => tabData[gi])
-      .slice(0, MAX_NN_GROUPED_TABS);
+      .slice(0, MAX_GROUPED_TABS);
 
     // generate embeddings for both anchor and candidate titles
     const titleEmbeddings = await this._generateEmbeddings(
@@ -543,28 +900,35 @@ export class SmartTabGroupingManager {
     );
 
     let groupEmbedding;
-    let groupSimilarities;
+    let groupSimilaritiesCos = null;
     if (groupLabel) {
       groupEmbedding = await this._generateEmbeddings([groupLabel]);
-      // calculate similarity between the group and the candidate tabs if group name is present
-      groupSimilarities = this.getAverageSimilarity(
+      // cosine(group, candidate_title) in [-1,1]
+      groupSimilaritiesCos = this.getAverageSimilarity(
         groupEmbedding,
         titleEmbeddings.slice(anchorTabsPrep.length)
       );
     }
 
-    // calculate the similarity between the anchors and candidate titles
-    const titleSimilarities = this.getAverageSimilarity(
+    // s_tt_max: max cosine(anchor_title, candidate_title) in [-1,1]
+    const titleSimilaritiesCos = this.getMaxSimilarity(
       titleEmbeddings.slice(0, anchorTabsPrep.length),
       titleEmbeddings.slice(anchorTabsPrep.length)
     );
 
-    const candidateProbabilities = this.calculateAllProbabilities(
-      groupSimilarities,
-      titleSimilarities
+    // s_dd: fraction of anchors sharing the candidate's base domain
+    const domainSimilarities = this.getDomainMatchFractions(
+      anchorTabsPrep,
+      candidateTabsPrep
     );
 
-    // get proper params depending on group name availability
+    const candidateProbabilities = this.calculateAllProbabilities(
+      groupSimilaritiesCos,
+      titleSimilaritiesCos,
+      domainSimilarities
+    );
+
+    // get matching params depending on the group name availability
     const probabilityThreshold = groupEmbedding
       ? LOGISTIC_REGRESSION_PARAMS.TITLE_WITH_GROUP_NAME.THRESHOLD
       : LOGISTIC_REGRESSION_PARAMS.TITLE_ONLY.THRESHOLD;
@@ -699,11 +1063,6 @@ export class SmartTabGroupingManager {
       lazy.topicModelRevision !== LATEST_MODEL_REVISION
     ) {
       initData.modelRevision = lazy.topicModelRevision;
-    } else if (
-      featureId === SMART_TAB_GROUPING_CONFIG.embedding.featureId &&
-      lazy.embeddingModelRevision !== LATEST_MODEL_REVISION
-    ) {
-      initData.modelRevision = lazy.embeddingModelRevision;
     }
     return initData;
   }
@@ -725,7 +1084,6 @@ export class SmartTabGroupingManager {
       modelId,
       modelRevision,
       backend,
-      fallbackBackend,
     } = engineConfig;
     let initData = {
       featureId,
@@ -737,21 +1095,15 @@ export class SmartTabGroupingManager {
       modelRevision,
       backend,
     };
+
     initData = SmartTabGroupingManager.getUpdatedInitData(initData, featureId);
-    let engine;
-    try {
-      engine = await createEngine(initData, progressCallback);
-      this.backend = backend;
-    } catch (e) {
-      engine = await createEngine(
-        {
-          ...initData,
-          backend: fallbackBackend,
-        },
-        progressCallback
-      );
-      this.backend = fallbackBackend;
-    }
+    const engine = await createEngine(initData, progressCallback);
+    // For "best-onnx" (and similar) the actual backend is decided in the
+    // inference child and reported back via EnginePort:EngineReady, so
+    // read it off the engine. We deliberately don't fall back to the
+    // requested backend here: telemetry consumers only care about which
+    // concrete backend ran, never the "best-*" sentinel.
+    this.backend = engine.pipelineOptions?.backend;
     return engine;
   }
 
@@ -763,22 +1115,11 @@ export class SmartTabGroupingManager {
    * @private
    */
   async _generateEmbeddings(textToEmbedList) {
-    const inputData = {
-      inputArgs: textToEmbedList,
-      runOptions: {
-        pooling: "mean",
-        normalize: true,
-      },
-    };
-
-    if (SmartTabGroupingManager.isEngineClosed(this.embeddingEngine)) {
-      this.embeddingEngine = await this._createMLEngine(this.config.embedding);
+    if (!textToEmbedList?.length) {
+      return [];
     }
-    const request = {
-      args: [inputData.inputArgs],
-      options: inputData.runOptions,
-    };
-    return await this.embeddingEngine.run(request);
+    // embedMany mean-pools + normalizes and returns one vector per string.
+    return this.getEmbeddingsGenerator().embedMany(textToEmbedList);
   }
 
   /**
@@ -936,6 +1277,28 @@ export class SmartTabGroupingManager {
   }
 
   /**
+   * Clusters embeddings agglomeratively (average-linkage cosine). The number of
+   * groups emerges from `agglomerativeThreshold`, so there is no k-sweep.
+   *
+   * @param {object} params
+   * @param {object[]} params.tabs
+   * @param {number[][]} params.embeddings
+   * @returns {SmartTabGroupingResult}
+   */
+  _clusterEmbeddingsHAC({ tabs, embeddings }) {
+    const indices = agglomerativeClusterCosine(
+      embeddings,
+      this.config.clustering.agglomerativeThreshold
+    );
+    return new SmartTabGroupingResult({
+      indices,
+      tabs,
+      embeddings,
+      config: this.config,
+    });
+  }
+
+  /**
    * Generates clusters for a given list of tabs using precomputed embeddings or newly generated ones.
    *
    * @param {object[]} tabList - List of tab objects to be clustered.
@@ -962,7 +1325,9 @@ export class SmartTabGroupingManager {
       this.docEmbeddings = precomputedEmbeddings;
     } else {
       this.docEmbeddings = await this._generateEmbeddings(
-        structuredData.map(a => a[EMBED_TEXT_KEY])
+        structuredData.map(a =>
+          SmartTabGroupingManager.preprocessText(a[EMBED_TEXT_KEY])
+        )
       );
     }
     let bestResultCluster;
@@ -970,20 +1335,32 @@ export class SmartTabGroupingManager {
 
     const NUM_RUNS = 1;
     for (let i = 0; i < NUM_RUNS; i++) {
-      const curResult = this._clusterEmbeddings({
-        tabs: tabList,
-        embeddings: this.docEmbeddings,
-        k: numClusters,
-        randomFunc: randFunc,
-        anchorIndices,
-        alreadyGroupedIndices,
-      });
+      const curResult =
+        this.config.clustering.clusterImplementation ===
+        CLUSTER_METHODS.AGGLOMERATIVE
+          ? this._clusterEmbeddingsHAC({
+              tabs: tabList,
+              embeddings: this.docEmbeddings,
+            })
+          : this._clusterEmbeddings({
+              tabs: tabList,
+              embeddings: this.docEmbeddings,
+              k: numClusters,
+              randomFunc: randFunc,
+              anchorIndices,
+              alreadyGroupedIndices,
+            });
       const distance = curResult.getCentroidInertia();
       if (distance < bestResultDistance) {
         bestResultDistance = distance;
         bestResultCluster = curResult;
       }
     }
+    // Attach a per-group quality score (average pairwise cosine similarity) so
+    // callers can rank/threshold the suggested groups by confidence.
+    bestResultCluster?.clusterRepresentations.forEach(rep => {
+      rep.cohesion = rep.getCohesion();
+    });
     return bestResultCluster;
   }
 
@@ -1008,13 +1385,14 @@ export class SmartTabGroupingManager {
   /**
    * Utility function that loads all required engines for Smart Tab Grouping and any dependent models
    *
-   * @param {(progress: { percentage: number }) => void} progressCallback callback function to call.
+   * @param {(progress: { percentage: number }) => void} [progressCallback] callback function to call.
    * Callback passes a dict with percentage indicating best effort 0.0-100.0 progress in model download.
+   * Optional: callers that don't surface progress can omit it.
    */
   async preloadAllModels(progressCallback) {
     let previousProgress = -1;
-    const expectedObjects =
-      EXPECTED_TOPIC_MODEL_OBJECTS + EXPECTED_EMBEDDING_MODEL_OBJECTS;
+    // Embedding download isn't wired into this aggregator; track topic only.
+    const expectedObjects = EXPECTED_TOPIC_MODEL_OBJECTS;
     // TODO - Find a way to get these fields. Add as a transformers js callback or within remotesettings
 
     const UPDATE_THRESHOLD_PERCENTAGE = 0.5;
@@ -1039,7 +1417,7 @@ export class SmartTabGroupingManager {
           Math.abs(previousProgress - progress) > UPDATE_THRESHOLD_PERCENTAGE
         ) {
           // Update only once changes are above a threshold to avoid throttling the UI with events.
-          progressCallback({
+          progressCallback?.({
             percentage: progress,
           });
           previousProgress = progress;
@@ -1051,22 +1429,17 @@ export class SmartTabGroupingManager {
       ],
     });
 
-    const [topicEngine, embeddingEngine] = await Promise.all([
+    const [topicEngine] = await Promise.all([
       this._createMLEngine(
         this.config.topicGeneration,
         mutliProgressAggregator?.aggregateCallback.bind(
           mutliProgressAggregator
         ) || null
       ),
-      this._createMLEngine(
-        this.config.embedding,
-        mutliProgressAggregator?.aggregateCallback.bind(
-          mutliProgressAggregator
-        ) || null
-      ),
+      // Warm up the shared embedding engine in parallel
+      this.initEmbeddingEngine(),
     ]);
     this.topicEngine = topicEngine;
-    this.embeddingEngine = embeddingEngine;
   }
 
   /**
@@ -1302,7 +1675,7 @@ export class SmartTabGroupingManager {
       tabs_removed: numTabsRemoved,
       model_revision: embeddingEngineConfig.modelRevision || "",
       id,
-      backend: this.backend || "onnx-native",
+      backend: this.getEmbeddingsGenerator().options.backend || "onnx-native",
     });
   }
 
@@ -1319,11 +1692,9 @@ export class SmartTabGroupingManager {
       );
     }
     if (!this.embeddingEngineConfig) {
+      const { featureId, taskName } = this.getEmbeddingsGenerator().options;
       this.embeddingEngineConfig =
-        await lazy.MLEngineParent.getInferenceOptions(
-          this.config.embedding.featureId,
-          this.config.embedding.taskName
-        );
+        await lazy.MLEngineParent.getInferenceOptions(featureId, taskName);
     }
     return {
       [ML_TASK_TEXT2TEXT]: this.topicEngineConfig,
@@ -1390,7 +1761,7 @@ export class SmartTabGroupingResult {
    * Returns the keywords and documents for the cluster, computing if needed
    * Does not return keywods if only one document is passed to the function.
    *
-   * @param{string[]} otherDocuments other clusters that we'll compare against
+   * @param {string[]} otherDocuments other clusters that we'll compare against
    * @return keywords and documents that represent the cluster
    */
   getRepresentativeDocsAndKeywords(otherDocuments = []) {
@@ -1579,6 +1950,45 @@ class EmbeddingCluster {
       totalDistance += euclideanDistance(this.centroid, embedding, true);
     });
     return totalDistance;
+  }
+
+  /**
+   * Cohesion of the cluster: the average pairwise cosine similarity between its
+   * items' embeddings. Ranges from ~0 (unrelated) to 1 (near-identical). Used as
+   * a quality/confidence score for the group. Returns 0 for clusters with fewer
+   * than two items (no pair to compare).
+   *
+   * The pairwise comparison is O(n^2). Clusters larger than MAX_COHESION_ITEMS
+   * are first reduced to that many items, sampled evenly across the cluster, and
+   * those are compared exhaustively, so an unexpectedly large cluster can't cause
+   * a quadratic blow-up and no pair is measured twice.
+   *
+   * @returns {number}
+   */
+  getCohesion() {
+    const all = this.embeddings;
+    const total = all ? all.length : 0;
+    if (total < 2) {
+      return 0;
+    }
+    let embeddings = all;
+    if (total > MAX_COHESION_ITEMS) {
+      embeddings = [];
+      const step = total / MAX_COHESION_ITEMS;
+      for (let i = 0; i < MAX_COHESION_ITEMS; i++) {
+        embeddings.push(all[Math.floor(i * step)]);
+      }
+    }
+    const n = embeddings.length;
+    let sum = 0;
+    let pairs = 0;
+    for (let a = 0; a < n; a++) {
+      for (let b = a + 1; b < n; b++) {
+        sum += cosSim(embeddings[a], embeddings[b]);
+        pairs++;
+      }
+    }
+    return sum / pairs;
   }
 
   /**

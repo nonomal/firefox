@@ -17,6 +17,11 @@ const TEST_MERINO_SINGLE = [
         values: [
           {
             flight_number: "flight",
+            airline: {
+              name: null,
+              code: null,
+              icon: null,
+            },
             origin: {
               city: "Origin",
               code: "O",
@@ -25,8 +30,12 @@ const TEST_MERINO_SINGLE = [
               city: "Destination",
               code: "D",
             },
-            departure_scheduled_time: "2025-09-17T14:05:00Z",
-            arrival_scheduled_time: "2025-09-17T18:30:00Z",
+            departure: {
+              scheduled_time: "2025-09-17T14:05:00Z",
+            },
+            arrival: {
+              scheduled_time: "2025-09-17T18:30:00Z",
+            },
             status: "Scheduled",
             url: "https://example.com/A1",
           },
@@ -38,7 +47,7 @@ const TEST_MERINO_SINGLE = [
 
 add_setup(async function init() {
   // Disable search suggestions so we don't hit the network.
-  await Services.search.init();
+  await SearchService.init();
   Services.prefs.setBoolPref("browser.search.suggest.enabled", false);
 
   await QuickSuggestTestUtils.ensureQuickSuggestInit({
@@ -213,10 +222,9 @@ add_task(async function show_less_frequently() {
 
 function merinoResult() {
   return {
-    type: UrlbarUtils.RESULT_TYPE.DYNAMIC,
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+    type: UrlbarShared.RESULT_TYPE.DYNAMIC,
+    source: UrlbarShared.RESULT_SOURCE.SEARCH,
     isBestMatch: true,
-    hideRowLabel: true,
     heuristic: false,
     payload: {
       source: "merino",
@@ -227,13 +235,22 @@ function merinoResult() {
       items: [
         {
           flight_number: "flight",
+          airline: {
+            name: null,
+            code: null,
+            icon: null,
+          },
           origin: {
             city: "Origin",
             code: "O",
           },
           destination: { city: "Destination", code: "D" },
-          departure_scheduled_time: "2025-09-17T14:05:00Z",
-          arrival_scheduled_time: "2025-09-17T18:30:00Z",
+          departure: {
+            scheduled_time: "2025-09-17T14:05:00Z",
+          },
+          arrival: {
+            scheduled_time: "2025-09-17T18:30:00Z",
+          },
           status: "Scheduled",
           url: "https://example.com/A1",
         },

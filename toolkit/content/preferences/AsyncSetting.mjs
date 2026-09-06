@@ -44,6 +44,25 @@ export class AsyncSetting extends EventEmitter {
   setup() {}
 
   /**
+   * Called before the setting values will be cached. You can start any shared
+   * work here if you need the same value in multiple callbacks.
+   *
+   * @example
+   * class Attendees extends AsyncSetting {
+   *   beforeRefresh() {
+   *     this.attendees = MeetingDb.getAttendees();
+   *   }
+   *   get() {
+   *     return this.attendees;
+   *   }
+   *   async visible() {
+   *     return (await this.attendees).length;
+   *   }
+   * }
+   */
+  beforeRefresh() {}
+
+  /**
    * Get the value of this setting.
    *
    * @abstract
@@ -105,6 +124,24 @@ export class AsyncSetting extends EventEmitter {
    */
   // eslint-disable-next-line no-unused-vars
   onUserClick(event) {}
+
+  /**
+   * Callback fired after a user has dismissed a message bar.
+   *
+   * @param {CustomEvent} event
+   */
+  //eslint-disable-next-line no-unused-vars
+  onMessageBarDismiss(event) {}
+
+  /**
+   * Callback fired after items in a reorderable list have been reordered.
+   * This should be used to update the underlying data when the user
+   * reorders items, such as updating preference values.
+   *
+   * @param {CustomEvent} event - reorder event with detail containing draggedElement, targetElement, position, draggedIndex, targetIndex
+   */
+  //eslint-disable-next-line no-unused-vars
+  onUserReorder(event) {}
 }
 
 /**
@@ -171,6 +208,7 @@ export class AsyncSettingHandler {
    * Called to trigger async tasks and re-cache values.
    */
   async refresh() {
+    this.asyncSetting.beforeRefresh();
     [
       this.cachedValue,
       this.cachedDisabled,
@@ -237,5 +275,19 @@ export class AsyncSettingHandler {
    */
   onUserClick(event) {
     this.asyncSetting.onUserClick(event);
+  }
+
+  /**
+   * @param {CustomEvent} event
+   */
+  onMessageBarDismiss(event) {
+    this.asyncSetting.onMessageBarDismiss(event);
+  }
+
+  /**
+   * @param {CustomEvent} event
+   */
+  onUserReorder(event) {
+    this.asyncSetting.onUserReorder(event);
   }
 }

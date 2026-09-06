@@ -3,10 +3,8 @@
 const PAGE_PREFS = "about:preferences";
 const PAGE_PRIVACY = PAGE_PREFS + "#privacy";
 const SELECTORS = {
-  savedCreditCardsBtn:
-    "#formAutofillGroupBox setting-group[groupid=payments] #savedPaymentsButton",
-  reauthCheckbox:
-    "#formAutofillGroupBox setting-group[groupid=payments] #requireOSAuthForPayments",
+  savedCreditCardsBtn: "setting-group[groupid=payments] #savedPaymentsButton",
+  reauthCheckbox: "setting-group[groupid=payments] #requireOSAuthForPayments",
 };
 
 // On mac, this test times out in chaos mode
@@ -115,9 +113,7 @@ async function test_osAuth_enabled_behaviour(settingsRedesignEnabled) {
       await openEditPaymentsList(redesignEnabled, browser);
       await reauthObserved; // If the OS does not popup, this will cause a timeout in the test.
 
-      if (!redesignEnabled) {
-        await waitForSubDialogLoad(content, EDIT_CREDIT_CARD_DIALOG_URL);
-      }
+      await waitForSubDialogLoad(content, EDIT_CREDIT_CARD_DIALOG_URL);
     }
   );
 }
@@ -175,11 +171,7 @@ async function openEditPaymentsList(redesignEnabled, browser) {
     );
     await SpecialPowers.spawn(ccManageDialog, [], async () => {
       let selRecords = content.document.getElementById("credit-cards");
-      await EventUtils.synthesizeMouseAtCenter(
-        selRecords.children[0],
-        [],
-        content
-      );
+      EventUtils.synthesizeMouseAtCenter(selRecords.children[0], [], content);
       content.document.querySelector("#edit").click();
     });
   } else {

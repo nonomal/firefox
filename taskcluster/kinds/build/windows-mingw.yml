@@ -8,6 +8,7 @@ task-defaults:
         max-run-time: 7200
     run-on-repo-type: [hg]
     run:
+        clone-with: hg
         using: mozharness
         actions: [build]
         script: mozharness/scripts/fx_desktop_build.py
@@ -38,11 +39,12 @@ win32-mingwclang/opt:
         mozconfig-variant: mingwclang
     run-on-projects:
         - 'mozilla-central'
-        - 'mozilla-esr140'
+        - 'mozilla-esr153'
     use-sccache: true
     fetches:
         toolchain:
             - mingw32-rust
+            - linux64-7zz
             - linux64-upx
             - linux64-wine
             - linux64-sccache
@@ -78,11 +80,12 @@ win32-mingwclang/debug:
         mozconfig-variant: mingwclang-debug
     run-on-projects:
         - 'mozilla-central'
-        - 'mozilla-esr140'
+        - 'mozilla-esr153'
     use-sccache: true
     fetches:
         toolchain:
             - mingw32-rust
+            - linux64-7zz
             - linux64-upx
             - linux64-wine
             - linux64-sccache
@@ -118,11 +121,12 @@ win64-mingwclang/opt:
         mozconfig-variant: mingwclang
     run-on-projects:
         - 'mozilla-central'
-        - 'mozilla-esr140'
+        - 'mozilla-esr153'
     use-sccache: true
     fetches:
         toolchain:
             - mingw32-rust
+            - linux64-7zz
             - linux64-upx
             - linux64-wine
             - linux64-sccache
@@ -158,11 +162,12 @@ win64-mingwclang/debug:
         mozconfig-variant: mingwclang-debug
     run-on-projects:
         - 'mozilla-central'
-        - 'mozilla-esr140'
+        - 'mozilla-esr153'
     use-sccache: true
     fetches:
         toolchain:
             - mingw32-rust
+            - linux64-7zz
             - linux64-upx
             - linux64-wine
             - linux64-sccache

@@ -33,17 +33,20 @@ function hideSelectPopup(mode = "enter", win = window) {
   let browser = win.gBrowser.selectedBrowser;
   let selectClosedPromise = SpecialPowers.spawn(browser, [], async function () {
     let { SelectContentHelper } = ChromeUtils.importESModule(
-      "resource://gre/actors/SelectChild.sys.mjs"
+      "moz-src:///toolkit/actors/SelectChild.sys.mjs"
     );
     return ContentTaskUtils.waitForCondition(() => !SelectContentHelper.open);
   });
 
-  if (mode == "escape") {
+  const popup = win.document.getElementById("ContentSelectDropdown")?.menupopup;
+  if (popup?.isNativeMenu) {
+    // Synthesized events are not available with native menus
+    popup.hidePopup();
+  } else if (mode == "escape") {
     EventUtils.synthesizeKey("KEY_Escape", {}, win);
   } else if (mode == "enter") {
     EventUtils.synthesizeKey("KEY_Enter", {}, win);
   } else if (mode == "click") {
-    let popup = win.document.getElementById("ContentSelectDropdown").menupopup;
     EventUtils.synthesizeMouseAtCenter(popup.lastElementChild, {}, win);
   }
 

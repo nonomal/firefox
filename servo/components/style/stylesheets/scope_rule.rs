@@ -7,6 +7,7 @@
 //! [scope]: https://drafts.csswg.org/css-cascade-6/#scoped-styles
 
 use crate::applicable_declarations::ScopeProximity;
+use crate::derives::*;
 use crate::dom::TElement;
 use crate::parser::ParserContext;
 use crate::selector_parser::{SelectorImpl, SelectorParser};
@@ -45,7 +46,7 @@ impl DeepCloneWithLock for ScopeRule {
         Self {
             bounds: self.bounds.clone(),
             rules: Arc::new(lock.wrap(rules.deep_clone_with_lock(lock, guard))),
-            source_location: self.source_location.clone(),
+            source_location: self.source_location,
         }
     }
 }
@@ -105,12 +106,12 @@ impl ScopeBounds {
     }
 }
 
-fn parse_scope<'a>(
+fn parse_scope(
     context: &ParserContext,
-    input: &mut Parser<'a, '_>,
+    input: &mut Parser,
     parse_relative: ParseRelative,
     for_end: bool,
-) -> Result<Option<SelectorList<SelectorImpl>>, ParseError<'a>> {
+) -> Result<Option<SelectorList<SelectorImpl>>, ParseError> {
     input.try_parse(|input| {
         if for_end {
             // scope-end not existing is valid.
@@ -149,11 +150,11 @@ fn parse_scope<'a>(
 
 impl ScopeBounds {
     /// Parse a container condition.
-    pub fn parse<'a>(
+    pub fn parse(
         context: &ParserContext,
-        input: &mut Parser<'a, '_>,
+        input: &mut Parser,
         parse_relative: ParseRelative,
-    ) -> Result<Self, ParseError<'a>> {
+    ) -> Result<Self, ParseError> {
         let start = parse_scope(context, input, parse_relative, false)?;
         let end = parse_scope(context, input, parse_relative, true)?;
         Ok(Self { start, end })
@@ -354,7 +355,7 @@ where
                 }
             }
         }
-        return false;
+        false
     })
 }
 
@@ -392,32 +393,27 @@ impl ScopeSubjectMap {
 
     fn add_selector(&mut self, selector: &Selector<SelectorImpl>, quirks_mode: QuirksMode) -> bool {
         let mut is_any = true;
-        let mut iter = selector.iter();
-        while let Some(c) = iter.next() {
+        let iter = selector.iter();
+        for c in iter {
             let component_any = match c {
-                Component::Class(cls) => {
-                    match self.buckets.classes.try_entry(cls.0.clone(), quirks_mode) {
-                        Ok(e) => {
-                            e.or_insert(());
-                            false
-                        },
-                        Err(_) => true,
-                    }
-                },
-                Component::ID(id) => match self.buckets.ids.try_entry(id.0.clone(), quirks_mode) {
-                    Ok(e) => {
-                        e.or_insert(());
-                        false
-                    },
-                    Err(_) => true,
-                },
+                Component::Class(cls) => self
+                    .buckets
+                    .classes
+                    .try_get_or_insert_with(&cls.0, quirks_mode, || ())
+                    .is_err(),
+                Component::ID(id) => self
+                    .buckets
+                    .ids
+                    .try_get_or_insert_with(&id.0, quirks_mode, || ())
+                    .is_err(),
                 Component::LocalName(local_name) => {
                     self.buckets
                         .local_names
-                        .insert(local_name.lower_name.clone(), ());
+                        .entry_ref(&local_name.lower_name)
+                        .or_insert(());
                     false
                 },
-                Component::Is(ref list) | Component::Where(ref list) => {
+                Component::Is(list) | Component::Where(list) => {
                     self.add_selector_list(list, quirks_mode)
                 },
                 _ => true,
@@ -480,15 +476,13 @@ pub fn scope_selector_list_is_trivial(list: &SelectorList<SelectorImpl>) -> bool
         //   requires re-plumbing what we pass around for scope roots.
         let mut iter = selector.iter();
         loop {
-            while let Some(c) = iter.next() {
+            for c in iter.by_ref() {
                 match c {
                     Component::ID(_)
                     | Component::Nth(_)
                     | Component::NthOf(_)
                     | Component::Has(_) => return false,
-                    Component::Is(ref list)
-                    | Component::Where(ref list)
-                    | Component::Negation(ref list) => {
+                    Component::Is(list) | Component::Where(list) | Component::Negation(list) => {
                         if !scope_selector_list_is_trivial(list) {
                             return false;
                         }
@@ -508,5 +502,5 @@ pub fn scope_selector_list_is_trivial(list: &SelectorList<SelectorImpl>) -> bool
         }
     }
 
-    list.slice().iter().all(|s| scope_selector_is_trivial(s))
+    list.slice().iter().all(scope_selector_is_trivial)
 }

@@ -1,4 +1,3 @@
-/* -*- Mode: rust; rust-indent-offset: 4 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -726,11 +725,11 @@ const TOKEN_SERIAL_NUMBER_BYTES: &[u8; 16] = b"0000000000000000";
 impl ClientCertsBackend for Backend {
     type Key = Key;
 
-    fn find_objects(&mut self) -> Result<(Vec<CryptokiCert>, Vec<Key>), Error> {
+    fn find_objects(&mut self) -> Result<(Vec<CryptokiCert>, Vec<Key>, Vec<CryptokiTrust>), Error> {
         match self.last_scan_finished {
             Some(last_scan_finished) => {
                 if Instant::now().duration_since(last_scan_finished) < Duration::new(3, 0) {
-                    return Ok((Vec::new(), Vec::new()));
+                    return Ok((Vec::new(), Vec::new(), Vec::new()));
                 }
             }
             None => {}
@@ -771,7 +770,7 @@ impl ClientCertsBackend for Backend {
 
 /// Attempts to enumerate certificates with private keys exposed by the OS. Currently only looks in
 /// the "My" cert store of the current user. In the future this may look in more locations.
-fn find_objects(thread: &nsIEventTarget) -> Result<(Vec<CryptokiCert>, Vec<Key>), Error> {
+fn find_objects(thread: &nsIEventTarget) -> Result<(Vec<CryptokiCert>, Vec<Key>, Vec<CryptokiTrust>), Error> {
     let mut certs = Vec::new();
     let mut keys = Vec::new();
     let location_flags =
@@ -849,5 +848,5 @@ fn find_objects(thread: &nsIEventTarget) -> Result<(Vec<CryptokiCert>, Vec<Key>)
             }
         }
     }
-    Ok((certs, keys))
+    Ok((certs, keys, Vec::new()))
 }

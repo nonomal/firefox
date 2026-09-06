@@ -1,12 +1,12 @@
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
+plugins {
+    id 'com.android.library'
+    alias(libs.plugins.dependency.analysis)
+}
 
 android {
     namespace = 'mozilla.components.feature.sendtab'
@@ -34,6 +34,7 @@ dependencies {
     testImplementation libs.androidx.concurrent
     testImplementation libs.androidx.test.junit
     testImplementation libs.androidx.work.testing
+    testImplementation libs.kotlin.test
     testImplementation libs.kotlinx.coroutines.test
     testImplementation libs.robolectric
 }

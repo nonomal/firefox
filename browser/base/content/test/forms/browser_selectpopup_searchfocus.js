@@ -8,10 +8,7 @@ SELECT +=
 
 add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["test.wait300msAfterTabSwitch", true],
-      ["dom.forms.selectSearch", true],
-    ],
+    set: [["dom.forms.selectSearch", true]],
   });
 });
 
@@ -25,7 +22,7 @@ add_task(async function test_focus_on_search_shouldnt_close_popup() {
   );
   searchInput.scrollIntoView();
   let searchFocused = BrowserTestUtils.waitForEvent(searchInput, "focus", true);
-  await EventUtils.synthesizeMouseAtCenter(searchInput, {}, window);
+  EventUtils.synthesizeMouseAtCenter(searchInput, {}, window);
   await searchFocused;
 
   is(

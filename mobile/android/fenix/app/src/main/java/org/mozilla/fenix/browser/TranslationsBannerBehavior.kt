@@ -14,19 +14,18 @@ import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.children
 import androidx.core.view.isVisible
+import kotlin.math.max
+import kotlin.math.min
 import mozilla.components.concept.engine.EngineView
 import mozilla.components.support.ktx.android.view.findViewInHierarchy
 import org.mozilla.fenix.R
-import kotlin.math.max
-import kotlin.math.min
 
 private const val SNAP_ANIMATION_DURATION = 150L
 
 /**
- * A [CoordinatorLayout.Behavior] implementation to be used for placing the translations banner
- * at the bottom of the screen.
- * The translations banner will be anchored to any bottom toolbar or other banners and be scrollable
- * depending on when the webpage is scrolled.
+ * A [CoordinatorLayout.Behavior] implementation to be used for placing the translations banner at the bottom of the
+ * screen. The translations banner will be anchored to any bottom toolbar or other banners and be scrollable depending
+ * on when the webpage is scrolled.
  *
  * @param context [Context] needed for various Android interactions.
  * @param isAddressBarAtBottom Whether the address bar is at the bottom of the screen.
@@ -48,7 +47,6 @@ class TranslationsBannerBehavior<V : View>(
         add(R.id.addressSelectBar)
         add(R.id.findInPageView)
         if (isAddressBarAtBottom) {
-            add(R.id.toolbarLayout)
             add(R.id.toolbar)
             add(R.id.composable_toolbar)
         } else if (isNavBarShown) {
@@ -60,7 +58,6 @@ class TranslationsBannerBehavior<V : View>(
         if (!isAddressBarAtBottom && isNavBarShown) {
             add(R.id.navigation_bar)
         }
-        add(R.id.toolbarLayout)
         add(R.id.toolbar)
         add(R.id.composable_toolbar)
     }
@@ -74,27 +71,25 @@ class TranslationsBannerBehavior<V : View>(
             }
         }
 
-    @VisibleForTesting()
-    internal var expanded: Boolean = true
+    @VisibleForTesting() internal var expanded: Boolean = true
+
+    @VisibleForTesting() internal var shouldSnapAfterScroll: Boolean = false
 
     @VisibleForTesting()
-    internal var shouldSnapAfterScroll: Boolean = false
-
-    @VisibleForTesting()
-    internal var snapAnimator: ValueAnimator = ValueAnimator()
-        .apply {
+    internal var snapAnimator: ValueAnimator =
+        ValueAnimator().apply {
             interpolator = DecelerateInterpolator()
             duration = SNAP_ANIMATION_DURATION
         }
 
-    @VisibleForTesting
-    internal var engineView: EngineView? = null
+    @VisibleForTesting internal var engineView: EngineView? = null
 
     @VisibleForTesting()
     internal val shouldScroll: Boolean
-        get() = engineView?.getInputResultDetail()?.let {
-            (it.canScrollToBottom() || it.canScrollToTop())
-        } ?: false
+        get() =
+            engineView?.getInputResultDetail()?.let {
+                (it.canScrollToBottom() || it.canScrollToTop())
+            } ?: false
 
     override fun onStartNestedScroll(
         coordinatorLayout: CoordinatorLayout,
@@ -153,13 +148,14 @@ class TranslationsBannerBehavior<V : View>(
     ) {
         if (shouldScroll) {
             super.onNestedPreScroll(coordinatorLayout, child, target, dx, dy, consumed, type)
-            child.translationY = max(
-                0f,
-                min(
-                    child.height.toFloat() + scrollableDependencyHeight,
-                    child.translationY + dy,
-                ),
-            )
+            child.translationY =
+                max(
+                    0f,
+                    min(
+                        child.height.toFloat() + scrollableDependencyHeight,
+                        child.translationY + dy,
+                    ),
+                )
         }
     }
 
@@ -176,9 +172,10 @@ class TranslationsBannerBehavior<V : View>(
             scrollableDependency = parent.children.firstOrNull { it.isVisible && it.id in scrollableDependenciesIds }
         }
 
-        val anchorId = anchoringDependenciesIds
-            .intersect(parent.children.filter { it.isVisible }.map { it.id }.toSet())
-            .firstOrNull()
+        val anchorId =
+            anchoringDependenciesIds
+                .intersect(parent.children.filter { it.isVisible }.map { it.id }.toSet())
+                .firstOrNull()
 
         // It is possible that previous anchor's visibility is changed.
         // We have to check here if a new anchor is available and reparent the logins bar.
@@ -198,19 +195,20 @@ class TranslationsBannerBehavior<V : View>(
     }
 
     @VisibleForTesting()
-    internal fun animateSnap(child: View, direction: SnapDirection) = with(snapAnimator) {
-        expanded = direction == SnapDirection.UP
-        addUpdateListener { child.translationY = it.animatedValue as Float }
-        setFloatValues(
-            child.translationY,
-            if (direction == SnapDirection.UP) {
-                0f
-            } else {
-                child.height.toFloat() + scrollableDependencyHeight
-            },
-        )
-        start()
-    }
+    internal fun animateSnap(child: View, direction: SnapDirection) =
+        with(snapAnimator) {
+            expanded = direction == SnapDirection.UP
+            addUpdateListener { child.translationY = it.animatedValue as Float }
+            setFloatValues(
+                child.translationY,
+                if (direction == SnapDirection.UP) {
+                    0f
+                } else {
+                    child.height.toFloat() + scrollableDependencyHeight
+                },
+            )
+            start()
+        }
 
     private fun placeBanner(banner: V, dependency: View?) {
         banner.post {

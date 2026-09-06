@@ -9,11 +9,13 @@
 
 ChromeUtils.defineESModuleGetters(this, {
   Preferences: "resource://gre/modules/Preferences.sys.mjs",
+  TelemetryReportingPolicy:
+    "resource://gre/modules/TelemetryReportingPolicy.sys.mjs",
 });
 
-const EN_LOCALES = ["en-CA", "en-GB", "en-US", "en-ZA"];
+const { SUGGEST_TOU_TIMESTAMP } = QuickSuggest;
 
-// Expected prefs when Suggest is disabled.
+// Expected prefs when Suggest is completely disabled.
 const EXPECTED_PREFS_SUGGEST_DISABLED = {
   "quicksuggest.enabled": false,
   "quicksuggest.online.available": false,
@@ -30,30 +32,8 @@ const EXPECTED_PREFS_SUGGEST_DISABLED = {
   "yelp.featureGate": false,
 };
 
-// Expected prefs for native locales in EU countries (e.g., `de` locale in
-// Germany).
-const EXPECTED_PREFS_EU_NATIVE = {
-  ...EXPECTED_PREFS_SUGGEST_DISABLED,
-  "quicksuggest.enabled": true,
-  "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
-  "suggest.quicksuggest.all": true,
-  "suggest.quicksuggest.sponsored": true,
-  "importantDates.featureGate": true,
-  "weather.featureGate": true,
-};
-
-// Expected prefs for `en` locales in EU countries (e.g., `en-US` locale in
-// Germany).
-const EXPECTED_PREFS_EU_EN = {
-  ...EXPECTED_PREFS_SUGGEST_DISABLED,
-  "quicksuggest.enabled": true,
-  "importantDates.featureGate": true,
-};
-
-// Base set of expected prefs for countries where an `en` locale is native
-// (e.g., US, UK). These countries will have slightly different actual expected
-// prefs, which is why this is a base set.
-const EXPECTED_PREFS_BASE_EN_NATIVE = {
+// Base set of expected prefs for US, GB, and the EU 3 (DE, FR, and IT).
+const EXPECTED_PREFS_BASE_US_GB_EU_3 = {
   ...EXPECTED_PREFS_SUGGEST_DISABLED,
   "quicksuggest.enabled": true,
   "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
@@ -65,78 +45,240 @@ const EXPECTED_PREFS_BASE_EN_NATIVE = {
   "wikipedia.featureGate": true,
 };
 
-// Region -> locale -> expected prefs when Suggest is enabled
-const EXPECTED_PREFS_BY_LOCALE_BY_REGION = {
-  DE: {
-    de: EXPECTED_PREFS_EU_NATIVE,
-    ...Object.fromEntries(
-      EN_LOCALES.map(locale => [locale, EXPECTED_PREFS_EU_EN])
-    ),
-  },
-  FR: {
-    fr: EXPECTED_PREFS_EU_NATIVE,
-    ...Object.fromEntries(
-      EN_LOCALES.map(locale => [locale, EXPECTED_PREFS_EU_EN])
-    ),
-  },
-  GB: Object.fromEntries(
-    EN_LOCALES.map(locale => [locale, EXPECTED_PREFS_BASE_EN_NATIVE])
-  ),
-  IT: {
-    it: EXPECTED_PREFS_EU_NATIVE,
-    ...Object.fromEntries(
-      EN_LOCALES.map(locale => [locale, EXPECTED_PREFS_EU_EN])
-    ),
-  },
-  US: Object.fromEntries(
-    EN_LOCALES.map(locale => [
-      locale,
-      {
-        ...EXPECTED_PREFS_BASE_EN_NATIVE,
-        "addons.featureGate": true,
-        "mdn.featureGate": true,
-        "yelp.featureGate": true,
-      },
-    ])
-  ),
+// Expected prefs for US.
+const EXPECTED_PREFS_US = {
+  ...EXPECTED_PREFS_BASE_US_GB_EU_3,
+  "addons.featureGate": true,
+  "mdn.featureGate": true,
+  "yelp.featureGate": true,
+};
+
+// Expected prefs for `en` locales in the EU 3 (DE, FR, and IT), e.g., the
+// `en-US` locale in Germany.
+const EXPECTED_PREFS_EU_3_EN = {
+  ...EXPECTED_PREFS_SUGGEST_DISABLED,
+  "quicksuggest.enabled": true,
+  "importantDates.featureGate": true,
+};
+
+// Expected prefs for the EU expansion in 157 (bug 2066294):
+// AT, BE, CH, CZ, DK, ES, FI, HU, IE, LU, NL, NO, PL, PT, SE, SK
+const EXPECTED_PREFS_EU_157 = {
+  ...EXPECTED_PREFS_SUGGEST_DISABLED,
+  "quicksuggest.enabled": true,
+  "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
+  "suggest.quicksuggest.all": true,
+  "suggest.quicksuggest.sponsored": true,
+  "amp.featureGate": true,
+  "wikipedia.featureGate": true,
 };
 
 add_setup(async () => {
   await UrlbarTestUtils.initNimbusFeature();
 });
 
-add_task(async function test() {
+add_task(async function primary() {
   let tests = [
-    // Regions/locales where Suggest should be enabled to some extent
-    { region: "DE", locale: "de" },
-    { region: "DE", locale: "en-GB" },
-    { region: "DE", locale: "en-US" },
+    // US: only `en` locales
+    {
+      region: "US",
+      locale: "en-CA",
+      expectedPrefs: EXPECTED_PREFS_US,
+    },
+    {
+      region: "US",
+      locale: "en-GB",
+      expectedPrefs: EXPECTED_PREFS_US,
+    },
+    {
+      region: "US",
+      locale: "en-US",
+      expectedPrefs: EXPECTED_PREFS_US,
+    },
+    {
+      region: "US",
+      locale: "es-MX",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
 
-    { region: "FR", locale: "fr" },
-    { region: "FR", locale: "en-GB" },
-    { region: "FR", locale: "en-US" },
+    // GB and EU 3 (DE, FR, and IT): native and `en` locales
+    {
+      region: "DE",
+      locale: "de",
+      expectedPrefs: EXPECTED_PREFS_BASE_US_GB_EU_3,
+    },
+    {
+      region: "DE",
+      locale: "en-GB",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "DE",
+      locale: "en-US",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "DE",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
 
-    { region: "GB", locale: "en-US" },
-    { region: "GB", locale: "en-CA" },
-    { region: "GB", locale: "en-GB" },
+    {
+      region: "FR",
+      locale: "fr",
+      expectedPrefs: EXPECTED_PREFS_BASE_US_GB_EU_3,
+    },
+    {
+      region: "FR",
+      locale: "en-GB",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "FR",
+      locale: "en-US",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "FR",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
 
-    { region: "IT", locale: "it" },
-    { region: "IT", locale: "en-GB" },
-    { region: "IT", locale: "en-US" },
+    {
+      region: "GB",
+      locale: "en-GB",
+      expectedPrefs: EXPECTED_PREFS_BASE_US_GB_EU_3,
+    },
+    {
+      region: "GB",
+      locale: "en-US",
+      expectedPrefs: EXPECTED_PREFS_BASE_US_GB_EU_3,
+    },
+    {
+      region: "GB",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
 
-    { region: "US", locale: "en-US" },
-    { region: "US", locale: "en-CA" },
-    { region: "US", locale: "en-GB" },
+    {
+      region: "IT",
+      locale: "it",
+      expectedPrefs: EXPECTED_PREFS_BASE_US_GB_EU_3,
+    },
+    {
+      region: "IT",
+      locale: "en-GB",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "IT",
+      locale: "en-US",
+      expectedPrefs: EXPECTED_PREFS_EU_3_EN,
+    },
+    {
+      region: "IT",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
 
-    // Regions/locales where Suggest should be completely disabled
-    { region: "CA", locale: "en-US" },
-    { region: "CA", locale: "en-CA" },
-    { region: "GB", locale: "de" },
-    { region: "US", locale: "de" },
+    // EU expansion in 157 (bug 2066294): locale doesn't matter, only region
+    {
+      region: "AT",
+      locale: "at",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "BE",
+      locale: "be",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "CH",
+      locale: "ch",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "CZ",
+      locale: "cz",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "DK",
+      locale: "dk",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "ES",
+      locale: "es",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "FI",
+      locale: "fi",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "HU",
+      locale: "hu",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "IE",
+      locale: "ie",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "LU",
+      locale: "lu",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "NL",
+      locale: "nl",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "NO",
+      locale: "no",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "PL",
+      locale: "pl",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "PT",
+      locale: "pt",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "SE",
+      locale: "se",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+    {
+      region: "SK",
+      locale: "sk",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+
+    {
+      region: "AT",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+
+    // regions where Suggest should be completely disabled
+    {
+      region: "JP",
+      locale: "ja",
+      expectedPrefs: EXPECTED_PREFS_SUGGEST_DISABLED,
+    },
   ];
 
-  for (let { locale, region } of tests) {
-    await doTest({ locale, region });
+  for (let { locale, region, expectedPrefs } of tests) {
+    await doPrimaryTest({ locale, region, expectedPrefs });
   }
 });
 
@@ -150,12 +292,10 @@ add_task(async function test() {
  *   The locale to simulate.
  * @param {string} options.region
  *   The "home" region to simulate.
+ * @param {object} options.expectedPrefs
+ *   Map from pref names (relative to `browser.urlbar.`) to expected values.
  */
-async function doTest({ locale, region }) {
-  let expectedPrefs =
-    EXPECTED_PREFS_BY_LOCALE_BY_REGION[region]?.[locale] ??
-    EXPECTED_PREFS_SUGGEST_DISABLED;
-
+async function doPrimaryTest({ locale, region, expectedPrefs }) {
   let defaultBranch = new Preferences({
     branch: "browser.urlbar.",
     defaultBranch: true,
@@ -216,4 +356,181 @@ async function doTest({ locale, region }) {
       defaultBranch.set(name, originalDefault);
     }
   }
+}
+
+// Online Suggest should be available at the time Suggest is initialized if: the
+// the user has accepted ToU, and Suggest overall is enabled. Online Suggest
+// should not be available otherwise.
+add_task(async function onlineAvailable_init() {
+  let tests = [
+    // Online should be available iff ToU are accepted
+    {
+      touAcceptedDate: 0,
+      expected: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+    },
+    {
+      touAcceptedDate: SUGGEST_TOU_TIMESTAMP - 1,
+      expected: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+    },
+    {
+      touAcceptedDate: SUGGEST_TOU_TIMESTAMP,
+      expected: {
+        "quicksuggest.online.available": true,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.FULL,
+        "flightStatus.featureGate": true,
+        "market.featureGate": true,
+        "sports.featureGate": true,
+      },
+    },
+
+    // ToU accepted but region/locale where Suggest is not enabled: online
+    // should be unavailable
+    {
+      region: "JP",
+      locale: "ja",
+      touAcceptedDate: SUGGEST_TOU_TIMESTAMP,
+      expected: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.NONE,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+    },
+  ];
+
+  for (let { region, locale, touAcceptedDate, expected } of tests) {
+    await doOnlineAvailableTest({
+      region,
+      locale,
+      touAcceptedDate,
+      expected,
+    });
+  }
+});
+
+// Online Suggest should become available at the time the user accepts ToU if
+// Suggest overall is enabled. Online Suggest should remain unavailable
+// otherwise.
+add_task(async function onlineAvailable_onToUAccepted() {
+  // `QuickSuggest.init` must be called so it adds itself as a `UrlbarPrefs`
+  // observer.
+  await QuickSuggest.init();
+
+  let tests = [
+    {
+      region: "US",
+      locale: "en-US",
+      expectedBefore: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.OFFLINE_ONLY,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+      expectedAfter: {
+        "quicksuggest.online.available": true,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.FULL,
+        "flightStatus.featureGate": true,
+        "market.featureGate": true,
+        "sports.featureGate": true,
+      },
+    },
+    // region/locale where Suggest is not enabled
+    {
+      region: "JP",
+      locale: "ja",
+      expectedBefore: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.NONE,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+      // same as `expectedBefore`
+      expectedAfter: {
+        "quicksuggest.online.available": false,
+        "quicksuggest.settingsUi": QuickSuggest.SETTINGS_UI.NONE,
+        "flightStatus.featureGate": false,
+        "market.featureGate": false,
+        "sports.featureGate": false,
+      },
+    },
+  ];
+
+  for (let { region, locale, expectedBefore, expectedAfter } of tests) {
+    await doOnlineAvailableTest({
+      region,
+      locale,
+      touAcceptedDate: 0,
+      expected: expectedBefore,
+      callback: async () => {
+        info("Setting ToU accepted date");
+        Services.prefs.setCharPref(
+          TelemetryReportingPolicy.TOU_ACCEPTED_DATE_PREF,
+          SUGGEST_TOU_TIMESTAMP
+        );
+        for (let [name, value] of Object.entries(expectedAfter)) {
+          Assert.equal(
+            UrlbarPrefs.get(name),
+            value,
+            "Pref should have expected value after accepting ToU: " + name
+          );
+        }
+      },
+    });
+  }
+});
+
+async function doOnlineAvailableTest({
+  touAcceptedDate,
+  expected,
+  region = "US",
+  locale = "en-US",
+  callback = null,
+}) {
+  info(
+    "Doing online-available test: " +
+      JSON.stringify({
+        region,
+        locale,
+        touAcceptedDate,
+        expected,
+      })
+  );
+
+  // Set the ToU acceptance date.
+  Services.prefs.setCharPref(
+    TelemetryReportingPolicy.TOU_ACCEPTED_DATE_PREF,
+    touAcceptedDate
+  );
+
+  await QuickSuggestTestUtils.withRegionAndLocale({
+    region,
+    locale,
+    callback: async () => {
+      for (let [name, value] of Object.entries(expected)) {
+        Assert.equal(
+          UrlbarPrefs.get(name),
+          value,
+          "Pref should have expected value: " + name
+        );
+      }
+      await callback?.();
+    },
+  });
+
+  Services.prefs.clearUserPref(TelemetryReportingPolicy.TOU_ACCEPTED_DATE_PREF);
 }

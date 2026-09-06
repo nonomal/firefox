@@ -57,6 +57,7 @@ const TEST_DATA = [
     },
     expected: {
       country: "US",
+      region: "San Francisco",
       city: "San Francisco",
     },
   },
@@ -80,7 +81,7 @@ add_task(async function () {
   // server.
   MerinoTestUtils.server.response.body.suggestions = [];
 
-  let controller = UrlbarTestUtils.newMockController();
+  let controller = UrlbarTestUtils.mockChildController();
 
   for (let [index, { geolocation, expected }] of TEST_DATA.entries()) {
     info(`Test for ${JSON.stringify(geolocation)}`);
@@ -99,6 +100,7 @@ add_task(async function () {
           [MerinoTestUtils.SEARCH_PARAMS.QUERY]: "",
           [MerinoTestUtils.SEARCH_PARAMS.PROVIDERS]: "accuweather",
           [MerinoTestUtils.SEARCH_PARAMS.SEQUENCE_NUMBER]: index,
+          request_type: "weather",
           source: "urlbar",
           ...expected,
         },

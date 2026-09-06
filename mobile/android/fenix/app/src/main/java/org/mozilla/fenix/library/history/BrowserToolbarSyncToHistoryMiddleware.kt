@@ -9,18 +9,17 @@ import mozilla.components.compose.browser.toolbar.store.BrowserToolbarAction.Exi
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarState
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarStore
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 import org.mozilla.fenix.library.history.HistoryFragmentAction.SearchDismissed
 
 /**
- * [BrowserToolbarStore] middleware that will synchronize history searches being ended
- * when the toolbar exits search mode.
+ * [BrowserToolbarStore] middleware that will synchronize history searches being ended when the toolbar exits search
+ * mode.
  */
-class BrowserToolbarSyncToHistoryMiddleware(
-    private val historyStore: HistoryFragmentStore,
-) : Middleware<BrowserToolbarState, BrowserToolbarAction> {
+class BrowserToolbarSyncToHistoryMiddleware(private val historyStore: HistoryFragmentStore) :
+    Middleware<BrowserToolbarState, BrowserToolbarAction> {
     override fun invoke(
-        context: MiddlewareContext<BrowserToolbarState, BrowserToolbarAction>,
+        store: Store<BrowserToolbarState, BrowserToolbarAction>,
         next: (BrowserToolbarAction) -> Unit,
         action: BrowserToolbarAction,
     ) {

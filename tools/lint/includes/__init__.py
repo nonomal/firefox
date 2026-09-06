@@ -28,17 +28,6 @@ def generate_diff(path, raw_content, line_to_delete):
     return diff
 
 
-def fix(path, raw_content, line_to_delete):
-    prev_content = raw_content.split("\n")
-    new_content = [
-        raw_line
-        for lineno, raw_line in enumerate(prev_content, start=1)
-        if lineno != line_to_delete
-    ]
-    with open(path, "w") as outfd:
-        outfd.write("\n".join(new_content))
-
-
 symbol_pattern = r"\b{}\b"
 literal_pattern = r'[0-9."\']{}\b'
 
@@ -51,10 +40,44 @@ categories_pattern = {
 }
 
 
-def lint(paths, config, **lintargs):
-    results = {"results": [], "fixed": 0}
+def check_mfbt_headers(path, raw_content, config):
+    """Return list of (lineno, msg) for unused mfbt headers."""
+    supported_keys = "variables", "functions", "macros", "types", "literals"
+    unused = []
 
+    for header, categories in description.items():
+        assert set(categories.keys()).issubset(supported_keys)
+
+        if path.endswith(f"mfbt/{header}") or path.endswith(f"mfbt/{header[:-1]}.cpp"):
+            continue
+
+        headerline = rf'#\s*include "mozilla/{header}"'
+        if not (match := re.search(headerline, raw_content)):
+            continue
+
+        content = raw_content.replace(f'"mozilla/{header}"', "")
+
+        for category, pattern in categories_pattern.items():
+            identifiers = categories.get(category, [])
+            if any(
+                re.search(pattern.format(identifier), content)
+                for identifier in identifiers
+            ):
+                break
+        else:
+            msg = f"{path} includes {header} but does not reference any of its API"
+            lineno = 1 + raw_content.count("\n", 0, match.start())
+            unused.append((lineno, msg))
+
+    return unused
+
+
+def lint(paths, config, **lintargs):
+    import diskarzhan
+
+    results = {"results": [], "fixed": 0}
     paths = list(expand_exclusions(paths, config, lintargs["root"]))
+    fix = lintargs.get("fix")
 
     for path in paths:
         try:
@@ -63,49 +86,27 @@ def lint(paths, config, **lintargs):
         except UnicodeDecodeError:
             continue
 
-        supported_keys = "variables", "functions", "macros", "types", "literals"
+        mfbt_results = check_mfbt_headers(path, raw_content, config)
+        diskarzhan_results = diskarzhan.diskarzhan.lint_std_headers(path, raw_content)
+        diskarzhan_results += diskarzhan.diskarzhan.lint_cstd_headers(path, raw_content)
 
-        for header, categories in description.items():
-            assert set(categories.keys()).issubset(supported_keys)
+        all_results = mfbt_results + diskarzhan_results
 
-            if path.endswith(f"mfbt/{header}") or path.endswith(
-                f"mfbt/{header[:-1]}.cpp"
-            ):
-                continue
-
-            headerline = rf'#\s*include "mozilla/{header}"'
-            if not re.search(headerline, raw_content):
-                continue
-
-            content = raw_content.replace(f'"mozilla/{header}"', "")
-
-            for category, pattern in categories_pattern.items():
-                identifiers = categories.get(category, [])
-                if any(
-                    re.search(pattern.format(identifier), content)
-                    for identifier in identifiers
-                ):
-                    break
-            else:
-                msg = f"{path} includes {header} but does not reference any of its API"
-                for lineno, raw_line in enumerate(raw_content.split("\n"), start=1):
-                    if re.search(headerline, raw_line):
-                        break
-
-                if lintargs.get("fix"):
-                    fix(path, raw_content, lineno)
-                    results["fixed"] += 1
-                else:
-                    diff = generate_diff(path, raw_content, lineno)
-
-                    results["results"].append(
-                        result.from_config(
-                            config,
-                            path=path,
-                            message=msg,
-                            level="error",
-                            lineno=lineno,
-                            diff=diff,
-                        )
+        if fix:
+            if all_results:
+                diskarzhan.diskarzhan.fix_includes(path, raw_content, all_results)
+                results["fixed"] += len(all_results)
+        else:
+            for lineno, msg in all_results:
+                results["results"].append(
+                    result.from_config(
+                        config,
+                        path=path,
+                        message=msg,
+                        level="error",
+                        lineno=lineno,
+                        diff=generate_diff(path, raw_content, lineno),
                     )
+                )
+
     return results

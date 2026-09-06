@@ -4,6 +4,7 @@
 
 //! A type to represent a namespace.
 
+use crate::derives::*;
 use crate::gecko_bindings::structs::nsAtom;
 use crate::string_cache::{Atom, WeakAtom};
 use precomputed_hash::PrecomputedHash;
@@ -83,7 +84,7 @@ impl WeakNamespace {
     /// Trivially construct a WeakNamespace.
     #[inline]
     pub unsafe fn new<'a>(atom: *mut nsAtom) -> &'a Self {
-        &*(atom as *const WeakNamespace)
+        unsafe { &*(atom as *const WeakNamespace) }
     }
 
     /// Clone this WeakNamespace to obtain a strong reference to the same

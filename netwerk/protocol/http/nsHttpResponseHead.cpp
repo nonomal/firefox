@@ -1,23 +1,22 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=4 sw=2 sts=2 et cin: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // HttpLog.h should generally be included first
-#include "HttpLog.h"
+#include "nsHttpResponseHead.h"
 
-#include "mozilla/dom/MimeType.h"
+#include <algorithm>
+
+#include "CacheControlParser.h"
+#include "HttpLog.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/TextUtils.h"
-#include "nsHttpResponseHead.h"
+#include "mozilla/dom/MimeType.h"
+#include "nsCRT.h"
 #include "nsIHttpHeaderVisitor.h"
 #include "nsPrintfCString.h"
-#include "prtime.h"
-#include "nsCRT.h"
 #include "nsURLHelper.h"
-#include "CacheControlParser.h"
-#include <algorithm>
+#include "prtime.h"
 
 namespace mozilla {
 namespace net {
@@ -106,7 +105,7 @@ nsHttpResponseHead::nsHttpResponseHead(nsHttpResponseHead&& aOther) {
   mCacheControlMaxAgeSet = std::move(other.mCacheControlMaxAgeSet);
   mCacheControlMaxAge = std::move(other.mCacheControlMaxAge);
   mPragmaNoCache = std::move(other.mPragmaNoCache);
-  mInVisitHeaders = false;
+  mInVisitHeaders = 0;
 }
 
 HttpVersion nsHttpResponseHead::Version() const {
@@ -290,8 +289,10 @@ void nsHttpResponseHead::Flatten(nsACString& buf, bool pruneTransients) {
     buf.AppendLiteral("1.0 ");
   }
 
-  buf.Append(nsPrintfCString("%u", unsigned(mStatus)) + " "_ns + mStatusText +
-             "\r\n"_ns);
+  buf.AppendInt(mStatus);
+  buf.Append(' ');
+  buf.Append(mStatusText);
+  buf.AppendLiteral("\r\n");
 
   mHeaders.Flatten(buf, false, pruneTransients);
 }
@@ -304,6 +305,25 @@ void nsHttpResponseHead::FlattenNetworkOriginalHeaders(nsACString& buf) {
 
   mHeaders.FlattenOriginalHeader(buf);
 }
+
+class ResponseHeaderVisitor : public nsIHttpHeaderVisitor {
+  using callbackType =
+      std::function<void(const nsACString& aName, const nsACString& aValue)>;
+  NS_DECL_ISUPPORTS
+  explicit ResponseHeaderVisitor(callbackType&& aCallback)
+      : mCallback(std::move(aCallback)) {}
+
+  NS_IMETHOD VisitHeader(const nsACString& aName,
+                         const nsACString& aValue) override {
+    mCallback(aName, aValue);
+    return NS_OK;
+  }
+
+ private:
+  virtual ~ResponseHeaderVisitor() = default;
+  callbackType mCallback;
+};
+NS_IMPL_ISUPPORTS(ResponseHeaderVisitor, nsIHttpHeaderVisitor)
 
 nsresult nsHttpResponseHead::ParseCachedHead(const char* block) {
   RecursiveMutexAutoLock monitor(mRecursiveMutex);
@@ -330,6 +350,15 @@ nsresult nsHttpResponseHead::ParseCachedHead(const char* block) {
 
   } while (true);
 
+  // fixup content-type header.
+  mContentTypeBuffer.Truncate();
+  RefPtr<ResponseHeaderVisitor> visitor = new ResponseHeaderVisitor(
+      [&](const nsACString& aName, const nsACString& aValue)
+          MOZ_REQUIRES(mRecursiveMutex) {
+            MOZ_ASSERT(nsHttp::Content_Type.val().EqualsIgnoreCase(aName));
+            ParseContentTypeValue(nsHttp::ResolveAtom(aName), aValue);
+          });
+  (void)mHeaders.GetOriginalHeader(nsHttp::Content_Type, visitor);
   return NS_OK;
 }
 
@@ -456,6 +485,33 @@ nsresult nsHttpResponseHead::ParseHeaderLine(const nsACString& line) {
   return ParseHeaderLine_locked(line, true);
 }
 
+void nsHttpResponseHead::ParseContentTypeValue(const nsHttpAtom& aAtom,
+                                               const nsACString& aValue) {
+  if (!mContentTypeBuffer.IsEmpty()) {
+    mContentTypeBuffer.AppendLiteral(",");
+  }
+  mContentTypeBuffer.Append(aValue);
+  mContentType.Truncate();
+  mContentCharset.Truncate();
+  if (CMimeType::Parse(mContentTypeBuffer, mContentType, mContentCharset)) {
+  } else if (StaticPrefs::network_http_fallback_to_net_parse_ct()) {
+    bool dummy;
+    net_ParseContentType(aValue, mContentType, mContentCharset, &dummy);
+  }
+  LOG(("ParseContentType [input=%s, type=%s, charset=%s]\n",
+       nsPromiseFlatCString(aValue).get(), mContentType.get(),
+       mContentCharset.get()));
+
+  nsAutoCString existingHeader;
+  if (NS_SUCCEEDED(mHeaders.GetHeader(aAtom, existingHeader)) &&
+      existingHeader != mContentTypeBuffer) {
+    // Always set the header to the merged buffer, as per Fetch spec.
+    DebugOnly<nsresult> rv = mHeaders.SetHeader(
+        aAtom, mContentTypeBuffer, false, nsHttpHeaderArray::eVarietyResponse);
+    MOZ_ASSERT(NS_SUCCEEDED(rv));
+  }
+}
+
 nsresult nsHttpResponseHead::ParseHeaderLine_locked(
     const nsACString& line, bool originalFromNetHeaders) {
   nsHttpAtom hdr;
@@ -499,14 +555,7 @@ nsresult nsHttpResponseHead::ParseHeaderLine_locked(
     }
 
   } else if (hdr == nsHttp::Content_Type) {
-    if (StaticPrefs::network_standard_content_type_parsing_response_headers() &&
-        CMimeType::Parse(val, mContentType, mContentCharset)) {
-    } else {
-      bool dummy;
-      net_ParseContentType(val, mContentType, mContentCharset, &dummy);
-    }
-    LOG(("ParseContentType [input=%s, type=%s, charset=%s]\n", val.get(),
-         mContentType.get(), mContentCharset.get()));
+    ParseContentTypeValue(hdr, val);
   } else if (hdr == nsHttp::Cache_Control) {
     ParseCacheControl(mHeaders.PeekHeader(hdr));
   } else if (hdr == nsHttp::Pragma) {
@@ -1152,9 +1201,9 @@ nsresult nsHttpResponseHead::ParseResponseContentLength(
 nsresult nsHttpResponseHead::VisitHeaders(
     nsIHttpHeaderVisitor* visitor, nsHttpHeaderArray::VisitorFilter filter) {
   RecursiveMutexAutoLock monitor(mRecursiveMutex);
-  mInVisitHeaders = true;
+  ++mInVisitHeaders;
   nsresult rv = mHeaders.VisitHeaders(visitor, filter);
-  mInVisitHeaders = false;
+  --mInVisitHeaders;
   return rv;
 }
 
@@ -1193,9 +1242,9 @@ NS_IMPL_ISUPPORTS(ContentTypeOptionsVisitor, nsIHttpHeaderVisitor)
 nsresult nsHttpResponseHead::GetOriginalHeader(const nsHttpAtom& aHeader,
                                                nsIHttpHeaderVisitor* aVisitor) {
   RecursiveMutexAutoLock monitor(mRecursiveMutex);
-  mInVisitHeaders = true;
+  ++mInVisitHeaders;
   nsresult rv = mHeaders.GetOriginalHeader(aHeader, aVisitor);
-  mInVisitHeaders = false;
+  --mInVisitHeaders;
   return rv;
 }
 

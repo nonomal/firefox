@@ -12,6 +12,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ThemeContentPropertyList: "resource:///modules/ThemeVariableMap.sys.mjs",
   ThemeVariableMap: "resource:///modules/ThemeVariableMap.sys.mjs",
   BuiltInThemeConfig: "resource:///modules/BuiltInThemeConfig.sys.mjs",
+  LightweightThemeManager:
+    "resource://gre/modules/LightweightThemeManager.sys.mjs",
 });
 
 // Whether the content and chrome areas should always use the same color
@@ -55,19 +57,19 @@ const toolkitVariableMap = [
     },
   ],
   [
-    "--arrowpanel-background",
+    "--panel-background-color",
     {
       lwtProperty: "popup",
     },
   ],
   [
-    "--arrowpanel-color",
+    "--panel-text-color",
     {
       lwtProperty: "popup_text",
     },
   ],
   [
-    "--arrowpanel-border-color",
+    "--panel-border-color",
     {
       lwtProperty: "popup_border",
     },
@@ -80,19 +82,19 @@ const toolkitVariableMap = [
     },
   ],
   [
-    "--toolbar-bgcolor",
+    "--toolbar-background-color",
     {
       lwtProperty: "toolbarColor",
     },
   ],
   [
-    "--toolbar-color",
+    "--toolbar-text-color",
     {
       lwtProperty: "toolbar_text",
     },
   ],
   [
-    "--toolbar-field-color",
+    "--toolbar-field-text-color",
     {
       lwtProperty: "toolbar_field_text",
       fallbackColor: "black",
@@ -106,7 +108,7 @@ const toolkitVariableMap = [
     },
   ],
   [
-    "--toolbar-field-focus-background-color",
+    "--toolbar-field-background-color-focus",
     {
       lwtProperty: "toolbar_field_focus",
       fallbackProperty: "toolbar_field",
@@ -130,7 +132,7 @@ const toolkitVariableMap = [
     },
   ],
   [
-    "--toolbar-field-focus-color",
+    "--toolbar-field-text-color-focus",
     {
       lwtProperty: "toolbar_field_text_focus",
       fallbackProperty: "toolbar_field_text",
@@ -138,7 +140,7 @@ const toolkitVariableMap = [
     },
   ],
   [
-    "--toolbar-field-focus-border-color",
+    "--toolbar-field-border-color-focus",
     {
       lwtProperty: "toolbar_field_border_focus",
     },
@@ -217,15 +219,50 @@ const toolkitVariableMap = [
   ],
 ];
 
+LightweightThemeConsumer.init = function (window) {
+  new LightweightThemeConsumer(window.document);
+};
+
 export function LightweightThemeConsumer(aDocument) {
   this._doc = aDocument;
   this._win = aDocument.defaultView;
   this._winId = this._win.docShell.outerWindowID;
+  this._isAIWindow = this._doc.documentElement.hasAttribute("ai-window");
+  this._isPrivateWindow = lazy.PrivateBrowsingUtils.isWindowPrivate(this._win);
 
   XPCOMUtils.defineLazyPreferenceGetter(
     this,
     "FORCED_COLORS_OVERRIDE_ENABLED",
     "browser.theme.forced-colors-override.enabled",
+    true,
+    () => this._update(this._lastData)
+  );
+
+  XPCOMUtils.defineLazyPreferenceGetter(
+    this,
+    "BROWSER_NOVA_ENABLED",
+    "browser.nova.enabled",
+    false,
+    () => this._update(this._lastData)
+  );
+
+  XPCOMUtils.defineLazyPreferenceGetter(
+    this,
+    "_toolbarTheme",
+    "browser.theme.toolbar-theme",
+    2,
+    () => {
+      if (this._isAIWindow) {
+        this._update(this._lastData);
+      }
+    }
+  );
+
+  // Whether we should switch to a dark theme variant in private windows
+  XPCOMUtils.defineLazyPreferenceGetter(
+    this,
+    "BROWSER_THEME_DARK_PRIVATE_WINDOWS",
+    "browser.theme.dark-private-windows",
     true,
     () => this._update(this._lastData)
   );
@@ -238,10 +275,14 @@ export function LightweightThemeConsumer(aDocument) {
   this.forcedColorsMediaQuery = this._win.matchMedia("(forced-colors)");
   this.forcedColorsMediaQuery.addListener(this);
 
-  const { LightweightThemeManager } = ChromeUtils.importESModule(
-    "resource://gre/modules/LightweightThemeManager.sys.mjs"
-  );
-  this._update(LightweightThemeManager.themeData);
+  this._aiWindowObserver = new this._win.MutationObserver(() => {
+    this.toggleAIWindowMode(this._win);
+  });
+  this._aiWindowObserver.observe(this._doc.documentElement, {
+    attributeFilter: ["ai-window"],
+  });
+
+  this._update(lazy.LightweightThemeManager.themeData);
 
   this._win.addEventListener("unload", this, { once: true });
 }
@@ -275,6 +316,8 @@ LightweightThemeConsumer.prototype = {
       case "unload":
         Services.obs.removeObserver(this, "lightweight-theme-styling-update");
         Services.ppmm.sharedData.delete(`theme/${this._winId}`);
+        this._aiWindowObserver?.disconnect();
+        this._aiWindowObserver = null;
         this._win = this._doc = null;
         this.darkThemeMediaQuery?.removeListener(this);
         this.darkThemeMediaQuery = null;
@@ -285,14 +328,68 @@ LightweightThemeConsumer.prototype = {
   },
 
   _update(themeData) {
-    this._lastData = themeData;
+    const manager = lazy.LightweightThemeManager;
 
-    let supportsDarkTheme =
-      !!themeData.darkTheme ||
-      !themeData.theme ||
-      themeData.theme.id == DEFAULT_THEME_ID;
+    // Store user's theme before replacing with aiThemeData or privateThemeData.
+    this._lastData = themeData;
+    let isPrivateThemeActive = false;
+
+    const shouldMakePrivateWindowDark =
+      this._isPrivateWindow &&
+      !lazy.PrivateBrowsingUtils.permanentPrivateBrowsing &&
+      this.BROWSER_THEME_DARK_PRIVATE_WINDOWS;
+    const themeId = themeData.theme?.id ?? DEFAULT_THEME_ID;
+    // Used to set a `theme-in-app` attribute to allow rules to apply to default/in-app themes only
+    let isDefaultOrInApp =
+      DEFAULT_THEME_ID === themeId ||
+      !!lazy.BuiltInThemeConfig.get(themeId)?.inApp;
+
+    if (this._isAIWindow) {
+      const useNova = this.BROWSER_NOVA_ENABLED;
+      const cachedData = useNova
+        ? manager.aiNovaThemeData
+        : manager.aiThemeData;
+      if (cachedData) {
+        themeData = cachedData;
+        isDefaultOrInApp = true;
+      } else {
+        const promise = useNova
+          ? manager.promiseAINovathemeData()
+          : manager.promiseAIThemeData();
+        promise.then(() => {
+          if (this._isAIWindow && this._win && !this._win.closed) {
+            this._update(this._lastData);
+          }
+        });
+        return;
+      }
+    } else if (
+      shouldMakePrivateWindowDark &&
+      this.BROWSER_NOVA_ENABLED &&
+      isDefaultOrInApp
+    ) {
+      // When in a private window, with nova enabled and any of the in-app themes active,
+      // substitute the built-in private-window theme. Other themes are unchanged.
+      if (manager.privateThemeData) {
+        themeData = manager.privateThemeData;
+        isPrivateThemeActive = true;
+      } else {
+        manager.promisePrivateThemeData().then(() => {
+          if (this._win && !this._win.closed) {
+            this._update(this._lastData);
+          }
+        });
+        return;
+      }
+    }
+
     let updateGlobalThemeData = true;
     const useDarkTheme = (() => {
+      let supportsDarkTheme =
+        !!themeData.darkTheme ||
+        !themeData.theme ||
+        themeData.theme.id == DEFAULT_THEME_ID;
+
       if (!supportsDarkTheme) {
         return false;
       }
@@ -302,11 +399,7 @@ LightweightThemeConsumer.prototype = {
       }
 
       // If enabled, apply the dark theme variant to private browsing windows.
-      if (
-        !Services.prefs.getBoolPref("browser.theme.dark-private-windows") ||
-        !lazy.PrivateBrowsingUtils.isWindowPrivate(this._win) ||
-        lazy.PrivateBrowsingUtils.permanentPrivateBrowsing
-      ) {
+      if (!shouldMakePrivateWindowDark) {
         return false;
       }
       // When applying the dark theme for a PBM window we need to skip setting
@@ -315,6 +408,10 @@ LightweightThemeConsumer.prototype = {
       updateGlobalThemeData = false;
       return true;
     })();
+
+    if (this._isAIWindow || isPrivateThemeActive) {
+      updateGlobalThemeData = false;
+    }
 
     let theme = useDarkTheme ? themeData.darkTheme : themeData.theme;
     let forcedColorsThemeOverride =
@@ -325,11 +422,43 @@ LightweightThemeConsumer.prototype = {
     }
     let builtinThemeConfig = lazy.BuiltInThemeConfig.get(theme.id);
     let hasTheme = theme.id != DEFAULT_THEME_ID && !builtinThemeConfig?.inApp;
-    this._doc.forceNonNativeTheme = !!builtinThemeConfig?.nonNative;
+    this._doc.forceNonNativeTheme = theme.id != DEFAULT_THEME_ID;
+
     let root = this._doc.documentElement;
-    root.toggleAttribute("lwtheme-image", !!(hasTheme && theme.headerURL));
+    root.toggleAttribute("lwtheme-image", !!(hasTheme && theme.headerImage));
+    root.toggleAttribute("theme-in-app", isDefaultOrInApp);
+    // Expose the effective (post-substitution) theme id.
+    root.setAttribute("theme-effective-id", theme.id);
+    // Toolbox background images go either on the `<body>` or on the toolbox
+    // itself. For most themes and pre-nova default theme, it goes on the
+    // `<body>`. For themes that align the image in the y axis, and the nova
+    // default theme, they go on the toolbox.
+    root.toggleAttribute(
+      "theme-image-in-toolbox",
+      (() => {
+        if (theme.backgroundsArea && theme.backgroundsArea != "auto") {
+          return theme.backgroundsArea == "top_toolbars";
+        }
+        if (hasTheme) {
+          return !!theme.backgroundsAlignment?.split(",").some(alignment => {
+            if (alignment == "center" || alignment == "bottom") {
+              return true;
+            }
+            let [, y] = alignment.split(" ");
+            return y == "center" || y == "bottom";
+          });
+        }
+        return this.BROWSER_NOVA_ENABLED;
+      })()
+    );
     this._setExperiment(hasTheme, themeData.experiment, theme.experimental);
-    _setImage(this._win, root, hasTheme, "--lwt-header-image", theme.headerURL);
+    _setImage(
+      this._win,
+      root,
+      hasTheme,
+      "--lwt-header-image",
+      theme.headerImage
+    );
     _setImage(
       this._win,
       root,
@@ -472,15 +601,18 @@ LightweightThemeConsumer.prototype = {
     this._lastExperimentData.usedVariables = usedVariables;
 
     if (experiment.stylesheet) {
-      /* Stylesheet URLs are validated using WebExtension schemas */
-      let stylesheetAttr = `href="${experiment.stylesheet}" type="text/css"`;
-      let stylesheet = this._doc.createProcessingInstruction(
-        "xml-stylesheet",
-        stylesheetAttr
-      );
-      this._doc.insertBefore(stylesheet, root);
+      let stylesheet = this._doc.createElement("link");
+      stylesheet.rel = "stylesheet";
+      // Stylesheet URLs are validated using WebExtension schemas
+      stylesheet.href = experiment.stylesheet;
+      this._doc.head.appendChild(stylesheet);
       this._lastExperimentData.stylesheet = stylesheet;
     }
+  },
+
+  toggleAIWindowMode(win) {
+    this._isAIWindow = win.document.documentElement.hasAttribute("ai-window");
+    this._update(lazy.LightweightThemeManager.themeData);
   },
 };
 
@@ -517,15 +649,26 @@ function _getContentProperties(doc, hasTheme, data) {
   return properties;
 }
 
-function _setImage(aWin, aRoot, aActive, aVariableName, aURLs) {
-  if (aURLs && !Array.isArray(aURLs)) {
-    aURLs = [aURLs];
+function _imageToCss(aWin, aImage) {
+  if (typeof aImage == "object") {
+    // Note that the theme manifest post-processor (validCSSGradient) has
+    // already validated this was a single valid gradient, or returned an
+    // image(transparent) otherwise.
+    const [gradient, args] = Object.entries(aImage)[0];
+    return `${gradient}(${args})`;
+  }
+  return `url(${aWin.CSS.escape(aImage)})`;
+}
+
+function _setImage(aWin, aRoot, aActive, aVariableName, aImages) {
+  if (aImages && !Array.isArray(aImages)) {
+    aImages = [aImages];
   }
   _setProperty(
     aRoot,
     aActive,
     aVariableName,
-    aURLs && aURLs.map(v => `url(${aWin.CSS.escape(v)})`).join(", ")
+    aImages && aImages.map(v => _imageToCss(aWin, v)).join(", ")
   );
 }
 
@@ -562,7 +705,7 @@ function _hasDarkFrame(doc, theme, colors, hasTheme) {
   // background image on top) because some text colors can be dark enough for
   // our heuristics, but still contrast well enough with a dark background,
   // see bug 1743010.
-  if (!theme.headerURL && colors.accentcolor) {
+  if (!theme.headerImage && colors.accentcolor) {
     let color = _cssColorToRGBA(doc, colors.accentcolor);
     if (color.a == 1) {
       return _isColorDark(color.r, color.g, color.b);

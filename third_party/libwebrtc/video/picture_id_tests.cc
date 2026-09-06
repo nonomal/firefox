@@ -14,11 +14,11 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
 
-#include "api/array_view.h"
 #include "api/environment/environment.h"
 #include "api/test/simulated_network.h"
 #include "api/test/video/function_video_encoder_factory.h"
@@ -197,7 +197,7 @@ class PictureIdObserver : public test::RtpRtcpObserver {
     }
   }
 
-  Action OnSendRtp(ArrayView<const uint8_t> packet) override {
+  Action OnSendRtp(std::span<const uint8_t> packet) override {
     MutexLock lock(&mutex_);
 
     ParsedPacket parsed;
@@ -286,6 +286,7 @@ void PictureIdTest::SetupEncoder(VideoEncoderFactory* encoder_factory,
     GetVideoSendConfig()->rtp.payload_name = payload_name;
     GetVideoEncoderConfig()->codec_type =
         PayloadStringToCodecType(payload_name);
+    GetVideoEncoderConfig()->video_format = SdpVideoFormat(payload_name);
     SetVideoEncoderConfig(/* number_of_streams */ 1);
   });
 }

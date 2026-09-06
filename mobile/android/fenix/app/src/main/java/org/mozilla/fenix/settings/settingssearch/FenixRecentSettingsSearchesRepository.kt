@@ -11,28 +11,37 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.mozilla.fenix.settings.datastore.RecentSettingsSearchItem
 import org.mozilla.fenix.settings.datastore.RecentSettingsSearches
-import org.mozilla.fenix.settings.settingssearch.DefaultFenixSettingsIndexer.Companion.preferenceFileInformationList
 
-private val Context.recentSearchesDataStore: DataStore<RecentSettingsSearches> by dataStore(
-    fileName = "recent_searches.pb",
-    serializer = RecentSettingsSearchesSerializer,
-)
+internal val Context.recentSearchesDataStore: DataStore<RecentSettingsSearches> by
+    dataStore(
+        fileName = "recent_searches.pb",
+        serializer = RecentSettingsSearchesSerializer,
+    )
+
+internal val Context.secretRecentSearchesDataStore: DataStore<RecentSettingsSearches> by
+    dataStore(
+        fileName = "secret_settings_recent_searches.pb",
+        serializer = RecentSettingsSearchesSerializer,
+    )
 
 /**
  * Repository for recent searches.
  *
- * @param context The application context.
+ * @param dataStore The DataStore for persisting recent searches.
+ * @param preferenceFileInformationList The list of preference file information used to resolve items.
  */
 class FenixRecentSettingsSearchesRepository(
-    private val context: Context,
+    private val dataStore: DataStore<RecentSettingsSearches>,
+    private val preferenceFileInformationList: List<PreferenceFileInformation>,
 ) : RecentSettingsSearchesRepository {
 
     override val recentSearches: Flow<List<SettingsSearchItem>> =
-        context.recentSearchesDataStore.data.map { protoResult ->
+        dataStore.data.map { protoResult ->
             protoResult.itemsList.mapNotNull { protoItem ->
-                val prefInfo = preferenceFileInformationList.find {
-                    it.xmlResourceId == protoItem.xmlResourceId
-                } ?: return@mapNotNull null
+                val prefInfo =
+                    preferenceFileInformationList.find {
+                        it.xmlResourceId == protoItem.xmlResourceId
+                    } ?: return@mapNotNull null
 
                 SettingsSearchItem(
                     preferenceKey = protoItem.preferenceKey,
@@ -50,17 +59,18 @@ class FenixRecentSettingsSearchesRepository(
      * @param item The [SettingsSearchItem] to add.
      */
     override suspend fun addRecentSearchItem(item: SettingsSearchItem) {
-        context.recentSearchesDataStore.updateData { currentRecents ->
+        dataStore.updateData { currentRecents ->
             val currentItems = currentRecents.itemsList.toMutableList()
 
             currentItems.removeIf { it.preferenceKey == item.preferenceKey }
 
-            val newProtoItem = RecentSettingsSearchItem.newBuilder()
-                .setPreferenceKey(item.preferenceKey)
-                .setTitle(item.title)
-                .setSummary(item.summary)
-                .setXmlResourceId(item.preferenceFileInformation.xmlResourceId)
-                .build()
+            val newProtoItem =
+                RecentSettingsSearchItem.newBuilder()
+                    .setPreferenceKey(item.preferenceKey)
+                    .setTitle(item.title)
+                    .setSummary(item.summary)
+                    .setXmlResourceId(item.preferenceFileInformation.xmlResourceId ?: 0)
+                    .build()
             currentItems.add(0, newProtoItem)
 
             val updatedItems = currentItems.take(MAX_RECENTS)
@@ -68,11 +78,9 @@ class FenixRecentSettingsSearchesRepository(
         }
     }
 
-    /**
-     * Clears all recent search items from the repository.
-     */
+    /** Clears all recent search items from the repository. */
     override suspend fun clearRecentSearches() {
-        context.recentSearchesDataStore.updateData {
+        dataStore.updateData {
             it.toBuilder().clearItems().build()
         }
     }

@@ -1,17 +1,14 @@
-/* -*- Mode: Java; c-basic-offset: 4; tab-width: 4; indent-tabs-mode: nil; -*-
- * Any copyright is dedicated to the Public Domain.
-   http://creativecommons.org/publicdomain/zero/1.0/ */
+/* Any copyright is dedicated to the Public Domain.
+http://creativecommons.org/publicdomain/zero/1.0/ */
 
 package org.mozilla.geckoview.test
 
 import android.content.ClipDescription
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.SpannableString
-import android.text.SpannedString
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
@@ -20,22 +17,29 @@ import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputContentInfo
 import androidx.core.net.toUri
+import androidx.test.ext.junit.rules.ActivityScenarioRule
 import androidx.test.filters.MediumTest
 import androidx.test.platform.app.InstrumentationRegistry
 import org.hamcrest.Matchers.equalTo
 import org.hamcrest.Matchers.not
 import org.hamcrest.Matchers.notNullValue
 import org.junit.Assume.assumeThat
+import org.junit.Before
 import org.junit.Ignore
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 import org.junit.runners.Parameterized.Parameter
+import org.mozilla.geckoview.Autofill
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSession.TextInputDelegate
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
+import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.NullDelegate
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
+import org.mozilla.geckoview.test.util.UiThreadUtils
 
 @MediumTest
 @RunWith(Parameterized::class)
@@ -44,61 +48,90 @@ class TextInputDelegateTest : BaseSessionTest() {
     companion object {
         @get:Parameterized.Parameters(name = "{0}")
         @JvmStatic
-        val parameters: List<Array<out Any>> = listOf(
-            arrayOf("#input"),
-            arrayOf("#textarea"),
-            arrayOf("#contenteditable"),
-            arrayOf("#designmode"),
+        val parameters: List<Array<out Any>> =
+            listOf(
+                arrayOf("#input"),
+                arrayOf("#textarea"),
+                arrayOf("#contenteditable"),
+                arrayOf("#designmode"),
+            )
+
+        private const val EDITABLE_SYNC_TIMEOUT_MILLIS = 2000L
+    }
+
+    @field:Parameter(0) @JvmField var id: String = ""
+
+    val activityRule = ActivityScenarioRule(GeckoViewTestActivity::class.java)
+
+    @get:Rule override val rules: RuleChain = RuleChain.outerRule(activityRule).around(sessionRule)
+
+    @Before
+    fun setup() {
+        // Disable the DOM security feature that filters key events immediately
+        // after navigation. Our tests otherwise may lose events if they send
+        // too fast.
+        sessionRule.setPrefsUntilTestEnd(
+            mapOf(
+                "dom.input_events.security.minTimeElapsedInMS" to 0,
+                "dom.input_events.security.minNumTicks" to 0,
+            )
         )
     }
 
-    @field:Parameter(0)
-    @JvmField
-    var id: String = ""
-
     private var textContent: String
-        get() = when (id) {
-            "#contenteditable" -> mainSession.evaluateJS("document.querySelector('$id').textContent")
-            "#designmode" -> mainSession.evaluateJS("document.querySelector('$id').contentDocument.body.textContent")
-            else -> mainSession.evaluateJS("document.querySelector('$id').value")
-        } as String
+        get() =
+            when (id) {
+                "#contenteditable" -> mainSession.evaluateJS("document.querySelector('$id').textContent")
+                "#designmode" ->
+                    mainSession.evaluateJS("document.querySelector('$id').contentDocument.body.textContent")
+                else -> mainSession.evaluateJS("document.querySelector('$id').value")
+            }
+                as String
         set(content) {
             when (id) {
                 "#contenteditable" -> mainSession.evaluateJS("document.querySelector('$id').textContent = '$content'")
-                "#designmode" -> mainSession.evaluateJS(
-                    "document.querySelector('$id').contentDocument.body.textContent = '$content'",
-                )
+                "#designmode" ->
+                    mainSession.evaluateJS(
+                        "document.querySelector('$id').contentDocument.body.textContent = '$content'"
+                    )
                 else -> mainSession.evaluateJS("document.querySelector('$id').value = '$content'")
             }
         }
 
     private var selectionOffsets: Pair<Int, Int>
-        get() = when (id) {
-            "#contenteditable" -> mainSession.evaluateJS(
-                """[
+        get() =
+            when (id) {
+                    "#contenteditable" ->
+                        mainSession.evaluateJS(
+                            """[
                     document.getSelection().anchorOffset,
-                    document.getSelection().focusOffset]""",
-            )
-            "#designmode" -> mainSession.evaluateJS(
-                """(function() {
+                    document.getSelection().focusOffset]"""
+                        )
+                    "#designmode" ->
+                        mainSession.evaluateJS(
+                            """(function() {
                         var sel = document.querySelector('$id').contentDocument.getSelection();
                         var text = document.querySelector('$id').contentDocument.body.firstChild;
                         return [sel.anchorOffset, sel.focusOffset];
-                    })()""",
-            )
-            else -> mainSession.evaluateJS(
-                """(document.querySelector('$id').selectionDirection !== 'backward'
+                    })()"""
+                        )
+                    else ->
+                        mainSession.evaluateJS(
+                            """(document.querySelector('$id').selectionDirection !== 'backward'
                 ? [ document.querySelector('$id').selectionStart, document.querySelector('$id').selectionEnd ]
-                : [ document.querySelector('$id').selectionEnd, document.querySelector('$id').selectionStart ])""",
-            )
-        }.asJsonArray().let {
-            Pair(it.getInt(0), it.getInt(1))
-        }
+                : [ document.querySelector('$id').selectionEnd, document.querySelector('$id').selectionStart ])"""
+                        )
+                }
+                .asJsonArray()
+                .let {
+                    Pair(it.getInt(0), it.getInt(1))
+                }
         set(offsets) {
             var (start, end) = offsets
             when (id) {
-                "#contenteditable" -> mainSession.evaluateJS(
-                    """(function() {
+                "#contenteditable" ->
+                    mainSession.evaluateJS(
+                        """(function() {
                         let selection = document.getSelection();
                         let text = document.querySelector('$id').firstChild;
                         if (text) {
@@ -106,10 +139,11 @@ class TextInputDelegateTest : BaseSessionTest() {
                         } else {
                             selection.collapse(document.querySelector('$id'), 0);
                         }
-                    })()""",
-                )
-                "#designmode" -> mainSession.evaluateJS(
-                    """(function() {
+                    })()"""
+                    )
+                "#designmode" ->
+                    mainSession.evaluateJS(
+                        """(function() {
                         let selection = document.querySelector('$id').contentDocument.getSelection();
                         let text = document.querySelector('$id').contentDocument.body.firstChild;
                         if (text) {
@@ -117,8 +151,8 @@ class TextInputDelegateTest : BaseSessionTest() {
                         } else {
                             selection.collapse(document.querySelector('$id').contentDocument.body, 0);
                         }
-                    })()""",
-                )
+                    })()"""
+                    )
                 else -> mainSession.evaluateJS("document.querySelector('$id').setSelectionRange($start, $end)")
             }
         }
@@ -128,27 +162,33 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     private fun processChildEvents() {
-        mainSession.waitForJS("new Promise(r => requestAnimationFrame(r))")
+        mainSession.waitForJS("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
     }
 
     private fun setComposingText(ic: InputConnection, text: CharSequence, newCursorPosition: Int) {
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('compositionupdate', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('compositionupdate', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('compositionupdate', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('compositionupdate', r, { once: true }))"
+                }
+            )
         ic.setComposingText(text, newCursorPosition)
         promise.value
     }
 
     private fun finishComposingText(ic: InputConnection) {
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('compositionend', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('compositionend', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('compositionend', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('compositionend', r, { once: true }))"
+                }
+            )
         ic.finishComposingText()
         promise.value
     }
@@ -161,9 +201,11 @@ class TextInputDelegateTest : BaseSessionTest() {
         }
         // InputConnection.commitText might not dispatch composition event if no composition.
         // So we look both input event and compositionend event for the completion.
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> """(function() {
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        """(function() {
                       const doc = document.querySelector('$id').contentDocument;
                       const p1 = new Promise(r => doc.addEventListener('compositionend', r, { once: true }));
                       const p2 = new Promise(
@@ -176,8 +218,10 @@ class TextInputDelegateTest : BaseSessionTest() {
                               }));
                       return Promise.any([p1, p2]);
                     })()
-                """.trimIndent()
-                else -> """(function() {
+                """
+                            .trimIndent()
+                    else ->
+                        """(function() {
                       const element = document.querySelector('$id');
                       const p1 = new Promise(r => element.addEventListener('compositionend', r, { once: true }));
                       const p2 = new Promise(
@@ -190,9 +234,10 @@ class TextInputDelegateTest : BaseSessionTest() {
                               }));
                       return Promise.any([p1, p2]);
                     })()
-                """.trimIndent()
-            },
-        )
+                """
+                            .trimIndent()
+                }
+            )
         ic.commitText(text, newCursorPosition)
         promise.value
 
@@ -205,12 +250,15 @@ class TextInputDelegateTest : BaseSessionTest() {
 
     private fun deleteSurroundingText(ic: InputConnection, before: Int, after: Int) {
         // deleteSurroundingText might fire multiple events.
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
+                }
+            )
         ic.deleteSurroundingText(before, after)
         if (before != 0 || after != 0) {
             promise.value
@@ -220,13 +268,17 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     private fun setSelection(ic: InputConnection, start: Int, end: Int) {
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('selectionchange', r, { once: true }))"
-                "#contenteditable" -> "new Promise(r => document.addEventListener('selectionchange', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('selectionchange', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('selectionchange', r, { once: true }))"
+                    "#contenteditable" ->
+                        "new Promise(r => document.addEventListener('selectionchange', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('selectionchange', r, { once: true }))"
+                }
+            )
         ic.setSelection(start, end)
         promise.value
     }
@@ -239,12 +291,15 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     private fun pressKey(ic: InputConnection, keyCode: Int) {
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('keyup', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('keyup', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('keyup', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('keyup', r, { once: true }))"
+                }
+            )
         pressKeyNoWait(ic, keyCode)
         promise.value
     }
@@ -258,47 +313,48 @@ class TextInputDelegateTest : BaseSessionTest() {
         processParentEvents()
     }
 
-    @Test fun restartInput() {
+    @Test
+    fun restartInput() {
         // Check that restartInput is called on focus and blur.
         mainSession.loadTestPath(INPUTS_PATH)
         mainSession.waitForPageStop()
 
         mainSession.evaluateJS("document.querySelector('$id').focus()")
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 1)
-            override fun restartInput(session: GeckoSession, reason: Int) {
-                assertThat(
-                    "Reason should be correct",
-                    reason,
-                    equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS),
-                )
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 1)
+                override fun restartInput(session: GeckoSession, reason: Int) {
+                    assertThat(
+                        "Reason should be correct",
+                        reason,
+                        equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS),
+                    )
+                }
             }
-        })
+        )
 
         mainSession.evaluateJS("document.querySelector('$id').blur()")
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 1)
-            override fun restartInput(session: GeckoSession, reason: Int) {
-                assertThat(
-                    "Reason should be correct",
-                    reason,
-                    equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_BLUR),
-                )
-            }
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 1)
+                override fun restartInput(session: GeckoSession, reason: Int) {
+                    assertThat(
+                        "Reason should be correct",
+                        reason,
+                        equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_BLUR),
+                    )
+                }
 
-            // Also check that showSoftInput/hideSoftInput are not called before a user action.
-            @AssertCalled(count = 0)
-            override fun showSoftInput(session: GeckoSession) {
-            }
+                // Also check that showSoftInput/hideSoftInput are not called before a user action.
+                @AssertCalled(count = 0) override fun showSoftInput(session: GeckoSession) {}
 
-            @AssertCalled(count = 0)
-            override fun hideSoftInput(session: GeckoSession) {
+                @AssertCalled(count = 0) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
+        )
     }
 
-    @Ignore("https://bugzilla.mozilla.org/show_bug.cgi?id=1988041")
-    @Test fun restartInput_temporaryFocus() {
+    @Test
+    fun restartInput_temporaryFocus() {
         // Our user action trick doesn't work for design-mode, so we can't test that here.
         assumeThat("Not in designmode", id, not(equalTo("#designmode")))
         // Disable for frequent failures Bug 1542525
@@ -315,27 +371,26 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
         mainSession.evaluateJS("document.querySelector('$id').focus()")
 
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 1, order = [1])
-            override fun restartInput(session: GeckoSession, reason: Int) {
-                assertThat(
-                    "Reason should be correct",
-                    reason,
-                    equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS),
-                )
-            }
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 1, order = [1])
+                override fun restartInput(session: GeckoSession, reason: Int) {
+                    assertThat(
+                        "Reason should be correct",
+                        reason,
+                        equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS),
+                    )
+                }
 
-            @AssertCalled(count = 1, order = [2])
-            override fun showSoftInput(session: GeckoSession) {
-            }
+                @AssertCalled(count = 1, order = [2]) override fun showSoftInput(session: GeckoSession) {}
 
-            @AssertCalled(count = 0)
-            override fun hideSoftInput(session: GeckoSession) {
+                @AssertCalled(count = 0) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
+        )
     }
 
-    @Test fun restartInput_temporaryBlur() {
+    @Test
+    fun restartInput_temporaryBlur() {
         // Our user action trick doesn't work for design-mode, so we can't test that here.
         assumeThat("Not in designmode", id, not(equalTo("#designmode")))
 
@@ -355,32 +410,31 @@ class TextInputDelegateTest : BaseSessionTest() {
         // but only one showSoftInput call and no hideSoftInput call.
         mainSession.evaluateJS("document.querySelector('$id').blur(); document.querySelector('$id').focus()")
 
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 2, order = [1])
-            override fun restartInput(session: GeckoSession, reason: Int) {
-                assertThat(
-                    "Reason should be correct",
-                    reason,
-                    equalTo(
-                        forEachCall(
-                            GeckoSession.TextInputDelegate.RESTART_REASON_BLUR,
-                            GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS,
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 2, order = [1])
+                override fun restartInput(session: GeckoSession, reason: Int) {
+                    assertThat(
+                        "Reason should be correct",
+                        reason,
+                        equalTo(
+                            forEachCall(
+                                GeckoSession.TextInputDelegate.RESTART_REASON_BLUR,
+                                GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS,
+                            )
                         ),
-                    ),
-                )
-            }
+                    )
+                }
 
-            @AssertCalled(count = 1, order = [2])
-            override fun showSoftInput(session: GeckoSession) {
-            }
+                @AssertCalled(count = 1, order = [2]) override fun showSoftInput(session: GeckoSession) {}
 
-            @AssertCalled(count = 0)
-            override fun hideSoftInput(session: GeckoSession) {
+                @AssertCalled(count = 0) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
+        )
     }
 
-    @Test fun showHideSoftInput() {
+    @Test
+    fun showHideSoftInput() {
         // Our user action trick doesn't work for design-mode, so we can't test that here.
         assumeThat("Not in designmode", id, not(equalTo("#designmode")))
 
@@ -391,37 +445,31 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
 
         mainSession.evaluateJS("document.querySelector('$id').focus()")
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 1, order = [1])
-            override fun restartInput(session: GeckoSession, reason: Int) {
-            }
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 1, order = [1]) override fun restartInput(session: GeckoSession, reason: Int) {}
 
-            @AssertCalled(count = 1, order = [2])
-            override fun showSoftInput(session: GeckoSession) {
-            }
+                @AssertCalled(count = 1, order = [2]) override fun showSoftInput(session: GeckoSession) {}
 
-            @AssertCalled(count = 0)
-            override fun hideSoftInput(session: GeckoSession) {
+                @AssertCalled(count = 0) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
+        )
 
         mainSession.evaluateJS("document.querySelector('$id').blur()")
-        mainSession.waitUntilCalled(object : TextInputDelegate {
-            @AssertCalled(count = 1, order = [1])
-            override fun restartInput(session: GeckoSession, reason: Int) {
-            }
+        mainSession.waitUntilCalled(
+            object : TextInputDelegate {
+                @AssertCalled(count = 1, order = [1]) override fun restartInput(session: GeckoSession, reason: Int) {}
 
-            @AssertCalled(count = 0)
-            override fun showSoftInput(session: GeckoSession) {
-            }
+                @AssertCalled(count = 0) override fun showSoftInput(session: GeckoSession) {}
 
-            @AssertCalled(count = 1, order = [2])
-            override fun hideSoftInput(session: GeckoSession) {
+                @AssertCalled(count = 1, order = [2]) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
+        )
     }
 
-    @Test fun restartInput_disableEnable() {
+    @WithDisplay(width = 100, height = 100)
+    @Test
+    fun restartInput_disableEnable() {
         assumeThat("input only", id, equalTo("#input"))
 
         mainSession.textInput.view = View(InstrumentationRegistry.getInstrumentation().targetContext)
@@ -432,31 +480,34 @@ class TextInputDelegateTest : BaseSessionTest() {
             """
             document.querySelector('#tel1').value = "123-45"
             document.querySelector('#tel1').focus()
-            """.trimIndent(),
+            """
+                .trimIndent()
         )
         mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
 
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
 
-        mainSession.delegateDuringNextWait(object : TextInputDelegate {
-            @AssertCalled(count = 0)
-            override fun hideSoftInput(session: GeckoSession) {
+        mainSession.delegateDuringNextWait(
+            object : TextInputDelegate {
+                @AssertCalled(count = 0) override fun hideSoftInput(session: GeckoSession) {}
             }
-        })
-
-        var promise = mainSession.evaluatePromiseJS(
-            """
-            new Promise(r =>
-                document.querySelector('#tel1').addEventListener('input', e => {
-                    const element = document.querySelector('#tel1');
-                    element.setAttribute('disabled', 'disabled');
-                    element.value = "123-456";
-                    element.removeAttribute('disabled');
-                    element.focus();
-                    window.setTimeout(r, 100);
-                }, { once: true }));
-            """.trimIndent(),
         )
+
+        var promise =
+            mainSession.evaluatePromiseJS(
+                """
+                new Promise(r =>
+                    document.querySelector('#tel1').addEventListener('input', e => {
+                        const element = document.querySelector('#tel1');
+                        element.setAttribute('disabled', 'disabled');
+                        element.value = "123-456";
+                        element.removeAttribute('disabled');
+                        element.focus();
+                        window.setTimeout(r, 100);
+                    }, { once: true }));
+                """
+                    .trimIndent()
+            )
 
         pressKeyNoWait(ic, KeyEvent.KEYCODE_0)
         promise.value
@@ -464,8 +515,105 @@ class TextInputDelegateTest : BaseSessionTest() {
         assertThat("hideSoftInput isn't called", true, equalTo(true))
     }
 
-    private fun getText(ic: InputConnection) =
-        ic.getExtractedText(ExtractedTextRequest(), 0).text.toString()
+    // When navigating away from a page with a focused input field, the keyboard should be dismissed.
+    @NullDelegate(Autofill.Delegate::class)
+    @Test
+    fun restartInput_dismissAfterNavigation() {
+        assumeThat("input only", id, equalTo("#input"))
+
+        activityRule.scenario.onActivity { activity ->
+            activity.view.setSession(mainSession)
+            mainSession.textInput.view = activity.view
+            activity.view.requestFocus()
+
+            mainSession.loadTestPath(RESUBMIT_CONFIRM)
+            mainSession.waitForPageStop()
+
+            mainSession.evaluateJS("document.querySelector('#text').focus()")
+
+            mainSession.waitUntilCalled(
+                object : TextInputDelegate {
+                    @AssertCalled(count = 1)
+                    override fun restartInput(session: GeckoSession, reason: Int) {
+                        assertThat(
+                            "Reason should be correct",
+                            reason,
+                            equalTo(GeckoSession.TextInputDelegate.RESTART_REASON_FOCUS),
+                        )
+                    }
+                }
+            )
+
+            val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
+            pressKeyNoWait(ic, KeyEvent.KEYCODE_ENTER)
+
+            mainSession.waitUntilCalled(
+                object : TextInputDelegate, GeckoSession.ProgressDelegate {
+                    @AssertCalled(count = 1) override fun hideSoftInput(session: GeckoSession) {}
+
+                    @AssertCalled(count = 1) override fun onPageStop(session: GeckoSession, success: Boolean) {}
+                }
+            )
+
+            assertThat("hideSoftInput is called once", true, equalTo(true))
+        }
+    }
+
+    // For bug 2048921
+    @Test
+    @NullDelegate(Autofill.Delegate::class)
+    fun noDismissKeyboardAfterlostFocus() {
+        assumeThat("input only", id, equalTo("#input"))
+
+        activityRule.scenario.onActivity { activity ->
+            activity.view.setSession(mainSession)
+            mainSession.textInput.view = activity.view
+            activity.view.requestFocus()
+
+            mainSession.loadTestPath(INPUTS_PATH)
+            mainSession.waitForPageStop()
+
+            var dismissCount = 0
+            mainSession.delegateUntilTestEnd(
+                object : TextInputDelegate {
+                    override fun hideSoftInput(session: GeckoSession) {
+                        dismissCount++
+                    }
+                }
+            )
+
+            mainSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
+            mainSession.evaluateJS("document.querySelector('#input').focus()")
+
+            mainSession.waitUntilCalled(
+                object : TextInputDelegate {
+                    @AssertCalled(count = 1) override fun showSoftInput(session: GeckoSession) {}
+                }
+            )
+
+            activity.view.clearFocus()
+            mainSession.evaluateJS("document.querySelector('#input').blur()")
+
+            // Must outlast DISMISS_VKB_DELAY_MS so HideSoftInputTask runs and hits its hasFocus() return.
+            try {
+                UiThreadUtils.waitForCondition({ dismissCount != 0 }, 2000)
+            } catch (e: UiThreadUtils.TimeoutException) {}
+
+            assertThat(
+                "The keyboard should not be dismissed after losing focus.",
+                dismissCount,
+                equalTo(0),
+            )
+        }
+    }
+
+    private fun getText(ic: InputConnection) = ic.getExtractedText(ExtractedTextRequest(), 0)!!.text.toString()
+
+    private fun pumpUntil(condition: () -> Boolean) {
+        try {
+            UiThreadUtils.waitForCondition({ condition() }, EDITABLE_SYNC_TIMEOUT_MILLIS)
+        } catch (e: UiThreadUtils.TimeoutException) {}
+    }
 
     private fun assertText(message: String, actual: String, expected: String) =
         // In an HTML editor, Gecko may insert an additional element that show up as a
@@ -484,6 +632,11 @@ class TextInputDelegateTest : BaseSessionTest() {
         if (checkGecko) {
             assertText(message, textContent, expected)
         }
+
+        pumpUntil {
+            val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+            extracted?.text?.toString()?.trimEnd('\n') == expected
+        }
         assertText(message, getText(ic), expected)
     }
 
@@ -501,7 +654,12 @@ class TextInputDelegateTest : BaseSessionTest() {
             assertThat(message, selectionOffsets, equalTo(Pair(start, end)))
         }
 
-        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        pumpUntil {
+            val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+            extracted != null && extracted.selectionStart == start && extracted.selectionEnd == end
+        }
+
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)!!
         assertThat(message, extracted.selectionStart, equalTo(start))
         assertThat(message, extracted.selectionEnd, equalTo(end))
     }
@@ -511,8 +669,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         ic: InputConnection,
         value: Int,
         checkGecko: Boolean = true,
-    ) =
-        assertSelection(message, ic, value, value, checkGecko)
+    ) = assertSelection(message, ic, value, value, checkGecko)
 
     private fun assertTextAndSelection(
         message: String,
@@ -530,7 +687,15 @@ class TextInputDelegateTest : BaseSessionTest() {
             assertThat(message, selectionOffsets, equalTo(Pair(start, end)))
         }
 
-        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        pumpUntil {
+            val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+            extracted != null &&
+                extracted.text?.toString()?.trimEnd('\n') == expected &&
+                extracted.selectionStart == start &&
+                extracted.selectionEnd == end
+        }
+
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)!!
         assertText(message, extracted.text.toString(), expected)
         assertThat(message, extracted.selectionStart, equalTo(start))
         assertThat(message, extracted.selectionEnd, equalTo(end))
@@ -542,16 +707,9 @@ class TextInputDelegateTest : BaseSessionTest() {
         expected: String,
         value: Int,
         checkGecko: Boolean = true,
-    ) =
-        assertTextAndSelection(message, ic, expected, value, value, checkGecko)
+    ) = assertTextAndSelection(message, ic, expected, value, value, checkGecko)
 
     private fun setupContent(content: String) {
-        sessionRule.setPrefsUntilTestEnd(
-            mapOf(
-                "dom.select_events.textcontrols.enabled" to true,
-            ),
-        )
-
         mainSession.textInput.view = View(InstrumentationRegistry.getInstrumentation().targetContext)
 
         mainSession.loadTestPath(INPUTS_PATH)
@@ -563,8 +721,6 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     // Test setSelection
-    @Ignore
-    // Disable for frequent timeout for selection event.
     @WithDisplay(width = 512, height = 512)
     // Child process updates require having a display.
     @Test
@@ -627,12 +783,11 @@ class TextInputDelegateTest : BaseSessionTest() {
             ic,
             "foobarfoo",
             5,
-            /* checkGecko */
+            // checkGecko
             false,
         )
     }
 
-    @Ignore("https://bugzilla.mozilla.org/show_bug.cgi?id=1988041")
     // Test deleteSurroundingText
     @WithDisplay(width = 512, height = 512)
     // Child process updates require having a display.
@@ -733,7 +888,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             ic,
             "frabar",
             6,
-            /* checkGecko */
+            // checkGecko
             false,
         )
 
@@ -770,7 +925,7 @@ class TextInputDelegateTest : BaseSessionTest() {
 
     @WithDisplay(width = 512, height = 512)
     // Child process updates require having a display.
-    @Ignore("Failing frequently, see: https://bugzilla.mozilla.org/show_bug.cgi?id=1741790")
+    @Ignore("Forward selection is lost on the Java side, see bug 2067617")
     @Test
     fun inputConnection_selectionByArrowKey() {
         setupContent("")
@@ -783,13 +938,14 @@ class TextInputDelegateTest : BaseSessionTest() {
 
         // backward selection test
         var time = SystemClock.uptimeMillis()
-        var shiftKey = KeyEvent(
-            time,
-            time,
-            KeyEvent.ACTION_DOWN,
-            KeyEvent.KEYCODE_SHIFT_LEFT,
-            0,
-        )
+        var shiftKey =
+            KeyEvent(
+                time,
+                time,
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                0,
+            )
         ic.sendKeyEvent(shiftKey)
         pressKey(ic, KeyEvent.KEYCODE_DPAD_LEFT)
         processChildEvents()
@@ -808,13 +964,14 @@ class TextInputDelegateTest : BaseSessionTest() {
 
         // forward selection test
         time = SystemClock.uptimeMillis()
-        shiftKey = KeyEvent(
-            time,
-            time,
-            KeyEvent.ACTION_DOWN,
-            KeyEvent.KEYCODE_SHIFT_LEFT,
-            0,
-        )
+        shiftKey =
+            KeyEvent(
+                time,
+                time,
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                0,
+            )
         ic.sendKeyEvent(shiftKey)
         pressKey(ic, KeyEvent.KEYCODE_DPAD_RIGHT)
         processChildEvents()
@@ -841,22 +998,27 @@ class TextInputDelegateTest : BaseSessionTest() {
         assertTextAndSelectionAt("Can commit text", ic, "frabar", 6)
 
         val time = SystemClock.uptimeMillis()
-        val shiftKey = KeyEvent(
-            time,
-            time,
-            KeyEvent.ACTION_DOWN,
-            KeyEvent.KEYCODE_SHIFT_LEFT,
-            0,
-        )
+        val shiftKey =
+            KeyEvent(
+                time,
+                time,
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                0,
+            )
 
         // Wait for selection change
-        var promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('selectionchange', r, { once: true }))"
-                "#contenteditable" -> "new Promise(r => document.addEventListener('selectionchange', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('selectionchange', r, { once: true }))"
-            },
-        )
+        var promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('selectionchange', r, { once: true }))"
+                    "#contenteditable" ->
+                        "new Promise(r => document.addEventListener('selectionchange', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('selectionchange', r, { once: true }))"
+                }
+            )
 
         ic.sendKeyEvent(shiftKey)
         pressKey(ic, KeyEvent.KEYCODE_DPAD_LEFT)
@@ -875,12 +1037,15 @@ class TextInputDelegateTest : BaseSessionTest() {
             5,
         )
 
-        promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
-            },
-        )
+        promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
+                }
+            )
 
         pressKey(ic, KeyEvent.KEYCODE_T)
         promise.value
@@ -914,16 +1079,19 @@ class TextInputDelegateTest : BaseSessionTest() {
     // Child process updates require having a display.
     @Test
     fun inputConnection_largeText() {
-        val content = (1..102400).map {
-            ('a'..'z').random()
-        }.joinToString("")
+        val content =
+            (1..102400)
+                .map {
+                    ('a'..'z').random()
+                }
+                .joinToString("")
         setupContent(content)
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
         assertText(
             "Can set large initial text",
             ic,
             content,
-            /* checkGecko */
+            // checkGecko
             false,
         )
     }
@@ -945,9 +1113,11 @@ class TextInputDelegateTest : BaseSessionTest() {
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
         assertText("Set initial text", ic, "")
 
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> """
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        """
                         new Promise((resolve, reject) => document.querySelector('$id').contentDocument.addEventListener('input', e => {
                             if (e.inputType == 'insertFromPaste') {
                                 resolve();
@@ -955,8 +1125,10 @@ class TextInputDelegateTest : BaseSessionTest() {
                                 reject();
                             }
                         }, { once: true }))
-                """.trimIndent()
-                else -> """
+                """
+                            .trimIndent()
+                    else ->
+                        """
                         new Promise((resolve, reject) => document.querySelector('$id').addEventListener('input', e => {
                             if (e.inputType == 'insertFromPaste') {
                                 resolve();
@@ -964,28 +1136,28 @@ class TextInputDelegateTest : BaseSessionTest() {
                                 reject();
                             }
                         }, { once: true }))
-                """.trimIndent()
-            },
-        )
+                """
+                            .trimIndent()
+                }
+            )
 
         // InputContentInfo requires content:// uri, so we have to set test data to custom content provider.
         TestContentProvider.setTestData(this.getTestBytes("/assets/www/images/test.gif"), "image/gif")
-        val info = InputContentInfo("content://org.mozilla.geckoview.test.provider/gif".toUri(), ClipDescription("test", arrayOf("image/gif")))
+        val info =
+            InputContentInfo(
+                "content://org.mozilla.geckoview.test.provider/gif".toUri(),
+                ClipDescription("test", arrayOf("image/gif")),
+            )
         ic.commitContent(info, 0, null)
         promise.value
         assertThat("Input event is fired by inserting image", true, equalTo(true))
     }
 
     // Bug 1133802, duplication when setting the same composing text more than once.
-    @Ignore
-    // Disable for frequent failures.
     @WithDisplay(width = 512, height = 512)
     // Child process updates require having a display.
     @Test
     fun inputConnection_bug1133802() {
-        // TODO:
-        // Disable this test for frequent failures. We consider another way to
-        // wait/ignore event handling.
         setupContent("")
 
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
@@ -1052,7 +1224,6 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     // Bug 1275371 - shift+backspace should not forward delete on Android.
-    @Ignore("https://bugzilla.mozilla.org/show_bug.cgi?id=1988041")
     @WithDisplay(width = 512, height = 512)
     // Child process updates require having a display.
     @Test
@@ -1069,22 +1240,26 @@ class TextInputDelegateTest : BaseSessionTest() {
         assertTextAndSelectionAt("Can commit text", ic, "foo", 1)
 
         val time = SystemClock.uptimeMillis()
-        val shiftKey = KeyEvent(
-            time,
-            time,
-            KeyEvent.ACTION_DOWN,
-            KeyEvent.KEYCODE_SHIFT_LEFT,
-            0,
-        )
+        val shiftKey =
+            KeyEvent(
+                time,
+                time,
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                0,
+            )
         ic.sendKeyEvent(shiftKey)
 
         // Wait for input change
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
-                else -> "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
-            },
-        )
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        "new Promise(r => document.querySelector('$id').contentDocument.addEventListener('input', r, { once: true }))"
+                    else ->
+                        "new Promise(r => document.querySelector('$id').addEventListener('input', r, { once: true }))"
+                }
+            )
 
         pressKey(ic, KeyEvent.KEYCODE_DEL)
         promise.value
@@ -1157,7 +1332,7 @@ class TextInputDelegateTest : BaseSessionTest() {
                                      window.addEventListener('input',() => {
                                          window.addEventListener('keyup', r, { once: true }) },
                                          { once: true }) },
-                                     { once: true}))""",
+                                     { once: true}))"""
             )
         ic.beginBatchEdit()
         ic.setSelection(0, 3)
@@ -1190,13 +1365,15 @@ class TextInputDelegateTest : BaseSessionTest() {
                     "#input" ->
                         InputType.TYPE_CLASS_TEXT or
                             InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
-                            InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+                            InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE or
+                            InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
                     else ->
                         InputType.TYPE_CLASS_TEXT or
                             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
                             InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
-                            InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
-                },
+                            InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE or
+                            InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
+                }
             ),
         )
     }
@@ -1228,14 +1405,15 @@ class TextInputDelegateTest : BaseSessionTest() {
 
             // Even if we get IC, new EditorInfo isn't updated yet.
             // We post and wait for empty job to IC thread to flush all IC's job.
-            val result = object : GeckoResult<Boolean>() {
-                init {
-                    val icHandler = mainSession.textInput.getHandler(Handler(Looper.getMainLooper()))
-                    icHandler.post({
-                        complete(true)
-                    })
+            val result =
+                object : GeckoResult<Boolean>() {
+                    init {
+                        val icHandler = mainSession.textInput.getHandler(Handler(Looper.getMainLooper()))
+                        icHandler.post({
+                            complete(true)
+                        })
+                    }
                 }
-            }
             sessionRule.waitForResult(result)
             mainSession.textInput.onCreateInputConnection(editorInfo)
 
@@ -1244,23 +1422,18 @@ class TextInputDelegateTest : BaseSessionTest() {
                 editorInfo.inputType,
                 equalTo(
                     when (inputType) {
-                        "#email1" ->
-                            InputType.TYPE_CLASS_TEXT or
-                                InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
-                        "#pass1" ->
-                            InputType.TYPE_CLASS_TEXT or
-                                InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        "#email1" -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                        "#pass1" -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                         "#search1" ->
                             InputType.TYPE_CLASS_TEXT or
                                 InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
                                 InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE or
-                                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
+                                InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
                         "#tel1" -> InputType.TYPE_CLASS_PHONE
-                        "#url1" ->
-                            InputType.TYPE_CLASS_TEXT or
-                                InputType.TYPE_TEXT_VARIATION_URI
+                        "#url1" -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                         else -> 0
-                    },
+                    }
                 ),
             )
         }
@@ -1283,7 +1456,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             mainSession.evaluateJS(
                 """
                 document.querySelector('$id').enterKeyHint = '$enterkeyhint';
-                document.querySelector('$id').focus()""",
+                document.querySelector('$id').focus()"""
             )
             mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
 
@@ -1301,7 +1474,7 @@ class TextInputDelegateTest : BaseSessionTest() {
                         "search" -> EditorInfo.IME_ACTION_SEARCH
                         "send" -> EditorInfo.IME_ACTION_SEND
                         else -> EditorInfo.IME_ACTION_NONE
-                    },
+                    }
                 ),
             )
 
@@ -1328,7 +1501,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             mainSession.evaluateJS(
                 """
                 document.querySelector('$id').autocapitalize = '$autocapitalize';
-                document.querySelector('$id').focus()""",
+                document.querySelector('$id').focus()"""
             )
             mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
 
@@ -1344,7 +1517,7 @@ class TextInputDelegateTest : BaseSessionTest() {
                         "sentences" -> InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                         "words" -> InputType.TYPE_TEXT_FLAG_CAP_WORDS
                         else -> 0
-                    },
+                    }
                 ),
             )
 
@@ -1373,7 +1546,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             mainSession.evaluateJS(
                 """
                 document.querySelector('$id').setAttribute('autocorrect', '$autocorrect');
-                document.querySelector('$id').focus()""",
+                document.querySelector('$id').focus()"""
             )
             mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
 
@@ -1386,7 +1559,7 @@ class TextInputDelegateTest : BaseSessionTest() {
                     when (autocorrect) {
                         "on" -> InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
                         else -> 0
-                    },
+                    }
                 ),
             )
 
@@ -1411,7 +1584,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.evaluateJS(
             """
             document.querySelector('$id').setAttribute('inputmode', 'text');
-            document.querySelector('$id').focus()""",
+            document.querySelector('$id').focus()"""
         )
         mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
 
@@ -1464,9 +1637,11 @@ class TextInputDelegateTest : BaseSessionTest() {
         setupContent("")
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
 
-        val promise = mainSession.evaluatePromiseJS(
-            when (id) {
-                "#designmode" -> """
+        val promise =
+            mainSession.evaluatePromiseJS(
+                when (id) {
+                    "#designmode" ->
+                        """
                       new Promise(
                           r => document.querySelector('$id').contentDocument.addEventListener('keyup', function handler(e) {
                                 if (e.key == "c") {
@@ -1474,9 +1649,11 @@ class TextInputDelegateTest : BaseSessionTest() {
                                   document.querySelector('$id').contentDocument.removeEventListener('keyup', handler);
                                 }
                               }))
-                """.trimIndent()
+                """
+                            .trimIndent()
 
-                else -> """
+                    else ->
+                        """
                       new Promise(
                           r => document.querySelector('$id').addEventListener('keyup', function handler(e) {
                                 if (e.key == "c") {
@@ -1484,9 +1661,10 @@ class TextInputDelegateTest : BaseSessionTest() {
                                   document.querySelector('$id').removeEventListener('keyup', handler);
                                 }
                               }))
-                """.trimIndent()
-            },
-        )
+                """
+                            .trimIndent()
+                }
+            )
 
         // Emulate GBoard's InputConnection API calls
         ic.beginBatchEdit()
@@ -1520,7 +1698,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             ic,
             0,
             0,
-            /* checkGecko */
+            // checkGecko
             false,
         )
 
@@ -1545,7 +1723,7 @@ class TextInputDelegateTest : BaseSessionTest() {
                 document.querySelector('$id').blur();
                 document.querySelector('$id').focus();
             })
-         """,
+         """
         )
 
         setComposingText(ic, "b", 1)
@@ -1591,7 +1769,7 @@ class TextInputDelegateTest : BaseSessionTest() {
             document.querySelector('$id').addEventListener('input', () => {
                 input_event_count++;
             })
-        """,
+        """
         )
 
         setComposingText(ic, "barbaz", 1)
@@ -1641,8 +1819,9 @@ class TextInputDelegateTest : BaseSessionTest() {
         setupContent("")
         val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
 
-        var promise = mainSession.evaluatePromiseJS(
-            """
+        var promise =
+            mainSession.evaluatePromiseJS(
+                """
             new Promise(r =>
                 document.querySelector('$id').addEventListener('input', () => {
                     let input = document.querySelector('$id');
@@ -1654,8 +1833,9 @@ class TextInputDelegateTest : BaseSessionTest() {
                       r();
                     }
                 }));
-            """.trimIndent(),
-        )
+            """
+                    .trimIndent()
+            )
 
         pressKey(ic, KeyEvent.KEYCODE_1)
         ic.setComposingText("", 1)
@@ -1725,7 +1905,8 @@ class TextInputDelegateTest : BaseSessionTest() {
                 document.querySelector('$id').value = '[***]';
                 document.querySelector('$id').setSelectionRange(1, 4);
             });
-            """.trimIndent(),
+            """
+                .trimIndent()
         )
 
         mainSession.evaluateJS("document.querySelector('$id').focus()")
@@ -1738,5 +1919,105 @@ class TextInputDelegateTest : BaseSessionTest() {
         processChildEvents()
         assertText("text isn't changed", ic, "[***]")
         assertSelection("selection isn't collapsed", ic, 1, 4)
+    }
+
+    // Bug 1563640 - SwiftKey commits empty text with setComposingRegion after enter key
+    @WithDisplay(width = 512, height = 512)
+    @Test
+    fun swiftKeyUsesSetComposingRegionAfterEnterKey() {
+        assumeThat("textarea only", id, equalTo("#textarea"))
+
+        setupContent("")
+        val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
+
+        pressKey(ic, KeyEvent.KEYCODE_B)
+        pressKey(ic, KeyEvent.KEYCODE_A)
+        pressKey(ic, KeyEvent.KEYCODE_R)
+        pressKey(ic, KeyEvent.KEYCODE_SPACE)
+        assertSelection("Can set selection to range", ic, 4, 4)
+
+        // After SwiftKey sends enter key, it calls setComposingRegion then finishComposingText to commit empty text.
+        val promise =
+            mainSession.evaluatePromiseJS(
+                """
+                new Promise(r => window.addEventListener('keyup', r, { once: true }))
+                """
+                    .trimIndent()
+            )
+        ic.beginBatchEdit()
+        pressKeyNoWait(ic, KeyEvent.KEYCODE_ENTER)
+        ic.setComposingRegion(4, 4)
+        ic.finishComposingText()
+        ic.endBatchEdit()
+        promise.value
+
+        assertSelection("selection moves by enter key", ic, 5, 5)
+    }
+
+    // Bug 2038467 - Samsung Keyboard doesn't use batch mode when setting both composing range and composing text
+    // at once.
+    @WithDisplay(width = 512, height = 512)
+    @Test
+    fun inputConnection_samsungKeyboard_email() {
+        assumeThat("input only", id, equalTo("#input"))
+
+        setupContent("")
+        val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
+
+        // Emulate Samsung Keyboard's InputConnection API calls on <input type="email">
+        commitText(ic, "foo@", 1)
+        ic.setComposingRegion(0, 4)
+        ic.setComposingText("foo@1", 1)
+        ic.setComposingText("foo@12", 1)
+        finishComposingText(ic)
+        processChildEvents()
+
+        assertText("committed text is \"foo@12\"", ic, "foo@12")
+    }
+
+    @WithDisplay(width = 100, height = 100)
+    @Test
+    fun inputConnection_newWindow() {
+        sessionRule.setPrefsUntilTestEnd(mapOf("dom.disable_open_during_load" to false))
+
+        assumeThat("input only", id, equalTo("#input"))
+
+        mainSession.loadTestPath(HELLO_HTML_PATH)
+        mainSession.waitForPageStop()
+
+        // Switching to a new session by window.open.
+        val newSession = sessionRule.createClosedSession()
+        mainSession.delegateDuringNextWait(
+            object : GeckoSession.NavigationDelegate {
+                override fun onNewSession(session: GeckoSession, uri: String): GeckoResult<GeckoSession>? {
+                    return GeckoResult.fromValue(newSession)
+                }
+            }
+        )
+
+        // evaluatePromiseJS doesn't wait for executing window.open. We don't want to wait for this.
+        mainSession.evaluatePromiseJS("window.open('forms3.html', 'test')")
+        newSession.waitUntilCalled(GeckoSession.ProgressDelegate::class, "onPageStop")
+
+        newSession.textInput.view = View(InstrumentationRegistry.getInstrumentation().targetContext)
+
+        // Simulate a user action so we're allowed to show/hide the keyboard.
+        newSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
+        newSession.evaluateJS("document.querySelector('#user1').focus()")
+        newSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
+
+        val ic = newSession.textInput.onCreateInputConnection(EditorInfo())!!
+
+        val promise =
+            newSession.evaluatePromiseJS(
+                """
+                new Promise(r => document.querySelector('#user1').addEventListener('input', r, { once: true }))
+                """
+                    .trimIndent()
+            )
+        ic.commitText("foo", 1)
+        promise.value
+
+        assertThat("Can commit text", getText(ic), equalTo("foo"))
     }
 }

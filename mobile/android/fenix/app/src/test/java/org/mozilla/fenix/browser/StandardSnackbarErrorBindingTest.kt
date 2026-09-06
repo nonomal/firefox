@@ -10,9 +10,9 @@ import io.mockk.MockKAnnotations
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
-import mozilla.components.support.test.rule.MainCoroutineRule
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.appstate.AppAction
@@ -21,8 +21,7 @@ import org.mozilla.fenix.compose.snackbar.SnackbarFactory
 
 class StandardSnackbarErrorBindingTest {
 
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
+    private val testDispatcher = StandardTestDispatcher()
     private lateinit var snackbarContainer: ViewGroup
     private lateinit var snackbar: Snackbar
     private lateinit var snackbarFactory: SnackbarFactory
@@ -46,48 +45,50 @@ class StandardSnackbarErrorBindingTest {
     }
 
     @Test
-    fun `WHEN show standard snackbar error action dispatched THEN snackbar should appear`() {
-        val appStore = AppStore()
-        val standardSnackbarError = StandardSnackbarErrorBinding(
-            snackbarContainer,
-            appStore,
-            snackbarFactory,
-            "Dismiss",
-        )
+    fun `WHEN show standard snackbar error action dispatched THEN snackbar should appear`() =
+        runTest(testDispatcher) {
+            val appStore = AppStore()
+            val standardSnackbarError =
+                StandardSnackbarErrorBinding(
+                    snackbarContainer,
+                    appStore,
+                    snackbarFactory,
+                    "Dismiss",
+                    testDispatcher,
+                )
 
-        standardSnackbarError.start()
-        appStore.dispatch(
-            AppAction.UpdateStandardSnackbarErrorAction(
-                StandardSnackbarError(
-                    "Unable to generate PDF",
-                ),
-            ),
-        )
-        verify { snackbar.show() }
-    }
+            standardSnackbarError.start()
+            appStore.dispatch(
+                AppAction.UpdateStandardSnackbarErrorAction(StandardSnackbarError("Unable to generate PDF"))
+            )
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            verify { snackbar.show() }
+        }
 
     @Test
-    fun `WHEN show standard snackbar error action dispatched and binding is stopped THEN snackbar should appear when binding is again started`() {
-        val appStore = AppStore()
-        val standardSnackbarError = StandardSnackbarErrorBinding(
-            snackbarContainer,
-            appStore,
-            snackbarFactory,
-            "Dismiss",
-        )
+    fun `WHEN show standard snackbar error action dispatched and binding is stopped THEN snackbar should appear when binding is again started`() =
+        runTest(testDispatcher) {
+            val appStore = AppStore()
+            val standardSnackbarError =
+                StandardSnackbarErrorBinding(
+                    snackbarContainer,
+                    appStore,
+                    snackbarFactory,
+                    "Dismiss",
+                    testDispatcher,
+                )
 
-        standardSnackbarError.start()
-        appStore.dispatch(
-            AppAction.UpdateStandardSnackbarErrorAction(
-                StandardSnackbarError(
-                    "Unable to generate PDF",
-                ),
-            ),
-        )
-        standardSnackbarError.stop()
+            standardSnackbarError.start()
+            appStore.dispatch(
+                AppAction.UpdateStandardSnackbarErrorAction(StandardSnackbarError("Unable to generate PDF"))
+            )
+            testDispatcher.scheduler.advanceUntilIdle()
 
-        standardSnackbarError.start()
+            standardSnackbarError.stop()
 
-        verify { snackbar.show() }
-    }
+            standardSnackbarError.start()
+
+            verify { snackbar.show() }
+        }
 }

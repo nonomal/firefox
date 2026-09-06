@@ -1,4 +1,3 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 // Any copyright is dedicated to the Public Domain.
 // http://creativecommons.org/publicdomain/zero/1.0/
 "use strict";
@@ -21,8 +20,10 @@ var gPrompt = {
     equal(text, EXPECTED_PROMPT_TEXT, "expecting alert() to be called");
   },
 
-  promptPassword() {
-    ok(false, "not expecting promptPassword() to be called");
+  promptPassword(_dialogTitle, _text, password, _checkMsg) {
+    // The first token in the test module has a blank password by default.
+    password.value = "";
+    return true;
   },
 };
 
@@ -30,10 +31,6 @@ const gPromptFactory = {
   QueryInterface: ChromeUtils.generateQI(["nsIPromptFactory"]),
   getPrompt: () => gPrompt,
 };
-
-const gModuleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
-  Ci.nsIPKCS11ModuleDB
-);
 
 const gCertDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
   Ci.nsIX509CertDB
@@ -58,36 +55,39 @@ add_task(async function test_pkcs11_module() {
 
   // Check that if we have never added the test module, that we don't find it
   // in the module list.
-  checkPKCS11ModuleNotPresent("PKCS11 Test Module", "pkcs11testmodule");
+  await checkPKCS11ModuleNotPresent("PKCS11 Test Module", "pkcs11testmodule");
 
   // Check that adding the test module makes it appear in the module list.
   let libraryFile = Services.dirsvc.get("CurWorkD", Ci.nsIFile);
   libraryFile.append("pkcs11testmodule");
   libraryFile.append(ctypes.libraryName("pkcs11testmodule"));
-  loadPKCS11Module(libraryFile, "PKCS11 Test Module", true);
+  await loadPKCS11Module(libraryFile, "PKCS11 Test Module", true);
   equal(
     1,
     await Glean.pkcs11.thirdPartyModulesLoaded.testGetValue(),
     "should have one third-party module after loading it"
   );
-  let testModule = checkPKCS11ModuleExists(
+  let testModule = await checkPKCS11ModuleExists(
     "PKCS11 Test Module",
     "pkcs11testmodule"
   );
 
-  let testClientCertificate = null;
-  for (const cert of gCertDB.getCerts()) {
-    if (cert.subjectName == "CN=client cert rsa") {
-      testClientCertificate = cert;
-    }
-  }
+  let testClientCertificate = await findCertByCommonName("client cert rsa");
   ok(testClientCertificate, "test module should expose rsa client certificate");
 
-  // Check that listing the slots for the test module works.
-  let testModuleSlotNames = Array.from(
-    testModule.listSlots(),
-    slot => slot.name
+  let testServerCertificate = await findCertByCommonName(
+    "EE issued by intermediate"
   );
+  ok(testServerCertificate, "test module should expose server certificate");
+  // If the server certificate verifies as a server certificate without having
+  // explicitly loaded any CAs, the module is correctly exposing the trust
+  // information from the CAs it provides.
+  await asyncTestCertificateUsages(gCertDB, testServerCertificate, [
+    Ci.nsIX509CertDB.verifyUsageTLSServer,
+  ]);
+
+  // Check that listing the slots for the test module works.
+  let testModuleSlotNames = Array.from(testModule.slots, slot => slot.name);
   testModuleSlotNames.sort();
   const expectedSlotNames = [
     "Empty PKCS11 Slot",
@@ -104,15 +104,18 @@ add_task(async function test_pkcs11_module() {
   let pkcs11ModuleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
     Ci.nsIPKCS11ModuleDB
   );
-  pkcs11ModuleDB.deleteModule("PKCS11 Test Module");
+  await pkcs11ModuleDB.deleteModule("PKCS11 Test Module");
   equal(
     0,
     await Glean.pkcs11.thirdPartyModulesLoaded.testGetValue(),
     "should have no third-party modules after unloading it"
   );
-  checkPKCS11ModuleNotPresent("PKCS11 Test Module", "pkcs11testmodule");
+  await checkPKCS11ModuleNotPresent("PKCS11 Test Module", "pkcs11testmodule");
 
   // Check miscellaneous module DB methods and attributes.
-  ok(!gModuleDB.canToggleFIPS, "It should NOT be possible to toggle FIPS");
-  ok(!gModuleDB.isFIPSEnabled, "FIPS should not be enabled");
+  const fipsUtils = Cc["@mozilla.org/security/fipsutils;1"].getService(
+    Ci.nsIFIPSUtils
+  );
+  ok(!fipsUtils.canToggleFIPS, "It should NOT be possible to toggle FIPS");
+  ok(!fipsUtils.isFIPSEnabled, "FIPS should not be enabled");
 });

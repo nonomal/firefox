@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,6 +7,8 @@
 
 #include <CoreMedia/CoreMedia.h>
 #include <VideoToolbox/VideoToolbox.h>
+
+#include <deque>
 
 #include "PlatformEncoderModule.h"
 #include "apple/AppleUtils.h"
@@ -55,19 +55,20 @@ class AppleVTEncoder final : public MediaDataEncoder {
   }
 
   void OutputFrame(OSStatus aStatus, VTEncodeInfoFlags aFlags,
-                   CMSampleBufferRef aBuffer);
+                   CMSampleBufferRef aBuffer, void* aSourceFrameRefcon);
 
  private:
   enum class EncodeResult { Success, EncodeError, FrameDropped, EmptyBuffer };
 
   virtual ~AppleVTEncoder() { MOZ_ASSERT(!mSession); }
-  void ProcessEncode(const RefPtr<const VideoData>& aSample);
+  RefPtr<EncodePromise> ProcessEncode(nsTArray<RefPtr<MediaData>>&& aSamples);
   RefPtr<ReconfigurationPromise> ProcessReconfigure(
       const RefPtr<const EncoderConfigurationChangeList>&
           aConfigurationChanges);
-  void ProcessOutput(RefPtr<MediaRawData>&& aOutput, EncodeResult aResult);
-  void ForceOutputIfNeeded();
-  void MaybeResolveOrRejectEncodePromise();
+  void ProcessOutput(RefPtr<MediaRawData>&& aOutput, EncodeResult aResult,
+                     bool aWasForcedKeyframe = false);
+  bool MaybeArmTimer();
+  void MaybeResolveOrRejectEncodePromises(bool aResolveAll = false);
   RefPtr<EncodePromise> ProcessDrain();
   RefPtr<ShutdownPromise> ProcessShutdown();
 
@@ -87,20 +88,22 @@ class AppleVTEncoder final : public MediaDataEncoder {
   bool IsSettingColorSpaceSupported() const;
   MediaResult SetColorSpace(const EncoderConfig::SampleFormat& aFormat);
 
-  void EncodeNextSample(nsTArray<RefPtr<MediaData>>&& aInputs,
-                        MediaDataEncoder::EncodedData&& aOutputs);
-
   void AssertOnTaskQueue() { MOZ_ASSERT(mTaskQueue->IsCurrentThreadIn()); }
+
+  enum class EncodeState : uint8_t {
+    NotEncoding,
+    Encoding,
+    ResolveOrReject,
+  };
 
   EncoderConfig mConfig;
   const RefPtr<TaskQueue> mTaskQueue;
   const bool mHardwareNotAllowed;
-  // Accessed only in mTaskQueue.
+  // The following are accessed only in mTaskQueue.
+  EncodeState mEncodeState = EncodeState::NotEncoding;
   EncodedData mEncodedData;
-  // Accessed only in mTaskQueue.
-  MozPromiseHolder<EncodePromise> mEncodePromise;
-  MozPromiseHolder<EncodePromise> mEncodeBatchPromise;
-  MozPromiseRequestHolder<EncodePromise> mEncodeBatchRequest;
+  MozPromiseHolder<EncodePromise> mDrainPromise;
+  std::deque<RefPtr<EncodePromise::Private>> mEncodePromises;
   RefPtr<MediaByteBuffer> mAvcc;  // Stores latest avcC data.
   MediaResult mError;
 

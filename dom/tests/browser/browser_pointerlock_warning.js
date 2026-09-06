@@ -34,12 +34,6 @@ async function waitForWarningState(aWarningElement, aExpectedState) {
   );
 }
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
-
 // Make sure the pointerlock warning is shown and exited with the escape key
 add_task(async function show_pointerlock_warning_escape() {
   let urls = [TEST_URL, FRAME_TEST_URL];
@@ -72,7 +66,7 @@ add_task(async function show_pointerlock_warning_escape() {
 
     let warningHiddenPromise = waitForWarningState(warning, "hidden");
 
-    await BrowserTestUtils.waitForCondition(
+    await TestUtils.waitForCondition(
       () => warning.innerText == expectedWarningText,
       "Warning text"
     );

@@ -45,7 +45,7 @@ async function resetPreferencesModifiedDuringTest() {
 
   // Cleanup some generic Firefox preferences set indirectly by tests.
   for (const pref of [
-    "browser.firefox-view.view-count",
+    "browser.firefox-view.button-clicks",
     "extensions.ui.lastCategory",
     "sidebar.old-sidebar.has-used",
   ]) {
@@ -159,6 +159,32 @@ if (DEBUG_TRACE_LINE) {
   });
 }
 
+/**
+ * Test helper to start a JavaScript tracer which would trace DevTools modules.
+ *
+ * @param {object} options
+ *        See https://firefox-source-docs.mozilla.org/devtools/tests/mochitest-devtools.html#tracing-javascript
+ *        for a list of handy additional options.
+ * @return {function}
+ *         Callback to stop the tracing.
+ */
+function startTracing(options = {}) {
+  const { JSTracer } = ChromeUtils.importESModule(
+    "resource://devtools/server/tracer/tracer.sys.mjs",
+    { global: "devtools" }
+  );
+  // You have to at least pass an empty object to startTracing,
+  // otherwise, all the attributes at optional.
+  JSTracer.startTracing({
+    traceAllGlobals: true,
+    ...options,
+  });
+
+  return function () {
+    JSTracer.stopTracing();
+  };
+}
+
 const { loader, require } = ChromeUtils.importESModule(
   "resource://devtools/shared/loader/Loader.sys.mjs"
 );
@@ -166,7 +192,7 @@ const { sinon } = ChromeUtils.importESModule(
   "resource://testing-common/Sinon.sys.mjs"
 );
 
-// When loaded from xpcshell test, this file is loaded via xpcshell.ini's head property
+// When loaded from xpcshell test, this file is loaded via xpcshell.toml's head property
 // and so it loaded first before anything else and isn't having access to Services global.
 // Whereas many head.js files from mochitest import this file via loadSubScript
 // and already expose Services as a global.
@@ -176,6 +202,7 @@ const {
 } = require("resource://devtools/client/framework/devtools.js");
 const {
   CommandsFactory,
+  createLocalClientForTests,
 } = require("resource://devtools/shared/commands/commands-factory.js");
 const DevToolsUtils = require("resource://devtools/shared/DevToolsUtils.js");
 
@@ -244,23 +271,6 @@ const URL_ROOT_MOCHI_8888 = CHROME_URL_ROOT.replace(
   "chrome://mochitests/content/",
   "http://mochi.test:8888/"
 );
-
-try {
-  if (isMochitest) {
-    Services.scriptloader.loadSubScript(
-      "chrome://mochitests/content/browser/devtools/client/shared/test/telemetry-test-helpers.js",
-      this
-    );
-  }
-} catch (e) {
-  ok(
-    false,
-    "MISSING DEPENDENCY ON telemetry-test-helpers.js\n" +
-      "Please add the following line in browser.ini:\n" +
-      "  !/devtools/client/shared/test/telemetry-test-helpers.js\n"
-  );
-  throw e;
-}
 
 // Force devtools to be initialized so menu items and keyboard shortcuts get installed
 require("resource://devtools/client/framework/devtools-browser.js");
@@ -427,7 +437,6 @@ async function safeCloseBrowserConsole({ clearOutput = false } = {}) {
  * we listen to this message to cleanup the observer.
  */
 function highlighterTestActorBootstrap() {
-  /* eslint-env mozilla/process-script */
   const HIGHLIGHTER_TEST_ACTOR_URL =
     "chrome://mochitests/content/browser/devtools/client/shared/test/highlighter-test-actor.js";
 
@@ -609,13 +618,12 @@ async function removeTab(tab) {
  * Alias for navigateTo which will reuse the current URI of the provided browser
  * to trigger a navigation.
  */
-async function reloadBrowser({
-  browser = gBrowser.selectedBrowser,
+async function reloadSelectedTab({
   isErrorPage = false,
   waitForLoad = true,
 } = {}) {
-  return navigateTo(browser.currentURI.spec, {
-    browser,
+  return navigateTo(gBrowser.selectedBrowser.currentURI.spec, {
+    browser: gBrowser.selectedBrowser,
     isErrorPage,
     waitForLoad,
   });
@@ -669,10 +677,20 @@ async function navigateTo(
     isErrorPage
   );
 
-  // if we're navigating to the same page we're already on, use reloadTab instead as the
-  // behavior slightly differs from loadURI (e.g. scroll position isn't keps with the latter).
   if (uri === browser.currentURI.spec) {
-    gBrowser.reloadTab(gBrowser.getTabForBrowser(browser));
+    // As BrowserCommands.reload only supports reloading the currently selected tab,
+    // only support reloading the selected tab.
+    is(
+      browser,
+      gBrowser.selectedBrowser,
+      "Only supports reloading the selected tab"
+    );
+
+    // If we're navigating to the same page we're already on,
+    // uses `BrowserCommands.reload()`,
+    // which is the method used to reload page from firefox UI.
+    // Compared to `gBrowser.reloadTab()`, it actually reloads iframes.
+    BrowserCommands.reload();
   } else {
     BrowserTestUtils.startLoadingURIString(browser, uri);
   }
@@ -936,7 +954,7 @@ async function watchForCommandsReload(
   // - dom-complete if we can wait for a full page load
   // - dom-loading otherwise
   // This allows to wait for page load for consumers calling directly
-  // waitForDevTools instead of navigateTo/reloadBrowser.
+  // waitForDevTools instead of navigateTo/reloadSelectedTab.
   // This is also useful as an alternative to target switching, when no target
   // switch is supposed to happen.
   const waitForCompleteLoad = waitForLoad && !isErrorPage;
@@ -1138,7 +1156,7 @@ async function waitFor(
       : maxTries;
 
   try {
-    const value = await BrowserTestUtils.waitForCondition(
+    const value = await TestUtils.waitForCondition(
       condition,
       message,
       interval,
@@ -1231,10 +1249,41 @@ function waitForNEvents(target, eventName, numTimes, useCapture = false) {
 }
 
 /**
- * Wait for DOM change on target.
+ * Wait until the browser element is no longer loading a document. In general
+ * if you are loading an existing browser element, prefer the shared helper
+ * BrowserTestUtils.isLoaded(browser).
+ *
+ * However in cases where the browser element is dynamically created and the
+ * load might be missed because the event loop had time to spin before calling
+ * isLoaded, this helper can be used as a fallback.
+ *
+ * @param {XULBrowser} browser
+ *        The browser to wait the load for.
+ */
+async function waitForBrowserLoaded(browser) {
+  return waitFor(
+    () =>
+      !browser.webProgress.isLoadingDocument &&
+      browser.currentURI?.spec &&
+      browser.currentURI?.spec !== "about:blank",
+    {
+      toString() {
+        return (
+          `Browser element did not load as expected. ` +
+          `isLoadingDocument=${browser.webProgress.isLoadingDocument} and ` +
+          `URI.spec=${browser.currentURI?.spec}.`
+        );
+      },
+    }
+  );
+}
+
+/**
+ * Wait for DOM to be updated until the number of elements matching the provided
+ * selector correspond to the expectation.
  *
  * @param {object} target
- *        The Node on which to observe DOM mutations.
+ *        The Node on which to query the selector.
  * @param {string} selector
  *        Given a selector to watch whether the expected element is changed
  *        on target.
@@ -1242,27 +1291,25 @@ function waitForNEvents(target, eventName, numTimes, useCapture = false) {
  *        Optional, default set to 1
  *        There may be more than one element match an array match the selector,
  *        give an expected length to wait for more elements.
- * @return A promise that resolves when the event has been handled
+ * @return A promise that resolves with the NodeList of the elements matching
+ *         the selector.
  */
-function waitForDOM(target, selector, expectedLength = 1) {
-  return new Promise(resolve => {
-    const observer = new MutationObserver(mutations => {
-      mutations.forEach(mutation => {
-        const elements = mutation.target.querySelectorAll(selector);
+async function waitForDOM(target, selector, expectedLength = 1) {
+  info(`Wait for ${expectedLength} elements to match selector "${selector}"`);
+  await waitFor(
+    () => target.querySelectorAll(selector).length === expectedLength,
+    {
+      toString() {
+        return (
+          `Expected ${expectedLength} elements for selector: "${selector}", ` +
+          `got ${target.querySelectorAll(selector).length}.`
+        );
+      },
+    }
+  );
 
-        if (elements.length === expectedLength) {
-          observer.disconnect();
-          resolve(elements);
-        }
-      });
-    });
-
-    observer.observe(target, {
-      attributes: true,
-      childList: true,
-      subtree: true,
-    });
-  });
+  info(`Successfully found ${expectedLength} elements matching "${selector}"`);
+  return target.querySelectorAll(selector);
 }
 
 /**
@@ -1552,14 +1599,6 @@ function createTestHTTPServer() {
  *        Arguments to be passed to DevToolsServer.registerModule
  */
 async function registerActorInContentProcess(url, options) {
-  function convertChromeToFile(uri) {
-    return Cc["@mozilla.org/chrome/chrome-registry;1"]
-      .getService(Ci.nsIChromeRegistry)
-      .convertChromeURL(Services.io.newURI(uri)).spec;
-  }
-  // chrome://mochitests URI is registered only in the parent process, so convert these
-  // URLs to file:// one in order to work in the content processes
-  url = url.startsWith("chrome://mochitests") ? convertChromeToFile(url) : url;
   return SpecialPowers.spawn(
     gBrowser.selectedBrowser,
     [{ url, options }],
@@ -1776,15 +1815,20 @@ async function assertSingleColorScreenshotImage(
     () => content.wrappedJSObject.devicePixelRatio
   );
 
-  is(
-    image.width,
-    ratio * width,
-    `node screenshot has the expected width (dpr = ${ratio})`
+  const expectedWidthAtPageDPR = Math.round(width * ratio);
+  const expectedHeightAtPageDPR = Math.round(height * ratio);
+  const expectedWidthAtOneDPR = Math.round(width * 1);
+  const expectedHeightAtOneDPR = Math.round(height * 1);
+
+  ok(
+    image.width === expectedWidthAtPageDPR ||
+      image.width === expectedWidthAtOneDPR,
+    `node screenshot width is ${image.width}, expected ${expectedWidthAtPageDPR} (page DPR=${ratio}) or ${expectedWidthAtOneDPR} (DPR=1)`
   );
-  is(
-    image.height,
-    height * ratio,
-    `node screenshot has the expected height (dpr = ${ratio})`
+  ok(
+    image.height === expectedHeightAtPageDPR ||
+      image.height === expectedHeightAtOneDPR,
+    `node screenshot height is ${image.height}, expected ${expectedHeightAtPageDPR} (page DPR=${ratio}) or ${expectedHeightAtOneDPR} (DPR=1)`
   );
 
   const color = colorAt(image, 0, 0);
@@ -2124,7 +2168,7 @@ async function getFluentStringHelper(resourceIds) {
 async function openRDM(tab, { waitForDeviceList = true } = {}) {
   info("Opening responsive design mode");
   const manager = ResponsiveUIManager;
-  const ui = await manager.openIfNeeded(tab.ownerGlobal, tab, {
+  const ui = await manager.openIfNeeded(tab.documentGlobal, tab, {
     trigger: "test",
   });
   info("Responsive design mode opened");
@@ -2157,7 +2201,7 @@ async function waitForRDMLoaded(ui, { waitForDeviceList = true } = {}) {
 async function closeRDM(tab, options) {
   info("Closing responsive design mode");
   const manager = ResponsiveUIManager;
-  await manager.closeIfNeeded(tab.ownerGlobal, tab, options);
+  await manager.closeIfNeeded(tab.documentGlobal, tab, options);
   info("Responsive design mode closed");
 }
 
@@ -2324,31 +2368,11 @@ function simulateLinkClick(element) {
 }
 
 /**
- * Since the MDN data is updated frequently, it might happen that the properties used in
- * this test are not in the dataset anymore/now have URLs.
- * This function will return properties in the dataset that don't have MDN url so you
- * can easily find a replacement.
+ * Use mocked MDN compat data. Should be called before the toolbox starts.
+ * See devtools/shared/compatibility/dataset/mock-css-properties.json.
  */
-function logCssCompatDataPropertiesWithoutMDNUrl() {
-  const cssPropertiesCompatData = require("resource://devtools/shared/compatibility/dataset/css-properties.json");
-
-  function walk(node) {
-    for (const propertyName in node) {
-      const property = node[propertyName];
-      if (property.__compat) {
-        if (!property.__compat.mdn_url) {
-          dump(
-            `"${propertyName}" - MDN URL: ${
-              property.__compat.mdn_url || "❌"
-            } - Spec URL: ${property.__compat.spec_url || "❌"}\n`
-          );
-        }
-      } else if (typeof property == "object") {
-        walk(property);
-      }
-    }
-  }
-  walk(cssPropertiesCompatData);
+async function setMockCompatibilityDataset() {
+  await pushPref("devtools.compatibility.use-mock-dataset", true);
 }
 
 /**
@@ -2547,8 +2571,8 @@ async function toggleJsTracer(toolbox) {
  *        The id of the context menu item
  */
 function getNetmonitorContextMenuItem(monitor, id) {
-  const Menu = require("resource://devtools/client/framework/menu.js");
-  return Menu.getMenuElementById(id, monitor.panelWin.document);
+  const menuDoc = DevToolsUtils.getTopWindow(monitor.panelWin).document;
+  return menuDoc.getElementById(id);
 }
 
 /**

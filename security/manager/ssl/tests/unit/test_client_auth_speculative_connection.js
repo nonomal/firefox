@@ -31,34 +31,26 @@ const gPromptFactory = {
   getPrompt: () => gPrompt,
 };
 
-function getTestClientCertificate() {
+add_task(async function run_test() {
+  MockRegistrar.register("@mozilla.org/prompter;1", gPromptFactory);
+
+  // Set a primary password.
+  let token = Cc["@mozilla.org/security/internalkeytoken;1"].createInstance(
+    Ci.nsIPKCS11Token
+  );
+  await token.changePassword("", "password");
+
+  let clientAuthRememberService = Cc[
+    "@mozilla.org/security/clientAuthRememberService;1"
+  ].getService(Ci.nsIClientAuthRememberService);
+
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
   const certFile = do_get_file("test_certDB_import/encrypted_with_aes.p12");
   certDB.importPKCS12File(certFile, "password");
-  for (const cert of certDB.getCerts()) {
-    if (cert.commonName == "John Doe") {
-      return cert;
-    }
-  }
-  return null;
-}
+  let cert = await findCertByCommonName("John Doe");
 
-function run_test() {
-  MockRegistrar.register("@mozilla.org/prompter;1", gPromptFactory);
-
-  // Set a primary password.
-  let tokenDB = Cc["@mozilla.org/security/pk11tokendb;1"].getService(
-    Ci.nsIPK11TokenDB
-  );
-  let token = tokenDB.getInternalKeyToken();
-  token.initPassword("password");
-
-  let clientAuthRememberService = Cc[
-    "@mozilla.org/security/clientAuthRememberService;1"
-  ].getService(Ci.nsIClientAuthRememberService);
-  let cert = getTestClientCertificate();
   clientAuthRememberService.rememberDecisionScriptable(
     "requireclientauth.example.com",
     { partitionKey: "(https,example.com)" },
@@ -66,34 +58,28 @@ function run_test() {
     Ci.nsIClientAuthRememberService.Session
   );
 
-  add_tls_server_setup("BadCertAndPinningServer", "bad_certs");
-  add_test(function () {
-    token.logoutSimple();
-    run_next_test();
-  });
   Services.prefs.setIntPref("network.http.speculative-parallel-limit", 6);
+  await asyncStartTLSTestServer("BadCertAndPinningServer", "bad_certs");
+  await token.logout();
 
-  add_test(() => {
-    Services.prefs.setCharPref(
-      "network.dns.localDomains",
-      "requireclientauth.example.com"
-    );
-    let uri = Services.io.newURI("https://requireclientauth.example.com:8443");
-    let principal = Services.scriptSecurityManager.createContentPrincipal(
-      uri,
-      {}
-    );
+  Services.prefs.setCharPref(
+    "network.dns.localDomains",
+    "requireclientauth.example.com"
+  );
+  let uri = Services.io.newURI("https://requireclientauth.example.com:8443");
+  let principal = Services.scriptSecurityManager.createContentPrincipal(
+    uri,
+    {}
+  );
 
-    Services.io
-      .QueryInterface(Ci.nsISpeculativeConnect)
-      .speculativeConnect(uri, principal, null, false);
-    // This is not a robust way to test this, but it's hard to test that
-    // something *didn't* happen (the something being, the primary password
-    // prompt). In any case, if after 3 seconds the prompt hasn't happened,
-    // optimistically assume it won't and pass the test.
-    // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
-    setTimeout(run_next_test, 3000);
-  });
+  Services.io
+    .QueryInterface(Ci.nsISpeculativeConnect)
+    .speculativeConnect(uri, principal, null, false);
 
-  run_next_test();
-}
+  // This is not a robust way to test this, but it's hard to test that
+  // something *didn't* happen (the something being, the primary password
+  // prompt). In any case, if after 3 seconds the prompt hasn't happened,
+  // optimistically assume it won't and pass the test.
+  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+  await new Promise(resolve => setTimeout(resolve, 3000));
+});

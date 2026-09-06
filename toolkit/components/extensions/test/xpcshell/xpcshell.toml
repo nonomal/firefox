@@ -67,6 +67,12 @@ skip-if = [
 
 ["test_ext_contexts.js"]
 
+["test_ext_dnr_cache.js"]
+requesttimeoutfactor = 2 # Test has multiple long wait to absorb slow execution
+prefs = [
+  "dom.script_loader.experimental.navigation_cache.check_memory_pressure=false",
+]
+
 ["test_ext_experiments_glean.js"]
 
 ["test_ext_geckoProfiler_schema.js"]
@@ -93,6 +99,8 @@ run-if = [
 ["test_ext_permission_warnings.js"]
 
 ["test_ext_runtime_sendMessage_args.js"]
+
+["test_ext_sandbox_csp.js"]
 
 ["test_ext_schemas.js"]
 head = "head.js head_schemas.js"
@@ -132,6 +140,8 @@ skip-if = [
   "os == 'win' && os_version == '10.2009' && arch == 'x86_64'", # Bug 1996467
   "os == 'win' && os_version == '11.26100' && arch == 'x86'", # Bug 1996467
   "os == 'win' && os_version == '11.26100' && arch == 'x86_64'", # Bug 1996467
+  "os == 'win' && os_version == '11.26200' && arch == 'x86'", # Bug 1996467
+  "os == 'win' && os_version == '11.26200' && arch == 'x86_64'", # Bug 1996467
 ]
 
 ["test_ext_test_mock.js"]
@@ -139,6 +149,8 @@ skip-if = [
 ["test_ext_test_wrapper.js"]
 
 ["test_ext_unknown_permissions.js"]
+
+["test_ext_urlclassifier.js"]
 
 ["test_ext_webRequest_handlerBehaviorChanged.js"]
 

@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: sw=2 ts=2 et lcs=trail\:.,tab\:>~ :
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -23,10 +21,9 @@ class nsIPrincipal;
 #include "mozilla/ipc/IPCCore.h"
 
 #define ICON_STATUS_UNKNOWN 0
-#define ICON_STATUS_CHANGED 1 << 0
-#define ICON_STATUS_SAVED 1 << 1
-#define ICON_STATUS_ASSOCIATED 1 << 2
-#define ICON_STATUS_CACHED 1 << 3
+#define ICON_STATUS_SAVED 1 << 0
+#define ICON_STATUS_ASSOCIATED 1 << 1
+#define ICON_STATUS_CACHED 1 << 2
 
 #define TO_CHARBUFFER(_buffer) \
   reinterpret_cast<char*>(const_cast<uint8_t*>(_buffer))
@@ -212,6 +209,22 @@ class NotifyIconObservers final : public Runnable {
  private:
   IconData mIcon;
   PageData mPage;
+};
+
+/**
+ * Removes all favicon associations for the given page, dispatched on the
+ * async DB thread so it is serialized with other favicon writes.
+ */
+class AsyncExpireFaviconsForPage final : public Runnable {
+ public:
+  NS_DECL_NSIRUNNABLE
+
+  AsyncExpireFaviconsForPage(const nsCOMPtr<nsIURI>& aPageURI,
+                             dom::Promise* aPromise);
+
+ private:
+  nsCOMPtr<nsIURI> mPageURI;
+  nsMainThreadPtrHandle<dom::Promise> mPromise;
 };
 
 /**

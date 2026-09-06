@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,11 +16,11 @@
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/ScreenBinding.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "nsCSSProps.h"
 #include "nsCSSValue.h"
 #include "nsContentUtils.h"
 #include "nsDeviceContext.h"
-#include "nsGkAtoms.h"
 #include "nsGlobalWindowOuter.h"
 #include "nsIBaseWindow.h"
 #include "nsIDocShell.h"
@@ -70,6 +68,15 @@ static nsSize GetDeviceSize(const Document& aDocument) {
       nsGlobalWindowOuter::GetRDMDeviceSize(aDocument);
   if (deviceSize.isSome()) {
     return CSSPixel::ToAppUnits(deviceSize.value());
+  }
+
+  // Media queries in documents should use an override set with WebDriver BiDi
+  // if it exists.
+  if (dom::BrowsingContext* bc = aDocument.GetBrowsingContext()) {
+    Maybe<CSSIntSize> screenSize = bc->GetScreenAreaOverride();
+    if (screenSize.isSome()) {
+      return CSSPixel::ToAppUnits(screenSize.value());
+    }
   }
 
   nsPresContext* pc = aDocument.GetPresContext();
@@ -221,15 +228,18 @@ StyleDisplayMode Gecko_MediaFeatures_GetDisplayMode(const Document* aDocument) {
     }
   }
 
-  static_assert(static_cast<int32_t>(DisplayMode::Browser) ==
-                        static_cast<int32_t>(StyleDisplayMode::Browser) &&
-                    static_cast<int32_t>(DisplayMode::Minimal_ui) ==
-                        static_cast<int32_t>(StyleDisplayMode::MinimalUi) &&
-                    static_cast<int32_t>(DisplayMode::Standalone) ==
-                        static_cast<int32_t>(StyleDisplayMode::Standalone) &&
-                    static_cast<int32_t>(DisplayMode::Fullscreen) ==
-                        static_cast<int32_t>(StyleDisplayMode::Fullscreen),
-                "DisplayMode must mach nsStyleConsts.h");
+  static_assert(
+      static_cast<int32_t>(DisplayMode::Browser) ==
+              static_cast<int32_t>(StyleDisplayMode::Browser) &&
+          static_cast<int32_t>(DisplayMode::Minimal_ui) ==
+              static_cast<int32_t>(StyleDisplayMode::MinimalUi) &&
+          static_cast<int32_t>(DisplayMode::Standalone) ==
+              static_cast<int32_t>(StyleDisplayMode::Standalone) &&
+          static_cast<int32_t>(DisplayMode::Fullscreen) ==
+              static_cast<int32_t>(StyleDisplayMode::Fullscreen) &&
+          static_cast<int32_t>(DisplayMode::Picture_in_picture) ==
+              static_cast<int32_t>(StyleDisplayMode::PictureInPicture),
+      "DisplayMode must mach nsStyleConsts.h");
 
   dom::BrowsingContext* browsingContext = aDocument->GetBrowsingContext();
   if (!browsingContext) {
@@ -268,6 +278,20 @@ bool Gecko_MediaFeatures_PrefersReducedMotion(const Document* aDocument) {
           RFPTarget::CSSPrefersReducedMotion)) {
     return false;
   }
+
+  // Check for DevTools override first
+  if (dom::BrowsingContext* bc = aDocument->GetBrowsingContext()) {
+    auto* top = bc->Top();
+    switch (top->GetPrefersReducedMotionOverride()) {
+      case dom::PrefersReducedMotionOverride::Reduce:
+        return true;
+      case dom::PrefersReducedMotionOverride::No_preference:
+        return false;
+      case dom::PrefersReducedMotionOverride::None:
+        break;
+    }
+  }
+
   return LookAndFeel::GetInt(LookAndFeel::IntID::PrefersReducedMotion, 0) == 1;
 }
 
@@ -345,20 +369,18 @@ StyleDynamicRange Gecko_MediaFeatures_DynamicRange(const Document* aDocument) {
 
 StyleDynamicRange Gecko_MediaFeatures_VideoDynamicRange(
     const Document* aDocument) {
-  if (aDocument->ShouldResistFingerprinting(RFPTarget::CSSVideoDynamicRange) ||
-      !StaticPrefs::layout_css_video_dynamic_range_allows_high()) {
+  if (aDocument->ShouldResistFingerprinting(RFPTarget::CSSVideoDynamicRange)) {
     return StyleDynamicRange::Standard;
   }
-#ifdef MOZ_WAYLAND
-  // Wayland compositors allow to process HDR content even without HDR monitor
-  // attached.
-  if (StaticPrefs::gfx_wayland_hdr_force_enabled_AtStartup()) {
+  // Usually compositors can process HDR content even without HDR displays.
+  //
+  // This parallels logic in gfxPlatform::UseHDR().
+  if (StaticPrefs::gfx_color_management_hdr_force_enabled()) {
     return StyleDynamicRange::High;
   }
-  if (!StaticPrefs::gfx_wayland_hdr_AtStartup()) {
+  if (!StaticPrefs::gfx_color_management_hdr() || !gfx::gfxVars::VideoHDR()) {
     return StyleDynamicRange::Standard;
   }
-#endif
   // video-dynamic-range: high has 3 requirements:
   // 1) high peak brightness
   // 2) high contrast ratio

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,13 +27,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
+import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import mozilla.components.compose.base.button.TextButton
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import org.mozilla.fenix.compose.list.RadioButtonListItem
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 /**
  * Top-level card container for profiler dialogs
@@ -46,7 +46,7 @@ private fun ProfilerDialogueCard(content: @Composable () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-        shape = RoundedCornerShape(12.dp),
+        shape = MaterialTheme.shapes.medium,
     ) {
         content()
     }
@@ -82,9 +82,7 @@ fun ProfilerLabeledRadioButton(
  * @param message String resource ID for the message to display above the spinner
  */
 @Composable
-fun WaitForProfilerDialog(
-    @StringRes message: Int,
-) {
+fun WaitForProfilerDialog(@StringRes message: Int) {
     ProfilerDialogueCard {
         Column(
             modifier = Modifier.padding(8.dp),
@@ -127,9 +125,7 @@ fun BaseProfilerDialogContent(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     ProfilerDialogueCard {
-        Column(
-            modifier = modifier.padding(16.dp),
-        ) {
+        Column(modifier = modifier.padding(16.dp)) {
             Text(
                 text = titleText,
                 fontWeight = FontWeight.ExtraBold,
@@ -194,35 +190,13 @@ fun ProfilerErrorDialog(
     }
 }
 
-@Composable
-@PreviewLightDark
-private fun ProfilerDialogueCardPreview() {
-    val radioOptions = listOf("Firefox", "Graphics", "Media", "Networking")
-    val selectedOption = remember { mutableStateOf("Firefox") }
-
-    FirefoxTheme {
-        ProfilerDialogueCard {
-            radioOptions.forEach { text ->
-                ProfilerLabeledRadioButton(
-                    text = text,
-                    subText = "Sub",
-                    selected = selectedOption.value == text,
-                    onClick = {
-                        selectedOption.value = text
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
 @Preview
-private fun ProfilerDialogueCardPrivatePreview() {
+@Composable
+private fun ProfilerDialogueCardPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
     val radioOptions = listOf("Firefox", "Graphics", "Media", "Networking")
     val selectedOption = remember { mutableStateOf("Firefox") }
 
-    FirefoxTheme(theme = Theme.Private) {
+    FirefoxTheme(theme) {
         ProfilerDialogueCard {
             radioOptions.forEach { text ->
                 ProfilerLabeledRadioButton(

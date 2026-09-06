@@ -757,7 +757,7 @@ def test_task_to_skip_if():
                 },
                 "runtime": {
                     "no-fission": True,
-                    "socketprocess_networking": True,
+                    "socketprocess": True,
                     "http3": True,
                 },
                 "platform": {
@@ -1496,24 +1496,6 @@ def test_reftest_add_fuzzy_if11():
     )
     assert additional_comment == "fuzzy-if not added as calculated range is 0-0,0-0"
     assert manifest_str == ""
-
-
-def test_reftest_get_lineno():
-    """Test reftest_get_lineno"""
-
-    sf = Skipfails()
-    mods = [
-        "pref(gfx.font_rendering.colr_v1.enabled,true)",
-        "fuzzy(0-8,0-10100)",
-        "==",
-        "colrv1-01.html#C",
-        "colrv1-01-ref.html#C",
-    ]
-    allmods = " ".join(mods)
-    lineno = sf.reftest_find_lineno(
-        DATA_PATH.joinpath("fontface_reftest.list"), mods, allmods
-    )
-    assert lineno == 171
 
 
 def test_reftest_get_lineno2():

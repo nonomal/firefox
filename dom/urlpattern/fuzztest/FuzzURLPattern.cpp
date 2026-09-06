@@ -1,4 +1,3 @@
-/* -*- Mode: IDL; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -17,7 +16,7 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-static MOZ_RUNINIT JS::PersistentRooted<JSObject*> global;
+static constinit JS::PersistentRooted<JSObject*> global;
 
 static int FuzzingInit(int* argc, char*** argv) {
   JSObject* simpleGlobal =
@@ -102,6 +101,7 @@ static int FuzzingRunURLPattern(const uint8_t* data, size_t size) {
   }
 
   if (MOZ_UNLIKELY(rv.Failed())) {
+    rv.SuppressException();
     return 0;
   }
 
@@ -133,6 +133,7 @@ static int FuzzingRunURLPattern(const uint8_t* data, size_t size) {
 
       ErrorResult testRv;
       (void)pattern->Test(testInput, base, testRv);
+      testRv.SuppressException();
     } else if (operation == 10) {
       // Exec
       UTF8StringOrURLPatternInit execInput;
@@ -145,6 +146,7 @@ static int FuzzingRunURLPattern(const uint8_t* data, size_t size) {
       Nullable<URLPatternResult> result;
       ErrorResult execRv;
       pattern->Exec(execInput, base, result, execRv);
+      execRv.SuppressException();
     }
   }
 

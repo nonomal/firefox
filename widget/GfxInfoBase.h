@@ -1,12 +1,10 @@
-/* vim: se cin sw=2 ts=2 et : */
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef __mozilla_widget_GfxInfoBase_h__
-#define __mozilla_widget_GfxInfoBase_h__
+#ifndef _mozilla_widget_GfxInfoBase_h_
+#define _mozilla_widget_GfxInfoBase_h_
 
 #include "GfxDriverInfo.h"
 #include "GfxInfoCollector.h"
@@ -87,6 +85,10 @@ class GfxInfoBase : public nsIGfxInfo,
 #ifdef DEBUG
   NS_IMETHOD SpoofMonitorInfo(uint32_t aScreenCount, int32_t aMinRefreshRate,
                               int32_t aMaxRefreshRate) override;
+  NS_IMETHOD SpoofVendorID2(const nsAString& aVendorID) override;
+  NS_IMETHOD SpoofDeviceID2(const nsAString& aDeviceID) override;
+  NS_IMETHOD SpoofDriverVendor2(const nsAString& aDriverVendor) override;
+  NS_IMETHOD SpoofDriverVersion2(const nsAString& aDriverVersion) override;
 #endif
 
   // Non-XPCOM method to get IPC data:
@@ -120,6 +122,11 @@ class GfxInfoBase : public nsIGfxInfo,
   virtual uint32_t OperatingSystemVersion() { return 0; }
   virtual GfxVersionEx OperatingSystemVersionEx() { return GfxVersionEx(); }
 
+  // Reports GL string values obtained from an OpenGL context to gfxInfo. Some
+  // gfxInfo implementations can use these in order to avoid having to create
+  // their own GL context during startup.
+  virtual void ReportGLStrings(gfx::GfxInfoGLStrings&& aStrings) {}
+
   // Convenience to get the application version
   static const nsCString& GetApplicationVersion();
 
@@ -135,6 +142,57 @@ class GfxInfoBase : public nsIGfxInfo,
   static bool MatchingRefreshRates(int32_t aSystem, int32_t aBlocked,
                                    int32_t aBlockedMax,
                                    VersionComparisonOp aCmp);
+
+  static constexpr bool IsFeatureStatusAllowed(int32_t aFeature,
+                                               int32_t aStatus) {
+    return IsFeatureAllowlisted(aFeature) || !MatchingAllowStatus(aStatus);
+  }
+
+  static constexpr bool MatchingAllowStatus(int32_t aStatus) {
+    switch (aStatus) {
+      case nsIGfxInfo::FEATURE_ALLOW_ALWAYS:
+      case nsIGfxInfo::FEATURE_ALLOW_QUALIFIED:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static constexpr bool IsFeatureAllowlisted(int32_t aFeature) {
+    switch (aFeature) {
+#define GFXINFO_FEATURE_ALLOWLIST(id, pref) \
+  case nsIGfxInfo::FEATURE_##id:            \
+    return true;
+#define GFXINFO_FEATURE(id, pref)
+#define GFXINFO_FEATURE_RETIRED(id, pref)
+#define GFXINFO_FEATURE_MISMATCHED(id, name, pref)
+#include "mozilla/widget/GfxInfoFeatureDefs.inc"
+#undef GFXINFO_FEATURE
+#undef GFXINFO_FEATURE_RETIRED
+#undef GFXINFO_FEATURE_MISMATCHED
+#undef GFXINFO_FEATURE_ALLOWLIST
+      default:
+        return false;
+    }
+  }
+
+  static constexpr bool IsFeatureRetired(int32_t aFeature) {
+    switch (aFeature) {
+#define GFXINFO_FEATURE_RETIRED(id, pref) \
+  case nsIGfxInfo::FEATURE_##id:          \
+    return true;
+#define GFXINFO_FEATURE(id, pref)
+#define GFXINFO_FEATURE_ALLOWLIST(id, pref)
+#define GFXINFO_FEATURE_MISMATCHED(id, name, pref)
+#include "mozilla/widget/GfxInfoFeatureDefs.inc"
+#undef GFXINFO_FEATURE
+#undef GFXINFO_FEATURE_RETIRED
+#undef GFXINFO_FEATURE_MISMATCHED
+#undef GFXINFO_FEATURE_ALLOWLIST
+      default:
+        return false;
+    }
+  }
 
  protected:
   virtual ~GfxInfoBase();
@@ -179,6 +237,16 @@ class GfxInfoBase : public nsIGfxInfo,
   int32_t mMaxRefreshRate = 0;
   nsCString mCodecSupportInfo;
 
+#ifdef DEBUG
+  // A spoofed secondary adapter, substituted for the real one (if any) when
+  // matching blocklist entries.
+  bool mSpoofedAdapter2 = false;
+  nsString mSpoofedAdapterVendorID2;
+  nsString mSpoofedAdapterDeviceID2;
+  nsString mSpoofedAdapterDriverVendor2;
+  nsString mSpoofedAdapterDriverVersion2;
+#endif
+
  private:
   virtual int32_t FindBlocklistedDeviceInList(
       const nsTArray<RefPtr<GfxDriverInfo>>& aDriverInfo,
@@ -187,8 +255,6 @@ class GfxInfoBase : public nsIGfxInfo,
 
   std::pair<nsIGfxInfo::FontVisibilityDeviceDetermination, nsString>*
   GetFontVisibilityDeterminationPair();
-
-  bool IsFeatureAllowlisted(int32_t aFeature) const;
 
   void EvaluateDownloadedBlocklist(
       nsTArray<RefPtr<GfxDriverInfo>>& aDriverInfo);
@@ -202,4 +268,4 @@ class GfxInfoBase : public nsIGfxInfo,
 }  // namespace widget
 }  // namespace mozilla
 
-#endif /* __mozilla_widget_GfxInfoBase_h__ */
+#endif /* _mozilla_widget_GfxInfoBase_h_ */

@@ -25,7 +25,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   DownloadLastDir: "resource://gre/modules/DownloadLastDir.sys.mjs",
   DownloadPaths: "resource://gre/modules/DownloadPaths.sys.mjs",
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
-  ScreenshotsUtils: "resource:///modules/ScreenshotsUtils.sys.mjs",
+  ScreenshotsUtils:
+    "moz-src:///browser/components/screenshots/ScreenshotsUtils.sys.mjs",
 });
 
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -139,7 +140,7 @@ export async function getFilename(filenameTitle, browser) {
       saveAsType: 0,
       file,
     };
-    let accepted = await promiseTargetFile(fpParams, browser.ownerGlobal);
+    let accepted = await promiseTargetFile(fpParams, browser.documentGlobal);
     if (!accepted) {
       return { filename: null, accepted };
     }
@@ -274,9 +275,9 @@ function appendFiltersForContentType(
  *        containing all the data used within this method.
  * @param win
  *        The window used for opening the file picker
- * @return Promise
- * @resolve a boolean. When true, it indicates that the file picker dialog
- *          is accepted.
+ * @returns {Promise<boolean>}
+ *   Resolves when the dialog is closed. When resolved to true, it indicates that
+ *   the file picker dialog is accepted.
  */
 function promiseTargetFile(aFpP, win) {
   return (async function () {

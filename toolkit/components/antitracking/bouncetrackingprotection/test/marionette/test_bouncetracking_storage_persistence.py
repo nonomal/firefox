@@ -11,13 +11,11 @@ from marionette_harness import MarionetteTestCase
 
 class BounceTrackingStoragePersistenceTestCase(MarionetteTestCase):
     def setUp(self):
-        super(BounceTrackingStoragePersistenceTestCase, self).setUp()
-        self.marionette.enforce_gecko_prefs(
-            {
-                "privacy.bounceTrackingProtection.enabled": True,
-                "privacy.bounceTrackingProtection.enableTestMode": True,
-            }
-        )
+        super().setUp()
+        self.marionette.enforce_gecko_prefs({
+            "privacy.bounceTrackingProtection.enabled": True,
+            "privacy.bounceTrackingProtection.enableTestMode": True,
+        })
 
         self.marionette.set_context("chrome")
         self.populate_state()
@@ -25,7 +23,7 @@ class BounceTrackingStoragePersistenceTestCase(MarionetteTestCase):
     def tearDown(self):
         self.marionette.restart(in_app=False, clean=True)
 
-        super(BounceTrackingStoragePersistenceTestCase, self).tearDown()
+        super().tearDown()
 
     def populate_state(self):
         # Add some data to test persistence.

@@ -1,44 +1,23 @@
 From: Michael Froman <mfroman@mozilla.com>
-Date: Wed, 17 Sep 2025 15:41:00 +0000
-Subject: Bug 1988042 - android build fix in
- third_party/libwebrtc/rtc_base/cpu_info.cc r?ng!
+Date: Fri, 16 Jan 2026 20:25:00 -0600
+Subject: Bug 2010312 - (fix-20159a54f6) fix new usage of GetRealTimeClock in
+ libaom_av1_encoder.cc
 
-Supports(...) is really used in unittests and outside of unittests
-it is only used when WEBRTC_ARCH_X86_FAMILY is defined.  For now,
-we'll return false when checking for arm/neon suport.
-
-Differential Revision: https://phabricator.services.mozilla.com/D265018
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/eae7b6ec4f7ca191e8eaa8e36787142528f2c132
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/c00f6910cab76176f0caf946f2af480cac016e38
 ---
- rtc_base/cpu_info.cc | 9 +++++++++
- 1 file changed, 9 insertions(+)
+ modules/video_coding/codecs/av1/libaom_av1_encoder.cc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
-diff --git a/rtc_base/cpu_info.cc b/rtc_base/cpu_info.cc
-index f0bff56911..b51c9e950e 100644
---- a/rtc_base/cpu_info.cc
-+++ b/rtc_base/cpu_info.cc
-@@ -25,7 +25,9 @@
- #elif defined(WEBRTC_MAC)
- #include <sys/sysctl.h>
- #elif defined(WEBRTC_ANDROID)
-+#if !defined(WEBRTC_MOZILLA_BUILD)
- #include <cpu-features.h>
-+#endif
- #include <unistd.h>
- #elif defined(WEBRTC_FUCHSIA)
- #include <zircon/syscalls.h>
-@@ -175,7 +177,14 @@ bool Supports(ISA instruction_set_architecture) {
- #elif defined(WEBRTC_ARCH_ARM_FAMILY)
-   if (instruction_set_architecture == ISA::kNeon) {
- #if defined(WEBRTC_ANDROID)
-+#if defined(WEBRTC_MOZILLA_BUILD)
-+    // We should revisit this if Supports(...) is ever more widely used.
-+    // Currently, it is used in unittests and when WEBRTC_ARCH_X86_FAMILY
-+    // is defined in non-unittest code.
-+    return false;
-+#else
-     return 0 != (android_getCpuFeatures() & ANDROID_CPU_ARM_FEATURE_NEON);
-+#endif
- #elif defined(WEBRTC_BSD)
-     // OpenBSD does not have getauxval() and does not have /proc reading
-     return false;
+diff --git a/modules/video_coding/codecs/av1/libaom_av1_encoder.cc b/modules/video_coding/codecs/av1/libaom_av1_encoder.cc
+index bedcbf11e7..f66ee6463a 100644
+--- a/modules/video_coding/codecs/av1/libaom_av1_encoder.cc
++++ b/modules/video_coding/codecs/av1/libaom_av1_encoder.cc
+@@ -278,7 +278,7 @@ LibaomAv1Encoder::LibaomAv1Encoder(const Environment& env,
+       drop_repeat_frames_on_enhancement_layers_(env.field_trials().IsEnabled(
+           "WebRTC-LibaomAv1Encoder-DropRepeatFramesOnEnhancementLayers")),
+       encoder_speed_experiment_(env.field_trials()),
+-      realtime_clock_(Clock::GetRealTimeClock()) {}
++      realtime_clock_(Clock::GetRealTimeClockRaw()) {}
+ 
+ LibaomAv1Encoder::~LibaomAv1Encoder() {
+   Release();

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,12 +7,13 @@
 #ifndef mozilla_image_SVGDocumentWrapper_h
 #define mozilla_image_SVGDocumentWrapper_h
 
+#include "Units.h"
 #include "nsCOMPtr.h"
-#include "nsIStreamListener.h"
-#include "nsIObserver.h"
 #include "nsIDocumentViewer.h"
-#include "nsWeakReference.h"
+#include "nsIObserver.h"
+#include "nsIStreamListener.h"
 #include "nsSize.h"
+#include "nsWeakReference.h"
 
 class nsIRequest;
 class nsILoadGroup;
@@ -51,7 +51,7 @@ class SVGDocumentWrapper final : public nsIStreamListener,
    * Returns the root <svg> element for the wrapped document, or nullptr on
    * failure.
    */
-  mozilla::dom::SVGSVGElement* GetRootSVGElem() const;
+  mozilla::dom::SVGSVGElement* GetSVGRootElement() const;
 
   /**
    * Returns the root nsIFrame* for the wrapped document, or nullptr on failure.
@@ -72,7 +72,7 @@ class SVGDocumentWrapper final : public nsIStreamListener,
    *
    * @param aViewportSize The new viewport dimensions.
    */
-  void UpdateViewportBounds(const nsIntSize& aViewportSize);
+  void UpdateViewportBounds(const CSSSize& aViewportSize);
 
   /**
    * If an SVG image's helper document has a pending notification for an
@@ -123,11 +123,11 @@ class SVGDocumentWrapper final : public nsIStreamListener,
  private:
   friend class AutoRestoreSVGState;
 
-  ~SVGDocumentWrapper();
+  MOZ_CAN_RUN_SCRIPT ~SVGDocumentWrapper();
 
   nsresult SetupViewer(nsIRequest* aRequest, nsIDocumentViewer** aViewer,
                        nsILoadGroup** aLoadGroup);
-  void DestroyViewer();
+  MOZ_CAN_RUN_SCRIPT void DestroyViewer();
   void RegisterForXPCOMShutdown();
   void UnregisterForXPCOMShutdown();
 

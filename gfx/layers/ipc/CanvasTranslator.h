@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -8,24 +6,25 @@
 #define mozilla_layers_CanvasTranslator_h
 
 #include <deque>
+#include <map>
 #include <memory>
 #include <unordered_map>
 
-#include "mozilla/dom/ipc/IdType.h"
-#include "mozilla/gfx/InlineTranslator.h"
-#include "mozilla/gfx/RecordedEvent.h"
 #include "CanvasChild.h"
-#include "mozilla/ipc/SharedMemoryHandle.h"
-#include "mozilla/layers/CanvasDrawEventRecorder.h"
-#include "mozilla/layers/LayersSurfaces.h"
-#include "mozilla/layers/PCanvasParent.h"
-#include "mozilla/layers/RemoteTextureMap.h"
-#include "mozilla/ipc/CrossProcessSemaphore.h"
-#include "mozilla/ipc/SharedMemoryMapping.h"
 #include "mozilla/Monitor.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Variant.h"
 #include "mozilla/WeakPtr.h"
+#include "mozilla/dom/ipc/IdType.h"
+#include "mozilla/gfx/InlineTranslator.h"
+#include "mozilla/gfx/RecordedEvent.h"
+#include "mozilla/ipc/CrossProcessSemaphore.h"
+#include "mozilla/ipc/SharedMemoryHandle.h"
+#include "mozilla/ipc/SharedMemoryMapping.h"
+#include "mozilla/layers/CanvasDrawEventRecorder.h"
+#include "mozilla/layers/LayersSurfaces.h"
+#include "mozilla/layers/PCanvasParent.h"
+#include "mozilla/layers/RemoteTextureMap.h"
 
 namespace mozilla {
 
@@ -112,7 +111,7 @@ class CanvasTranslator final : public gfx::InlineTranslator,
    * Sets the shared memory to be used for readback.
    */
   ipc::IPCResult RecvSetDataSurfaceBuffer(
-      ipc::MutableSharedMemoryHandle&& aBufferHandle);
+      uint32_t aId, ipc::MutableSharedMemoryHandle&& aBufferHandle);
 
   ipc::IPCResult RecvClearCachedResources();
 
@@ -246,8 +245,8 @@ class CanvasTranslator final : public gfx::InlineTranslator,
    * @param aRefPtr the key to the objects to remove
    */
   void RemoveSourceSurface(gfx::ReferencePtr aRefPtr) final {
-    RemoveDataSurface(aRefPtr);
     InlineTranslator::RemoveSourceSurface(aRefPtr);
+    RemoveDataSurface(aRefPtr);
   }
 
   already_AddRefed<gfx::SourceSurface> LookupExternalSurface(
@@ -291,7 +290,7 @@ class CanvasTranslator final : public gfx::InlineTranslator,
 
   void NextBuffer();
 
-  void GetDataSurface(uint64_t aSurfaceRef);
+  void GetDataSurface(uint32_t aId, uint64_t aSurfaceRef);
 
   /**
    * Wait for a canvas to produce the designated surface. If necessary,
@@ -352,8 +351,9 @@ class CanvasTranslator final : public gfx::InlineTranslator,
       MOZ_ASSERT(mTag == Tag::AddBuffer);
     }
     CanvasTranslatorEvent(const Tag aTag,
-                          ipc::MutableSharedMemoryHandle&& aBufferHandle)
-        : mTag(aTag), mBufferHandle(std::move(aBufferHandle)) {
+                          ipc::MutableSharedMemoryHandle&& aBufferHandle,
+                          uint32_t aId = 0)
+        : mTag(aTag), mBufferHandle(std::move(aBufferHandle)), mId(aId) {
       MOZ_ASSERT(mTag == Tag::SetDataSurfaceBuffer);
     }
 
@@ -368,9 +368,9 @@ class CanvasTranslator final : public gfx::InlineTranslator,
     }
 
     static UniquePtr<CanvasTranslatorEvent> SetDataSurfaceBuffer(
-        ipc::MutableSharedMemoryHandle&& aBufferHandle) {
+        uint32_t aId, ipc::MutableSharedMemoryHandle&& aBufferHandle) {
       return MakeUnique<CanvasTranslatorEvent>(Tag::SetDataSurfaceBuffer,
-                                               std::move(aBufferHandle));
+                                               std::move(aBufferHandle), aId);
     }
 
     static UniquePtr<CanvasTranslatorEvent> ClearCachedResources() {
@@ -396,6 +396,8 @@ class CanvasTranslator final : public gfx::InlineTranslator,
       MOZ_ASSERT_UNREACHABLE("unexpected to be called");
       return nullptr;
     }
+
+    uint32_t mId = 0;
   };
 
   /*
@@ -408,9 +410,14 @@ class CanvasTranslator final : public gfx::InlineTranslator,
    * @returns true if next HandleCanvasTranslatorEvents() needs to call
    * TranslateRecording().
    */
-  bool SetDataSurfaceBuffer(ipc::MutableSharedMemoryHandle&& aBufferHandle);
+  bool SetDataSurfaceBuffer(uint32_t aId,
+                            ipc::MutableSharedMemoryHandle&& aBufferHandle);
 
-  void DataSurfaceBufferWillChange();
+  void UnlinkDataSurfaceShmemOwner(
+      const RefPtr<gfx::DataSourceSurface>& aSurface);
+
+  void DataSurfaceBufferWillChange(uint32_t aId = 0, bool aKeepAlive = true,
+                                   size_t aLimit = 0);
 
   bool ReadNextEvent(EventType& aEventType);
 
@@ -525,9 +532,15 @@ class CanvasTranslator final : public gfx::InlineTranslator,
   };
   std::queue<CanvasShmem> mCanvasShmems;
   CanvasShmem mCurrentShmem;
-  gfx::MemReader mCurrentMemReader{0, 0};
-  ipc::SharedMemoryMapping mDataSurfaceShmem;
-  ThreadSafeWeakPtr<gfx::DataSourceSurface> mDataSurfaceShmemOwner;
+  gfx::MemReader mCurrentMemReader{nullptr, 0};
+  // Track any data surfaces pointing to a shmem mapping.
+  struct DataSurfaceShmem {
+    ipc::SharedMemoryMapping mShmem;
+    ThreadSafeWeakPtr<gfx::DataSourceSurface> mOwner;
+  };
+  std::map<uint32_t, DataSurfaceShmem> mDataSurfaceShmems;
+  // The last shmem id that was assigned to a mapping.
+  uint32_t mLastDataSurfaceShmemId = 0;
   UniquePtr<CrossProcessSemaphore> mWriterSemaphore;
   UniquePtr<CrossProcessSemaphore> mReaderSemaphore;
   TextureType mTextureType = TextureType::Unknown;
@@ -575,6 +588,8 @@ class CanvasTranslator final : public gfx::InlineTranslator,
   std::deque<UniquePtr<CanvasTranslatorEvent>> mPendingCanvasTranslatorEvents;
 
   std::unordered_map<gfx::ReferencePtr, ExportSurface> mExportSurfaces;
+
+  gfx::UserDataKey mDataSurfaceShmemIdKey = {0};
 };
 
 }  // namespace layers

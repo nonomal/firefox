@@ -19,9 +19,9 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <vector>
 
-#include "api/array_view.h"
 #include "api/audio/echo_canceller3_config.h"
 #include "modules/audio_processing/aec3/aec3_common.h"
 #include "modules/audio_processing/aec3/aec3_fft.h"
@@ -104,7 +104,7 @@ class RenderDelayBufferImpl final : public RenderDelayBuffer {
   int ComputeDelay() const;
   void ApplyTotalDelay(int delay);
   void InsertBlock(const Block& block, int previous_write);
-  bool DetectActiveRender(ArrayView<const float> x) const;
+  bool DetectActiveRender(std::span<const float> x) const;
   bool DetectExcessRenderBlocks();
   void IncrementWriteIndices();
   void IncrementLowRateReadIndices();
@@ -335,7 +335,11 @@ void RenderDelayBufferImpl::SetAudioBufferDelay(int delay_ms) {
   }
 
   // Convert delay from milliseconds to blocks (rounded down).
-  external_audio_buffer_delay_ = delay_ms / 4;
+  constexpr int kSampleRateForFixedCaptureDelay = 16000;
+  constexpr int kNumSamplesPerMs = kSampleRateForFixedCaptureDelay / 1000;
+  external_audio_buffer_delay_ = (delay_ms * kNumSamplesPerMs +
+                                  config_.delay.fixed_capture_delay_samples) /
+                                 (kBlockSizeMs * kNumSamplesPerMs);
 }
 
 bool RenderDelayBufferImpl::HasReceivedBufferDelay() {
@@ -401,7 +405,7 @@ void RenderDelayBufferImpl::InsertBlock(const Block& block,
   if (render_linear_amplitude_gain_ != 1.f) {
     for (size_t band = 0; band < num_bands; ++band) {
       for (size_t ch = 0; ch < num_render_channels; ++ch) {
-        ArrayView<float, kBlockSize> b_view = b.buffer[b.write].View(band, ch);
+        std::span<float, kBlockSize> b_view = b.buffer[b.write].View(band, ch);
         for (float& sample : b_view) {
           sample *= render_linear_amplitude_gain_;
         }
@@ -424,7 +428,7 @@ void RenderDelayBufferImpl::InsertBlock(const Block& block,
   }
 }
 
-bool RenderDelayBufferImpl::DetectActiveRender(ArrayView<const float> x) const {
+bool RenderDelayBufferImpl::DetectActiveRender(std::span<const float> x) const {
   const float x_energy = std::inner_product(x.begin(), x.end(), x.begin(), 0.f);
   return x_energy > (config_.render_levels.active_render_limit *
                      config_.render_levels.active_render_limit) *

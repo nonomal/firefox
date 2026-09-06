@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,15 +11,18 @@
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/OwningNonNull.h"
 #include "mozilla/StaticPrefs_dom.h"
+#include "mozilla/UseCounter.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Promise-inl.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/dom/ServiceWorkerGlobalScopeBinding.h"
+#include "mozilla/dom/WorkerRef.h"
 #include "mozilla/dom/WorkerRunnable.h"
 #include "mozilla/dom/WorkerScope.h"
 #include "mozilla/glean/DomNotificationMetrics.h"
+#include "mozilla/image/FetchDecodedImage.h"
 #include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/ipc/BackgroundUtils.h"
 #include "mozilla/ipc/PBackgroundChild.h"
@@ -113,7 +114,8 @@ class GetPermissionRunnable final : public WorkerMainThreadRunnable {
 }  // anonymous namespace
 
 NS_IMPL_CYCLE_COLLECTION_INHERITED(NotificationPermissionRequest,
-                                   ContentPermissionRequestBase, mCallback)
+                                   ContentPermissionRequestBase, mCallback,
+                                   mPromise)
 NS_IMPL_ADDREF_INHERITED(NotificationPermissionRequest,
                          ContentPermissionRequestBase)
 NS_IMPL_RELEASE_INHERITED(NotificationPermissionRequest,
@@ -209,7 +211,7 @@ nsresult NotificationPermissionRequest::ResolvePromise() {
       nsCOMPtr<Document> doc = mWindow->GetExtantDoc();
       if (doc) {
         nsContentUtils::ReportToConsole(nsIScriptError::errorFlag, "DOM"_ns,
-                                        doc, nsContentUtils::eDOM_PROPERTIES,
+                                        doc, PropertiesFile::DOM_PROPERTIES,
                                         "NotificationsRequireUserGesture");
       }
     }
@@ -278,10 +280,15 @@ already_AddRefed<Notification> Notification::Constructor(
         aNotification->Deactivate();
       },
       notification);
-  if (!notification->CreateActor() || !notification->SendShow(promise)) {
+
+  ContextInfo contextInfo = notification->GetContextInfo();
+  if (!notification->CreateActor(contextInfo)) {
     notification->Deactivate();
+    aRv.ThrowUnknownError("Failed to create actor.");
     return nullptr;
   }
+
+  notification->LoadImageAndShow(promise, std::move(contextInfo));
 
   notification->KeepAliveIfHasListenersFor(nsGkAtoms::onclick);
   notification->KeepAliveIfHasListenersFor(nsGkAtoms::onshow);
@@ -345,6 +352,16 @@ static Result<nsString, nsresult> SerializeDataAsBase64(
   return result;
 }
 
+#define SetUseCounterIf(wasUsed, memberName)                             \
+  if (wasUsed) {                                                         \
+    if (NS_IsMainThread()) {                                             \
+      SetUseCounter(aGlobal->GetGlobalJSObject(),                        \
+                    eUseCounter_NotificationOptions_##memberName);       \
+    } else {                                                             \
+      SetUseCounter(UseCounterWorker::NotificationOptions_##memberName); \
+    }                                                                    \
+  }
+
 /* static */
 // https://notifications.spec.whatwg.org/#create-a-notification
 already_AddRefed<Notification> Notification::ValidateAndCreate(
@@ -352,6 +369,15 @@ already_AddRefed<Notification> Notification::ValidateAndCreate(
     const NotificationOptions& aOptions, const nsAString& aScope,
     ErrorResult& aRv) {
   MOZ_ASSERT(aGlobal);
+
+  SetUseCounterIf(aOptions.mNavigate.WasPassed(), navigate);
+  SetUseCounterIf(aOptions.mImage.WasPassed(), image);
+  SetUseCounterIf(aOptions.mBadge.WasPassed(), badge);
+  SetUseCounterIf(aOptions.mVibrate.WasPassed(), vibrate);
+  SetUseCounterIf(aOptions.mTimestamp.WasPassed(), timestamp);
+  SetUseCounterIf(aOptions.mRenotify, renotify);
+  SetUseCounterIf(aOptions.mRequireInteraction, requireInteraction);
+  SetUseCounterIf(!aOptions.mActions.IsEmpty(), actions);
 
   // Step 4: Set notification’s data to
   // StructuredSerializeForStorage(options["data"]).
@@ -392,10 +418,19 @@ already_AddRefed<Notification> Notification::ValidateAndCreate(
     }
   }
 
-  // Step 12: If options["icon"] exists, then parse it using baseURL, and if
+  // 10. If options["navigate"] exists, then parse it using baseURL, and if that
+  // does not return failure, set notification’s navigation URL to the return
+  // value. (Otherwise notification’s navigation URL remains null.)
+  RefPtr<nsIURI> navigateUrl;
+  if (StaticPrefs::dom_webnotifications_navigate_enabled() &&
+      aOptions.mNavigate.WasPassed()) {
+    navigateUrl = ResolveURL(aGlobal, aOptions.mNavigate.Value());
+  }
+
+  // Step 13: If options["icon"] exists, then parse it using baseURL, and if
   // that does not return failure, set notification’s icon URL to the return
   // value. (Otherwise icon URL is not set.)
-  RefPtr<nsIURI> iconUrl = ResolveIconURL(aGlobal, aOptions.mIcon);
+  RefPtr<nsIURI> iconUrl = ResolveURL(aGlobal, aOptions.mIcon);
 
   // Step 19: Set notification’s actions to « ».
   nsTArray<IPCNotificationAction> actions;
@@ -409,9 +444,16 @@ already_AddRefed<Notification> Notification::ValidateAndCreate(
       action.name() = entry.mAction;
       // Step 20.3: Set action’s title to entry["title"].
       action.title() = entry.mTitle;
-      // Step 20.4: (Skipping icon support, see
+      if (StaticPrefs::dom_webnotifications_navigate_enabled() &&
+          entry.mNavigate.WasPassed()) {
+        // Step 20.4: If entry["navigate"] exists, then parse it using baseURL,
+        // and if that does not return failure, set action’s navigation URL to
+        // the return value. (Otherwise action’s navigation URL remains null.)
+        action.navigate() = ResolveURL(aGlobal, entry.mNavigate.Value());
+      }
+      // Step 20.5: (Skipping icon support, see
       // https://github.com/whatwg/notifications/issues/233)
-      // Step 20.5: Append action to notification’s actions.
+      // Step 20.6: Append action to notification’s actions.
       actions.AppendElement(std::move(action));
       if (actions.Length() == kMaxActions) {
         break;
@@ -423,8 +465,8 @@ already_AddRefed<Notification> Notification::ValidateAndCreate(
       nsString(), IPCNotificationOptions(
                       nsString(aTitle), aOptions.mDir, nsString(aOptions.mLang),
                       nsString(aOptions.mBody), nsString(aOptions.mTag),
-                      iconUrl, aOptions.mRequireInteraction, silent, vibrate,
-                      nsString(dataResult.unwrap()), actions));
+                      iconUrl, navigateUrl, aOptions.mRequireInteraction,
+                      silent, vibrate, nsString(dataResult.unwrap()), actions));
 
   RefPtr<Notification> notification =
       new Notification(aGlobal, ipcNotification, aScope);
@@ -562,11 +604,11 @@ uint32_t Notification::MaxActions(const GlobalObject& aGlobal) {
   return kMaxActions;
 }
 
-already_AddRefed<nsIURI> Notification::ResolveIconURL(
-    nsIGlobalObject* aGlobal, const nsACString& aIconUrl) {
+already_AddRefed<nsIURI> Notification::ResolveURL(nsIGlobalObject* aGlobal,
+                                                  const nsACString& aUrl) {
   nsresult rv = NS_OK;
 
-  if (aIconUrl.IsEmpty()) {
+  if (aUrl.IsEmpty()) {
     return nullptr;
   }
 
@@ -576,7 +618,7 @@ already_AddRefed<nsIURI> Notification::ResolveIconURL(
   }
 
   nsCOMPtr<nsIURI> srcUri;
-  rv = NS_NewURI(getter_AddRefs(srcUri), aIconUrl, nullptr, baseUri);
+  rv = NS_NewURI(getter_AddRefs(srcUri), aUrl, nullptr, baseUri);
   if (NS_FAILED(rv)) {
     return nullptr;
   }
@@ -594,7 +636,7 @@ void Notification::Close() {
     return;
   }
   if (!mActor) {
-    CreateActor();
+    CreateActor(GetContextInfo());
   }
   if (mActor) {
     (void)mActor->SendClose();
@@ -653,6 +695,12 @@ void Notification::GetActions(nsTArray<NotificationAction>& aRetVal) {
     RootedDictionary<NotificationAction> action(RootingCx());
     action.mAction = entry.name();
     action.mTitle = entry.title();
+    if (entry.navigate() &&
+        StaticPrefs::dom_webnotifications_navigate_enabled()) {
+      nsAutoCString spec;
+      entry.navigate()->GetSpec(spec);
+      action.mNavigate.Construct(spec);
+    }
     aRetVal.AppendElement(action);
   }
 }
@@ -701,14 +749,35 @@ already_AddRefed<Promise> Notification::ShowPersistentNotification(
     return nullptr;
   }
 
-  if (!notification->CreateActor() || !notification->SendShow(p)) {
+  ContextInfo contextInfo = notification->GetContextInfo();
+  if (!notification->CreateActor(contextInfo)) {
+    aRv.ThrowUnknownError("Failed to create actor.");
     return nullptr;
   }
+  notification->LoadImageAndShow(p, std::move(contextInfo));
 
   return p.forget();
 }
 
-bool Notification::CreateActor() {
+Notification::ContextInfo Notification::GetContextInfo() {
+  // TODO: Should get nsIGlobalObject methods for each method
+  if (WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate()) {
+    return {.mTarget = workerPrivate->HybridEventTarget(),
+            .mPrincipal = workerPrivate->GetPrincipal(),
+            .mEffectiveStoragePrincipal =
+                workerPrivate->GetEffectiveStoragePrincipal(),
+            .mIsSecureContext = workerPrivate->IsSecureContext()};
+  }
+
+  nsGlobalWindowInner* win = GetOwnerWindow();
+  return {
+      .mPrincipal = win->GetPrincipal(),
+      .mEffectiveStoragePrincipal = win->GetEffectiveStoragePrincipal(),
+      .mIsSecureContext = win->IsSecureContext(),
+  };
+}
+
+bool Notification::CreateActor(const ContextInfo& aInfo) {
   mozilla::ipc::PBackgroundChild* backgroundActor =
       mozilla::ipc::BackgroundChild::GetOrCreateForCurrentThread();
 
@@ -727,64 +796,138 @@ bool Notification::CreateActor() {
       persistent ? nullptr : this,
       window ? window->GetWindowGlobalChild() : nullptr);
 
-  nsISerialEventTarget* target = nullptr;
-  nsIPrincipal* principal;
-  nsIPrincipal* effectiveStoragePrincipal;
-  bool isSecureContext;
-
-  // TODO: Should get nsIGlobalObject methods for each method
-  if (WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate()) {
-    target = workerPrivate->HybridEventTarget();
-    principal = workerPrivate->GetPrincipal();
-    effectiveStoragePrincipal = workerPrivate->GetEffectiveStoragePrincipal();
-    isSecureContext = workerPrivate->IsSecureContext();
-  } else {
-    nsGlobalWindowInner* win = GetOwnerWindow();
-    NS_ENSURE_TRUE(win, false);
-    principal = win->GetPrincipal();
-    effectiveStoragePrincipal = win->GetEffectiveStoragePrincipal();
-    isSecureContext = win->IsSecureContext();
-  }
-
-  if (!childEndpoint.Bind(mActor, target)) {
+  if (!childEndpoint.Bind(mActor, aInfo.mTarget)) {
     return false;
   }
 
   (void)backgroundActor->SendCreateNotificationParent(
-      std::move(parentEndpoint), WrapNotNull(principal),
-      WrapNotNull(effectiveStoragePrincipal), isSecureContext, mScope,
-      mIPCNotification);
+      std::move(parentEndpoint), WrapNotNull(aInfo.mPrincipal),
+      WrapNotNull(aInfo.mEffectiveStoragePrincipal), aInfo.mIsSecureContext,
+      mScope, mIPCNotification);
 
   return true;
 }
 
-bool Notification::SendShow(Promise* aPromise) {
-  mActor->SendShow()->Then(
-      GetCurrentSerialEventTarget(), __func__,
-      [self = RefPtr{this}, promise = RefPtr(aPromise)](
-          notification::PNotificationChild::ShowPromise::ResolveOrRejectValue&&
-              aResult) {
-        if (aResult.IsReject()) {
-          promise->MaybeRejectWithUnknownError("Failed to open notification");
-          self->Deactivate();
-          return;
+void Notification::LoadImageAndShow(Promise* aPromise, ContextInfo&& aInfo) {
+  nsCOMPtr<nsIURI> uri = mIPCNotification.options().icon();
+  Maybe<ClientInfo> clientInfo = GetParentObject()->GetClientInfo();
+  if (!uri || clientInfo.isNothing()) {
+    SendShow(aPromise, Nothing());
+    return;
+  }
+
+  RefPtr<StrongWorkerRef> workerRef;
+  if (!NS_IsMainThread()) {
+    workerRef = StrongWorkerRef::Create(GetCurrentThreadWorkerPrivate(),
+                                        "Notification::LoadImageAndShow");
+    if (!workerRef) {
+      return;
+    }
+  }
+
+  using IPCImagePromise = mozilla::MozPromise<Maybe<IPCImage>, bool, true>;
+  InvokeAsync(
+      GetMainThreadSerialEventTarget(), __func__,
+      [uri, clientInfo, contextInfo = std::move(aInfo)]() {
+        // Don't load the image if we aren't even allowed to show the
+        // notification.
+        NotificationPermission permission = GetNotificationPermission(
+            contextInfo.mPrincipal, contextInfo.mEffectiveStoragePrincipal,
+            contextInfo.mIsSecureContext,
+            PermissionCheckPurpose::LoadImageForShow);
+        if (permission != NotificationPermission::Granted) {
+          return image::FetchDecodedImagePromise::CreateAndReject(
+              NS_ERROR_FAILURE, __func__);
         }
 
-        CopyableErrorResult rv = aResult.ResolveValue();
-        if (rv.Failed()) {
-          promise->MaybeReject(std::move(rv));
-          self->Deactivate();
-          return;
+        // https://notifications.spec.whatwg.org/#fetch-steps
+        // Step 1: If the notification platform supports images, fetch
+        // notification's image URL, if image URL is set.
+        //
+        // But the spec doesn't provide proper details (see
+        // https://github.com/whatwg/notifications/issues/208), so for
+        // now we pretend a Request object with:
+        // * method: "GET"
+        // * destination: "image"
+        // * mode: "no-cors"
+        nsCOMPtr<nsIChannel> channel;
+        nsresult rv = NS_NewChannel(
+            getter_AddRefs(channel), uri, contextInfo.mPrincipal,
+            clientInfo.ref(), Maybe<dom::ServiceWorkerDescriptor>(),
+            nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
+            nsIContentPolicy::TYPE_INTERNAL_IMAGE_NOTIFICATION);
+        if (NS_FAILED(rv)) {
+          return image::FetchDecodedImagePromise::CreateAndReject(rv, __func__);
         }
 
-        if (promise) {
-          promise->MaybeResolveWithUndefined();
-        } else {
-          self->DispatchTrustedEvent(u"show"_ns);
-        }
-      });
+        // This function must be called on the main thread.
+        return image::FetchDecodedImage(uri, channel, gfx::IntSize{});
+      })
+      ->Then(
+          GetMainThreadSerialEventTarget(), __func__,
+          [](already_AddRefed<imgIContainer> aImage) {
+            nsCOMPtr<imgIContainer> image(std::move(aImage));
+            // The promise should only be resolved for decoded images, so
+            // using FLAG_SYNC_DECODE is just a precaution.
+            if (RefPtr<mozilla::gfx::SourceSurface> surface =
+                    image->GetFrame(imgIContainer::FRAME_FIRST,
+                                    imgIContainer::FLAG_SYNC_DECODE |
+                                        imgIContainer::FLAG_ASYNC_NOTIFY)) {
+              if (RefPtr<mozilla::gfx::DataSourceSurface> dataSurface =
+                      surface->GetDataSurface()) {
+                return IPCImagePromise::CreateAndResolve(
+                    nsContentUtils::SurfaceToIPCImage(*dataSurface), __func__);
+              }
+            }
 
-  return true;
+            return IPCImagePromise::CreateAndResolve(Nothing(), __func__);
+          },
+          [](nsresult) {
+            // Show the notification even if loading the image failed.
+            return IPCImagePromise::CreateAndResolve(Nothing(), __func__);
+          })
+      ->Then(
+          GetCurrentSerialEventTarget(), __func__,
+          [self = RefPtr{this}, promise = RefPtr{aPromise},
+           workerRef = std::move(workerRef)](Maybe<IPCImage>&& aImage) {
+            // SendShow must happen on the original (potentially Worker) thread.
+            self->SendShow(promise, std::move(aImage));
+          },
+          [](bool) {});
+}
+
+void Notification::SendShow(Promise* aPromise, Maybe<IPCImage>&& aIcon) {
+  if (mIsClosed) {
+    MOZ_ASSERT(mIPCNotification.options().icon(),
+               "Closure before SendShow can only happen with image resources");
+    return;
+  }
+
+  mActor->SendShow(std::move(aIcon))
+      ->Then(GetCurrentSerialEventTarget(), __func__,
+             [self = RefPtr{this}, promise = RefPtr(aPromise)](
+                 notification::PNotificationChild::ShowPromise::
+                     ResolveOrRejectValue&& aResult) {
+               if (aResult.IsReject()) {
+                 promise->MaybeRejectWithUnknownError(
+                     "Failed to open notification");
+                 self->Deactivate();
+                 return;
+               }
+
+               CopyableErrorResult rv = aResult.ResolveValue();
+               if (rv.Failed()) {
+                 promise->MaybeReject(std::move(rv));
+                 self->Deactivate();
+                 return;
+               }
+
+               if (promise) {
+                 promise->MaybeResolveWithUndefined();
+               } else {
+                 self->DispatchTrustedEvent(u"show"_ns);
+               }
+             });
 }
 
 void Notification::Deactivate() {
@@ -800,7 +943,7 @@ void Notification::Deactivate() {
 }
 
 nsresult Notification::DispatchToMainThread(
-    already_AddRefed<nsIRunnable>&& aRunnable) {
+    already_AddRefed<nsIRunnable> aRunnable) {
   if (WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate()) {
     return workerPrivate->DispatchToMainThread(std::move(aRunnable));
   }

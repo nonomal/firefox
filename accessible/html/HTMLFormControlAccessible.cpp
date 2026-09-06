@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,24 +7,22 @@
 #include "CacheConstants.h"
 #include "DocAccessible-inl.h"
 #include "LocalAccessible-inl.h"
-#include "nsAccUtils.h"
-#include "nsEventShell.h"
-#include "nsTextEquivUtils.h"
 #include "Relation.h"
-#include "mozilla/a11y/Role.h"
 #include "States.h"
 #include "TextLeafAccessible.h"
-
-#include "nsContentList.h"
-#include "mozilla/dom/HTMLInputElement.h"
-#include "mozilla/dom/HTMLMeterElement.h"
-#include "mozilla/dom/HTMLTextAreaElement.h"
-#include "mozilla/dom/HTMLFormControlsCollection.h"
-#include "nsIFormControl.h"
-
 #include "mozilla/FloatingPoint.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/TextEditor.h"
+#include "mozilla/a11y/Role.h"
+#include "mozilla/dom/ContentList.h"
+#include "mozilla/dom/HTMLFormControlsCollection.h"
+#include "mozilla/dom/HTMLInputElement.h"
+#include "mozilla/dom/HTMLMeterElement.h"
+#include "mozilla/dom/HTMLTextAreaElement.h"
+#include "nsAccUtils.h"
+#include "nsEventShell.h"
+#include "nsIFormControl.h"
+#include "nsTextEquivUtils.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -58,8 +55,8 @@ void HTMLFormAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
               !acc->Elm()->AttrValueIs(kNameSpaceID_None,
                                        nsGkAtoms::autocomplete, nsGkAtoms::OFF,
                                        eIgnoreCase)) {
-            RefPtr<AccEvent> stateChangeEvent =
-                new AccStateChangeEvent(acc, states::SUPPORTS_AUTOCOMPLETION);
+            auto stateChangeEvent = MakeRefPtr<AccStateChangeEvent>(
+                acc, states::SUPPORTS_AUTOCOMPLETION);
             mDoc->FireDelayedEvent(stateChangeEvent);
           }
         }
@@ -115,9 +112,10 @@ Relation HTMLRadioButtonAccessible::ComputeGroupAttributes(
   nsAutoString name;
   mContent->AsElement()->GetAttr(nsGkAtoms::name, name);
 
-  RefPtr<nsContentList> inputElms;
+  RefPtr<ContentList> inputElms;
 
-  if (dom::Element* formElm = nsIFormControl::FromNode(mContent)->GetForm()) {
+  if (dom::Element* formElm =
+          nsIFormControl::FromNode(mContent)->GetFormInternal()) {
     inputElms = NS_GetContentList(formElm, namespaceId, tagName);
   } else {
     inputElms = NS_GetContentList(mContent->OwnerDoc(), namespaceId, tagName);
@@ -187,8 +185,9 @@ void HTMLButtonAccessible::Value(nsString& aValue) const {
         nsAutoString rs(NS_ConvertUTF8toUTF16(r.toString()));
         nsAutoString gs(NS_ConvertUTF8toUTF16(g.toString()));
         nsAutoString bs(NS_ConvertUTF8toUTF16(b.toString()));
-        Accessible::TranslateString(u"inputColorValue"_ns, aValue,
-                                    {rs, gs, bs});
+        Accessible::TranslateString(
+            u"inputColorValue"_ns, aValue,
+            {std::move(rs), std::move(gs), std::move(bs)});
         return;
       }
     }
@@ -345,31 +344,6 @@ ENameValueFlag HTMLTextFieldAccessible::DirectName(nsString& aName) const {
   return eNameOK;
 }
 
-void HTMLTextFieldAccessible::Value(nsString& aValue) const {
-  aValue.Truncate();
-
-  HTMLTextAreaElement* textArea = HTMLTextAreaElement::FromNode(mContent);
-  if (textArea) {
-    MOZ_ASSERT(!(NativeState() & states::PROTECTED));
-    textArea->GetValue(aValue);
-    return;
-  }
-
-  HTMLInputElement* input = HTMLInputElement::FromNode(mContent);
-  if (input) {
-    // Pass NonSystem as the caller type, to be safe.  We don't expect to have a
-    // file input here.
-    input->GetValue(aValue, CallerType::NonSystem);
-
-    if (NativeState() & states::PROTECTED) {  // Don't return password text!
-      const char16_t mask = TextEditor::PasswordMask();
-      for (size_t i = 0; i < aValue.Length(); i++) {
-        aValue.SetCharAt(mask, i);
-      }
-    }
-  }
-}
-
 bool HTMLTextFieldAccessible::AttributeChangesState(nsAtom* aAttribute) {
   if (aAttribute == nsGkAtoms::readonly || aAttribute == nsGkAtoms::list ||
       aAttribute == nsGkAtoms::autocomplete) {
@@ -427,7 +401,7 @@ uint64_t HTMLTextFieldAccessible::NativeState() const {
     mContent->AsElement()->GetAttr(nsGkAtoms::autocomplete, autocomplete);
 
     if (!autocomplete.LowerCaseEqualsLiteral("off")) {
-      Element* formElement = input->GetForm();
+      Element* formElement = input->GetFormInternal();
       if (formElement) {
         formElement->GetAttr(nsGkAtoms::autocomplete, autocomplete);
       }
@@ -904,7 +878,7 @@ void HTMLProgressAccessible::DOMAttributeChanged(int32_t aNameSpaceID,
 
     uint64_t currState = NativeState();
     if ((aOldState ^ currState) & states::MIXED) {
-      RefPtr<AccEvent> stateChangeEvent = new AccStateChangeEvent(
+      auto stateChangeEvent = MakeRefPtr<AccStateChangeEvent>(
           this, states::MIXED, (currState & states::MIXED));
       mDoc->FireDelayedEvent(stateChangeEvent);
     }

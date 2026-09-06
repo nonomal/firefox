@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,49 +16,6 @@ using mozilla::dom::MediaKeyStatus from "mozilla/dom/MediaKeyStatusMapBinding.h"
 [RefCounted] using class mozilla::ArrayOfRemoteVideoData from "mozilla/RemoteMediaData.h";
 
 namespace mozilla {
-
-struct RemoteCDMInitRequestIPDL
-{
-  bool allowDistinctiveIdentifier;
-  bool allowPersistentState;
-};
-
-struct RemoteCDMCreateSessionRequestIPDL
-{
-  MediaKeySessionType sessionType;
-  nsString initDataType;
-  uint8_t[] initData;
-};
-
-struct RemoteCDMLoadSessionRequestIPDL
-{
-  MediaKeySessionType sessionType;
-  nsString sessionId;
-};
-
-struct RemoteCDMUpdateSessionRequestIPDL
-{
-  nsString sessionId;
-  uint8_t[] response;
-};
-
-union RemoteCDMSessionResponseIPDL
-{
-  MediaResult;
-  nsString;
-};
-
-struct RemoteCDMProvisionRequestIPDL
-{
-  nsString serverUrl;
-  uint8_t[] request;
-};
-
-union RemoteCDMProvisionResponseIPDL
-{
-  MediaResult;
-  uint8_t[];
-};
 
 // For EME spec 'message' event
 // https://w3c.github.io/encrypted-media/#queue-message
@@ -84,6 +40,50 @@ struct RemoteCDMKeyExpirationIPDL
 {
   nsString sessionId;
   double expiredTimeMilliSecondsSinceEpoch;
+};
+
+struct RemoteCDMInitRequestIPDL
+{
+  bool allowDistinctiveIdentifier;
+  bool allowPersistentState;
+  nsCString originID;
+};
+
+struct RemoteCDMCreateSessionRequestIPDL
+{
+  MediaKeySessionType sessionType;
+  nsString initDataType;
+  uint8_t[] initData;
+};
+
+struct RemoteCDMLoadSessionRequestIPDL
+{
+  MediaKeySessionType sessionType;
+  nsString sessionId;
+};
+
+struct RemoteCDMUpdateSessionRequestIPDL
+{
+  nsString sessionId;
+  uint8_t[] response;
+};
+
+union RemoteCDMSessionResponseIPDL
+{
+  MediaResult;
+  RemoteCDMKeyMessageIPDL;
+};
+
+struct RemoteCDMProvisionRequestIPDL
+{
+  nsString serverUrl;
+  uint8_t[] request;
+};
+
+union RemoteCDMProvisionResponseIPDL
+{
+  MediaResult;
+  uint8_t[];
 };
 
 // This protocol provides a way to use CDMProxy across processes.

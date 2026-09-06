@@ -1,30 +1,28 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "nsAccUtils.h"
 
-#include "AccAttributes.h"
 #include "ARIAMap.h"
-#include "nsCoreUtils.h"
-#include "nsGenericHTMLElement.h"
+#include "AccAttributes.h"
 #include "DocAccessible.h"
 #include "DocAccessibleParent.h"
 #include "HyperTextAccessible.h"
-#include "nsIAccessibleTypes.h"
-#include "mozilla/a11y/Role.h"
 #include "States.h"
 #include "TextLeafAccessible.h"
-
-#include "nsIBaseWindow.h"
-#include "nsIDocShellTreeOwner.h"
-#include "nsIDOMXULContainerElement.h"
 #include "mozilla/a11y/RemoteAccessible.h"
+#include "mozilla/a11y/Role.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/ElementInternals.h"
 #include "nsAccessibilityService.h"
+#include "nsCoreUtils.h"
+#include "nsGenericHTMLElement.h"
+#include "nsIAccessibleTypes.h"
+#include "nsIBaseWindow.h"
+#include "nsIDOMXULContainerElement.h"
+#include "nsIDocShellTreeOwner.h"
 
 using namespace mozilla;
 using namespace mozilla::a11y;
@@ -166,6 +164,13 @@ nsStaticAtom* nsAccUtils::NormalizeARIAToken(const AttrArray* aAttrs,
         aAttrs->FindAttrValueIn(kNameSpaceID_None, aAttr, tokens, eCaseMatters);
     // If the token is present, return it, otherwise TRUE as per spec.
     return (idx >= 0) ? tokens[idx] : nsGkAtoms::_true;
+  }
+
+  if (aAttr == nsGkAtoms::aria_haspopup) {
+    if (aAttrs->AttrValueIs(kNameSpaceID_None, aAttr, nsGkAtoms::_true,
+                            eCaseMatters)) {
+      return nsGkAtoms::menu;
+    }
   }
 
   static AttrArray::AttrValuesArray tokens[] = {
@@ -579,20 +584,19 @@ const nsAttrValue* nsAccUtils::GetARIAAttr(dom::Element* aElement,
   return defaults->GetAttr(aName, kNameSpaceID_None);
 }
 
-bool nsAccUtils::GetARIAElementsAttr(dom::Element* aElement, nsAtom* aName,
-                                     nsTArray<dom::Element*>& aElements) {
+Maybe<nsTArray<RefPtr<dom::Element>>> nsAccUtils::GetARIAElementsAttr(
+    dom::Element* aElement, nsAtom* aName) {
   if (aElement->HasAttr(aName)) {
-    aElement->GetExplicitlySetAttrElements(aName, aElements);
-    return true;
+    return aElement->GetExplicitlySetAttrElements(aName);
   }
 
   if (auto* element = nsGenericHTMLElement::FromNode(aElement)) {
     if (auto* internals = element->GetInternals()) {
-      return internals->GetAttrElements(aName, aElements);
+      return internals->GetAttrElements(aName);
     }
   }
 
-  return false;
+  return Nothing();
 }
 
 bool nsAccUtils::ARIAAttrValueIs(dom::Element* aElement, const nsAtom* aName,
@@ -650,6 +654,15 @@ bool nsAccUtils::IsEditableARIACombobox(const LocalAccessible* aAccessible) {
 
   return aAccessible->IsTextField() ||
          aAccessible->Elm()->State().HasState(dom::ElementState::READWRITE);
+}
+
+bool nsAccUtils::ShouldFireValueChangeForDescendantChanges(
+    const LocalAccessible* aAccessible) {
+  if (aAccessible->IsCombobox() || aAccessible->IsPassword()) {
+    return true;
+  }
+  role accRole = aAccessible->Role();
+  return accRole == roles::ENTRY || accRole == roles::SPINBUTTON;
 }
 
 bool nsAccUtils::IsValidDetailsTargetForAnchor(const Accessible* aTarget,

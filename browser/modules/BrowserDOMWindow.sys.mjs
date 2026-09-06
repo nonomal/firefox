@@ -1,5 +1,4 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -82,6 +81,7 @@ export class BrowserDOMWindow {
    * @param {nsIPolicyContainer} [aPolicyContainer=null]
    * @param {boolean} [skipLoad=false]
    * @param {i16} [aWhere=undefined]
+   * @param {boolean} [aForceAllowDataURI=false]
    * @returns {nsIBrowser|null}
    */
   #openURIInNewTab(
@@ -97,7 +97,8 @@ export class BrowserDOMWindow {
     aName = "",
     aPolicyContainer = null,
     aSkipLoad = false,
-    aWhere = undefined
+    aWhere = undefined,
+    aForceAllowDataURI = false
   ) {
     let win, needToFocusWin;
 
@@ -151,6 +152,7 @@ export class BrowserDOMWindow {
       name: aName,
       policyContainer: aPolicyContainer,
       skipLoad: aSkipLoad,
+      forceAllowDataURI: aForceAllowDataURI,
     };
 
     let tab;
@@ -242,6 +244,9 @@ export class BrowserDOMWindow {
   ) {
     var browsingContext = null;
     var isExternal = !!(aFlags & Ci.nsIBrowserDOMWindow.OPEN_EXTERNAL);
+    var forceAllowDataURI = !!(
+      aFlags & Ci.nsIBrowserDOMWindow.OPEN_FORCE_ALLOW_DATA_URI
+    );
     var guessUserContextIdEnabled =
       isExternal &&
       !Services.prefs.getBoolPref(
@@ -328,6 +333,9 @@ export class BrowserDOMWindow {
             "@mozilla.org/hash-property-bag;1"
           ].createInstance(Ci.nsIWritablePropertyBag2);
           extraOptions.setPropertyAsBool("fromExternal", isExternal);
+          if (forceAllowDataURI) {
+            extraOptions.setPropertyAsBool("forceAllowDataURI", true);
+          }
 
           this.win.openDialog(
             AppConstants.BROWSER_CHROME_URL,
@@ -385,7 +393,8 @@ export class BrowserDOMWindow {
           "",
           aPolicyContainer,
           aSkipLoad,
-          aWhere
+          aWhere,
+          forceAllowDataURI
         );
         if (browser) {
           browsingContext = browser.browsingContext;
@@ -411,6 +420,9 @@ export class BrowserDOMWindow {
             // XXX this code must be reviewed and changed when bug 1616353
             // lands.
             loadFlags |= Ci.nsIWebNavigation.LOAD_FLAGS_FIRST_LOAD;
+          }
+          if (forceAllowDataURI) {
+            loadFlags |= Ci.nsIWebNavigation.LOAD_FLAGS_FORCE_ALLOW_DATA_URI;
           }
           // This should ideally be able to call loadURI with the actual URI.
           // However, that would bypass some styles of fixup (notably Windows
@@ -494,6 +506,9 @@ export class BrowserDOMWindow {
     }
 
     var isExternal = !!(aFlags & Ci.nsIBrowserDOMWindow.OPEN_EXTERNAL);
+    var forceAllowDataURI = !!(
+      aFlags & Ci.nsIBrowserDOMWindow.OPEN_FORCE_ALLOW_DATA_URI
+    );
 
     var userContextId =
       aParams.openerOriginAttributes &&
@@ -514,7 +529,8 @@ export class BrowserDOMWindow {
       aName,
       aParams.policyContainer,
       aSkipLoad,
-      aWhere
+      aWhere,
+      forceAllowDataURI
     );
   }
 

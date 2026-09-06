@@ -1,5 +1,3 @@
-# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
-# vim: set filetype=python:
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -185,12 +183,12 @@ EXPORTS.mozilla += [
     "ClipboardWriteRequestChild.h",
     "ClipboardWriteRequestParent.h",
     "ColorScheme.h",
-    "CommandList.h",
+    "CommandList.inc",
     "ContentCache.h",
     "ContentData.h",
     "ContentEvents.h",
     "DimensionRequest.h",
-    "EventClassList.h",
+    "EventClassList.inc",
     "EventForwards.h",
     "EventMessageList.h",
     "FontRange.h",
@@ -211,14 +209,15 @@ EXPORTS.mozilla += [
 
 EXPORTS.mozilla.widget += [
     "CompositorWidget.h",
-    "GfxInfoDeviceVendorDefs.h",
-    "GfxInfoDriverVendorDefs.h",
-    "GfxInfoDriverVersionCmpDefs.h",
-    "GfxInfoFeatureDefs.h",
-    "GfxInfoFeatureStatusDefs.h",
-    "GfxInfoOperatingSystemDefs.h",
-    "GfxInfoRefreshRateStatusDefs.h",
-    "GfxInfoWindowProtocolDefs.h",
+    "GfxInfoAdapterMatchDefs.inc",
+    "GfxInfoDeviceVendorDefs.inc",
+    "GfxInfoDriverVendorDefs.inc",
+    "GfxInfoDriverVersionCmpDefs.inc",
+    "GfxInfoFeatureDefs.inc",
+    "GfxInfoFeatureStatusDefs.inc",
+    "GfxInfoOperatingSystemDefs.inc",
+    "GfxInfoRefreshRateStatusDefs.inc",
+    "GfxInfoWindowProtocolDefs.inc",
     "IconLoader.h",
     "IMEData.h",
     "InitData.h",
@@ -234,6 +233,8 @@ EXPORTS.mozilla.widget += [
     "ScreenManager.h",
     "TextRecognition.h",
     "ThemeChangeKind.h",
+    "ThemeDrawing.h",
+    "WebCustomFormatUtils.h",
     "WidgetLogging.h",
     "WidgetMessageUtils.h",
     "WindowOcclusionState.h",
@@ -293,6 +294,7 @@ UNIFIED_SOURCES += [
     "ThemeDrawing.cpp",
     "TouchResampler.cpp",
     "VsyncDispatcher.cpp",
+    "WebCustomFormatUtils.cpp",
     "WidgetEventImpl.cpp",
     "WidgetUtils.cpp",
 ]
@@ -366,7 +368,6 @@ LOCAL_INCLUDES += [
     "/layout/painting",
     "/layout/xul",
     "/layout/xul/tree/",
-    "/view",
     "/widget",
     "/widget/headless",
 ]

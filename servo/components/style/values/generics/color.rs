@@ -4,16 +4,19 @@
 
 //! Generic types for color properties.
 
+use crate::color::ColorMixItemList;
 use crate::color::{mix::ColorInterpolationMethod, AbsoluteColor, ColorFunction};
+use crate::derives::*;
+use crate::values::generics::Optional;
 use crate::values::{
     computed::ToComputedValue, specified::percentage::ToPercentage, ParseError, Parser,
 };
 use std::fmt::{self, Write};
-use style_traits::{CssWriter, ToCss};
+use style_traits::{owned_slice::OwnedSlice, CssWriter, ToCss};
 
 /// This struct represents a combined color from a numeric color and
 /// the current foreground color (currentcolor keyword).
-#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToAnimatedValue, ToShmem, ToTyped)]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToAnimatedValue, ToShmem)]
 #[repr(C)]
 pub enum GenericColor<Percentage> {
     /// The actual numeric color.
@@ -41,6 +44,25 @@ bitflags! {
     }
 }
 
+/// One `(color, percentage)` component of a `color-mix()` expression.
+#[derive(
+    Clone,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    ToAnimatedValue,
+    ToComputedValue,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[allow(missing_docs)]
+#[repr(C)]
+pub struct GenericColorMixItem<Color, Percentage> {
+    pub color: Color,
+    /// [Optional::None] when the percentage was omitted next to a calc() sibling.
+    pub percentage: Optional<Percentage>,
+}
+
 /// A restricted version of the css `color-mix()` function, which only supports
 /// percentages.
 ///
@@ -59,10 +81,7 @@ bitflags! {
 #[repr(C)]
 pub struct GenericColorMix<Color, Percentage> {
     pub interpolation: ColorInterpolationMethod,
-    pub left: Color,
-    pub left_percentage: Percentage,
-    pub right: Color,
-    pub right_percentage: Percentage,
+    pub items: OwnedSlice<GenericColorMixItem<Color, Percentage>>,
     pub flags: ColorMixFlags,
 }
 
@@ -73,38 +92,69 @@ impl<Color: ToCss, Percentage: ToCss + ToPercentage> ToCss for ColorMix<Color, P
     where
         W: Write,
     {
-        fn can_omit<Percentage: ToPercentage>(
-            percent: &Percentage,
-            other: &Percentage,
-            is_left: bool,
-        ) -> bool {
-            if percent.is_calc() {
-                return false;
-            }
-            if percent.to_percentage() == 0.5 {
-                return other.to_percentage() == 0.5;
-            }
-            if is_left {
-                return false;
-            }
-            (1.0 - percent.to_percentage() - other.to_percentage()).abs() <= f32::EPSILON
+        dest.write_str("color-mix(")?;
+
+        // If the color interpolation method is oklab (which is now the default),
+        // it can be omitted.
+        // See: https://github.com/web-platform-tests/interop/issues/1166
+        if !self.interpolation.is_default() {
+            self.interpolation.to_css(dest)?;
+            dest.write_str(", ")?;
         }
 
-        dest.write_str("color-mix(")?;
-        self.interpolation.to_css(dest)?;
-        dest.write_str(", ")?;
-        self.left.to_css(dest)?;
-        if !can_omit(&self.left_percentage, &self.right_percentage, true) {
-            dest.write_char(' ')?;
-            self.left_percentage.to_css(dest)?;
+        let uniform_value = 1.0 / self.items.len() as f32;
+
+        // Per https://drafts.csswg.org/css-color-5/#serial-color-mix: omit every
+        // percentage iff all are known (specified, non-calc) and equal to 100%/N.
+        let omit_all = self.items.iter().all(|item| {
+            item.percentage
+                .as_ref()
+                .is_some_and(|p| !p.is_calc() && p.to_percentage() == Some(uniform_value))
+        });
+
+        for (index, item) in self.items.iter().enumerate() {
+            if index != 0 {
+                dest.write_str(", ")?;
+            }
+
+            item.color.to_css(dest)?;
+
+            if omit_all {
+                continue;
+            }
+
+            // An omitted percentage next to a calc() sibling serializes to nothing.
+            if let Some(percentage) = item.percentage.as_ref() {
+                dest.write_char(' ')?;
+                percentage.to_css(dest)?;
+            }
         }
-        dest.write_str(", ")?;
-        self.right.to_css(dest)?;
-        if !can_omit(&self.right_percentage, &self.left_percentage, false) {
-            dest.write_char(' ')?;
-            self.right_percentage.to_css(dest)?;
-        }
+
         dest.write_char(')')
+    }
+}
+
+impl<Color, Percentage> ColorMix<Color, Percentage> {
+    /// The weight used for percentages that were omitted next to a calc()
+    /// sibling: an equal share of the weight not taken by specified percentages.
+    /// Returns `None` if a specified percentage can't be resolved to a number.
+    pub(crate) fn omitted_weight(&self) -> Option<f32>
+    where
+        Percentage: ToPercentage,
+    {
+        let mut specified_sum = 0.0;
+        let mut omitted = 0;
+        for item in self.items.iter() {
+            match item.percentage.as_ref() {
+                Some(p) => specified_sum += p.to_percentage()?,
+                None => omitted += 1,
+            }
+        }
+        Some(if omitted > 0 {
+            (1.0 - specified_sum) / omitted as f32
+        } else {
+            0.0
+        })
     }
 }
 
@@ -115,17 +165,20 @@ impl<Percentage> ColorMix<GenericColor<Percentage>, Percentage> {
     where
         Percentage: ToPercentage,
     {
-        let left = self.left.as_absolute()?;
-        let right = self.right.as_absolute()?;
+        use crate::color::mix;
 
-        Some(crate::color::mix::mix(
-            self.interpolation,
-            &left,
-            self.left_percentage.to_percentage(),
-            &right,
-            self.right_percentage.to_percentage(),
-            self.flags,
-        ))
+        let fill = self.omitted_weight()?;
+
+        let mut items = ColorMixItemList::with_capacity(self.items.len());
+        for item in self.items.iter() {
+            let weight = match item.percentage.as_ref() {
+                Some(percentage) => percentage.to_percentage()?,
+                None => fill,
+            };
+            items.push(mix::ColorMixItem::new(*item.color.as_absolute()?, weight))
+        }
+
+        Some(mix::mix_many(self.interpolation, items, self.flags))
     }
 }
 
@@ -230,10 +283,10 @@ pub struct GenericLightDark<T> {
 
 impl<T> GenericLightDark<T> {
     /// Parse the arguments of the light-dark() function.
-    pub fn parse_args_with<'i>(
-        input: &mut Parser<'i, '_>,
-        mut parse_one: impl FnMut(&mut Parser<'i, '_>) -> Result<T, ParseError<'i>>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse_args_with(
+        input: &mut Parser,
+        mut parse_one: impl FnMut(&mut Parser) -> Result<T, ParseError>,
+    ) -> Result<Self, ParseError> {
         let light = parse_one(input)?;
         input.expect_comma()?;
         let dark = parse_one(input)?;
@@ -241,10 +294,10 @@ impl<T> GenericLightDark<T> {
     }
 
     /// Parse the light-dark() function.
-    pub fn parse_with<'i>(
-        input: &mut Parser<'i, '_>,
-        parse_one: impl FnMut(&mut Parser<'i, '_>) -> Result<T, ParseError<'i>>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse_with(
+        input: &mut Parser,
+        parse_one: impl FnMut(&mut Parser) -> Result<T, ParseError>,
+    ) -> Result<Self, ParseError> {
         input.expect_function_matching("light-dark")?;
         input.parse_nested_block(|input| Self::parse_args_with(input, parse_one))
     }

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -33,9 +31,6 @@ class TMimeType final {
     ParameterValue() : mRequiresQuoting(false) {}
   };
 
-  static nsTArray<nsTDependentSubstring<char_type>> SplitMimetype(
-      const nsTSubstring<char_type>& aMimeType);
-
   bool mIsBase64{false};
   nsTString<char_type> mType;
   nsTString<char_type> mSubtype;
@@ -47,6 +42,9 @@ class TMimeType final {
   TMimeType(const nsTSubstring<char_type>& aType,
             const nsTSubstring<char_type>& aSubtype)
       : mType(aType), mSubtype(aSubtype) {}
+
+  static nsTArray<nsTDependentSubstring<char_type>> SplitMimetype(
+      const nsTSubstring<char_type>& aMimeType);
 
   static RefPtr<TMimeType<char_type>> Parse(
       const nsTSubstring<char_type>& aMimeType);

@@ -42,6 +42,7 @@ support-files = [
   "xhr_worker.js",
   "xhr2_worker.js",
   "xhrAbort_worker.js",
+  "xhrAbortDuringTerminate_worker.js",
   "test_XHR.js",
   "test_worker_xhr_parameters.js",
   "test_worker_xhr_system.js",
@@ -191,6 +192,8 @@ skip-if = [
   "os == 'win'",
 ]
 
+["test_worker_xhrAbortDuringTerminate.html"]
+
 ["test_worker_xhr_3rdparty.html"]
 support-files = ["window_worker_xhr_3rdparty.html"]
 # Bug 1617611: Fix all the tests broken by "cookies SameSite=lax by default"
@@ -230,6 +233,9 @@ skip-if = [
 ]
 
 ["test_worker_xhr_timeout.html"]
+skip-if = [
+"os == 'win'", # bug 1868894
+]
 
 ["test_xhr_abort_after_load.html"]
 
@@ -242,6 +248,7 @@ skip-if = [
   "http2",
   "http3",
   "os == 'win' && os_version == '11.26100' && arch == 'x86' && xorigin", # bug 1917808
+  "os == 'win' && os_version == '11.26200' && arch == 'x86' && xorigin", # bug 1917808
 ]
 
 ["test_xhr_send.html"]

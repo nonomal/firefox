@@ -1,10 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "jit/IonCacheIRCompiler.h"
+
 #include "mozilla/Maybe.h"
 
 #include <algorithm>
@@ -612,7 +611,11 @@ JitCode* IonCacheIRCompiler::compile(IonICStub* stub) {
     allocator.nextOp();
   } while (reader.more());
 
-  masm.assumeUnreachable("Should have returned from IC");
+  if (!savedLiveRegs_) {
+    allocator.restoreInputState(masm);
+  }
+  uint8_t* rejoinAddr = ic_->rejoinAddr(ionScript_);
+  masm.jump(ImmPtr(rejoinAddr));
 
   // Done emitting the main IC code. Now emit the failure paths.
   perfSpewer_.recordOffset(masm, "FailurePath");
@@ -968,7 +971,7 @@ bool IonCacheIRCompiler::emitCallScriptedGetterResult(
   Register callee = allocator.useRegister(masm, calleeId);
   AutoScratchRegister scratch(allocator, masm);
 
-  int32_t nargsAndFlags = int32StubField(nargsAndFlagsOffset);
+  uint32_t nargsAndFlags = int32StubField(nargsAndFlagsOffset);
   size_t nargs = nargsAndFlags >> JSFunction::ArgCountShift;
 
   allocator.discardStack(masm);
@@ -1639,7 +1642,7 @@ bool IonCacheIRCompiler::emitLoadStringCharResult(
     volatileRegs.takeUnchecked(output);
     masm.PushRegsInMask(volatileRegs);
 
-    using Fn = JSLinearString* (*)(JSContext* cx, int32_t code);
+    using Fn = JSLinearString* (*)(JSContext * cx, int32_t code);
     masm.setupUnalignedABICall(scratch2);
     masm.loadJSContext(scratch2);
     masm.passABIArg(scratch2);
@@ -1772,7 +1775,7 @@ bool IonCacheIRCompiler::emitCallScriptedSetter(ObjOperandId receiverId,
   Register callee = allocator.useRegister(masm, calleeId);
   ConstantOrRegister val = allocator.useConstantOrRegister(masm, rhsId);
 
-  int32_t nargsAndFlags = int32StubField(nargsAndFlagsOffset);
+  uint32_t nargsAndFlags = int32StubField(nargsAndFlagsOffset);
   size_t nargs = nargsAndFlags >> JSFunction::ArgCountShift;
 
   AutoScratchRegister scratch(allocator, masm);
@@ -1945,17 +1948,6 @@ bool IonCacheIRCompiler::emitMegamorphicSetElement(ObjOperandId objId,
   return true;
 }
 
-bool IonCacheIRCompiler::emitReturnFromIC() {
-  JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
-  if (!savedLiveRegs_) {
-    allocator.restoreInputState(masm);
-  }
-
-  uint8_t* rejoinAddr = ic_->rejoinAddr(ionScript_);
-  masm.jump(ImmPtr(rejoinAddr));
-  return true;
-}
-
 bool IonCacheIRCompiler::emitGuardDOMExpandoMissingOrGuardShape(
     ValOperandId expandoId, uint32_t shapeOffset) {
   JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
@@ -2113,20 +2105,27 @@ void IonIC::attachCacheIRStub(JSContext* cx, const CacheIRWriter& writer,
   // identify this as Ion code.
   if (ionScript->hasProfilingInstrumentation()) {
     uint8_t* addr = rejoinAddr(ionScript);
-    auto entry = MakeJitcodeGlobalEntry<IonICEntry>(cx, code, code->raw(),
-                                                    code->rawEnd(), addr);
+    auto* globalTable = cx->runtime()->jitRuntime()->getJitcodeGlobalTable();
+
+    // Resolve the parent IonEntry once here and hand it to the IonICEntry.
+    // The IonEntry for this IonScript was added to the table when the script
+    // was compiled, so it must still be present in the AVL tree.
+    auto* parent = globalTable->lookup(addr);
+    MOZ_RELEASE_ASSERT(parent && parent->isIon());
+
+    auto entry = MakeJitcodeGlobalEntry<IonICEntry>(
+        cx, code, code->raw(), code->rawEnd(), addr, &parent->asIon());
     if (!entry) {
       cx->recoverFromOutOfMemory();
       return;
     }
 
-    auto* globalTable = cx->runtime()->jitRuntime()->getJitcodeGlobalTable();
     if (!globalTable->addEntry(std::move(entry))) {
       return;
     }
   }
 
-  attachStub(newStub, code);
+  attachStub(ionScript, newStub, code);
   *attached = true;
 }
 
@@ -2154,7 +2153,6 @@ bool IonCacheIRCompiler::emitCallStringObjectConcatResult(ValOperandId lhsId,
 
 bool IonCacheIRCompiler::emitCloseIterScriptedResult(ObjOperandId iterId,
                                                      ObjOperandId calleeId,
-                                                     CompletionKind kind,
                                                      uint32_t calleeNargs) {
   JitSpew(JitSpew_Codegen, "%s", __FUNCTION__);
   AutoSaveLiveRegisters save(*this);
@@ -2192,23 +2190,21 @@ bool IonCacheIRCompiler::emitCloseIterScriptedResult(ObjOperandId iterId,
   masm.loadJitCodeRaw(callee, callee);
   masm.callJit(callee);
 
-  if (kind != CompletionKind::Throw) {
-    // Verify that the return value is an object.
-    Label success;
-    masm.branchTestObject(Assembler::Equal, JSReturnOperand, &success);
+  // Verify that the return value is an object.
+  Label success;
+  masm.branchTestObject(Assembler::Equal, JSReturnOperand, &success);
 
-    // We can reuse the same stub frame, but we first have to pop the arguments
-    // from the previous call.
-    uint32_t framePushedAfterCall = masm.framePushed();
-    masm.freeStack(masm.framePushed() - stubFramePushed);
+  // We can reuse the same stub frame, but we first have to pop the arguments
+  // from the previous call.
+  uint32_t framePushedAfterCall = masm.framePushed();
+  masm.freeStack(masm.framePushed() - stubFramePushed);
 
-    masm.push(Imm32(int32_t(CheckIsObjectKind::IteratorReturn)));
-    using Fn = bool (*)(JSContext*, CheckIsObjectKind);
-    callVM<Fn, ThrowCheckIsObject>(masm);
+  masm.push(Imm32(int32_t(CheckIsObjectKind::IteratorReturn)));
+  using Fn = bool (*)(JSContext*, CheckIsObjectKind);
+  callVM<Fn, ThrowCheckIsObject>(masm);
 
-    masm.bind(&success);
-    masm.setFramePushed(framePushedAfterCall);
-  }
+  masm.bind(&success);
+  masm.setFramePushed(framePushedAfterCall);
 
   // Restore the frame pointer and stack pointer.
   masm.loadPtr(Address(FramePointer, 0), FramePointer);
@@ -2307,6 +2303,12 @@ bool IonCacheIRCompiler::emitCallClassHook(ObjOperandId calleeId,
                                            Int32OperandId argcId,
                                            CallFlags flags, uint32_t argcFixed,
                                            uint32_t targetOffset) {
+  MOZ_CRASH("Call ICs not used in ion");
+}
+
+bool IonCacheIRCompiler::emitCallInlinedBoundFunction(
+    ObjOperandId calleeId, ObjOperandId targetId, Int32OperandId argcId,
+    CallFlags flags, uint32_t icScriptOffset, uint32_t numBoundArgs) {
   MOZ_CRASH("Call ICs not used in ion");
 }
 
@@ -2425,5 +2427,13 @@ bool IonCacheIRCompiler::emitRegExpBuiltinExecTestResult(
 
 bool IonCacheIRCompiler::emitRegExpHasCaptureGroupsResult(
     ObjOperandId regexpId, StringOperandId inputId) {
+  MOZ_CRASH("Call ICs not used in ion");
+}
+
+bool IonCacheIRCompiler::emitMetaCreateThis(uint32_t numFixedSlots,
+                                            uint32_t numDynamicSlots,
+                                            gc::AllocKind allocKind,
+                                            uint32_t thisShapeOffset,
+                                            uint32_t siteOffset) {
   MOZ_CRASH("Call ICs not used in ion");
 }

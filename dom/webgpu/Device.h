@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,7 +11,6 @@
 #include "mozilla/MozPromise.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/WeakPtr.h"
-#include "mozilla/webgpu/PWebGPUTypes.h"
 #include "mozilla/webgpu/WebGPUTypes.h"
 #include "mozilla/webrender/WebRenderAPI.h"
 #include "nsTHashSet.h"
@@ -121,6 +119,8 @@ class Device final : public DOMEventTargetHelper,
   // HTMLVideoElement.
   void ExpireExternalTextures();
 
+  // Used to guard losing the device multiple times.
+  bool mLost;
   RefPtr<dom::Promise> mLostPromise;
   RefPtr<Queue> mQueue;
   nsTHashSet<nsCString> mKnownWarnings;
@@ -144,6 +144,9 @@ class Device final : public DOMEventTargetHelper,
   already_AddRefed<Buffer> CreateBuffer(const dom::GPUBufferDescriptor& aDesc,
                                         ErrorResult& aRv);
 
+  static dom::GPUTextureDescriptor SwapChainTextureDescriptor(
+      const dom::GPUCanvasConfiguration& aConfig,
+      const gfx::IntSize& aCanvasSize);
   already_AddRefed<Texture> CreateTextureForSwapChain(
       const dom::GPUCanvasConfiguration* const aConfig,
       const gfx::IntSize& aCanvasSize,

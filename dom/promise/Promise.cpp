@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -20,6 +18,7 @@
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/OwningNonNull.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/dom/AutoEntryScript.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/DOMException.h"
@@ -141,7 +140,12 @@ already_AddRefed<Promise> Promise::Resolve(
     nsIGlobalObject* aGlobal, JSContext* aCx, JS::Handle<JS::Value> aValue,
     ErrorResult& aRv, PropagateUserInteraction aPropagateUserInteraction) {
   JSAutoRealm ar(aCx, aGlobal->GetGlobalJSObject());
-  JS::Rooted<JSObject*> p(aCx, JS::CallOriginalPromiseResolve(aCx, aValue));
+  JS::Rooted<JS::Value> value(aCx, aValue);
+  if (!JS_WrapValue(aCx, &value)) {
+    aRv.NoteJSContextException(aCx);
+    return nullptr;
+  }
+  JS::Rooted<JSObject*> p(aCx, JS::CallOriginalPromiseResolve(aCx, value));
   if (!p) {
     aRv.NoteJSContextException(aCx);
     return nullptr;
@@ -156,7 +160,12 @@ already_AddRefed<Promise> Promise::Reject(nsIGlobalObject* aGlobal,
                                           JS::Handle<JS::Value> aValue,
                                           ErrorResult& aRv) {
   JSAutoRealm ar(aCx, aGlobal->GetGlobalJSObject());
-  JS::Rooted<JSObject*> p(aCx, JS::CallOriginalPromiseReject(aCx, aValue));
+  JS::Rooted<JS::Value> value(aCx, aValue);
+  if (!JS_WrapValue(aCx, &value)) {
+    aRv.NoteJSContextException(aCx);
+    return nullptr;
+  }
+  JS::Rooted<JSObject*> p(aCx, JS::CallOriginalPromiseReject(aCx, value));
   if (!p) {
     aRv.NoteJSContextException(aCx);
     return nullptr;
@@ -322,8 +331,18 @@ void Promise::WaitForAll(nsIGlobalObject* aGlobal,
       return nullptr;
     };
     // Step 9.4 (and actually also step 4 and step 9.3)
-    (void)promise->ThenCatchWithCycleCollectedArgs(
+    Result resultPromise = promise->ThenCatchWithCycleCollectedArgs(
         fulfillmentHandlerSteps, rejectionHandlerSteps, result, arg);
+
+    // https://tc39.es/ecma262/multipage/control-abstraction-objects.html#sec-performpromisethen
+    // Step 12
+    // Promise;:ThenCatchWithCycleCollectedArgs is fairly similar to, but not
+    // exactly the same as PerformPromiseThen, in particular the step that marks
+    // the promise as handled is missing. It's performed here to not change the
+    // existing behavior of ThenCatchWithCycleCollectedArgs.
+    if (resultPromise.isOk()) {
+      (void)resultPromise.unwrap()->SetAnyPromiseIsHandled();
+    }
 
     // Step 9.5
     index++;
@@ -424,7 +443,14 @@ void Promise::MaybeResolve(JSContext* aCx, JS::Handle<JS::Value> aValue) {
   NS_ASSERT_OWNINGTHREAD(Promise);
 
   JS::Rooted<JSObject*> p(aCx, PromiseObj());
-  if (!p || !JS::ResolvePromise(aCx, p, aValue)) {
+#ifdef NIGHTLY_BUILD
+  const bool ok = p && (StaticPrefs::dom_promise_experimental_safe_resolve()
+                            ? JS::SafeResolve(aCx, p, aValue)
+                            : JS::ResolvePromise(aCx, p, aValue));
+#else
+  const bool ok = p && JS::ResolvePromise(aCx, p, aValue);
+#endif
+  if (!ok) {
     // Now what?  There's nothing sane to do here.
     JS_ClearPendingException(aCx);
   }
@@ -564,7 +590,7 @@ class PromiseNativeHandlerShim final : public PromiseNativeHandler {
     return PromiseNativeHandler_Binding::Wrap(aCx, this, aGivenProto, aWrapper);
   }
 
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS_FINAL
   NS_DECL_CYCLE_COLLECTION_CLASS(PromiseNativeHandlerShim)
 };
 
@@ -781,7 +807,12 @@ void Promise::ReportRejectedPromise(JSContext* aCx,
     } else {
       // Use the resolution site as the exception stack
       JS::ExceptionStack exnStack(aCx, unwrapped, resolutionSite);
-      if (!report.init(aCx, exnStack, JS::ErrorReportBuilder::NoSideEffects)) {
+      // This report only ends up in the console, so it's not observable by web
+      // content and we can afford to list the rejection value's own property
+      // names instead of reporting a bare "Object".
+      if (!report.init(
+              aCx, exnStack,
+              JS::ErrorReportBuilder::NoSideEffectsListPropertyNames)) {
         JS_ClearPendingException(aCx);
         return;
       }
@@ -869,8 +900,9 @@ class PromiseWorkerProxyRunnable final : public WorkerThreadRunnable {
 
     // Here we convert the buffer to a JS::Value.
     JS::Rooted<JS::Value> value(aCx);
-    if (!mPromiseWorkerProxy->Read(aCx, &value)) {
-      JS_ClearPendingException(aCx);
+    IgnoredErrorResult rv;
+    mPromiseWorkerProxy->Read(aCx, &value, rv);
+    if (rv.Failed()) {
       return false;
     }
 
@@ -972,8 +1004,9 @@ void PromiseWorkerProxy::RunCallback(JSContext* aCx,
   }
 
   // The |aValue| is written into the StructuredCloneHolderBase.
-  if (!Write(aCx, aValue)) {
-    JS_ClearPendingException(aCx);
+  IgnoredErrorResult rv;
+  Write(aCx, aValue, rv);
+  if (rv.Failed()) {
     MOZ_ASSERT(false,
                "cannot serialize the value with the StructuredCloneAlgorithm!");
   }
@@ -1170,6 +1203,16 @@ void DomPromise_Release(mozilla::dom::Promise* aPromise) {
   aPromise->Release();
 }
 
+void DomPromise_ResolveWithUndefined(mozilla::dom::Promise* aPromise) {
+  MOZ_ASSERT(aPromise);
+  aPromise->MaybeResolveWithUndefined();
+}
+
+void DomPromise_RejectWithUndefined(mozilla::dom::Promise* aPromise) {
+  MOZ_ASSERT(aPromise);
+  aPromise->MaybeRejectWithUndefined();
+}
+
 #define DOM_PROMISE_FUNC_WITH_VARIANT(name, func)                         \
   void name(mozilla::dom::Promise* aPromise, nsIVariant* aVariant) {      \
     MOZ_ASSERT(aPromise);                                                 \
@@ -1188,8 +1231,14 @@ void DomPromise_Release(mozilla::dom::Promise* aPromise) {
     aPromise->func(val);                                                  \
   }
 
-DOM_PROMISE_FUNC_WITH_VARIANT(DomPromise_RejectWithVariant, MaybeReject)
 DOM_PROMISE_FUNC_WITH_VARIANT(DomPromise_ResolveWithVariant, MaybeResolve)
+DOM_PROMISE_FUNC_WITH_VARIANT(DomPromise_RejectWithVariant, MaybeReject)
+
+void DomPromise_RejectWithNsresult(mozilla::dom::Promise* aPromise,
+                                   nsresult aResult) {
+  MOZ_ASSERT(aPromise);
+  aPromise->MaybeReject(aResult);
+}
 
 #undef DOM_PROMISE_FUNC_WITH_VARIANT
 }

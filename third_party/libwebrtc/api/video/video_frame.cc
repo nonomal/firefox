@@ -19,6 +19,7 @@
 #include "api/scoped_refptr.h"
 #include "api/units/timestamp.h"
 #include "api/video/color_space.h"
+#include "api/video/video_content_type.h"
 #include "api/video/video_frame_buffer.h"
 #include "api/video/video_rotation.h"
 #include "rtc_base/checks.h"
@@ -174,7 +175,8 @@ VideoFrame VideoFrame::Builder::build() {
   return VideoFrame(id_, video_frame_buffer_, timestamp_us_,
                     presentation_timestamp_, reference_time_, timestamp_rtp_,
                     ntp_time_ms_, rotation_, color_space_, render_parameters_,
-                    update_rect_, packet_infos_);
+                    update_rect_, packet_infos_, is_repeat_frame_,
+                    content_type_);
 }
 
 VideoFrame::Builder& VideoFrame::Builder::set_video_frame_buffer(
@@ -192,12 +194,6 @@ VideoFrame::Builder& VideoFrame::Builder::set_timestamp_ms(
 VideoFrame::Builder& VideoFrame::Builder::set_timestamp_us(
     int64_t timestamp_us) {
   timestamp_us_ = timestamp_us;
-  return *this;
-}
-
-VideoFrame::Builder& VideoFrame::Builder::set_capture_time_identifier(
-    const std::optional<Timestamp>& presentation_timestamp) {
-  presentation_timestamp_ = presentation_timestamp;
   return *this;
 }
 
@@ -264,6 +260,18 @@ VideoFrame::Builder& VideoFrame::Builder::set_packet_infos(
   return *this;
 }
 
+VideoFrame::Builder& VideoFrame::Builder::set_is_repeat_frame(
+    bool is_repeat_frame) {
+  is_repeat_frame_ = is_repeat_frame;
+  return *this;
+}
+
+VideoFrame::Builder& VideoFrame::Builder::set_content_type(
+    VideoContentType content_type) {
+  content_type_ = content_type;
+  return *this;
+}
+
 VideoFrame::VideoFrame(const scoped_refptr<VideoFrameBuffer>& buffer,
                        VideoRotation rotation,
                        int64_t timestamp_us)
@@ -271,7 +279,8 @@ VideoFrame::VideoFrame(const scoped_refptr<VideoFrameBuffer>& buffer,
       timestamp_rtp_(0),
       ntp_time_ms_(0),
       timestamp_us_(timestamp_us),
-      rotation_(rotation) {}
+      rotation_(rotation),
+      is_repeat_frame_(false) {}
 
 VideoFrame::VideoFrame(const scoped_refptr<VideoFrameBuffer>& buffer,
                        uint32_t timestamp_rtp,
@@ -281,40 +290,9 @@ VideoFrame::VideoFrame(const scoped_refptr<VideoFrameBuffer>& buffer,
       timestamp_rtp_(timestamp_rtp),
       ntp_time_ms_(0),
       timestamp_us_(render_time_ms * kNumMicrosecsPerMillisec),
-      rotation_(rotation) {
-  RTC_DCHECK(buffer);
-}
-
-VideoFrame::VideoFrame(uint16_t id,
-                       const scoped_refptr<VideoFrameBuffer>& buffer,
-                       int64_t timestamp_us,
-                       const std::optional<Timestamp>& presentation_timestamp,
-                       const std::optional<Timestamp>& reference_time,
-                       uint32_t timestamp_rtp,
-                       int64_t ntp_time_ms,
-                       VideoRotation rotation,
-                       const std::optional<ColorSpace>& color_space,
-                       const RenderParameters& render_parameters,
-                       const std::optional<UpdateRect>& update_rect,
-                       RtpPacketInfos packet_infos)
-    : id_(id),
-      video_frame_buffer_(buffer),
-      timestamp_rtp_(timestamp_rtp),
-      ntp_time_ms_(ntp_time_ms),
-      timestamp_us_(timestamp_us),
-      presentation_timestamp_(presentation_timestamp),
-      reference_time_(reference_time),
       rotation_(rotation),
-      color_space_(color_space),
-      render_parameters_(render_parameters),
-      update_rect_(update_rect),
-      packet_infos_(std::move(packet_infos)) {
-  if (update_rect_) {
-    RTC_DCHECK_GE(update_rect_->offset_x, 0);
-    RTC_DCHECK_GE(update_rect_->offset_y, 0);
-    RTC_DCHECK_LE(update_rect_->offset_x + update_rect_->width, width());
-    RTC_DCHECK_LE(update_rect_->offset_y + update_rect_->height, height());
-  }
+      is_repeat_frame_(false) {
+  RTC_DCHECK(buffer);
 }
 
 VideoFrame::~VideoFrame() = default;

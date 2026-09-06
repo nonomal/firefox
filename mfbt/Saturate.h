@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,8 +7,9 @@
 #ifndef mozilla_Saturate_h
 #define mozilla_Saturate_h
 
-#include <limits>
 #include <stdint.h>
+
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -127,14 +126,9 @@ class Saturate {
 
   // Compare operators
 
-  bool operator==(const Saturate<T>& aRhs) const {
-    return mValue == aRhs.mValue;
-  }
-
-  bool operator!=(const Saturate<T>& aRhs) const { return !operator==(aRhs); }
+  bool operator==(const Saturate& aRhs) const = default;
 
   bool operator==(const T& aRhs) const { return mValue == aRhs; }
-
   bool operator!=(const T& aRhs) const { return !operator==(aRhs); }
 
   // Assignment operators
@@ -228,6 +222,8 @@ typedef detail::Saturate<uint16_t> SaturateUint16;
 typedef detail::Saturate<uint32_t> SaturateUint32;
 typedef detail::Saturate<intptr_t> SaturateIntPtr;
 typedef detail::Saturate<uintptr_t> SaturateUintPtr;
+
+using detail::Saturate;
 
 }  // namespace mozilla
 

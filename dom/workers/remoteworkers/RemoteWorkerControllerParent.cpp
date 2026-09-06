@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -81,7 +79,7 @@ IPCResult RemoteWorkerControllerParent::RecvPFetchEventOpConstructor(
   MOZ_ASSERT(aActor);
 
   RefPtr<FetchEventOpParent> realFetchOp =
-      static_cast<FetchEventOpParent*>(aActor);
+      mozilla::ipc::ActorCast<FetchEventOpParent>(aActor);
   mRemoteWorkerController->ExecServiceWorkerFetchEventOp(aArgs, realFetchOp)
       ->Then(GetCurrentSerialEventTarget(), __func__,
              [fetchOp = std::move(realFetchOp)](
@@ -105,7 +103,7 @@ bool RemoteWorkerControllerParent::DeallocPFetchEventOpParent(
   MOZ_ASSERT(aActor);
 
   RefPtr<FetchEventOpParent> actor =
-      dont_AddRef(static_cast<FetchEventOpParent*>(aActor));
+      dont_AddRef(mozilla::ipc::ActorCast<FetchEventOpParent>(aActor));
   return true;
 }
 

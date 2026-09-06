@@ -4,15 +4,17 @@
 
 //! Generic types for font stuff.
 
+use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
+use crate::typed_om::{KeywordValue, ToTyped, TypedValue};
 use crate::values::animated::ToAnimatedZero;
 use crate::{One, Zero};
 use byteorder::{BigEndian, ReadBytesExt};
 use cssparser::Parser;
 use std::fmt::{self, Write};
 use std::io::Cursor;
-use style_traits::{CssWriter, ParseError};
-use style_traits::{StyleParseErrorKind, ToCss};
+use style_traits::{CssString, CssWriter, ParseError, StyleParseErrorKind, ToCss};
+use thin_vec::ThinVec;
 
 /// A trait for values that are labelled with a FontTag (for feature and
 /// variation settings).
@@ -25,9 +27,12 @@ pub trait TaggedFontValue {
 #[derive(
     Clone,
     Debug,
+    Deserialize,
     Eq,
+    Hash,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToComputedValue,
@@ -74,9 +79,11 @@ where
     Clone,
     ComputeSquaredDistance,
     Debug,
+    Deserialize,
     Eq,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToComputedValue,
@@ -84,7 +91,6 @@ where
     ToResolvedValue,
     ToShmem,
 )]
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 pub struct VariationValue<Number> {
     /// A four-character tag, packed into a u32 (one byte per character).
     #[animation(constant)]
@@ -103,9 +109,12 @@ impl<T> TaggedFontValue for VariationValue<T> {
 #[derive(
     Clone,
     Debug,
+    Deserialize,
     Eq,
+    Hash,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToCss,
@@ -113,8 +122,8 @@ impl<T> TaggedFontValue for VariationValue<T> {
     ToShmem,
     ToTyped,
 )]
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 #[css(comma)]
+#[typed(todo_derive_fields)]
 pub struct FontSettings<T>(#[css(if_empty = "normal", iterable)] pub Box<[T]>);
 
 impl<T> FontSettings<T> {
@@ -128,10 +137,7 @@ impl<T> FontSettings<T> {
 impl<T: Parse> Parse for FontSettings<T> {
     /// https://drafts.csswg.org/css-fonts-4/#descdef-font-face-font-feature-settings
     /// https://drafts.csswg.org/css-fonts-4/#font-variation-settings-def
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if input
             .try_parse(|i| i.expect_ident_matching("normal"))
             .is_ok()
@@ -156,18 +162,33 @@ impl<T: Parse> Parse for FontSettings<T> {
 #[derive(
     Clone,
     Copy,
-    Debug,
+    Deserialize,
     Eq,
+    Hash,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
 )]
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 pub struct FontTag(pub u32);
+
+impl fmt::Debug for FontTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tag_bytes = self.0.to_be_bytes();
+
+        let mut tuple = f.debug_tuple("FontTag");
+        if let Ok(utf8_tag) = str::from_utf8(&tag_bytes) {
+            tuple.field(&utf8_tag);
+        } else {
+            tuple.field(&tag_bytes);
+        };
+        tuple.finish()
+    }
+}
 
 impl ToCss for FontTag {
     fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
@@ -184,16 +205,12 @@ impl ToCss for FontTag {
 }
 
 impl Parse for FontTag {
-    fn parse<'i, 't>(
-        _context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
-        let location = input.current_source_location();
+    fn parse(_context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let tag = input.expect_string()?;
 
         // allowed strings of length 4 containing chars: <U+20, U+7E>
         if tag.len() != 4 || tag.as_bytes().iter().any(|c| *c < b' ' || *c > b'~') {
-            return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
 
         let mut raw = Cursor::new(tag.as_bytes());
@@ -205,16 +222,17 @@ impl Parse for FontTag {
 ///
 /// https://drafts.csswg.org/css-fonts-4/#font-style-prop
 #[allow(missing_docs)]
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 #[derive(
     Animate,
     Clone,
     ComputeSquaredDistance,
     Copy,
     Debug,
+    Deserialize,
     Hash,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToAnimatedZero,
@@ -248,16 +266,17 @@ impl<Angle: Zero> FontStyle<Angle> {
     ComputeSquaredDistance,
     Copy,
     Debug,
+    Deserialize,
     Hash,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToAnimatedZero,
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 pub enum GenericFontSizeAdjust<Factor> {
     #[animation(error)]
@@ -293,6 +312,19 @@ impl<Factor: ToCss> ToCss for GenericFontSizeAdjust<Factor> {
     }
 }
 
+impl<Factor: ToTyped> ToTyped for GenericFontSizeAdjust<Factor> {
+    fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
+        match self {
+            Self::None => {
+                dest.push(TypedValue::Keyword(KeywordValue(CssString::from("none"))));
+                Ok(())
+            },
+            Self::ExHeight(v) => v.to_typed(dest),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A generic value for the `line-height` property.
 #[derive(
     Animate,
@@ -300,24 +332,20 @@ impl<Factor: ToCss> ToCss for GenericFontSizeAdjust<Factor> {
     ComputeSquaredDistance,
     Copy,
     Debug,
+    Deserialize,
     MallocSizeOf,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToAnimatedValue,
     ToCss,
     ToShmem,
-    Parse,
     ToTyped,
 )]
-#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
 #[repr(C, u8)]
 pub enum GenericLineHeight<N, L> {
     /// `normal`
     Normal,
-    /// `-moz-block-height`
-    #[cfg(feature = "gecko")]
-    #[parse(condition = "ParserContext::in_ua_sheet")]
-    MozBlockHeight,
     /// `<number>`
     Number(N),
     /// `<length-percentage>`
@@ -338,5 +366,11 @@ impl<N, L> LineHeight<N, L> {
     #[inline]
     pub fn normal() -> Self {
         LineHeight::Normal
+    }
+
+    /// Returns whether the value is `normal`.
+    #[inline]
+    pub fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
     }
 }

@@ -112,7 +112,6 @@
     'disable_deprecated_rc2%': 0,
     'disable_dbm%': 1,
     'disable_libpkix%': 1,
-    'disable_kyber%' : 0,
     'disable_werror%': 0,
     'disable_altivec%': 0,
     'disable_crypto_vsx%': 0,
@@ -144,7 +143,6 @@
     'coverage%': 0,
     'softfp_cflags%': '',
     'enable_draft_hpke%': 0,
-    'force_integrated_as%': 0,
     'disable_ckbi%': 0,
     'ppc_abi%': 0,
     'use_pkcs5_pbkd2_params2_only%': 0,
@@ -615,11 +613,6 @@
           [ 'disable_deprecated_rc2==1', {
             'defines': [
               'NSS_DISABLE_DEPRECATED_RC2',
-            ],
-          }],
-          [ 'disable_kyber==1', {
-            'defines': [
-              'NSS_DISABLE_KYBER',
             ],
           }],
 

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -262,7 +260,7 @@ static Result<Ok, nsresult> OpenNewWindow(
 
   nsCOMPtr<mozIDOMWindowProxy> win;
   MOZ_TRY(ww->OpenWindow(nullptr, nsDependentCString(BROWSER_CHROME_URL_QUOTED),
-                         "_blank"_ns, features, args, getter_AddRefs(win)));
+                         u"_blank"_ns, features, args, getter_AddRefs(win)));
   return Ok();
 }
 
@@ -368,7 +366,7 @@ void WaitForLoad(const ClientOpenWindowArgsParsed& aArgsValidated,
     loadState->SetTriggeringRemoteType(
         aArgsValidated.originContent
             ? aArgsValidated.originContent->GetRemoteType()
-            : NOT_REMOTE_TYPE);
+            : RemoteType::NotRemote());
 
     rv = aBrowsingContext->LoadURI(loadState, true);
     if (NS_FAILED(rv)) {
@@ -505,8 +503,7 @@ RefPtr<ClientOpPromise> ClientOpenWindow(
   nsCOMPtr<nsIURI> nullPrincipalURI = NullPrincipal::CreateURI(nullptr);
   nsCOMPtr<nsIPrincipal> initialPrincipal =
       NullPrincipal::Create(principal->OriginAttributesRef(), nullPrincipalURI);
-  openInfo->mPrincipalToInheritForAboutBlank = initialPrincipal;
-  openInfo->mPartitionedPrincipalToInheritForAboutBlank = initialPrincipal;
+  openInfo->mPrincipalToInheritForAboutBlank = std::move(initialPrincipal);
   openInfo->mIsRemote = true;
 
   RefPtr<BrowsingContext> bc;

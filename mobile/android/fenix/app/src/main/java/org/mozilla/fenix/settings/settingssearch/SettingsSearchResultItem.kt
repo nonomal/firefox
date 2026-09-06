@@ -9,7 +9,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -38,49 +41,78 @@ fun SettingsSearchResultItem(
     query: String,
     onClick: () -> Unit,
 ) {
-    val defaultSpanStyle = SpanStyle(
-        fontWeight = FontWeight.Bold,
-        background = FirefoxTheme.colors.layer3,
-    )
-
-    val displayTitle = remember(item.title, query) {
-        highlightQueryMatchingText(
-            text = item.title,
-            query = query,
-            highlight = defaultSpanStyle,
-        )
-    }
-    val displaySubtitle = if (shouldShowSummary(item)) {
-        AnnotatedString(item.summary)
-    } else {
-        val breadcrumbString = buildString {
-            append(stringResource(item.preferenceFileInformation.topBreadcrumbResourceId))
-            if (item.preferenceFileInformation.secondaryBreadcrumbResourceId != 0) {
-                append(" > ")
-                append(stringResource(item.preferenceFileInformation.secondaryBreadcrumbResourceId))
-            }
+    val backgroundColor = MaterialTheme.colorScheme.secondaryContainer
+    val defaultSpanStyle =
+        remember(backgroundColor) {
+            SpanStyle(
+                fontWeight = FontWeight.Bold,
+                background = backgroundColor,
+            )
         }
-        AnnotatedString(breadcrumbString)
-    }
+
+    val displayTitle =
+        remember(item.title, query, defaultSpanStyle) {
+            highlightQueryMatchingText(
+                text = item.title,
+                query = query,
+                highlight = defaultSpanStyle,
+            )
+        }
+    val topBreadcrumb =
+        if (item.preferenceFileInformation.topBreadcrumbResourceId != 0) {
+            stringResource(item.preferenceFileInformation.topBreadcrumbResourceId)
+        } else {
+            ""
+        }
+
+    val secondaryBreadcrumb =
+        if (item.preferenceFileInformation.secondaryBreadcrumbResourceId != 0) {
+            stringResource(item.preferenceFileInformation.secondaryBreadcrumbResourceId)
+        } else {
+            ""
+        }
+
+    val displaySubtitle =
+        remember(
+            item.summary,
+            item.preferenceFileInformation,
+            topBreadcrumb,
+            secondaryBreadcrumb,
+        ) {
+            val text =
+                if (shouldShowSummary(item)) {
+                    item.summary
+                } else {
+                    buildString {
+                        append(topBreadcrumb)
+                        if (secondaryBreadcrumb.isNotBlank()) {
+                            append(" > ")
+                            append(secondaryBreadcrumb)
+                        }
+                    }
+                }
+            AnnotatedString(text)
+        }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .clickable(onClick = onClick)
-            .padding(start = 16.dp, end = 16.dp, top = 8.dp),
+        modifier =
+            Modifier.fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         Text(
             text = displayTitle,
             style = FirefoxTheme.typography.subtitle1,
             maxLines = 1,
-            color = FirefoxTheme.colors.textPrimary,
+            color = MaterialTheme.colorScheme.onSurface,
         )
+
         if (displaySubtitle.isNotBlank()) {
             Text(
                 text = displaySubtitle,
                 style = FirefoxTheme.typography.caption,
-                color = FirefoxTheme.colors.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
             Spacer(modifier = Modifier.height(8.dp))
@@ -93,18 +125,13 @@ fun SettingsSearchResultItem(
  *
  * @param item [SettingsSearchItem] to check.
  */
-internal fun shouldShowSummary(
-    item: SettingsSearchItem,
-): Boolean {
-    return (
-            item.preferenceFileInformation == PreferenceFileInformation.GeneralPreferences &&
-            item.summary.isNotBlank()
-            )
+internal fun shouldShowSummary(item: SettingsSearchItem): Boolean {
+    return (item.preferenceFileInformation == PreferenceFileInformation.GeneralPreferences && item.summary.isNotBlank())
 }
 
 /**
- * Highlights the query matching text.  Only the first instance of the matching text.
- * Works with even with mismatched capitalization.
+ * Highlights the query matching text. Only the first instance of the matching text. Works with even with mismatched
+ * capitalization.
  *
  * @param text Text to highlight.
  * @param query Query to highlight.
@@ -140,37 +167,38 @@ internal fun highlightQueryMatchingText(
 
 private class SettingsSearchResultItemParameterProvider : PreviewParameterProvider<SettingsSearchItem> {
     override val values: Sequence<SettingsSearchItem>
-        get() = sequenceOf(
-            SettingsSearchItem(
-                title = "Search Engine",
-                summary = "Set your preferred search engine for browsing.",
-                preferenceKey = "search_engine_main",
-                categoryHeader = "General",
-                preferenceFileInformation = PreferenceFileInformation.SearchSettingsPreferences,
-            ),
-            SettingsSearchItem(
-                title = "Advanced Settings",
-                summary = "", // Empty or blank summary
-                preferenceKey = "advanced_stuff",
-                categoryHeader = "Advanced",
-                preferenceFileInformation = PreferenceFileInformation.GeneralPreferences,
-            ),
-        )
+        get() =
+            sequenceOf(
+                SettingsSearchItem(
+                    title = "Search Engine",
+                    summary = "Set your preferred search engine for browsing.",
+                    preferenceKey = "search_engine_main",
+                    categoryHeader = "General",
+                    preferenceFileInformation = PreferenceFileInformation.SearchSettingsPreferences,
+                ),
+                SettingsSearchItem(
+                    title = "Advanced Settings",
+                    summary = "", // Empty or blank summary
+                    preferenceKey = "advanced_stuff",
+                    categoryHeader = "Advanced",
+                    preferenceFileInformation = PreferenceFileInformation.GeneralPreferences,
+                ),
+            )
 }
 
-/**
- * Preview for the Settings Search Result Item.
- */
+/** Preview for the Settings Search Result Item. */
 @PreviewLightDark
 @Composable
 private fun SettingsSearchResultItemFullPreview(
-    @PreviewParameter(SettingsSearchResultItemParameterProvider::class) item: SettingsSearchItem,
+    @PreviewParameter(SettingsSearchResultItemParameterProvider::class) item: SettingsSearchItem
 ) {
     FirefoxTheme {
-        SettingsSearchResultItem(
-            item = item,
-            "a",
-            onClick = {},
-        )
+        Surface {
+            SettingsSearchResultItem(
+                item = item,
+                "a",
+                onClick = {},
+            )
+        }
     }
 }

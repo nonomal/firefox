@@ -11,6 +11,7 @@
 /**
  * @typedef {object} StateProps
  * @property {boolean?} isSupportedPlatform
+ * @property {import("../../@types/perf").PageContext} pageContext
  */
 
 /**
@@ -63,12 +64,13 @@ const panelWindow = /** @type {PanelWindow} */ (anyWindow);
 /**
  * This is the top level component for the DevTools panel.
  *
- * @extends {React.PureComponent<Props>}
+ * @augments {React.PureComponent<Props>}
  */
 class DevToolsPanel extends PureComponent {
   render() {
     const {
       isSupportedPlatform,
+      pageContext,
       perfFront,
       onProfileReceived,
       onEditSettingsLinkClicked,
@@ -82,7 +84,12 @@ class DevToolsPanel extends PureComponent {
     return [
       OnboardingMessage(),
       div(
-        { className: `perf perf-devtools` },
+        {
+          className:
+            pageContext === "devtools-remote"
+              ? `perf perf-devtools perf-devtools-remote`
+              : `perf perf-devtools`,
+        },
         RecordingButton({ perfFront, onProfileReceived }),
         panelWindow.gToolbox
           ? ToolboxHighlightController({ toolbox: panelWindow.gToolbox })
@@ -102,6 +109,7 @@ class DevToolsPanel extends PureComponent {
 function mapStateToProps(state) {
   return {
     isSupportedPlatform: selectors.getIsSupportedPlatform(state),
+    pageContext: selectors.getPageContext(state),
   };
 }
 

@@ -15,9 +15,10 @@ import {
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 /**
@@ -25,10 +26,10 @@ ChromeUtils.defineESModuleGetters(lazy, {
  */
 export class UrlbarProviderAliasEngines extends UrlbarProvider {
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.HEURISTIC;
+    return lazy.UrlbarShared.PROVIDER_TYPE.HEURISTIC;
   }
 
   /**
@@ -41,8 +42,9 @@ export class UrlbarProviderAliasEngines extends UrlbarProvider {
   async isActive(queryContext) {
     return (
       (!queryContext.restrictSource ||
-        queryContext.restrictSource == UrlbarUtils.RESULT_SOURCE.SEARCH) &&
-      !queryContext.searchMode &&
+        queryContext.restrictSource ==
+          lazy.UrlbarShared.RESULT_SOURCE.SEARCH) &&
+      !queryContext.restrictInSearchMode() &&
       !!queryContext.tokens.length
     );
   }
@@ -53,29 +55,37 @@ export class UrlbarProviderAliasEngines extends UrlbarProvider {
    * @param {UrlbarQueryContext} queryContext
    * @param {(provider: UrlbarProvider, result: UrlbarResult) => void} addCallback
    *   Callback invoked by the provider to add a new result.
+   * @param {UrlbarParentController} controller The controller instance.
    */
-  async startQuery(queryContext, addCallback) {
+  async startQuery(queryContext, addCallback, controller) {
     let instance = this.queryInstance;
     let alias = queryContext.tokens[0]?.value;
     let engine = await lazy.UrlbarSearchUtils.engineForAlias(
       alias,
       queryContext.searchString
     );
-    let icon = await engine?.getIconURL();
     if (!engine || instance != this.queryInstance) {
       return;
     }
-    let query = UrlbarUtils.substringAfter(queryContext.searchString, alias);
+    let icon = await UrlbarUtils.getEngineIconUrl(engine, controller);
+    if (instance != this.queryInstance) {
+      return;
+    }
+    let query = UrlbarUtils.substringAfter(
+      queryContext.searchString,
+      alias
+    ).trimStart();
     let result = new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.SEARCH,
-      source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.SEARCH,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       heuristic: true,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
+      payload: {
         engine: engine.name,
         keyword: alias,
-        query: query.trimStart(),
+        query,
+        title: query,
         icon,
-      }),
+      },
     });
     addCallback(this, result);
   }

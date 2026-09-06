@@ -17,16 +17,18 @@ const POSITION_UNAVAILABLE = 2;
 
 XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
-  "gLoggingEnabled",
-  "geo.provider.network.logging.enabled",
-  false
+  "gNetworkGeolocationLogLevel",
+  "geo.provider.network.loglevel",
+  "Off"
 );
 
-function LOG(aMsg) {
-  if (lazy.gLoggingEnabled) {
-    dump("*** WIFI GEO: " + aMsg + "\n");
-  }
-}
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
+  let consoleOptions = {
+    maxLogLevelPref: lazy.gNetworkGeolocationLogLevel,
+    prefix: "NetworkGeolocationProvider",
+  };
+  return console.createInstance(consoleOptions);
+});
 
 function CachedRequest(loc, wifiList) {
   this.location = loc;
@@ -160,9 +162,30 @@ export function NetworkGeolocationProvider() {
     true
   );
 
+  // Upper bound for the exponential backoff applied to the repeating request
+  // timer after consecutive network failures.
+  XPCOMUtils.defineLazyPreferenceGetter(
+    this,
+    "_backoffMaxMs",
+    "geo.provider.network.backoffMaxMs",
+    20 * 1000 // 20sec
+  );
+
+  // Rate at which to scale the repeating request timer duration after
+  // consecutive network failures.
+  XPCOMUtils.defineLazyPreferenceGetter(
+    this,
+    "_backoffScale",
+    "geo.provider.network.backoffScale",
+    1.1 // 10% increase
+  );
+
   this.wifiService = null;
   this.timer = null;
   this.started = false;
+  // Current repeating-timer interval; grows on failure (up to _backoffMaxMs),
+  // resets to _wifiMonitorTimeout on a new request or a success.
+  this._currentTimerInterval = null;
 }
 
 NetworkGeolocationProvider.prototype = {
@@ -186,19 +209,44 @@ NetworkGeolocationProvider.prototype = {
       this.timer.cancel();
       this.timer = null;
     }
+    if (this._currentTimerInterval == null) {
+      this._currentTimerInterval = this._wifiMonitorTimeout;
+    }
     // Wifi thread triggers NetworkGeolocationProvider to proceed. With no wifi,
-    // do manual timeout.
+    // do manual timeout. The interval is extended by _increaseBackoff() while
+    // requests are failing and restored by _resetBackoff().
     this.timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
     this.timer.initWithCallback(
       this,
-      this._wifiMonitorTimeout,
+      this._currentTimerInterval,
       this.timer.TYPE_REPEATING_SLACK
     );
   },
 
+  _resetBackoff() {
+    this._currentTimerInterval = this._wifiMonitorTimeout;
+  },
+
+  _increaseBackoff() {
+    let current = this._currentTimerInterval || this._wifiMonitorTimeout;
+    this._currentTimerInterval = Math.min(
+      current * this._backoffScale,
+      this._backoffMaxMs
+    );
+  },
+
   startup() {
-    LOG("startup called.");
+    lazy.log.debug("startup called.");
+
+    // startup() may be called again for each new geolocation request (per
+    // nsIGeolocationProvider). Treat it as a fresh request and restart the
+    // failure backoff so the request is served at the normal cadence instead
+    // of waiting out a prior failure's backoff.
+    this._resetBackoff();
+
     if (this.started) {
+      // Already running: re-arm the repeating timer at the reset interval.
+      this.resetTimer();
       return;
     }
 
@@ -218,21 +266,22 @@ NetworkGeolocationProvider.prototype = {
   },
 
   watch(c) {
-    LOG("watch called");
+    lazy.log.debug("watch called");
     this.listener = c;
     this.notify();
     this.resetTimer();
   },
 
   shutdown() {
-    LOG("shutdown called");
+    lazy.log.debug("shutdown called");
     if (!this.started) {
       return;
     }
 
-    // Without clearing this, we could end up using the cache almost indefinitely
-    // TODO: add logic for cache lifespan, for now just be safe and clear it
-    gCachedRequest = null;
+    // The request cache is intentionally retained across shutdown so a recent
+    // position can be reused across the provider's stop/restart cycles within a
+    // browser run, instead of cold-starting a network request for each
+    // intermittent geolocation use.
 
     if (this.timer) {
       this.timer.cancel();
@@ -271,7 +320,7 @@ NetworkGeolocationProvider.prototype = {
   },
 
   onError(code) {
-    LOG("wifi error: " + code);
+    lazy.log.debug("wifi error: " + code);
     this.sendLocationRequest(null);
   },
 
@@ -279,7 +328,7 @@ NetworkGeolocationProvider.prototype = {
     if (!this.listener) {
       return;
     }
-    LOG("onStatus called." + statusMessage);
+    lazy.log.debug("onStatus called." + statusMessage);
 
     if (statusMessage && this.listener.notifyStatus) {
       this.listener.notifyStatus(statusMessage);
@@ -320,6 +369,7 @@ NetworkGeolocationProvider.prototype = {
    */
   async sendLocationRequest(wifiData) {
     let data = { wifiAccessPoints: undefined };
+    // Zero or one entry means lookup is only by our own IP address.
     if (wifiData && wifiData.length >= 2) {
       data.wifiAccessPoints = wifiData;
     }
@@ -328,9 +378,13 @@ NetworkGeolocationProvider.prototype = {
       data.wifiAccessPoints
     );
 
-    LOG("Use request cache:" + useCached + " reason:" + gDebugCacheReasoning);
+    lazy.log.debug(
+      "Use request cache:" + useCached + " reason:" + gDebugCacheReasoning
+    );
 
     if (useCached) {
+      Glean.geolocation.geolocationCacheHit.NetworkGeolocationProvider.add();
+
       gCachedRequest.location.timestamp = Date.now();
       if (this.listener) {
         this.listener.update(gCachedRequest.location);
@@ -340,12 +394,15 @@ NetworkGeolocationProvider.prototype = {
 
     // From here on, do a network geolocation request //
     let url = Services.urlFormatter.formatURLPref("geo.provider.network.url");
-    LOG("Sending request");
+    let logStr = data.wifiAccessPoints ? " with wifi APs" : "";
+    lazy.log.info(
+      `Sending IP-address-based geolocation request${logStr} to network service: ${url}`
+    );
 
     let result;
     try {
-      result = await this.makeRequest(url, wifiData);
-      LOG(
+      result = await this.fetchLocation(url, wifiData);
+      lazy.log.info(
         `geo provider reported: ${result.location.lng}:${result.location.lat}`
       );
       let newLocation = new NetworkGeoPositionObject(
@@ -359,18 +416,31 @@ NetworkGeolocationProvider.prototype = {
       }
 
       gCachedRequest = new CachedRequest(newLocation, data.wifiAccessPoints);
+
+      // Recovered: if we had backed off, return the timer to normal cadence.
+      if (this._currentTimerInterval !== this._wifiMonitorTimeout) {
+        this._resetBackoff();
+        this.resetTimer();
+      }
     } catch (err) {
-      LOG("Location request hit error: " + err.name);
+      lazy.log.error("Location request hit error: " + err.name);
       console.error(err);
       if (err.name == "AbortError") {
         this.onStatus(true, "xhr-timeout");
       } else {
         this.onStatus(true, "xhr-error");
       }
+      // Slow down the repeating retry timer while the endpoint keeps failing,
+      // to avoid hammering it (and draining battery). Capped at _backoffMaxMs.
+      let prevInterval = this._currentTimerInterval;
+      this._increaseBackoff();
+      if (this._currentTimerInterval !== prevInterval) {
+        this.resetTimer();
+      }
     }
   },
 
-  async makeRequest(url, wifiData) {
+  async fetchLocation(url, wifiData) {
     this.onStatus(false, "xhr-start");
 
     let fetchController = new AbortController();
@@ -387,20 +457,32 @@ NetworkGeolocationProvider.prototype = {
 
     let timeoutId = lazy.setTimeout(
       () => fetchController.abort(),
-      Services.prefs.getIntPref("geo.provider.network.timeout")
+      Services.prefs.getIntPref("geo.provider.network.timeout", 60000)
     );
 
-    let req = await fetch(url, fetchOpts);
-    lazy.clearTimeout(timeoutId);
+    let isWifi = wifiData && wifiData.length >= 2;
+    let label = isWifi ? "network_wifi_and_ip" : "network_ip";
+    Glean.geolocation.geolocationService[label].add();
 
-    if (!req.ok) {
+    let response;
+    try {
+      response = await fetch(url, fetchOpts);
+    } catch (err) {
+      Glean.geolocation.networkFailures[label].add();
+      throw err;
+    } finally {
+      lazy.clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      Glean.geolocation.networkFailures[label].add();
       throw new Error(
-        `The geolocation provider returned a non-ok status ${req.status}`,
-        { cause: await req.text() }
+        `The geolocation provider returned a non-ok status ${response.status}`,
+        { cause: await response.text() }
       );
     }
 
-    let result = req.json();
+    let result = response.json();
     return result;
   },
 };

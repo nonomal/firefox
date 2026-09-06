@@ -163,7 +163,7 @@ async function testCopyPaste(isXHTML) {
   testClipboardValue("text/plain", "This is a draggable bit of text.");
   testHtmlClipboardValue(
     "text/html",
-    '<div id="draggable" title="title to have a long HTML line">This is a <em>draggable</em> bit of text.</div>'
+    `This is a <em>draggable</em> bit of text.`
   );
   testPasteText("This is a draggable bit of text.");
 
@@ -172,7 +172,7 @@ async function testCopyPaste(isXHTML) {
   testClipboardValue("text/plain", " bla\n\n    foo\n    bar\n\n");
   testHtmlClipboardValue(
     "text/html",
-    '<div id="alist">\n    bla\n    <ul>\n      <li>foo</li>\n      \n      <li>bar</li>\n    </ul>\n  </div>'
+    `\n    bla\n    <ul>\n      <li>foo</li>\n      \n      <li>bar</li>\n    </ul>\n  `
   );
   testPasteText(" bla\n\n    foo\n    bar\n\n");
 
@@ -181,7 +181,7 @@ async function testCopyPaste(isXHTML) {
   testClipboardValue("text/plain", " mozilla\n\n    foo\n    bar\n\n");
   testHtmlClipboardValue(
     "text/html",
-    '<div id="blist">\n    mozilla\n    <ol>\n      <li>foo</li>\n      \n      <li>bar</li>\n    </ol>\n  </div>'
+    `\n    mozilla\n    <ol>\n      <li>foo</li>\n      \n      <li>bar</li>\n    </ol>\n  `
   );
   testPasteText(" mozilla\n\n    foo\n    bar\n\n");
 
@@ -193,7 +193,7 @@ async function testCopyPaste(isXHTML) {
   );
   testHtmlClipboardValue(
     "text/html",
-    '<div id="clist">\n    mzla\n    <ul>\n      <li>foo<ul>\n        <li>bazzinga!</li>\n      </ul></li>\n      \n      <li>bar</li>\n    </ul>\n  </div>'
+    `\n    mzla\n    <ul>\n      <li>foo<ul>\n        <li>bazzinga!</li>\n      </ul></li>\n      \n      <li>bar</li>\n    </ul>\n  `
   );
   testPasteText(" mzla\n\n    foo\n        bazzinga!\n    bar\n\n");
 
@@ -210,10 +210,7 @@ async function testCopyPaste(isXHTML) {
       '\n  T<textarea xmlns="http://www.w3.org/1999/xhtml">t t t</textarea>\n'
     );
   } else {
-    testHtmlClipboardValue(
-      "text/html",
-      '<div id="div4">\n  T<textarea>t t t</textarea>\n</div>'
-    );
+    testHtmlClipboardValue("text/html", `\n  T<textarea>t t t</textarea>\n`);
     testInnerHTML("div4", "\n  T<textarea>t t t</textarea>\n");
   }
   testPasteText(" Tt t t ");
@@ -231,10 +228,7 @@ async function testCopyPaste(isXHTML) {
       '\n  T<textarea xmlns="http://www.w3.org/1999/xhtml">     </textarea>\n'
     );
   } else {
-    testHtmlClipboardValue(
-      "text/html",
-      '<div id="div5">\n  T<textarea>     </textarea>\n</div>'
-    );
+    testHtmlClipboardValue("text/html", `\n  T<textarea>     </textarea>\n`);
     testInnerHTML("div5", "\n  T<textarea>     </textarea>\n");
   }
   testPasteText(" T     ");
@@ -458,7 +452,7 @@ async function testCopyPaste(isXHTML) {
   await copyChildrenToClipboard("div13");
   testSelectionToString("__");
   testClipboardValue("text/plain", "__");
-  testHtmlClipboardValue("text/html", '<div id="div13">__</div>');
+  testHtmlClipboardValue("text/html", `__`);
   testPasteText("__");
 
   // ============ converting cell boundaries to tabs in tables
@@ -498,7 +492,7 @@ async function testCopyPaste(isXHTML) {
     2
   );
   testClipboardValue("text/plain", "Xdiv11");
-  testHtmlClipboardValue("text/html", "<div><p>X<span>div</span>11</p></div>");
+  testHtmlClipboardValue("text/html", `<p>X<span>div</span>11</p>`);
 
   await new Promise(resolve => {
     setTimeout(resolve, 0);
@@ -516,7 +510,7 @@ async function testCopyPaste(isXHTML) {
   );
 
   testClipboardValue("text/plain", "Xdiv12");
-  testHtmlClipboardValue("text/html", "<div><p>X<span>div</span>12</p></div>");
+  testHtmlClipboardValue("text/html", `<p>X<span>div</span>12</p>`);
   await new Promise(resolve => {
     setTimeout(resolve, 0);
   });
@@ -525,6 +519,13 @@ async function testCopyPaste(isXHTML) {
   await new Promise(resolve => {
     setTimeout(resolve, 0);
   });
+
+  // ============ long lines in markup shouldn't be wrapped (bug 1498271)
+  await copyChildrenToClipboard("long");
+  testHtmlClipboardValue(
+    "text/html",
+    document.getElementById("long").textContent
+  );
 
   if (!isXHTML) {
     // ============ copy from ruby

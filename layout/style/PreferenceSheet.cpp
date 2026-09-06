@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -44,7 +42,7 @@ static void GetColor(const char* aPrefName, ColorScheme aColorScheme,
     return;
   }
   nscolor result;
-  if (!ServoCSSParser::ComputeColor(nullptr, NS_RGB(0, 0, 0), value, &result)) {
+  if (!ServoCSSParser::ComputeColor(nullptr, value, &result)) {
     return;
   }
   aColor = result;

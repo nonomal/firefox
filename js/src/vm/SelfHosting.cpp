@@ -1,15 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "vm/SelfHosting.h"
 
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
-#  include "builtin/AsyncDisposableStackObject.h"
-#  include "builtin/DisposableStackObject.h"
-#endif
 #include "mozilla/BinarySearch.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/ScopeExit.h"  // mozilla::MakeScopeExit
@@ -19,36 +13,24 @@
 #include <iterator>
 
 #include "jsfriendapi.h"
-#include "jsmath.h"
-#include "jsnum.h"
 #include "selfhosted.out.h"
 
 #include "builtin/Array.h"
+#include "builtin/AsyncDisposableStackObject.h"
 #include "builtin/BigInt.h"
+#include "builtin/DisposableStackObject.h"
 #ifdef JS_HAS_INTL_API
-#  include "builtin/intl/Collator.h"
-#  include "builtin/intl/DateTimeFormat.h"
-#  include "builtin/intl/DisplayNames.h"
-#  include "builtin/intl/DurationFormat.h"
-#  include "builtin/intl/IntlObject.h"
-#  include "builtin/intl/ListFormat.h"
-#  include "builtin/intl/Locale.h"
-#  include "builtin/intl/NumberFormat.h"
-#  include "builtin/intl/PluralRules.h"
-#  include "builtin/intl/RelativeTimeFormat.h"
 #  include "builtin/intl/Segmenter.h"
 #endif
 #include "builtin/MapObject.h"
+#include "builtin/Math.h"
+#include "builtin/Number.h"
 #include "builtin/Object.h"
 #include "builtin/Promise.h"
 #include "builtin/Reflect.h"
 #include "builtin/RegExp.h"
 #include "builtin/SelfHostingDefines.h"
 #include "builtin/String.h"
-#ifdef JS_HAS_INTL_API
-#  include "builtin/temporal/Duration.h"
-#  include "builtin/temporal/TimeZone.h"
-#endif
 #include "builtin/WeakMapObject.h"
 #include "frontend/BytecodeCompiler.h"    // CompileGlobalScriptToStencil
 #include "frontend/CompilationStencil.h"  // js::frontend::CompilationStencil
@@ -251,29 +233,6 @@ static bool intrinsic_GuardToBuiltin(JSContext* cx, unsigned argc, Value* vp) {
 }
 
 template <typename T>
-static bool intrinsic_IsWrappedInstanceOfBuiltin(JSContext* cx, unsigned argc,
-                                                 Value* vp) {
-  CallArgs args = CallArgsFromVp(argc, vp);
-  MOZ_ASSERT(args.length() == 1);
-  MOZ_ASSERT(args[0].isObject());
-
-  JSObject* obj = &args[0].toObject();
-  if (!obj->is<WrapperObject>()) {
-    args.rval().setBoolean(false);
-    return true;
-  }
-
-  JSObject* unwrapped = CheckedUnwrapDynamic(obj, cx);
-  if (!unwrapped) {
-    ReportAccessDenied(cx);
-    return false;
-  }
-
-  args.rval().setBoolean(unwrapped->is<T>());
-  return true;
-}
-
-template <typename T>
 static bool intrinsic_IsPossiblyWrappedInstanceOfBuiltin(JSContext* cx,
                                                          unsigned argc,
                                                          Value* vp) {
@@ -310,25 +269,25 @@ static bool intrinsic_SubstringKernel(JSContext* cx, unsigned argc, Value* vp) {
   return true;
 }
 
-static void ThrowErrorWithType(JSContext* cx, JSExnType type,
-                               const CallArgs& args) {
-  MOZ_RELEASE_ASSERT(args[0].isInt32());
+static bool PrepareErrorArguments(JSContext* cx, JSExnType type,
+                                  const CallArgs& args,
+                                  UniqueChars (&errorArgs)[3]) {
+#ifdef DEBUG
+  MOZ_ASSERT(args[0].isInt32());
   uint32_t errorNumber = args[0].toInt32();
 
-#ifdef DEBUG
   const JSErrorFormatString* efs = GetErrorMessage(nullptr, errorNumber);
   MOZ_ASSERT(efs->argCount == args.length() - 1);
   MOZ_ASSERT(efs->exnType == type,
              "error-throwing intrinsic and error number are inconsistent");
 #endif
 
-  UniqueChars errorArgs[3];
   for (unsigned i = 1; i < 4 && i < args.length(); i++) {
     HandleValue val = args[i];
     if (val.isInt32() || val.isString()) {
       JSString* str = ToString<CanGC>(cx, val);
       if (!str) {
-        return;
+        return false;
       }
       errorArgs[i - 1] = QuoteString(cx, str);
     } else {
@@ -336,8 +295,20 @@ static void ThrowErrorWithType(JSContext* cx, JSExnType type,
           DecompileValueGenerator(cx, JSDVG_SEARCH_STACK, val, nullptr);
     }
     if (!errorArgs[i - 1]) {
-      return;
+      return false;
     }
+  }
+  return true;
+}
+
+static void ThrowErrorWithType(JSContext* cx, JSExnType type,
+                               const CallArgs& args) {
+  MOZ_RELEASE_ASSERT(args[0].isInt32());
+  uint32_t errorNumber = args[0].toInt32();
+
+  UniqueChars errorArgs[3];
+  if (!PrepareErrorArguments(cx, type, args, errorArgs)) {
+    return;
   }
 
   JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, errorNumber,
@@ -379,7 +350,6 @@ static bool intrinsic_ThrowInternalError(JSContext* cx, unsigned argc,
   return false;
 }
 
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
 static bool intrinsic_CreateSuppressedError(JSContext* cx, unsigned argc,
                                             Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
@@ -395,7 +365,6 @@ static bool intrinsic_CreateSuppressedError(JSContext* cx, unsigned argc,
   args.rval().setObject(*suppressedError);
   return true;
 }
-#endif
 
 /**
  * Handles an assertion failure in self-hosted code just like an assertion
@@ -837,7 +806,9 @@ static bool intrinsic_GeneratorSetClosed(JSContext* cx, unsigned argc,
   MOZ_ASSERT(args[0].isObject());
 
   GeneratorObject* genObj = &args[0].toObject().as<GeneratorObject>();
-  genObj->setClosed(cx);
+  if (!genObj->isClosed()) {
+    genObj->setClosed(cx);
+  }
   return true;
 }
 
@@ -1014,7 +985,7 @@ static bool intrinsic_RegExpCreate(JSContext* cx, unsigned argc, Value* vp) {
                 args[1].isString() || args[1].isUndefined());
   MOZ_ASSERT(!args.isConstructing());
 
-  return RegExpCreate(cx, args[0], args.get(1), args.rval());
+  return RegExpCreate(cx, args[0], args.get(1), args.rval(), nullptr);
 }
 
 static bool intrinsic_RegExpGetSubstitution(JSContext* cx, unsigned argc,
@@ -1260,49 +1231,6 @@ bool js::ReportIncompatibleSelfHostedMethod(
   return false;
 }
 
-#ifdef JS_HAS_INTL_API
-static bool intrinsic_DefaultLocale(JSContext* cx, unsigned argc, Value* vp) {
-  CallArgs args = CallArgsFromVp(argc, vp);
-  MOZ_ASSERT(args.length() == 0);
-
-  auto* locale = cx->global()->globalIntlData().defaultLocale(cx);
-  if (!locale) {
-    return false;
-  }
-
-  args.rval().setString(locale);
-  return true;
-}
-
-static bool intrinsic_DefaultTimeZone(JSContext* cx, unsigned argc, Value* vp) {
-  CallArgs args = CallArgsFromVp(argc, vp);
-  MOZ_ASSERT(args.length() == 0);
-
-  auto* timeZone = cx->global()->globalIntlData().defaultTimeZone(cx);
-  if (!timeZone) {
-    return false;
-  }
-
-  args.rval().setString(timeZone);
-  return true;
-}
-
-static bool intl_ValidateAndCanonicalizeTimeZone(JSContext* cx, unsigned argc,
-                                                 Value* vp) {
-  CallArgs args = CallArgsFromVp(argc, vp);
-  MOZ_ASSERT(args.length() == 1);
-
-  Rooted<JSString*> timeZone(cx, args[0].toString());
-  auto* timeZoneId = temporal::ToValidCanonicalTimeZoneIdentifier(cx, timeZone);
-  if (!timeZoneId) {
-    return false;
-  }
-
-  args.rval().setString(timeZoneId);
-  return true;
-}
-#endif  // JS_HAS_INTL_API
-
 static bool intrinsic_ConstructFunction(JSContext* cx, unsigned argc,
                                         Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
@@ -1480,7 +1408,7 @@ static JSObject* NewIteratorRecord(JSContext* cx, HandleObject iterator,
                                    HandleValue nextMethod) {
   gc::AllocKind allocKind = gc::GetGCObjectKind(3);
   Rooted<PlainObject*> obj(
-      cx, NewPlainObjectWithProtoAndAllocKind(cx, nullptr, allocKind));
+      cx, NewPlainObjectWithProto(cx, nullptr, {.allocKind = allocKind}));
   if (!obj) {
     return nullptr;
   }
@@ -1574,16 +1502,12 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("AssertionFailed", intrinsic_AssertionFailed, 1, 0),
     JS_FN("CallArrayIteratorMethodIfWrapped",
           CallNonGenericSelfhostedMethod<Is<ArrayIteratorObject>>, 2, 0),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     JS_FN("CallAsyncDisposableStackMethodIfWrapped",
           CallNonGenericSelfhostedMethod<Is<AsyncDisposableStackObject>>, 2, 0),
-#endif
     JS_FN("CallAsyncIteratorHelperMethodIfWrapped",
           CallNonGenericSelfhostedMethod<Is<AsyncIteratorHelperObject>>, 2, 0),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     JS_FN("CallDisposableStackMethodIfWrapped",
           CallNonGenericSelfhostedMethod<Is<DisposableStackObject>>, 2, 0),
-#endif
     JS_FN("CallGeneratorMethodIfWrapped",
           CallNonGenericSelfhostedMethod<Is<GeneratorObject>>, 2, 0),
     JS_FN("CallIteratorHelperMethodIfWrapped",
@@ -1625,9 +1549,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("CreateMapIterationResultPair",
           intrinsic_CreateMapIterationResultPair, 0, 0),
     JS_FN("CreateSetIterationResult", intrinsic_CreateSetIterationResult, 0, 0),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     JS_FN("CreateSuppressedError", intrinsic_CreateSuppressedError, 2, 0),
-#endif
     JS_FN("DecompileArg", intrinsic_DecompileArg, 2, 0),
     JS_FN("DefineDataProperty", intrinsic_DefineDataProperty, 4, 0),
     JS_FN("DefineProperty", intrinsic_DefineProperty, 6, 0),
@@ -1655,19 +1577,15 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_INLINABLE_FN("GuardToArrayIterator",
                     intrinsic_GuardToBuiltin<ArrayIteratorObject>, 1, 0,
                     IntrinsicGuardToArrayIterator),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     JS_INLINABLE_FN("GuardToAsyncDisposableStackHelper",
                     intrinsic_GuardToBuiltin<AsyncDisposableStackObject>, 1, 0,
                     IntrinsicGuardToAsyncDisposableStack),
-#endif
     JS_INLINABLE_FN("GuardToAsyncIteratorHelper",
                     intrinsic_GuardToBuiltin<AsyncIteratorHelperObject>, 1, 0,
                     IntrinsicGuardToAsyncIteratorHelper),
-#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
     JS_INLINABLE_FN("GuardToDisposableStackHelper",
                     intrinsic_GuardToBuiltin<DisposableStackObject>, 1, 0,
                     IntrinsicGuardToDisposableStack),
-#endif
     JS_INLINABLE_FN("GuardToIteratorHelper",
                     intrinsic_GuardToBuiltin<IteratorHelperObject>, 1, 0,
                     IntrinsicGuardToIteratorHelper),
@@ -1824,124 +1742,35 @@ static const JSFunctionSpec intrinsic_functions[] = {
 
 // Intrinsics and standard functions used by Intl API implementation.
 #ifdef JS_HAS_INTL_API
-    JS_FN("intl_BestAvailableLocale", intl_BestAvailableLocale, 3, 0),
-    JS_FN("intl_CallCollatorMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<CollatorObject>>, 2, 0),
-    JS_FN("intl_CallDateTimeFormatMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<DateTimeFormatObject>>, 2, 0),
-    JS_FN("intl_CallDisplayNamesMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<DisplayNamesObject>>, 2, 0),
-    JS_FN("intl_CallDurationFormatMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<DurationFormatObject>>, 2, 0),
-    JS_FN("intl_CallListFormatMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<ListFormatObject>>, 2, 0),
-    JS_FN("intl_CallNumberFormatMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<NumberFormatObject>>, 2, 0),
-    JS_FN("intl_CallPluralRulesMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<PluralRulesObject>>, 2, 0),
-    JS_FN("intl_CallRelativeTimeFormatMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<RelativeTimeFormatObject>>, 2, 0),
     JS_FN("intl_CallSegmentIteratorMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<SegmentIteratorObject>>, 2, 0),
-    JS_FN("intl_CallSegmenterMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<SegmenterObject>>, 2, 0),
+          CallNonGenericSelfhostedMethod<Is<intl::SegmentIteratorObject>>, 2,
+          0),
     JS_FN("intl_CallSegmentsMethodIfWrapped",
-          CallNonGenericSelfhostedMethod<Is<SegmentsObject>>, 2, 0),
-    JS_FN("intl_CompareStrings", intl_CompareStrings, 3, 0),
-    JS_FN("intl_ComputeDisplayName", intl_ComputeDisplayName, 6, 0),
+          CallNonGenericSelfhostedMethod<Is<intl::SegmentsObject>>, 2, 0),
     JS_FN("intl_CreateSegmentIterator", intl_CreateSegmentIterator, 1, 0),
-    JS_FN("intl_CreateSegmentsObject", intl_CreateSegmentsObject, 2, 0),
-    JS_FN("intl_DefaultLocale", intrinsic_DefaultLocale, 0, 0),
-    JS_FN("intl_DefaultTimeZone", intrinsic_DefaultTimeZone, 0, 0),
     JS_FN("intl_FindNextSegmentBoundaries", intl_FindNextSegmentBoundaries, 1,
           0),
     JS_FN("intl_FindSegmentBoundaries", intl_FindSegmentBoundaries, 2, 0),
-    JS_FN("intl_FormatDateTime", intl_FormatDateTime, 2, 0),
-    JS_FN("intl_FormatDateTimeRange", intl_FormatDateTimeRange, 4, 0),
-    JS_FN("intl_FormatList", intl_FormatList, 3, 0),
-    JS_FN("intl_FormatNumber", intl_FormatNumber, 3, 0),
-    JS_FN("intl_FormatNumberRange", intl_FormatNumberRange, 4, 0),
-    JS_FN("intl_FormatRelativeTime", intl_FormatRelativeTime, 4, 0),
-    JS_FN("intl_GetCalendarInfo", intl_GetCalendarInfo, 1, 0),
-    JS_FN("intl_GetPluralCategories", intl_GetPluralCategories, 1, 0),
-    JS_INLINABLE_FN("intl_GuardToCollator",
-                    intrinsic_GuardToBuiltin<CollatorObject>, 1, 0,
-                    IntlGuardToCollator),
-    JS_INLINABLE_FN("intl_GuardToDateTimeFormat",
-                    intrinsic_GuardToBuiltin<DateTimeFormatObject>, 1, 0,
-                    IntlGuardToDateTimeFormat),
-    JS_INLINABLE_FN("intl_GuardToDisplayNames",
-                    intrinsic_GuardToBuiltin<DisplayNamesObject>, 1, 0,
-                    IntlGuardToDisplayNames),
-    JS_INLINABLE_FN("intl_GuardToDurationFormat",
-                    intrinsic_GuardToBuiltin<DurationFormatObject>, 1, 0,
-                    IntlGuardToDurationFormat),
-    JS_INLINABLE_FN("intl_GuardToListFormat",
-                    intrinsic_GuardToBuiltin<ListFormatObject>, 1, 0,
-                    IntlGuardToListFormat),
-    JS_INLINABLE_FN("intl_GuardToNumberFormat",
-                    intrinsic_GuardToBuiltin<NumberFormatObject>, 1, 0,
-                    IntlGuardToNumberFormat),
-    JS_INLINABLE_FN("intl_GuardToPluralRules",
-                    intrinsic_GuardToBuiltin<PluralRulesObject>, 1, 0,
-                    IntlGuardToPluralRules),
-    JS_INLINABLE_FN("intl_GuardToRelativeTimeFormat",
-                    intrinsic_GuardToBuiltin<RelativeTimeFormatObject>, 1, 0,
-                    IntlGuardToRelativeTimeFormat),
     JS_INLINABLE_FN("intl_GuardToSegmentIterator",
-                    intrinsic_GuardToBuiltin<SegmentIteratorObject>, 1, 0,
+                    intrinsic_GuardToBuiltin<intl::SegmentIteratorObject>, 1, 0,
                     IntlGuardToSegmentIterator),
-    JS_INLINABLE_FN("intl_GuardToSegmenter",
-                    intrinsic_GuardToBuiltin<SegmenterObject>, 1, 0,
-                    IntlGuardToSegmenter),
     JS_INLINABLE_FN("intl_GuardToSegments",
-                    intrinsic_GuardToBuiltin<SegmentsObject>, 1, 0,
+                    intrinsic_GuardToBuiltin<intl::SegmentsObject>, 1, 0,
                     IntlGuardToSegments),
-    JS_FN("intl_IsWrappedDateTimeFormat",
-          intrinsic_IsWrappedInstanceOfBuiltin<DateTimeFormatObject>, 1, 0),
-    JS_FN("intl_IsWrappedNumberFormat",
-          intrinsic_IsWrappedInstanceOfBuiltin<NumberFormatObject>, 1, 0),
-    JS_FN("intl_NumberFormat", intl_NumberFormat, 2, 0),
-    JS_FN("intl_SelectPluralRule", intl_SelectPluralRule, 2, 0),
-    JS_FN("intl_SelectPluralRuleRange", intl_SelectPluralRuleRange, 3, 0),
-    JS_FN("intl_SupportedValuesOf", intl_SupportedValuesOf, 1, 0),
-    JS_FN("intl_TryValidateAndCanonicalizeLanguageTag",
-          intl_TryValidateAndCanonicalizeLanguageTag, 1, 0),
-    JS_FN("intl_ValidateAndCanonicalizeLanguageTag",
-          intl_ValidateAndCanonicalizeLanguageTag, 2, 0),
-    JS_FN("intl_ValidateAndCanonicalizeTimeZone",
-          intl_ValidateAndCanonicalizeTimeZone, 1, 0),
-    JS_FN("intl_ValidateAndCanonicalizeUnicodeExtensionType",
-          intl_ValidateAndCanonicalizeUnicodeExtensionType, 3, 0),
-    JS_FN("intl_availableCalendars", intl_availableCalendars, 1, 0),
-    JS_FN("intl_availableCollations", intl_availableCollations, 1, 0),
-#  if DEBUG || MOZ_SYSTEM_ICU
-    JS_FN("intl_availableMeasurementUnits", intl_availableMeasurementUnits, 0,
-          0),
-#  endif
-    JS_FN("intl_defaultCalendar", intl_defaultCalendar, 1, 0),
-    JS_FN("intl_isIgnorePunctuation", intl_isIgnorePunctuation, 1, 0),
-    JS_FN("intl_isUpperCaseFirst", intl_isUpperCaseFirst, 1, 0),
-    JS_FN("intl_numberingSystem", intl_numberingSystem, 1, 0),
-    JS_FN("intl_resolveDateTimeFormatComponents",
-          intl_resolveDateTimeFormatComponents, 3, 0),
 #endif  // JS_HAS_INTL_API
 
     // Standard builtins used by self-hosting.
     JS_FN("new_List", intrinsic_newList, 0, 0),
     JS_INLINABLE_FN("std_Array", array_construct, 1, 0, Array),
-    JS_FN("std_Array_includes", array_includes, 1, 0),
-    JS_FN("std_Array_indexOf", array_indexOf, 1, 0),
-    JS_FN("std_Array_lastIndexOf", array_lastIndexOf, 1, 0),
     JS_INLINABLE_FN("std_Array_pop", array_pop, 0, 0, ArrayPop),
+    JS_INLINABLE_FN("std_Array_shift", array_shift, 0, 0, ArrayShift),
+    JS_INLINABLE_FN("std_Array_slice", array_slice, 2, 0, ArraySlice),
     JS_TRAMPOLINE_FN("std_Array_sort", array_sort, 1, 0, ArraySort),
     JS_FN("std_Function_apply", fun_apply, 2, 0),
     JS_FN("std_Map_entries", MapObject::entries, 0, 0),
     JS_INLINABLE_FN("std_Map_get", MapObject::get, 1, 0, MapGet),
     JS_INLINABLE_FN("std_Map_has", MapObject::has, 1, 0, MapHas),
     JS_INLINABLE_FN("std_Map_set", MapObject::set, 2, 0, MapSet),
-    JS_INLINABLE_FN("std_Math_abs", math_abs, 1, 0, MathAbs),
-    JS_INLINABLE_FN("std_Math_floor", math_floor, 1, 0, MathFloor),
     JS_INLINABLE_FN("std_Math_max", math_max, 2, 0, MathMax),
     JS_INLINABLE_FN("std_Math_min", math_min, 2, 0, MathMin),
     JS_INLINABLE_FN("std_Math_trunc", math_trunc, 1, 0, MathTrunc),
@@ -1960,19 +1789,12 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_INLINABLE_FN("std_Set_has", SetObject::has, 1, 0, SetHas),
     JS_INLINABLE_FN("std_Set_size", SetObject::size, 1, 0, SetSize),
     JS_FN("std_Set_values", SetObject::values, 0, 0),
-    JS_INLINABLE_FN("std_String_charCodeAt", str_charCodeAt, 1, 0,
-                    StringCharCodeAt),
     JS_INLINABLE_FN("std_String_codePointAt", str_codePointAt, 1, 0,
                     StringCodePointAt),
-    JS_INLINABLE_FN("std_String_endsWith", str_endsWith, 1, 0, StringEndsWith),
-    JS_INLINABLE_FN("std_String_fromCharCode", str_fromCharCode, 1, 0,
-                    StringFromCharCode),
     JS_INLINABLE_FN("std_String_fromCodePoint", str_fromCodePoint, 1, 0,
                     StringFromCodePoint),
     JS_INLINABLE_FN("std_String_includes", str_includes, 1, 0, StringIncludes),
     JS_INLINABLE_FN("std_String_indexOf", str_indexOf, 1, 0, StringIndexOf),
-    JS_INLINABLE_FN("std_String_startsWith", str_startsWith, 1, 0,
-                    StringStartsWith),
     JS_TRAMPOLINE_FN("std_TypedArray_sort", TypedArrayObject::sort, 1, 0,
                      TypedArraySort),
     JS_INLINABLE_FN("std_WeakMap_get", WeakMapObject::get, 1, 0, WeakMapGet),
@@ -2008,15 +1830,17 @@ class CheckTenuredTracer : public JS::CallbackTracer {
       JS::TraceChildren(this, stack.popCopy());
     }
   }
-  void onChild(JS::GCCellPtr thing, const char* name) override {
+  bool onChild(JS::GCCellPtr thing, const char* name) override {
     gc::Cell* cell = thing.asCell();
     MOZ_RELEASE_ASSERT(cell->isTenured(), "Expected tenured cell");
     if (!visited.has(cell)) {
       if (!visited.put(cell) || !stack.append(thing)) {
         // Ignore OOM. This can happen during fuzzing.
-        return;
+        return true;
       }
     }
+
+    return true;
   }
 };
 
@@ -2495,7 +2319,7 @@ static bool GetComputedIntrinsic(JSContext* cx, Handle<PropertyName*> name,
     // Attach the computed intrinsics holder to the global now to capture
     // generated values.
     computedIntrinsicsHolder =
-        NewPlainObjectWithProto(cx, nullptr, TenuredObject);
+        NewPlainObjectWithProto(cx, nullptr, {.newKind = TenuredObject});
     if (!computedIntrinsicsHolder) {
       return false;
     }

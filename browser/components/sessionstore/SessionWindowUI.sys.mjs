@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const lazy = {};
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
+  SessionStore:
+    "moz-src:///browser/components/sessionstore/SessionStore.sys.mjs",
   TabMetrics: "moz-src:///browser/components/tabbrowser/TabMetrics.sys.mjs",
 });
 
@@ -24,13 +25,16 @@ export var SessionWindowUI = {
    */
   restoreLastClosedTabOrWindowOrSession(window) {
     let lastActionTaken = lazy.SessionStore.popLastClosedAction();
-
     if (lastActionTaken) {
       switch (lastActionTaken.type) {
-        case lazy.SessionStore.LAST_ACTION_CLOSED_TAB: {
-          this.undoCloseTab(window);
+        case lazy.SessionStore.LAST_ACTION_CLOSED_TAB:
+          {
+            const sourceWindow = lazy.SessionStore.getWindowForTabClosedId(
+              lastActionTaken.closedId
+            );
+            this.undoCloseTab(window, undefined, sourceWindow?.__SSi);
+          }
           break;
-        }
         case lazy.SessionStore.LAST_ACTION_CLOSED_WINDOW: {
           this.undoCloseWindow();
           break;

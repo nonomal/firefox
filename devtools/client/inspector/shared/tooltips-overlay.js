@@ -11,6 +11,8 @@
 
 const flags = require("resource://devtools/shared/flags.js");
 const {
+  VIEW_NODE_ATTR_TYPE,
+  VIEW_NODE_CSS_EXPLAINERS,
   VIEW_NODE_CSS_QUERY_CONTAINER,
   VIEW_NODE_CSS_SELECTOR_WARNINGS,
   VIEW_NODE_FONT_TYPE,
@@ -58,6 +60,12 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
+  "CssExplainersTooltipHelper",
+  "resource://devtools/client/shared/widgets/tooltip/css-explainers-tooltip-helper.js",
+  false
+);
+loader.lazyRequireGetter(
+  this,
   "CssQueryContainerTooltipHelper",
   "resource://devtools/client/shared/widgets/tooltip/css-query-container-tooltip-helper.js",
   false
@@ -68,11 +76,19 @@ loader.lazyRequireGetter(
   "resource://devtools/client/shared/widgets/tooltip/css-selector-warnings-tooltip-helper.js",
   false
 );
+loader.lazyRequireGetter(
+  this,
+  "setAttrTooltip",
+  "resource://devtools/client/shared/widgets/tooltip/AttrTooltipHelper.js",
+  true
+);
 
 const PREF_IMAGE_TOOLTIP_SIZE = "devtools.inspector.imagePreviewTooltipSize";
 
 // Types of existing tooltips
+const TOOLTIP_ATTR_TYPE = "attr";
 const TOOLTIP_CSS_COMPATIBILITY = "css-compatibility";
+const TOOLTIP_CSS_EXPLAINERS = "css-explainers";
 const TOOLTIP_CSS_QUERY_CONTAINER = "css-query-info";
 const TOOLTIP_CSS_SELECTOR_WARNINGS = "css-selector-warnings";
 const TOOLTIP_FONTFAMILY_TYPE = "font-family";
@@ -82,46 +98,54 @@ const TOOLTIP_VARIABLE_TYPE = "variable";
 
 /**
  * Manages all tooltips in the style-inspector.
- *
- * @param {CssRuleView|CssComputedView} view
- *        Either the rule-view or computed-view panel
  */
-function TooltipsOverlay(view) {
-  this.view = view;
-  this._instances = new Map();
+class TooltipsOverlay {
+  /**
+   * @param {CssRuleView|CssComputedView} view
+   *        Either the rule-view or computed-view panel
+   */
+  constructor(view) {
+    this.#view = view;
 
-  this._onNewSelection = this._onNewSelection.bind(this);
-  this.view.inspector.selection.on("new-node-front", this._onNewSelection);
+    this.#view.inspector.selection.on("new-node-front", this.#onNewSelection);
 
-  this.addToView();
-}
+    this.#addToView();
+  }
 
-TooltipsOverlay.prototype = {
+  #instances = new Map();
+  #isDestroyed = false;
+  #isStarted = false;
+  #view;
+
+  #compatibilityTooltipHelper;
+  #cssExplainersTooltipHelper;
+  #cssQueryContainerTooltipHelper;
+  #cssSelectorWarningsTooltipHelper;
+  #inactiveCssTooltipHelper;
+
   get isEditing() {
-    for (const [, tooltip] of this._instances) {
+    for (const [, tooltip] of this.#instances) {
       if (typeof tooltip.isEditing == "function" && tooltip.isEditing()) {
         return true;
       }
     }
     return false;
-  },
+  }
+
+  get instances() {
+    return this.#instances;
+  }
 
   /**
    * Add the tooltips overlay to the view. This will start tracking mouse
    * movements and display tooltips when needed
    */
-  addToView() {
-    if (this._isStarted || this._isDestroyed) {
+  #addToView() {
+    if (this.#isStarted || this.#isDestroyed) {
       return;
     }
 
-    this._isStarted = true;
-
-    this.inactiveCssTooltipHelper = new InactiveCssTooltipHelper();
-    this.compatibilityTooltipHelper = new CssCompatibilityTooltipHelper();
-    this.cssQueryContainerTooltipHelper = new CssQueryContainerTooltipHelper();
-    this.cssSelectorWarningsTooltipHelper =
-      new CssSelectorWarningsTooltipHelper();
+    this.#isStarted = true;
 
     // Instantiate the interactiveTooltip and preview tooltip when the
     // rule/computed view is hovered over in order to call
@@ -132,7 +156,7 @@ TooltipsOverlay.prototype = {
         this.getTooltip(type);
       } else {
         // Lazily get the preview tooltip to avoid loading HTMLTooltip.
-        this.view.element.addEventListener(
+        this.#view.element.addEventListener(
           "mousemove",
           () => {
             this.getTooltip(type);
@@ -141,7 +165,7 @@ TooltipsOverlay.prototype = {
         );
       }
     }
-  },
+  }
 
   /**
    * Lazily fetch and initialize the different tooltips that are used in the inspector.
@@ -152,15 +176,15 @@ TooltipsOverlay.prototype = {
    *        Identifier name for the tooltip
    */
   getTooltip(name) {
-    let tooltip = this._instances.get(name);
+    let tooltip = this.#instances.get(name);
     if (tooltip) {
       return tooltip;
     }
-    const { doc } = this.view.inspector.toolbox;
+    const { doc } = this.#view.inspector.toolbox;
     switch (name) {
       case "colorPicker": {
         const SwatchColorPickerTooltip = require("resource://devtools/client/shared/widgets/tooltip/SwatchColorPickerTooltip.js");
-        tooltip = new SwatchColorPickerTooltip(doc, this.view.inspector);
+        tooltip = new SwatchColorPickerTooltip(doc, this.#view.inspector);
         break;
       }
       case "cubicBezier": {
@@ -185,7 +209,7 @@ TooltipsOverlay.prototype = {
           noAutoHide: true,
         });
         tooltip.startTogglingOnHover(
-          this.view.element,
+          this.#view.element,
           this.onInteractiveTooltipTargetHover.bind(this),
           {
             interactive: true,
@@ -198,35 +222,41 @@ TooltipsOverlay.prototype = {
           useXulWrapper: true,
         });
         tooltip.startTogglingOnHover(
-          this.view.element,
-          this._onPreviewTooltipTargetHover.bind(this)
+          this.#view.element,
+          this.#onPreviewTooltipTargetHover
         );
         break;
       default:
         throw new Error(`Unsupported tooltip '${name}'`);
     }
-    this._instances.set(name, tooltip);
+    this.#instances.set(name, tooltip);
     return tooltip;
-  },
+  }
 
   /**
    * Remove the tooltips overlay from the view. This will stop tracking mouse
    * movements and displaying tooltips
    */
-  removeFromView() {
-    if (!this._isStarted || this._isDestroyed) {
+  #removeFromView() {
+    if (!this.#isStarted || this.#isDestroyed) {
       return;
     }
 
-    for (const [, tooltip] of this._instances) {
+    for (const [, tooltip] of this.#instances) {
       tooltip.destroy();
     }
 
-    this.inactiveCssTooltipHelper.destroy();
-    this.compatibilityTooltipHelper.destroy();
+    if (this.#inactiveCssTooltipHelper) {
+      this.#inactiveCssTooltipHelper.destroy();
+      this.#inactiveCssTooltipHelper = null;
+    }
+    if (this.#compatibilityTooltipHelper) {
+      this.#compatibilityTooltipHelper.destroy();
+      this.#compatibilityTooltipHelper = null;
+    }
 
-    this._isStarted = false;
-  },
+    this.#isStarted = false;
+  }
 
   /**
    * Given a hovered node info, find out which type of tooltip should be shown,
@@ -235,7 +265,7 @@ TooltipsOverlay.prototype = {
    * @param {object} nodeInfo
    * @return {string} The tooltip type to be shown, or null
    */
-  _getTooltipType({ type, value: prop }) {
+  #getTooltipType({ type, value: prop }) {
     let tooltipType = null;
 
     // Image preview tooltip
@@ -249,7 +279,7 @@ TooltipsOverlay.prototype = {
       type === VIEW_NODE_FONT_TYPE
     ) {
       const value = prop.value.toLowerCase();
-      if (value !== "inherit" && value !== "unset" && value !== "initial") {
+      if (!InspectorUtils.getCSSWideKeywords().includes(value)) {
         tooltipType = TOOLTIP_FONTFAMILY_TYPE;
       }
     }
@@ -264,6 +294,11 @@ TooltipsOverlay.prototype = {
       tooltipType = TOOLTIP_VARIABLE_TYPE;
     }
 
+    // Css Explainers tooltip
+    if (type === VIEW_NODE_CSS_EXPLAINERS) {
+      tooltipType = TOOLTIP_CSS_EXPLAINERS;
+    }
+
     // Container info tooltip
     if (type === VIEW_NODE_CSS_QUERY_CONTAINER) {
       tooltipType = TOOLTIP_CSS_QUERY_CONTAINER;
@@ -274,11 +309,16 @@ TooltipsOverlay.prototype = {
       tooltipType = TOOLTIP_CSS_SELECTOR_WARNINGS;
     }
 
-    return tooltipType;
-  },
+    // Attribute (used in `attr()`) preview tooltip
+    if (type === VIEW_NODE_ATTR_TYPE) {
+      tooltipType = TOOLTIP_ATTR_TYPE;
+    }
 
-  _removePreviousInstances() {
-    for (const tooltip of this._instances.values()) {
+    return tooltipType;
+  }
+
+  #removePreviousInstances() {
+    for (const tooltip of this.#instances.values()) {
       if (tooltip.isVisible()) {
         if (tooltip.revert) {
           tooltip.revert();
@@ -286,7 +326,7 @@ TooltipsOverlay.prototype = {
         tooltip.hide();
       }
     }
-  },
+  }
 
   /**
    * Executed by the tooltip when the pointer hovers over an element of the
@@ -297,30 +337,30 @@ TooltipsOverlay.prototype = {
    * @param {DOMNode} target The currently hovered node
    * @return {Promise}
    */
-  async _onPreviewTooltipTargetHover(target) {
-    const nodeInfo = this.view.getNodeInfo(target);
+  #onPreviewTooltipTargetHover = async target => {
+    const nodeInfo = this.#view.getNodeInfo(target);
     if (!nodeInfo) {
       // The hovered node isn't something we care about
       return false;
     }
 
-    const type = this._getTooltipType(nodeInfo);
+    const type = this.#getTooltipType(nodeInfo);
     if (!type) {
       // There is no tooltip type defined for the hovered node
       return false;
     }
 
-    this._removePreviousInstances();
+    this.#removePreviousInstances();
 
-    const inspector = this.view.inspector;
+    const inspector = this.#view.inspector;
 
     if (type === TOOLTIP_IMAGE_TYPE) {
       try {
-        await this._setImagePreviewTooltip(nodeInfo.value.url);
+        await this.#setImagePreviewTooltip(nodeInfo.value.url);
       } catch (e) {
         await setBrokenImageTooltip(
           this.getTooltip("previewTooltip"),
-          this.view.inspector.panelDoc
+          this.#view.inspector.panelDoc
         );
       }
 
@@ -332,7 +372,7 @@ TooltipsOverlay.prototype = {
     if (type === TOOLTIP_FONTFAMILY_TYPE) {
       const font = nodeInfo.value.value;
       const nodeFront = inspector.selection.nodeFront;
-      await this._setFontPreviewTooltip(font, nodeFront);
+      await this.#setFontPreviewTooltip(font, nodeFront);
 
       this.sendOpenScalarToTelemetry(type);
 
@@ -357,7 +397,7 @@ TooltipsOverlay.prototype = {
         cssProperties,
         value,
       } = nodeInfo.value;
-      await this._setVariablePreviewTooltip({
+      await this.#setVariablePreviewTooltip({
         topSectionText: variable,
         computed: variableComputed,
         registeredProperty,
@@ -372,8 +412,17 @@ TooltipsOverlay.prototype = {
       return true;
     }
 
+    if (type === TOOLTIP_ATTR_TYPE) {
+      const { attribute } = nodeInfo.value;
+      await this.#setAttrPreviewTooltip({
+        text: attribute,
+      });
+
+      return true;
+    }
+
     return false;
-  },
+  };
 
   /**
    * Executed by the tooltip when the pointer hovers over an element of the
@@ -383,15 +432,21 @@ TooltipsOverlay.prototype = {
    *
    * @param  {DOMNode} target
    *         The currently hovered node
-   * @return {boolean}
-   *         true if shown, false otherwise.
+   * @return {boolean|Element}
+   *         This returns either a boolean, that indicate if the tooltip should be shown,
+   *         or an Element which should be used as the anchor for the tooltip (in case
+   *         this needs to be different from `target`).
    */
   async onInteractiveTooltipTargetHover(target) {
     if (target.classList.contains("ruleview-compatibility-warning")) {
       const nodeCompatibilityInfo =
-        await this.view.getNodeCompatibilityInfo(target);
+        await this.#view.getNodeCompatibilityInfo(target);
 
-      await this.compatibilityTooltipHelper.setContent(
+      if (!this.#compatibilityTooltipHelper) {
+        this.#compatibilityTooltipHelper = new CssCompatibilityTooltipHelper();
+      }
+
+      await this.#compatibilityTooltipHelper.setContent(
         nodeCompatibilityInfo,
         this.getTooltip("interactiveTooltip")
       );
@@ -400,19 +455,19 @@ TooltipsOverlay.prototype = {
       return true;
     }
 
-    const nodeInfo = this.view.getNodeInfo(target);
+    const nodeInfo = this.#view.getNodeInfo(target);
     if (!nodeInfo) {
       // The hovered node isn't something we care about.
       return false;
     }
 
-    const type = this._getTooltipType(nodeInfo);
+    const type = this.#getTooltipType(nodeInfo);
     if (!type) {
       // There is no tooltip type defined for the hovered node.
       return false;
     }
 
-    this._removePreviousInstances();
+    this.#removePreviousInstances();
 
     if (type === TOOLTIP_INACTIVE_CSS) {
       // Ensure this is the correct node and not a parent.
@@ -420,7 +475,10 @@ TooltipsOverlay.prototype = {
         return false;
       }
 
-      await this.inactiveCssTooltipHelper.setContent(
+      if (!this.#inactiveCssTooltipHelper) {
+        this.#inactiveCssTooltipHelper = new InactiveCssTooltipHelper();
+      }
+      await this.#inactiveCssTooltipHelper.setContent(
         nodeInfo.value,
         this.getTooltip("interactiveTooltip")
       );
@@ -432,22 +490,60 @@ TooltipsOverlay.prototype = {
 
     if (type === TOOLTIP_CSS_QUERY_CONTAINER) {
       // Ensure this is the correct node and not a parent.
-      if (!target.closest(".container-query .container-query-declaration")) {
+      const conditionEl = target.closest(
+        ".container-query .container-condition"
+      );
+      if (!conditionEl) {
         return false;
       }
 
-      await this.cssQueryContainerTooltipHelper.setContent(
+      if (!this.#cssQueryContainerTooltipHelper) {
+        this.#cssQueryContainerTooltipHelper =
+          new CssQueryContainerTooltipHelper();
+      }
+
+      await this.#cssQueryContainerTooltipHelper.setContent(
         nodeInfo.value,
         this.getTooltip("interactiveTooltip")
       );
 
       this.sendOpenScalarToTelemetry(type);
 
-      return true;
+      // We want the tooltip to be displayed if a child of the condition element is hovered
+      // (for example the "jump to" button), but we want the tooltip to always be anchored
+      // to the condition element as we're using the .tooltip-anchor class to style the
+      // condition when showing the tooltip
+      return conditionEl;
+    }
+
+    if (type === TOOLTIP_CSS_EXPLAINERS) {
+      const functionEl = target.closest(
+        "[data-function-expression]:has(.css-explainers-function-name)"
+      );
+      if (!functionEl) {
+        return false;
+      }
+
+      if (!this.#cssExplainersTooltipHelper) {
+        this.#cssExplainersTooltipHelper = new CssExplainersTooltipHelper();
+      }
+
+      await this.#cssExplainersTooltipHelper.setContent(
+        nodeInfo.value,
+        this.getTooltip("interactiveTooltip")
+      );
+
+      this.sendOpenScalarToTelemetry(type);
+      return functionEl;
     }
 
     if (type === TOOLTIP_CSS_SELECTOR_WARNINGS) {
-      await this.cssSelectorWarningsTooltipHelper.setContent(
+      if (!this.#cssSelectorWarningsTooltipHelper) {
+        this.#cssSelectorWarningsTooltipHelper =
+          new CssSelectorWarningsTooltipHelper();
+      }
+
+      await this.#cssSelectorWarningsTooltipHelper.setContent(
         nodeInfo.value,
         this.getTooltip("interactiveTooltip")
       );
@@ -458,7 +554,7 @@ TooltipsOverlay.prototype = {
     }
 
     return false;
-  },
+  }
 
   /**
    * Send a telemetry Scalar showing that a tooltip of `type` has been opened.
@@ -468,7 +564,7 @@ TooltipsOverlay.prototype = {
    */
   sendOpenScalarToTelemetry(type) {
     Glean.devtoolsTooltip.shown[type].add(1);
-  },
+  }
 
   /**
    * Set the content of the preview tooltip to display an image preview. The image URL can
@@ -479,8 +575,8 @@ TooltipsOverlay.prototype = {
    *        The image url value (may be relative or absolute).
    * @return {Promise} A promise that resolves when the preview tooltip content is ready
    */
-  async _setImagePreviewTooltip(imageUrl) {
-    const doc = this.view.inspector.panelDoc;
+  async #setImagePreviewTooltip(imageUrl) {
+    const doc = this.#view.inspector.panelDoc;
     const maxDim = Services.prefs.getIntPref(PREF_IMAGE_TOOLTIP_SIZE);
 
     let naturalWidth, naturalHeight;
@@ -490,7 +586,7 @@ TooltipsOverlay.prototype = {
       naturalWidth = size.naturalWidth;
       naturalHeight = size.naturalHeight;
     } else {
-      const inspectorFront = this.view.inspector.inspectorFront;
+      const inspectorFront = this.#view.inspector.inspectorFront;
       const { data, size } = await inspectorFront.getImageDataFromURL(
         imageUrl,
         maxDim
@@ -505,7 +601,7 @@ TooltipsOverlay.prototype = {
       naturalWidth,
       naturalHeight,
     });
-  },
+  }
 
   /**
    * Set the content of the preview tooltip to display a font family preview.
@@ -517,7 +613,7 @@ TooltipsOverlay.prototype = {
    *        family tooltip contents.
    * @return {Promise} A promise that resolves when the preview tooltip content is ready
    */
-  async _setFontPreviewTooltip(font, nodeFront) {
+  async #setFontPreviewTooltip(font, nodeFront) {
     if (
       !font ||
       !nodeFront ||
@@ -532,7 +628,7 @@ TooltipsOverlay.prototype = {
 
     const fillStyle = getCssVariableColor(
       "--theme-body-color",
-      this.view.inspector.panelWin
+      this.#view.inspector.panelWin
     );
     const { data, size: maxDim } = await nodeFront.getFontFamilyDataURL(
       font,
@@ -540,7 +636,7 @@ TooltipsOverlay.prototype = {
     );
 
     const imageUrl = await data.string();
-    const doc = this.view.inspector.panelDoc;
+    const doc = this.#view.inspector.panelDoc;
     const { naturalWidth, naturalHeight } = await getImageDimensions(
       doc,
       imageUrl
@@ -553,7 +649,7 @@ TooltipsOverlay.prototype = {
       naturalWidth,
       naturalHeight,
     });
-  },
+  }
 
   /**
    * Set the content of the preview tooltip to display a variable preview.
@@ -562,32 +658,44 @@ TooltipsOverlay.prototype = {
    *        See VariableTooltipHelper#setVariableTooltip `params`.
    * @return {Promise} A promise that resolves when the preview tooltip content is ready
    */
-  async _setVariablePreviewTooltip(tooltipParams) {
-    const doc = this.view.inspector.panelDoc;
+  async #setVariablePreviewTooltip(tooltipParams) {
+    const doc = this.#view.inspector.panelDoc;
     await setVariableTooltip(
       this.getTooltip("previewTooltip"),
       doc,
       tooltipParams
     );
-  },
+  }
 
-  _onNewSelection() {
-    for (const [, tooltip] of this._instances) {
+  /**
+   * Set the content of the preview tooltip to display an attr preview.
+   *
+   * @param {object} tooltipParams
+   *        See AttrTooltipHelper.js setAttrTooltip `params`.
+   * @return {Promise} A promise that resolves when the preview tooltip content is ready
+   */
+  async #setAttrPreviewTooltip(tooltipParams) {
+    const doc = this.#view.inspector.panelDoc;
+    await setAttrTooltip(this.getTooltip("previewTooltip"), doc, tooltipParams);
+  }
+
+  #onNewSelection = () => {
+    for (const [, tooltip] of this.#instances) {
       tooltip.hide();
     }
-  },
+  };
 
   /**
    * Destroy this overlay instance, removing it from the view
    */
   destroy() {
-    this.removeFromView();
+    this.#removeFromView();
 
-    this.view.inspector.selection.off("new-node-front", this._onNewSelection);
-    this.view = null;
+    this.#view.inspector.selection.off("new-node-front", this.#onNewSelection);
+    this.#view = null;
 
-    this._isDestroyed = true;
-  },
-};
+    this.#isDestroyed = true;
+  }
+}
 
 module.exports = TooltipsOverlay;

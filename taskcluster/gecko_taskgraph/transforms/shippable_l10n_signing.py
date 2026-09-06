@@ -5,11 +5,11 @@
 Transform the signing task into an actual task description.
 """
 
+from mozilla_taskgraph.util.attributes import copy_attributes_from_dependent_job
 from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.dependencies import get_primary_dependency
 from taskgraph.util.treeherder import join_symbol
 
-from gecko_taskgraph.util.attributes import copy_attributes_from_dependent_job
 from gecko_taskgraph.util.signed_artifacts import (
     generate_specifications_of_artifacts_to_sign,
 )
@@ -59,24 +59,20 @@ def define_upstream_artifacts(config, jobs):
             if dep_job.kind.endswith(("-mac-notarization", "-mac-signing")):
                 # Upstream is mac signing or notarization
                 upstream_task_type = "scriptworker"
-            upstream_artifacts.append(
-                {
-                    "taskId": {"task-reference": f"<{dep_job.kind}>"},
-                    "taskType": upstream_task_type,
-                    # Set paths based on artifacts in the specs (above) one per
-                    # locale present in the chunk this is signing stuff for.
-                    # Pass paths through set and sorted() so we get a list back
-                    # and we remove any duplicates (e.g. hardcoded ja-JP-mac langpack)
-                    "paths": sorted(
-                        {
-                            path_template.format(locale=locale)
-                            for locale in dep_job.attributes.get("chunk_locales", [])
-                            for path_template in spec["artifacts"]
-                        }
-                    ),
-                    "formats": spec["formats"],
-                }
-            )
+            upstream_artifacts.append({
+                "taskId": {"task-reference": f"<{dep_job.kind}>"},
+                "taskType": upstream_task_type,
+                # Set paths based on artifacts in the specs (above) one per
+                # locale present in the chunk this is signing stuff for.
+                # Pass paths through set and sorted() so we get a list back
+                # and we remove any duplicates (e.g. hardcoded ja-JP-mac langpack)
+                "paths": sorted({
+                    path_template.format(locale=locale)
+                    for locale in dep_job.attributes.get("chunk_locales", [])
+                    for path_template in spec["artifacts"]
+                }),
+                "formats": spec["formats"],
+            })
 
         job["upstream-artifacts"] = upstream_artifacts
 

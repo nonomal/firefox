@@ -26,15 +26,16 @@ from functools import partial
 from multiprocessing import cpu_count
 from subprocess import PIPE, STDOUT, Popen
 from tempfile import gettempdir, mkdtemp
-from threading import Event, Thread, Timer, current_thread
+from threading import Event, Lock, Thread, Timer, current_thread
 
 import mozdebug
 import six
 from mozgeckoprofiler import (
     symbolicate_profile_json,
+    symbolicate_profiles,
     view_gecko_profile,
 )
-from mozserve import Http3Server
+from mozserve import Http3Server, MozHttp2Server
 
 try:
     import psutil
@@ -55,6 +56,10 @@ except ImportError:
     build = None
 
 HARNESS_TIMEOUT = 30
+# How long to wait for a force-killed process to exit on its own after
+# kill_and_get_minidump asked it for a minidump (a SIGABRT the process handles
+# itself on Linux/macOS), before giving up and letting postCheck SIGKILL it.
+TIMEOUT_MINIDUMP_WAIT = 30
 TBPL_RETRY = 4  # defined in mozharness
 
 # Based on recent benchmarking on highcpu pools, this value gives the best
@@ -70,13 +75,11 @@ TBPL_RETRY = 4  # defined in mozharness
 # are needed for custom CPU/memory configurations
 NUM_THREADS = int(cpu_count() * 2.5)
 
-EXPECTED_LOG_ACTIONS = set(
-    [
-        "crash_reporter_init",
-        "test_status",
-        "log",
-    ]
-)
+EXPECTED_LOG_ACTIONS = set([
+    "crash_reporter_init",
+    "test_status",
+    "log",
+])
 
 # --------------------------------------------------------------
 # TODO: this is a hack for mozbase without virtualenv, remove with bug 849900
@@ -93,7 +96,7 @@ import mozfile
 import mozinfo
 from manifestparser import TestManifest
 from manifestparser.expression import parse
-from manifestparser.filters import chunk_by_slice, failures, pathprefix, tags
+from manifestparser.filters import failures, pathprefix, tags
 from manifestparser.util import normsep
 from mozlog import commandline
 from mozprofile import Profile
@@ -188,7 +191,10 @@ class XPCShellTestThread(Thread):
         if retry is None:
             # Retry in CI, but report results without retry when run locally to
             # avoid confusion and ease local debugging.
-            self.retry = os.environ.get("MOZ_AUTOMATION", 0) != 0
+            self.retry = os.environ.get("MOZ_AUTOMATION") is not None
+        # True only for the re-run of a test that failed the first time, so it
+        # can name artifacts differently from the initial run.
+        self.is_retry = kwargs.get("is_retry", False)
         self.verbose = verbose
         self.usingTSan = usingTSan
         self.usingCrashReporter = usingCrashReporter
@@ -253,9 +259,16 @@ class XPCShellTestThread(Thread):
         self.timedout = False
         self.infra = False
 
+        # Set by run() when the thread finishes; testTimeout can mark a test done
+        # while its thread is still blocked, so they need a value from the start.
+        self.exception = None
+        self.traceback = None
+
         # event from main thread to signal work done
         self.event = kwargs.get("event")
         self.done = False  # explicitly set flag so we don't rely on thread.isAlive
+        self.timer = None  # Timer used to detect test timeouts
+        self.lock = Lock()  # lock used to serialize access to the timer
 
     def run(self):
         try:
@@ -424,16 +437,110 @@ class XPCShellTestThread(Thread):
             self.log_full_output()
             self.failCount = 1
 
+    def _readTimeoutProfileProgress(self, profile_path):
+        # Read the 0..1 streaming progress the profiler writes to the
+        # "<profile>.progress" sidecar while a scheduled dump is in flight.
+        # Returns None if it isn't there yet or can't be parsed.
+        if not profile_path:
+            return None
+        try:
+            with open(profile_path + ".progress") as f:
+                return float(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
     def testTimeout(self, proc):
-        # Set these flags first to prevent test_end from being logged again
-        # while we output the full log.
-        self.done = True
+        # Ensure that we didn't race the test finishing execution between when
+        # the timeout timer fired and this code started executing.
+        self.lock.acquire()
+
+        # If `self.timer` has been set to None it means that the test actually
+        # finished execution before we managed to get the lock and the code in
+        # this timer shouldn't run, so return right away.
+        if self.timer is None:
+            self.lock.release()
+            return
+
+        # While a scheduled profile dump (see scheduleDumpToFile in head.js) is
+        # still writing, defer the kill so we don't upload truncated JSON. The
+        # profiler reports the dump's 0..1 progress in a "<profile>.progress"
+        # sidecar; keep deferring while it advances, and kill once it stalls (a
+        # genuine hang) or the budget runs out (30 deferrals of 10s, or 3 stalls).
+        profile_path = self.env.get("MOZ_TEST_TIMEOUT_PROFILE_PATH")
+        progress = self._readTimeoutProfileProgress(profile_path)
+        if progress is not None and self._timeout_defer_count < 30:
+            if progress > self._last_timeout_profile_progress + 1e-6:
+                self._last_timeout_profile_progress = progress
+                self._timeout_stall_count = 0
+            else:
+                self._timeout_stall_count += 1
+            if progress < 1.0 and self._timeout_stall_count < 3:
+                self._timeout_defer_count += 1
+                self.log.info(
+                    f"{self.test_object['id']} | timeout profile dump "
+                    f"progressing ({progress * 100:.1f}%), deferring kill"
+                )
+                self.timer = Timer(10, lambda: self.testTimeout(proc))
+                self.timer.start()
+                self.lock.release()
+                return
+
+        # Mark timed out so run_test reports the timeout instead of a result for
+        # the process we're killing.
         self.timedout = True
 
-        # Kill the test process before calling log_full_output that can take a
-        # a while due to stack fixing.
-        self.killTimeout(proc)
+        try:
+            # Kill the test process before calling log_full_output that can take a
+            # a while due to stack fixing.
+            self.killTimeout(proc)
 
+            # On Linux/macOS kill_and_get_minidump only sends SIGABRT, so wait for
+            # the process to finish writing its minidump before postCheck's SIGKILL
+            # cuts it off, then symbolicate it -- this timeout path returns before
+            # run_test's own checkForCrashes.
+            if proc is not None and hasattr(proc, "pid"):
+                deadline = time.time() + TIMEOUT_MINIDUMP_WAIT
+                while self.poll(proc) is None and time.time() < deadline:
+                    time.sleep(0.1)
+            self.checkForCrashes(
+                self.tempDir, self.symbolsPath, test_name=self.test_object["id"]
+            )
+
+            # Note that the crash above is this force-killed process, not a real
+            # crash. Buffered as a test message so the retry replay demotes it out of
+            # the failure summary, like the crash itself.
+            self.report_message({
+                "action": "log",
+                "level": "ERROR",
+                "message": (
+                    f"{self.test_object['id']} | Timed out and was force-killed by "
+                    "the harness; the crash dump reported for this test is that "
+                    "force-killed process, not an actual crash."
+                ),
+            })
+
+            self.reportTimeoutResult()
+
+            self.log.info(f"xpcshell return code: {self.getReturnCode(proc)}")
+            self.postCheck(proc)
+            self.clean_temp_dirs(self.test_object["path"])
+        finally:
+            # Relinquish the lock to allow run_test() to finish, and mark the test
+            # done. Both have to happen even if the cleanup above raised -- this
+            # runs on the timer thread, and the test thread it leaves behind can be
+            # blocked forever on a stdout pipe a surviving child process holds open,
+            # so nothing else will ever set this and the scheduler would wait for
+            # the test until mozharness kills the job. Reached after the TIMEOUT
+            # test_end above, so a retry can't interleave its test_start with our
+            # output.
+            self.lock.release()
+            self.done = True
+
+    def reportTimeoutResult(self):
+        """Log the structured failure for a timed-out test: a FAIL test_status
+        pointing at the uploaded profile (when one was written), followed by a
+        TIMEOUT test_end. Shared by the harness timer (testTimeout) and the path
+        where a profiled test dumps its profile and exits on its own."""
         if self.test_object["expected"] == "pass":
             expected = "PASS"
         else:
@@ -442,6 +549,29 @@ class XPCShellTestThread(Thread):
         extra = None
         if self.timeout_factor > 1:
             extra = {"timeoutfactor": self.timeout_factor}
+
+        # If the profiler dumped a profile from its sampler thread (scheduled by
+        # head.js via scheduleDumpToFile since the main thread can't write one
+        # once it stops returning to the event loop), report it here as a
+        # structured test_status, logged while the test is still in progress so
+        # the artifact is linked to this test. A structured message (unlike a
+        # raw log line) is downgraded to expected on a retried run, and is
+        # recorded as a FAIL marker in the resource-usage profile the dashboards
+        # read.
+        profile_name = self.timeout_profile_name
+        upload_dir = self.env.get("MOZ_UPLOAD_DIR")
+        if (
+            profile_name
+            and upload_dir
+            and os.path.isfile(os.path.join(upload_dir, profile_name))
+        ):
+            self.log.test_status(
+                self.test_object["id"],
+                "",
+                "FAIL",
+                expected="FAIL" if (self.retry or self.timeoutAsPass) else expected,
+                message=f"Test timed out; profile uploaded in {profile_name}",
+            )
 
         if self.retry:
             self.log.test_end(
@@ -466,10 +596,6 @@ class XPCShellTestThread(Thread):
                 extra=extra,
             )
             self.log_full_output()
-
-        self.log.info("xpcshell return code: %s" % self.getReturnCode(proc))
-        self.postCheck(proc)
-        self.clean_temp_dirs(self.test_object["path"])
 
     def updateTestPrefsFile(self):
         # If the Manifest file has some additional prefs, merge the
@@ -740,9 +866,10 @@ class XPCShellTestThread(Thread):
             if "message" in line:
                 line["message"] = self.fix_text_output(line["message"])
             if "xpcshell_process" in line:
-                line["thread"] = " ".join(
-                    [current_thread().name, line["xpcshell_process"]]
-                )
+                line["thread"] = " ".join([
+                    current_thread().name,
+                    line["xpcshell_process"],
+                ])
             else:
                 line["thread"] = current_thread().name
             self.log.log_raw(line)
@@ -877,6 +1004,8 @@ class XPCShellTestThread(Thread):
             self.keep_going = True
             return
 
+        self.log.test_start(name, group=group)
+
         # Check for known-fail tests
         expect_pass = self.test_object["expected"] == "pass"
 
@@ -913,15 +1042,17 @@ class XPCShellTestThread(Thread):
         # 3) Arguments for the test file
         self.command.extend(self.buildCmdTestFile(path))
         self.command.extend(["-e", 'const _TEST_NAME = "%s";' % name])
-        self.command.extend(
-            ["-e", 'const _EXPECTED = "%s";' % self.test_object["expected"]]
-        )
+        self.command.extend([
+            "-e",
+            'const _EXPECTED = "%s";' % self.test_object["expected"],
+        ])
 
         # 4) Arguments for code coverage
         if self.jscovdir:
-            self.command.extend(
-                ["-e", 'const _JSCOV_DIR = "%s";' % self.jscovdir.replace("\\", "/")]
-            )
+            self.command.extend([
+                "-e",
+                'const _JSCOV_DIR = "%s";' % self.jscovdir.replace("\\", "/"),
+            ])
 
         # 5) Runtime arguments
         if "debug" in self.test_object:
@@ -947,6 +1078,14 @@ class XPCShellTestThread(Thread):
                     self.profileDir, "profile_" + os.path.basename(name) + ".json"
                 )
                 self.env["MOZ_PROFILER_SHUTDOWN"] = profile_path
+                # The user explicitly asked for a profile, so use the normal
+                # profiler feature set and sampling interval instead of the
+                # low-overhead defaults applied in buildCoreEnvironment,
+                # unless they have already picked values themselves.
+                if "MOZ_PROFILER_STARTUP_FEATURES" not in os.environ:
+                    self.env["MOZ_PROFILER_STARTUP_FEATURES"] = "default"
+                if "MOZ_PROFILER_STARTUP_INTERVAL" not in os.environ:
+                    self.env.pop("MOZ_PROFILER_STARTUP_INTERVAL", None)
 
         if (
             self.test_object.get("headless", "true" if self.headless else None)
@@ -962,20 +1101,63 @@ class XPCShellTestThread(Thread):
 
         testTimeoutInterval = self.harness_timeout * self.timeout_factor
 
-        testTimer = None
+        self.timeout_profile_name = None
         if not self.interactive and not self.debuggerInfo and not self.jsDebuggerInfo:
-            testTimer = Timer(testTimeoutInterval, lambda: self.testTimeout(proc))
-            testTimer.start()
+            # When the profiler runs by default, have it dump a profile from its
+            # sampler thread once this timeout is reached (armed by head.js), so
+            # a test blocked in a synchronous run (where the main thread can
+            # never write one) still leaves a profile. We pick the artifact name here
+            # so the retry of a test that timed out doesn't overwrite the initial
+            # run's profile: the retry gets a "_retry" suffix, and a numeric
+            # counter is only added on an actual name collision (the same test
+            # listed in two manifests). The suffixes go before the test extension
+            # so the name still ends in e.g. ".js.json" as Treeherder expects.
+            # testTimeout reports this name.
+            upload_dir = self.env.get("MOZ_UPLOAD_DIR")
+            timeout_dump_armed = (
+                upload_dir
+                and self.env.get("MOZ_PROFILER_STARTUP")
+                and "MOZ_PROFILER_SHUTDOWN" not in self.env
+            )
+            if timeout_dump_armed:
+                root, ext = os.path.splitext(os.path.basename(name))
+                if self.is_retry:
+                    root += "_retry"
+                filename = f"profile_{root}{ext}.json"
+                i = 2
+                while os.path.exists(os.path.join(upload_dir, filename)):
+                    filename = f"profile_{root}-{i}{ext}.json"
+                    i += 1
+                self.timeout_profile_name = filename
+                self.env["MOZ_TEST_TIMEOUT_PROFILE_PATH"] = os.path.join(
+                    upload_dir, filename
+                )
+
+            # head.js dumps the profile from the sampler thread once the timeout
+            # is reached, so when that's armed this timer is only a safety net;
+            # give it 50% more time so the sampler thread can finish writing the
+            # profile before we kill the process.
+            kill_interval = testTimeoutInterval
+            if timeout_dump_armed:
+                kill_interval = testTimeoutInterval * 1.5
+            # Tracks the scheduled profile dump's streaming progress so
+            # testTimeout can defer the kill while the dump is still making
+            # progress, and kill it once progress stalls.
+            self._last_timeout_profile_progress = -1.0
+            self._timeout_stall_count = 0
+            self._timeout_defer_count = 0
+            self.timer = Timer(kill_interval, lambda: self.testTimeout(proc))
+            self.timer.start()
             self.env["MOZ_TEST_TIMEOUT_INTERVAL"] = str(testTimeoutInterval)
 
         proc = None
         process_output = None
 
         try:
-            self.log.test_start(name, group=group)
             if self.verbose:
                 self.logCommand(name, self.command, test_dir)
 
+            launch_time = time.monotonic()
             proc = self.launchProcess(
                 self.command,
                 stdout=self.pStdout,
@@ -998,14 +1180,54 @@ class XPCShellTestThread(Thread):
             # Communicate returns a tuple of (stdout, stderr), however we always
             # redirect stderr to stdout, so the second element is ignored.
             process_output, _ = self.communicate(proc)
+            elapsed = time.monotonic() - launch_time
 
             if self.interactive:
                 # Not sure what else to do here...
                 self.keep_going = True
                 return
 
-            if testTimer:
-                testTimer.cancel()
+            # Cancel the test timeout timer, note that this must happen under
+            # lock to prevent this code from racing with the code within the
+            # timer itself.
+            self.lock.acquire()
+
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
+            self.lock.release()
+
+            # Drop the scheduled-dump progress sidecar so it isn't uploaded as a
+            # stray artifact (it lives next to the profile inside MOZ_UPLOAD_DIR).
+            # This is the only cleanup site, reached on both the self-exit and
+            # kill paths; the C++ exit-after path _exit()s the process without
+            # removing it, so this is what keeps it out of the upload.
+            timeout_profile = self.env.get("MOZ_TEST_TIMEOUT_PROFILE_PATH")
+            if timeout_profile:
+                try:
+                    os.remove(timeout_profile + ".progress")
+                except OSError:
+                    pass
+
+            # A profiled test that overran its expected timeout dumps a profile
+            # from the sampler thread and exits the process itself (see
+            # scheduleDumpToFile in head.js), rather than waiting for the
+            # harness's safety-net kill. Recognize that here -- the process
+            # ended on its own past the expected timeout and left a profile at
+            # the agreed path -- and report it as a timeout, not a normal result.
+            if (
+                not self.timedout
+                and self.timeout_profile_name
+                and self.env.get("MOZ_UPLOAD_DIR")
+                and elapsed > testTimeoutInterval
+                and os.path.isfile(
+                    os.path.join(self.env["MOZ_UPLOAD_DIR"], self.timeout_profile_name)
+                )
+            ):
+                self.timedout = True
+                self.reportTimeoutResult()
+                return
 
             if process_output:
                 # For the remote case, stdout is not yet depleted, so we parse
@@ -1177,6 +1399,7 @@ class XPCShellTests:
         self.harness_timeout = HARNESS_TIMEOUT
         self.nodeProc = {}
         self.http3Server = None
+        self.mozHttp2Server = None
         self.conditioned_profile_dir = None
 
     def getTestManifest(self, manifest):
@@ -1266,8 +1489,6 @@ class XPCShellTests:
             filters.append(failures(self.runFailures))
             noDefaultFilters = True
 
-        if self.totalChunks > 1:
-            filters.append(chunk_by_slice(self.thisChunk, self.totalChunks))
         try:
             self.alltests = list(
                 map(
@@ -1284,7 +1505,10 @@ class XPCShellTests:
             sys.stderr.write("*** offending mozinfo.info: %s\n" % repr(mozinfo.info))
             raise
 
+        # Store missing manifests for later use in structured logging
+        self.missing_manifests = set()
         if path_filter and path_filter.missing:
+            self.missing_manifests = path_filter.missing
             self.log.warning(
                 "The following path(s) didn't resolve any tests:\n  {}".format(
                     "  \n".join(sorted(path_filter.missing))
@@ -1435,6 +1659,33 @@ class XPCShellTests:
         else:
             self.env["MOZ_DISABLE_SOCKET_PROCESS"] = "1"
 
+        # Self-tests run many sub-processes whose tests fail on purpose, so
+        # profiling them only wastes overhead and uploads useless artifacts.
+        # Strip any startup-profiling request inherited from the environment
+        # (e.g. a `mach try fuzzy --profiler` push) and don't enable it by
+        # default.
+        if self.selfTest:
+            self.env.pop("MOZ_PROFILER_STARTUP", None)
+            return
+
+        # Enable the profiler by default with a feature set chosen to keep
+        # overhead low while still producing useful profiles: the platform
+        # defaults minus `stackwalk` and `fileioall` (both too expensive),
+        # plus `ipcmessages` and `memory` so IPC and memory tracks show up.
+        #
+        # The profiler is left disabled under ThreadSanitizer, where it causes
+        # too many failures.
+        if not self.mozInfo.get("tsan"):
+            self.env.setdefault("MOZ_PROFILER_STARTUP", "1")
+            self.env.setdefault(
+                "MOZ_PROFILER_STARTUP_FEATURES",
+                "java,js,screenshots,processcpu,ipcmessages,memory",
+            )
+
+            # Set the sampling interval to 10ms to reduce the sampling overhead
+            # and avoid triggering the timer resolution change on Windows.
+            self.env.setdefault("MOZ_PROFILER_STARTUP_INTERVAL", "10")
+
     def buildEnvironment(self):
         """
         Create and returns a dictionary of self.env to include all the appropriate env
@@ -1452,13 +1703,13 @@ class XPCShellTests:
             self.env["DYLD_LIBRARY_PATH"] = os.path.join(
                 os.path.dirname(self.xrePath), "MacOS"
             )
-        else:  # unix or linux?
-            if "LD_LIBRARY_PATH" not in self.env or self.env["LD_LIBRARY_PATH"] is None:
-                self.env["LD_LIBRARY_PATH"] = self.xrePath
-            else:
-                self.env["LD_LIBRARY_PATH"] = ":".join(
-                    [self.xrePath, self.env["LD_LIBRARY_PATH"]]
-                )
+        elif "LD_LIBRARY_PATH" not in self.env or self.env["LD_LIBRARY_PATH"] is None:
+            self.env["LD_LIBRARY_PATH"] = self.xrePath
+        else:
+            self.env["LD_LIBRARY_PATH"] = ":".join([
+                self.xrePath,
+                self.env["LD_LIBRARY_PATH"],
+            ])
 
         usingASan = "asan" in self.mozInfo and self.mozInfo["asan"]
         usingTSan = "tsan" in self.mozInfo and self.mozInfo["tsan"]
@@ -1497,16 +1748,15 @@ class XPCShellTests:
         if self.interactive:
             pStdout = None
             pStderr = None
+        elif self.debuggerInfo and self.debuggerInfo.interactive:
+            pStdout = None
+            pStderr = None
         else:
-            if self.debuggerInfo and self.debuggerInfo.interactive:
+            if sys.platform == "os2emx":
                 pStdout = None
-                pStderr = None
             else:
-                if sys.platform == "os2emx":
-                    pStdout = None
-                else:
-                    pStdout = PIPE
-                pStderr = STDOUT
+                pStdout = PIPE
+            pStderr = STDOUT
         return pStdout, pStderr
 
     def verifyDirPath(self, dirname):
@@ -1515,6 +1765,13 @@ class XPCShellTests:
         On a remote system, we need to overload this to work on the remote filesystem.
         """
         return os.path.abspath(dirname)
+
+    def buildNodeEnvironment(self):
+        """
+        Return the environment to use for the node process. This can be overridden
+        by subclasses to filter or modify the environment.
+        """
+        return self.env
 
     def trySetupNode(self):
         """
@@ -1529,8 +1786,6 @@ class XPCShellTests:
                 )
             return
 
-        # We try to find the node executable in the path given to us by the user in
-        # the MOZ_NODE_PATH environment variable
         nodeBin = os.getenv("MOZ_NODE_PATH", None)
         if not nodeBin and build:
             nodeBin = build.substs.get("NODEJS")
@@ -1548,80 +1803,28 @@ class XPCShellTests:
 
         self.log.info("Found node at %s" % (nodeBin,))
 
-        def read_streams(name, proc, pipe):
-            output = "stdout" if pipe == proc.stdout else "stderr"
-            for line in iter(pipe.readline, ""):
-                self.log.info("node %s [%s] %s" % (name, output, line))
-
-        def startServer(name, serverJs):
-            if not os.path.exists(serverJs):
-                error = "%s not found at %s" % (name, serverJs)
-                self.log.error(error)
-                raise OSError(error)
-
-            # OK, we found our server, let's try to get it running
-            self.log.info("Found %s at %s" % (name, serverJs))
-            try:
-                # We pipe stdin to node because the server will exit when its
-                # stdin reaches EOF
-                with popenCleanupHack():
-                    process = Popen(
-                        [nodeBin, serverJs],
-                        stdin=PIPE,
-                        stdout=PIPE,
-                        stderr=PIPE,
-                        env=self.env,
-                        cwd=os.getcwd(),
-                        universal_newlines=True,
-                        start_new_session=True,
-                    )
-                self.nodeProc[name] = process
-
-                # Check to make sure the server starts properly by waiting for it to
-                # tell us it's started
-                msg = process.stdout.readline()
-                if "server listening" in msg:
-                    searchObj = re.search(
-                        r"HTTP2 server listening on ports ([0-9]+),([0-9]+)", msg, 0
-                    )
-                    if searchObj:
-                        self.env["MOZHTTP2_PORT"] = searchObj.group(1)
-                        self.env["MOZNODE_EXEC_PORT"] = searchObj.group(2)
-                t1 = Thread(
-                    target=read_streams,
-                    args=(name, process, process.stdout),
-                    daemon=True,
-                )
-                t1.start()
-                t2 = Thread(
-                    target=read_streams,
-                    args=(name, process, process.stderr),
-                    daemon=True,
-                )
-                t2.start()
-            except OSError as e:
-                # This occurs if the subprocess couldn't be started
-                self.log.error("Could not run %s server: %s" % (name, str(e)))
-                raise
-
+        node_env = self.buildNodeEnvironment()
         myDir = os.path.split(os.path.abspath(__file__))[0]
-        startServer("moz-http2", os.path.join(myDir, "moz-http2", "moz-http2.js"))
+        serverPath = os.path.join(myDir, "moz-http2", "moz-http2.js")
+
+        serverOptions = {}
+        serverOptions["nodeBin"] = nodeBin
+        serverOptions["serverPath"] = serverPath
+        serverOptions["isWin"] = sys.platform == "win32"
+
+        self.mozHttp2Server = MozHttp2Server(serverOptions, node_env, self.log)
+        self.mozHttp2Server.start()
+
+        for key, value in self.mozHttp2Server.ports().items():
+            self.env[key] = value
 
     def shutdownNode(self):
         """
         Shut down our node process, if it exists
         """
-        for name, proc in self.nodeProc.items():
-            self.log.info("Node %s server shutting down ..." % name)
-            if proc.poll() is not None:
-                self.log.info("Node server %s already dead %s" % (name, proc.poll()))
-            elif sys.platform != "win32":
-                # Kill process and all its spawned children.
-                os.killpg(proc.pid, signal.SIGTERM)
-            else:
-                proc.terminate()
-
-        self.nodeProc = {}
+        if self.mozHttp2Server is not None:
+            self.mozHttp2Server.stop()
+            self.mozHttp2Server = None
 
     def startHttp3Server(self):
         """
@@ -1636,7 +1839,10 @@ class XPCShellTests:
             if self.mozInfo["buildapp"] == "mobile/android":
                 # For android, use binary from host utilities.
                 http3ServerPath = os.path.join(self.xrePath, "http3server" + binSuffix)
-                serverEnv["LD_LIBRARY_PATH"] = self.xrePath
+                if sys.platform == "darwin":
+                    serverEnv["DYLD_LIBRARY_PATH"] = self.xrePath
+                else:
+                    serverEnv["LD_LIBRARY_PATH"] = self.xrePath
             elif build:
                 http3ServerPath = os.path.join(
                     build.topobjdir, "dist", "bin", "http3server" + binSuffix
@@ -1718,9 +1924,7 @@ class XPCShellTests:
         self.mozInfo = fixedInfo
 
         self.mozInfo["fission"] = prefs.get("fission.autostart", True)
-        self.mozInfo["sessionHistoryInParent"] = self.mozInfo[
-            "fission"
-        ] or not prefs.get("fission.disableSessionHistoryInParent", False)
+        self.mozInfo["sessionHistoryInParent"] = True
 
         self.mozInfo["verify"] = options.get("verify", False)
 
@@ -1732,6 +1936,8 @@ class XPCShellTests:
             os.environ.get("MOZ_ENABLE_INC_ORIGIN_INIT") == "1"
         )
 
+        self.mozInfo["privateBrowsing"] = os.environ.get("MOZ_PRIVATE_BROWSING") == "1"
+
         self.mozInfo["condprof"] = options.get("conditionedProfile", False)
         self.mozInfo["msix"] = options.get("variant", "") == "msix"
 
@@ -1742,7 +1948,7 @@ class XPCShellTests:
             (release, versioninfo, machine) = platform.mac_ver()
             versionNums = release.split(".")[:2]
             os_version = "%s.%s" % (versionNums[0], versionNums[1].ljust(2, "0"))
-            if os_version.split(".")[0] in ["14", "15"]:
+            if os_version.split(".", 1)[0] in ["14", "15"]:
                 self.mozInfo["crashreporter"] = False
 
         # we default to false for e10s on xpcshell
@@ -1936,7 +2142,6 @@ class XPCShellTests:
         """
         Run xpcshell tests.
         """
-        global gotSIGINT
 
         # Number of times to repeat test(s) in --verify mode
         VERIFY_REPEAT = 10
@@ -2016,8 +2221,6 @@ class XPCShellTests:
         self.verboseIfFails = options.get("verboseIfFails")
         self.keepGoing = options.get("keepGoing")
         self.logfiles = options.get("logfiles")
-        self.totalChunks = options.get("totalChunks", 1)
-        self.thisChunk = options.get("thisChunk")
         self.profileName = options.get("profileName") or "xpcshell"
         self.mozInfo = options.get("mozInfo")
         self.testingModulesDir = testingModulesDir
@@ -2421,6 +2624,14 @@ class XPCShellTests:
     def test_ended(self, test):
         pass
 
+    def join_test(self, test):
+        """Wait for a test to be done rather than for its thread to exit: a test
+        that timed out leaving a child process holding its stdout pipe open
+        never returns from communicate(), and testTimeout marks it done for us.
+        The thread is a daemon, so leaving it blocked behind is harmless."""
+        while not test.done:
+            test.join(1)
+
     def runTestList(
         self, tests_queue, sequential_tests, testClass, mobileArgs, **kwargs
     ):
@@ -2443,12 +2654,17 @@ class XPCShellTests:
             group = get_full_group_name(test)
             tests_by_manifest[group].append(test["id"])
 
+        # Add missing manifests with empty test lists so they appear in
+        # group_result output with SKIP status
+        for missing_path in self.missing_manifests:
+            tests_by_manifest[missing_path] = []
+
         self.log.suite_start(tests_by_manifest, name="xpcshell")
 
         # Start group for parallel test execution
         parallel_group_started = False
         if tests_queue:
-            self.log.group_start(name="parallel")
+            self.log.group_start(name="parallel", extra={"threads": self.threadCount})
             parallel_group_started = True
 
         while tests_queue or running_tests:
@@ -2524,7 +2740,7 @@ class XPCShellTests:
                     )
                     break
                 self.start_test(test)
-                test.join()
+                self.join_test(test)
                 self.test_ended(test)
                 if (test.failCount > 0 or test.passCount <= 0) and test.retry:
                     self.try_again_list.append(test.test_object)
@@ -2547,16 +2763,19 @@ class XPCShellTests:
         if self.try_again_list:
             self.log.info("Retrying tests that failed when run in parallel.")
             self.log.group_start(name="retry")
+
+        try_again_kwargs = kwargs.copy()
+        try_again_kwargs["retry"] = False
+        try_again_kwargs["is_retry"] = True
         for test_object in self.try_again_list:
             test = testClass(
                 test_object,
-                retry=False,
                 verbose=self.verbose,
                 mobileArgs=mobileArgs,
-                **kwargs,
+                **try_again_kwargs,
             )
             self.start_test(test)
-            test.join()
+            self.join_test(test)
             self.test_ended(test)
             self.addTestResults(test)
             # did the test encounter any exception?
@@ -2622,7 +2841,7 @@ def main():
     parser = parser_desktop()
     options = parser.parse_args()
 
-    log = commandline.setup_logging("XPCShell", options, {"tbpl": sys.stdout})
+    log = commandline.setup_logging("XPCShell", options, {"raw": sys.stdout})
 
     if options.xpcshell is None and options.app_binary is None:
         log.error(
@@ -2643,6 +2862,10 @@ def main():
         sys.exit(1)
 
     result = xpcsh.runTests(options)
+
+    if "MOZ_AUTOMATION" in os.environ:
+        symbolicate_profiles()
+
     if result == TBPL_RETRY:
         sys.exit(4)
 

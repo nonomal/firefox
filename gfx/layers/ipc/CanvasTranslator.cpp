@@ -1,23 +1,29 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #include "CanvasTranslator.h"
 
+#include "GLContext.h"
+#include "HostWebGLContext.h"
+#include "RecordedCanvasEventImpl.h"
+#include "SharedSurface.h"
+#include "WebGLParent.h"
 #include "gfxGradientCache.h"
 #include "mozilla/DataMutex.h"
+#include "mozilla/StaticPrefs_gfx.h"
+#include "mozilla/SyncRunnable.h"
+#include "mozilla/TaskQueue.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/CanvasManagerParent.h"
 #include "mozilla/gfx/CanvasRenderThread.h"
 #include "mozilla/gfx/DataSourceSurfaceWrapper.h"
 #include "mozilla/gfx/DrawTargetWebgl.h"
-#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/gfx/GPUParent.h"
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/gfx/Swizzle.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/ipc/Endpoint.h"
 #include "mozilla/ipc/SharedMemoryHandle.h"
 #include "mozilla/layers/BufferTexture.h"
@@ -26,14 +32,6 @@
 #include "mozilla/layers/SharedSurfacesParent.h"
 #include "mozilla/layers/TextureClient.h"
 #include "mozilla/layers/VideoBridgeParent.h"
-#include "mozilla/StaticPrefs_gfx.h"
-#include "mozilla/SyncRunnable.h"
-#include "mozilla/TaskQueue.h"
-#include "GLContext.h"
-#include "HostWebGLContext.h"
-#include "SharedSurface.h"
-#include "WebGLParent.h"
-#include "RecordedCanvasEventImpl.h"
 
 #if defined(XP_WIN)
 #  include "mozilla/gfx/DeviceManagerDx.h"
@@ -51,7 +49,8 @@ UniquePtr<TextureData> CanvasTranslator::CreateTextureData(
   switch (mTextureType) {
     case TextureType::Unknown:
       textureData = BufferTextureData::Create(
-          aSize, aFormat, gfx::BackendType::SKIA, LayersBackend::LAYERS_WR,
+          aSize, aFormat, gfx::ColorSpace2::SRGB, gfx::TransferFunction::SRGB,
+          gfx::BackendType::SKIA, LayersBackend::LAYERS_WR,
           TextureFlags::DEALLOCATE_CLIENT | TextureFlags::REMOTE_TEXTURE,
           allocFlags, nullptr);
       break;
@@ -284,7 +283,7 @@ bool CanvasTranslator::AddBuffer(
 }
 
 ipc::IPCResult CanvasTranslator::RecvSetDataSurfaceBuffer(
-    ipc::MutableSharedMemoryHandle&& aBufferHandle) {
+    uint32_t aId, ipc::MutableSharedMemoryHandle&& aBufferHandle) {
   if (mDeactivated) {
     // The other side might have sent a resume message before we deactivated.
     return IPC_OK();
@@ -293,29 +292,84 @@ ipc::IPCResult CanvasTranslator::RecvSetDataSurfaceBuffer(
   if (UsePendingCanvasTranslatorEvents()) {
     MutexAutoLock lock(mCanvasTranslatorEventsLock);
     mPendingCanvasTranslatorEvents.push_back(
-        CanvasTranslatorEvent::SetDataSurfaceBuffer(std::move(aBufferHandle)));
+        CanvasTranslatorEvent::SetDataSurfaceBuffer(aId,
+                                                    std::move(aBufferHandle)));
     PostCanvasTranslatorEvents(lock);
   } else {
-    DispatchToTaskQueue(NewRunnableMethod<ipc::MutableSharedMemoryHandle&&>(
-        "CanvasTranslator::SetDataSurfaceBuffer", this,
-        &CanvasTranslator::SetDataSurfaceBuffer, std::move(aBufferHandle)));
+    DispatchToTaskQueue(
+        NewRunnableMethod<uint32_t, ipc::MutableSharedMemoryHandle&&>(
+            "CanvasTranslator::SetDataSurfaceBuffer", this,
+            &CanvasTranslator::SetDataSurfaceBuffer, aId,
+            std::move(aBufferHandle)));
   }
 
   return IPC_OK();
 }
 
-void CanvasTranslator::DataSurfaceBufferWillChange() {
-  RefPtr<gfx::DataSourceSurface> owner(mDataSurfaceShmemOwner);
-  if (owner) {
-    // Force copy-on-write of contained shmem if applicable
-    gfx::DataSourceSurface::ScopedMap map(
-        owner, gfx::DataSourceSurface::MapType::READ_WRITE);
-    mDataSurfaceShmemOwner = nullptr;
+void CanvasTranslator::UnlinkDataSurfaceShmemOwner(
+    const RefPtr<gfx::DataSourceSurface>& aSurface) {
+  if (!aSurface) {
+    return;
+  }
+  // Remove the associated id key
+  aSurface->RemoveUserData(&mDataSurfaceShmemIdKey);
+  // Force copy-on-write of contained shmem if applicable
+  gfx::DataSourceSurface::ScopedMap map(
+      aSurface, gfx::DataSourceSurface::MapType::READ_WRITE);
+}
+
+void CanvasTranslator::DataSurfaceBufferWillChange(uint32_t aId,
+                                                   bool aKeepAlive,
+                                                   size_t aLimit) {
+  if (aId) {
+    // If a specific id is changing, then attempt to copy it.
+    auto it = mDataSurfaceShmems.find(aId);
+    if (it != mDataSurfaceShmems.end()) {
+      RefPtr<gfx::DataSourceSurface> owner(it->second.mOwner);
+      if (owner) {
+        UnlinkDataSurfaceShmemOwner(owner);
+        it->second.mOwner = nullptr;
+      }
+      // Erase the shmem if it's not the last used id.
+      if (!aKeepAlive || aId != mLastDataSurfaceShmemId) {
+        mDataSurfaceShmems.erase(it);
+      }
+    }
+  } else {
+    // If no limit is requested, clear everything.
+    if (!aLimit) {
+      aLimit = mDataSurfaceShmems.size();
+    }
+    // Ensure all shmems still alive are copied.
+    DataSurfaceShmem lastShmem;
+    auto it = mDataSurfaceShmems.begin();
+    for (; aLimit > 0 && it != mDataSurfaceShmems.end(); ++it, --aLimit) {
+      RefPtr<gfx::DataSourceSurface> owner(it->second.mOwner);
+      if (owner) {
+        UnlinkDataSurfaceShmemOwner(owner);
+        it->second.mOwner = nullptr;
+      }
+      // If the last shmem id needs to be kept alive, move it before clearing
+      // the hashtable.
+      if (aKeepAlive && it->first == mLastDataSurfaceShmemId) {
+        lastShmem = std::move(it->second);
+      }
+    }
+    // Clear all iterated shmem mappings.
+    if (it == mDataSurfaceShmems.end()) {
+      mDataSurfaceShmems.clear();
+    } else if (it != mDataSurfaceShmems.begin()) {
+      mDataSurfaceShmems.erase(mDataSurfaceShmems.begin(), it);
+    }
+    // Restore the last shmem id if necessary.
+    if (lastShmem.mShmem.IsValid()) {
+      mDataSurfaceShmems[mLastDataSurfaceShmemId] = std::move(lastShmem);
+    }
   }
 }
 
 bool CanvasTranslator::SetDataSurfaceBuffer(
-    ipc::MutableSharedMemoryHandle&& aBufferHandle) {
+    uint32_t aId, ipc::MutableSharedMemoryHandle&& aBufferHandle) {
   MOZ_ASSERT(IsInTaskQueue());
   if (mHeader->readerState == State::Failed) {
     // We failed before we got to the pause event.
@@ -332,16 +386,50 @@ bool CanvasTranslator::SetDataSurfaceBuffer(
     return false;
   }
 
-  DataSurfaceBufferWillChange();
-  mDataSurfaceShmem = aBufferHandle.Map();
-  if (!mDataSurfaceShmem) {
+  if (!aId) {
     return false;
+  }
+
+  if (aId < mLastDataSurfaceShmemId) {
+    // The id space has overflowed, so clear out all existing mapping.
+    DataSurfaceBufferWillChange(0, false);
+  } else if (mLastDataSurfaceShmemId != aId) {
+    // The last shmem id will be kept alive, even if there is no owner. The last
+    // shmem id is about to change, so if the current last id has no owner, it
+    // needs to be erased.
+    auto it = mDataSurfaceShmems.find(mLastDataSurfaceShmemId);
+    if (it != mDataSurfaceShmems.end() && it->second.mOwner.IsDead()) {
+      mDataSurfaceShmems.erase(it);
+    }
+    // Ensure the current shmems don't exceed the maximum allowed.
+    size_t maxShmems = StaticPrefs::gfx_canvas_accelerated_max_data_shmems();
+    if (maxShmems > 0 && mDataSurfaceShmems.size() >= maxShmems) {
+      DataSurfaceBufferWillChange(0, false,
+                                  (mDataSurfaceShmems.size() - maxShmems) + 1);
+    }
+  }
+  mLastDataSurfaceShmemId = aId;
+
+  // If the id is being reused, then ensure the old contents is copied before
+  // the buffer is changed.
+  DataSurfaceBufferWillChange(aId);
+
+  // Finally, change the shmem mapping.
+  mDataSurfaceShmems[aId].mShmem = aBufferHandle.Map();
+  if (!mDataSurfaceShmems[aId].mShmem) {
+    // Try clearing out old mappings to see if resource limits were reached.
+    DataSurfaceBufferWillChange(0, false);
+    // Try mapping one last time.
+    mDataSurfaceShmems[aId].mShmem = aBufferHandle.Map();
+    if (!mDataSurfaceShmems[aId].mShmem) {
+      return false;
+    }
   }
 
   return TranslateRecording();
 }
 
-void CanvasTranslator::GetDataSurface(uint64_t aSurfaceRef) {
+void CanvasTranslator::GetDataSurface(uint32_t aId, uint64_t aSurfaceRef) {
   MOZ_ASSERT(IsInTaskQueue());
 
   ReferencePtr surfaceRef = reinterpret_cast<void*>(aSurfaceRef);
@@ -358,21 +446,34 @@ void CanvasTranslator::GetDataSurface(uint64_t aSurfaceRef) {
   }
   auto dstSize = dataSurface->GetSize();
   gfx::SurfaceFormat format = dataSurface->GetFormat();
-  int32_t dstStride =
-      ImageDataSerializer::ComputeRGBStride(format, dstSize.width);
-  auto requiredSize =
+  auto dstStride = ImageDataSerializer::ComputeRGBStride(format, dstSize.width);
+  Maybe<uint32_t> requiredSize =
       ImageDataSerializer::ComputeRGBBufferSize(dstSize, format);
-  if (requiredSize <= 0 || size_t(requiredSize) > mDataSurfaceShmem.Size()) {
+  if (dstStride.isNothing() || requiredSize.isNothing()) {
     return;
   }
 
   // Ensure any old references to the shmem are copied before modification.
-  DataSurfaceBufferWillChange();
+  DataSurfaceBufferWillChange(aId);
+
+  // Ensure a shmem exists with the given id.
+  auto it = mDataSurfaceShmems.find(aId);
+  if (it == mDataSurfaceShmems.end()) {
+    return;
+  }
 
   // Try directly reading the data surface into shmem to avoid further copies.
-  uint8_t* dst = mDataSurfaceShmem.DataAs<uint8_t>();
-  if (dataSurface->ReadDataInto(dst, dstStride)) {
-    mDataSurfaceShmemOwner = dataSurface;
+  if (size_t(requiredSize.value()) > it->second.mShmem.Size()) {
+    return;
+  }
+
+  uint8_t* dst = it->second.mShmem.DataAs<uint8_t>();
+  if (dataSurface->ReadDataInto(dst, dstStride.value())) {
+    // If reading directly into the shmem, then mark the data surface as the
+    // shmem's owner.
+    it->second.mOwner = dataSurface;
+    dataSurface->AddUserData(&mDataSurfaceShmemIdKey,
+                             reinterpret_cast<void*>(aId), nullptr);
     return;
   }
 
@@ -383,8 +484,8 @@ void CanvasTranslator::GetDataSurface(uint64_t aSurfaceRef) {
     return;
   }
 
-  gfx::SwizzleData(map.GetData(), map.GetStride(), format, dst, dstStride,
-                   format, dstSize);
+  gfx::SwizzleData(map.GetData(), map.GetStride(), format, dst,
+                   dstStride.value(), format, dstSize);
 }
 
 already_AddRefed<gfx::SourceSurface> CanvasTranslator::WaitForSurface(
@@ -424,6 +525,11 @@ already_AddRefed<gfx::SourceSurface> CanvasTranslator::WaitForSurface(
     if (surf->mSharedSurface) {
       surf->mSharedSurface->BeginRead();
       *aDesc = surf->mSharedSurface->ToSurfaceDescriptor();
+      if (*aDesc && aDesc->ref().type() ==
+                        SurfaceDescriptor::TSurfaceDescriptorMacIOSurface) {
+        aDesc->ref().get_SurfaceDescriptorMacIOSurface().gpuFence() =
+            surf->mSharedSurface->TakeGpuFence();
+      }
       surf->mSharedSurface->EndRead();
     }
   }
@@ -628,7 +734,11 @@ bool CanvasTranslator::ReadNextEvent(EventType& aEventType) {
   mHeader->readerState = State::Waiting;
 
   if (mReaderSemaphore->Wait(Some(mNextEventTimeout))) {
-    MOZ_RELEASE_ASSERT(HasPendingEvent());
+    MOZ_ASSERT(HasPendingEvent());
+    if (!HasPendingEvent()) {
+      mHeader->readerState = State::Failed;
+      return false;
+    }
     MOZ_RELEASE_ASSERT(mHeader->readerState == State::Processing);
     return ReadPendingEvent(aEventType);
   }
@@ -636,7 +746,11 @@ bool CanvasTranslator::ReadNextEvent(EventType& aEventType) {
   // We have to use compareExchange here because the writer can change our
   // state if we are waiting.
   if (!mHeader->readerState.compareExchange(State::Waiting, State::Stopped)) {
-    MOZ_RELEASE_ASSERT(HasPendingEvent());
+    MOZ_ASSERT(HasPendingEvent());
+    if (!HasPendingEvent()) {
+      mHeader->readerState = State::Failed;
+      return false;
+    }
     MOZ_RELEASE_ASSERT(mHeader->readerState == State::Processing);
     // The writer has just signaled us, so consume it before returning
     MOZ_ALWAYS_TRUE(mReaderSemaphore->Wait());
@@ -693,7 +807,7 @@ bool CanvasTranslator::TranslateRecording() {
     }
 
     if (!success && !HandleExtensionEvent(eventType)) {
-      gfxCriticalNote << "Failed to play canvas event type: " << eventType;
+      gfxCriticalNoteOnce << "Failed to play canvas event type: " << eventType;
 
       if (!mCurrentMemReader.good()) {
         mHeader->readerState = State::Failed;
@@ -784,8 +898,8 @@ void CanvasTranslator::HandleCanvasTranslatorEvents() {
         dispatchTranslate = AddBuffer(event->TakeBufferHandle());
         break;
       case CanvasTranslatorEvent::Tag::SetDataSurfaceBuffer:
-        dispatchTranslate =
-            SetDataSurfaceBuffer(event->TakeDataSurfaceBufferHandle());
+        dispatchTranslate = SetDataSurfaceBuffer(
+            event->mId, event->TakeDataSurfaceBufferHandle());
         break;
       case CanvasTranslatorEvent::Tag::ClearCachedResources:
         ClearCachedResources();
@@ -1382,7 +1496,7 @@ bool CanvasTranslator::PushRemoteTexture(
 void CanvasTranslator::ClearTextureInfo() {
   MOZ_ASSERT(mIPDLClosed);
 
-  DataSurfaceBufferWillChange();
+  DataSurfaceBufferWillChange(0, false);
 
   mUsedDataSurfaceForSurfaceDescriptor = nullptr;
   mUsedWrapperForSurfaceDescriptor = nullptr;
@@ -1439,13 +1553,10 @@ static bool SDIsSupportedRemoteDecoder(const SurfaceDescriptor& sd) {
   }
 
   const auto& sdrd = sdv.get_SurfaceDescriptorRemoteDecoder();
-  const auto& subdesc = sdrd.subdesc();
-  const auto& subdescType = subdesc.type();
 
-  if (subdescType == RemoteDecoderVideoSubDescriptor::Tnull_t ||
-      subdescType ==
-          RemoteDecoderVideoSubDescriptor::TSurfaceDescriptorMacIOSurface ||
-      subdescType == RemoteDecoderVideoSubDescriptor::TSurfaceDescriptorD3D10) {
+  if (sdrd.videoType() == RemoteDecoderVideoType::Buffer ||
+      sdrd.videoType() == RemoteDecoderVideoType::MacIOSurface ||
+      sdrd.videoType() == RemoteDecoderVideoType::D3D10) {
     return true;
   }
 
@@ -1467,11 +1578,36 @@ CanvasTranslator::MaybeRecycleDataSurfaceForSurfaceDescriptor(
   if (usedDescriptor.isSome() && usedDescriptor.ref() == aSurfaceDescriptor) {
     MOZ_ASSERT(usedSurf);
     MOZ_ASSERT(usedWrapper);
-    MOZ_ASSERT(aTextureHost->GetSize() == usedSurf->GetSize());
 
-    // Since the data is the same as before, the DataSourceSurfaceWrapper can be
-    // reused.
-    return do_AddRef(usedWrapper);
+    auto* bufferTextureHost = aTextureHost->AsBufferTextureHost();
+    if (bufferTextureHost) {
+      if (usedSurf->GetType() == gfx::SurfaceType::DATA_ALIGNED) {
+        // Buffer of DataSourceSurface is owned by DataSourceSurface
+        MOZ_ASSERT(aTextureHost->GetSize() == usedSurf->GetSize());
+        if (aTextureHost->GetSize() == usedSurf->GetSize()) {
+          // Since the data is the same as before, the DataSourceSurfaceWrapper
+          // can be reused.
+          return do_AddRef(usedWrapper);
+        } else {
+          mUsedDataSurfaceForSurfaceDescriptor = nullptr;
+          mUsedWrapperForSurfaceDescriptor = nullptr;
+          mUsedSurfaceDescriptorForSurfaceDescriptor = Nothing();
+        }
+      } else {
+        // Buffer of DataSourceSurface is owned by BufferTextureHost
+        if (bufferTextureHost->GetBuffer() &&
+            bufferTextureHost->GetBuffer() == usedSurf->GetData() &&
+            aTextureHost->GetSize() == usedSurf->GetSize() &&
+            aTextureHost->GetFormat() == usedSurf->GetFormat()) {
+          // Since the data is the same as before, the DataSourceSurfaceWrapper
+          // can be reused.
+          return do_AddRef(usedWrapper);
+        }
+        mUsedDataSurfaceForSurfaceDescriptor = nullptr;
+        mUsedWrapperForSurfaceDescriptor = nullptr;
+        mUsedSurfaceDescriptorForSurfaceDescriptor = Nothing();
+      }
+    }
   }
 
   bool isYuvVideo = false;
@@ -1512,13 +1648,10 @@ CanvasTranslator::LookupSourceSurfaceFromSurfaceDescriptor(
 
   const auto& sdrd = aDesc.get_SurfaceDescriptorGPUVideo()
                          .get_SurfaceDescriptorRemoteDecoder();
-  const auto& subdesc = sdrd.subdesc();
-  const auto& subdescType = subdesc.type();
 
   RefPtr<VideoBridgeParent> parent =
       VideoBridgeParent::GetSingleton(sdrd.source());
   if (!parent) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
     gfxCriticalNote << "TexUnpackSurface failed to get VideoBridgeParent";
     return nullptr;
   }
@@ -1531,7 +1664,7 @@ CanvasTranslator::LookupSourceSurfaceFromSurfaceDescriptor(
   }
 
 #if defined(XP_WIN)
-  if (subdescType == RemoteDecoderVideoSubDescriptor::TSurfaceDescriptorD3D10) {
+  if (sdrd.videoType() == RemoteDecoderVideoType::D3D10) {
     auto* textureHostD3D11 = texture->AsDXGITextureHostD3D11();
     if (!textureHostD3D11) {
       MOZ_ASSERT_UNREACHABLE("unexpected to be called");
@@ -1559,8 +1692,7 @@ CanvasTranslator::LookupSourceSurfaceFromSurfaceDescriptor(
   }
 #endif
 
-  if (subdescType ==
-      RemoteDecoderVideoSubDescriptor::TSurfaceDescriptorMacIOSurface) {
+  if (sdrd.videoType() == RemoteDecoderVideoType::MacIOSurface) {
     MOZ_ASSERT(texture->AsMacIOSurfaceTextureHost());
 
     RefPtr<gfx::DataSourceSurface> surf =
@@ -1568,7 +1700,7 @@ CanvasTranslator::LookupSourceSurfaceFromSurfaceDescriptor(
     return surf.forget();
   }
 
-  if (subdescType == RemoteDecoderVideoSubDescriptor::Tnull_t) {
+  if (sdrd.videoType() == RemoteDecoderVideoType::Buffer) {
     RefPtr<gfx::DataSourceSurface> surf =
         MaybeRecycleDataSurfaceForSurfaceDescriptor(texture, sdrd);
     return surf.forget();
@@ -1624,30 +1756,31 @@ mozilla::ipc::IPCResult CanvasTranslator::RecvSnapshotExternalCanvas(
   ExternalSnapshot snapshot;
   if (auto* actor = gfx::CanvasManagerParent::GetCanvasActor(
           mContentId, aManagerId, aCanvasId)) {
-    switch (actor->GetProtocolId()) {
-      case ProtocolId::PWebGLMsgStart:
-        if (auto* hostContext =
-                static_cast<dom::WebGLParent*>(actor)->GetHostWebGLContext()) {
-          if (auto* webgl = hostContext->GetWebGLContext()) {
-            if (mWebglTextureType != TextureType::Unknown) {
-              snapshot.mSharedSurface =
-                  webgl->GetBackBufferSnapshotSharedSurface(mWebglTextureType,
-                                                            true, true, true);
-              if (snapshot.mSharedSurface) {
-                snapshot.mWebgl = webgl;
-                snapshot.mDescriptor =
-                    snapshot.mSharedSurface->ToSurfaceDescriptor();
+    if (dom::WebGLParent* webglActor = ActorDynCast<dom::WebGLParent>(actor)) {
+      if (auto* hostContext = webglActor->GetHostWebGLContext()) {
+        if (auto* webgl = hostContext->GetWebGLContext()) {
+          if (mWebglTextureType != TextureType::Unknown) {
+            snapshot.mSharedSurface = webgl->GetBackBufferSnapshotSharedSurface(
+                mWebglTextureType, true, true, true);
+            if (snapshot.mSharedSurface) {
+              snapshot.mWebgl = webgl;
+              snapshot.mDescriptor =
+                  snapshot.mSharedSurface->ToSurfaceDescriptor();
+              if (snapshot.mDescriptor &&
+                  snapshot.mDescriptor->type() ==
+                      SurfaceDescriptor::TSurfaceDescriptorMacIOSurface) {
+                snapshot.mDescriptor->get_SurfaceDescriptorMacIOSurface()
+                    .gpuFence() = snapshot.mSharedSurface->TakeGpuFence();
               }
             }
-            if (!snapshot.mDescriptor) {
-              snapshot.mData = webgl->GetBackBufferSnapshot(true);
-            }
+          }
+          if (!snapshot.mDescriptor) {
+            snapshot.mData = webgl->GetBackBufferSnapshot(true);
           }
         }
-        break;
-      default:
-        MOZ_ASSERT_UNREACHABLE("Unsupported protocol");
-        break;
+      }
+    } else {
+      MOZ_ASSERT_UNREACHABLE("Unsupported protocol");
     }
   }
 
@@ -1751,7 +1884,25 @@ void CanvasTranslator::AddDataSurface(
 }
 
 void CanvasTranslator::RemoveDataSurface(gfx::ReferencePtr aRefPtr) {
-  mDataSurfaces.Remove(aRefPtr);
+  RefPtr<gfx::DataSourceSurface> surface;
+  if (mDataSurfaces.Remove(aRefPtr, getter_AddRefs(surface))) {
+    // If the data surface is the assigned owner of a shmem, and if the shmem
+    // is not the last shmem id used, then erase the shmem.
+    if (auto id = reinterpret_cast<uintptr_t>(
+            surface->GetUserData(&mDataSurfaceShmemIdKey))) {
+      if (id != mLastDataSurfaceShmemId) {
+        auto it = mDataSurfaceShmems.find(id);
+        if (it != mDataSurfaceShmems.end()) {
+          // If this is not the last reference to the surface, then the shmem
+          // contents needs to be copied.
+          if (!surface->hasOneRef()) {
+            UnlinkDataSurfaceShmemOwner(surface);
+          }
+          mDataSurfaceShmems.erase(it);
+        }
+      }
+    }
+  }
 }
 
 }  // namespace layers

@@ -1,10 +1,13 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 package org.mozilla.fenix.termsofuse.store
 
 import io.mockk.mockk
-import mozilla.components.lib.state.MiddlewareContext
+import kotlin.test.assertNotNull
 import mozilla.components.support.test.robolectric.testContext
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
@@ -18,11 +21,7 @@ private const val TOU_VERSION = 5
 @RunWith(RobolectricTestRunner::class)
 class TermsOfUsePromptTelemetryMiddlewareTest {
 
-    @get:Rule
-    val gleanTestRule = FenixGleanTestRule(testContext)
-
-    private val middlewareContext =
-        mockk<MiddlewareContext<TermsOfUsePromptState, TermsOfUsePromptAction>>(relaxed = true)
+    @get:Rule val gleanTestRule = FenixGleanTestRule(testContext)
 
     @Test
     fun `WHEN the OnAcceptClicked action THEN the expected telemetry is recorded`() {
@@ -111,7 +110,7 @@ class TermsOfUsePromptTelemetryMiddlewareTest {
 
     private fun invokeMiddlewareWith(action: TermsOfUsePromptAction) {
         TermsOfUsePromptTelemetryMiddleware()(
-            context = middlewareContext,
+            store = mockk(),
             next = {},
             action = action,
         )

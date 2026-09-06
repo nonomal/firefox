@@ -1,25 +1,18 @@
-/* -*- Mode: c++; c-basic-offset: 2; tab-width: 4; indent-tabs-mode: nil; -*-
- * vim: set sw=2 ts=4 expandtab:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "GeckoEditableSupport.h"
 
+#include <android/api-level.h>
+#include <android/input.h>
+#include <android/log.h>
+
 #include "AndroidBridgeUtilities.h"
 #include "AndroidRect.h"
 #include "KeyEvent.h"
 #include "PuppetWidget.h"
-#include "nsIContent.h"
-#include "nsITransferable.h"
-#include "nsStringStream.h"
-#include "nsWindow.h"
-
-#include "mozilla/dom/ContentChild.h"
 #include "mozilla/IMEStateManager.h"
-#include "mozilla/java/GeckoEditableChildWrappers.h"
-#include "mozilla/java/GeckoServiceChildProcessWrappers.h"
-#include "mozilla/jni/NativesInlines.h"
 #include "mozilla/Logging.h"
 #include "mozilla/MiscEvents.h"
 #include "mozilla/Preferences.h"
@@ -29,11 +22,16 @@
 #include "mozilla/TextEvents.h"
 #include "mozilla/ToString.h"
 #include "mozilla/dom/BrowserChild.h"
+#include "mozilla/dom/ContentChild.h"
+#include "mozilla/java/GeckoEditableChildWrappers.h"
+#include "mozilla/java/GeckoServiceChildProcessWrappers.h"
+#include "mozilla/jni/NativesInlines.h"
 #include "mozilla/widget/GeckoViewSupport.h"
-
-#include <android/api-level.h>
-#include <android/input.h>
-#include <android/log.h>
+#include "nsComponentManagerUtils.h"
+#include "nsIContent.h"
+#include "nsITransferable.h"
+#include "nsStringStream.h"
+#include "nsWindow.h"
 
 #ifdef NIGHTLY_BUILD
 static mozilla::LazyLogModule sGeckoEditableSupportLog("IMEHandler");
@@ -263,7 +261,7 @@ static KeyNameIndex ConvertAndroidKeyCodeToKeyNameIndex(
   case aNativeKey:                                                     \
     return aKeyNameIndex;
 
-#include "NativeKeyToDOMKeyName.h"
+#include "NativeKeyToDOMKeyName.inc"
 
 #undef NS_NATIVE_KEY_TO_DOM_KEY_NAME_INDEX
 
@@ -374,7 +372,7 @@ static CodeNameIndex ConvertAndroidScanCodeToCodeNameIndex(int32_t scanCode) {
   case aNativeKey:                                                       \
     return aCodeNameIndex;
 
-#include "NativeKeyToDOMCodeName.h"
+#include "NativeKeyToDOMCodeName.inc"
 
 #undef NS_NATIVE_KEY_TO_DOM_CODE_NAME_INDEX
 
@@ -649,7 +647,7 @@ void GeckoEditableSupport::FlushIMEChanges(FlushChangesFlag aFlags) {
                                  mIMEPendingTextChange.mCausedOnlyByComposition;
   mIMETextChangedDuringFlush = false;
 
-  auto shouldAbort = [=](bool aForce) -> bool {
+  auto shouldAbort = [=, this](bool aForce) -> bool {
     if (!aForce && !mIMETextChangedDuringFlush) {
       return false;
     }
@@ -736,7 +734,7 @@ void GeckoEditableSupport::FlushIMEChanges(FlushChangesFlag aFlags) {
   }
 
   JNIEnv* const env = jni::GetGeckoThreadEnv();
-  auto flushOnException = [=]() -> bool {
+  auto flushOnException = [=, this]() -> bool {
     if (!env->ExceptionCheck()) {
       return false;
     }
@@ -1323,6 +1321,7 @@ nsresult GeckoEditableSupport::NotifyIME(
 
         --mIMEMaskEventsCount;
         if (!mIMEFocusCount || !widget || widget->Destroyed()) {
+          ALOGIME("IME: NOTIFY_IME_OF_FOCUS: No focus");
           return;
         }
 
@@ -1335,6 +1334,16 @@ nsresult GeckoEditableSupport::NotifyIME(
                 mEditable, do_AddRef(this));
             mEditableAttached = true;
           }
+
+          if (!mEditable->HasEditableParent()) {
+            if (dom::BrowserChild* browserChild =
+                    widget->GetOwningBrowserChild()) {
+              const uint64_t tabId = browserChild->GetTabId();
+
+              EnsureEditableParent(tabId);
+            }
+          }
+
           // Because GeckoEditableSupport in content process doesn't
           // manage the active input context, we need to retrieve the
           // input context from the widget, for use by
@@ -1474,7 +1483,7 @@ void GeckoEditableSupport::WillDispatchKeyboardEvent(
 
 NS_IMETHODIMP_(IMENotificationRequests)
 GeckoEditableSupport::GetIMENotificationRequests() {
-  return IMENotificationRequests(IMENotificationRequests::NOTIFY_TEXT_CHANGE);
+  return {IMENotificationRequest::TextChange};
 }
 
 static bool ShouldKeyboardDismiss(const nsAString& aInputType,
@@ -1593,6 +1602,16 @@ void GeckoEditableSupport::TransferParent(jni::Object::Param aEditableParent) {
   }
 }
 
+void GeckoEditableSupport::EnsureEditableParent(uint64_t aTabId) {
+  MOZ_ASSERT(mEditableAttached);
+  MOZ_ASSERT(mEditable);
+
+  if (mEditable->HasEditableParent()) {
+    return;
+  }
+  java::GeckoServiceChildProcess::GetEditableParent(GetJavaEditable(), aTabId);
+}
+
 void GeckoEditableSupport::SetOnBrowserChild(dom::BrowserChild* aBrowserChild) {
   MOZ_ASSERT(!XRE_IsParentProcess());
   NS_ENSURE_TRUE_VOID(aBrowserChild);
@@ -1602,7 +1621,7 @@ void GeckoEditableSupport::SetOnBrowserChild(dom::BrowserChild* aBrowserChild) {
   RefPtr<widget::PuppetWidget> widget(aBrowserChild->WebWidget());
   NS_ENSURE_TRUE_VOID(contentChild && widget);
 
-  // Get the content/tab ID in order to get the correct
+  // Get the tab ID in order to get the correct
   // IGeckoEditableParent object, which GeckoEditableChild uses to
   // communicate with the parent process.
   const uint64_t contentId = contentChild->GetID();
@@ -1633,8 +1652,7 @@ void GeckoEditableSupport::SetOnBrowserChild(dom::BrowserChild* aBrowserChild) {
     accEditableSupport->mEditableAttached = true;
 
     // Connect the new child to a parent that corresponds to the BrowserChild.
-    java::GeckoServiceChildProcess::GetEditableParent(editableChild, contentId,
-                                                      tabId);
+    java::GeckoServiceChildProcess::GetEditableParent(editableChild, tabId);
     return;
   }
 
@@ -1643,8 +1661,8 @@ void GeckoEditableSupport::SetOnBrowserChild(dom::BrowserChild* aBrowserChild) {
   // We expect the existing TextEventDispatcherListener to be a
   // GeckoEditableSupport object, so we perform a sanity check to make
   // sure, by comparing their respective vtable pointers.
-  const RefPtr<widget::GeckoEditableSupport> dummy =
-      new widget::GeckoEditableSupport(/* child */ nullptr);
+  const auto dummy =
+      MakeRefPtr<widget::GeckoEditableSupport>(/* child */ nullptr);
   NS_ENSURE_TRUE_VOID(*reinterpret_cast<const uintptr_t*>(listener.get()) ==
                       *reinterpret_cast<const uintptr_t*>(dummy.get()));
 
@@ -1657,13 +1675,8 @@ void GeckoEditableSupport::SetOnBrowserChild(dom::BrowserChild* aBrowserChild) {
     support->mEditableAttached = true;
   }
 
-  MOZ_ASSERT(support->mEditable);
-
-  if (!support->mEditable->HasEditableParent()) {
-    // Transfer to a new parent that corresponds to the BrowserChild.
-    java::GeckoServiceChildProcess::GetEditableParent(
-        support->GetJavaEditable(), contentId, tabId);
-  }
+  // Transfer to a new parent that corresponds to the BrowserChild.
+  support->EnsureEditableParent(tabId);
 }
 
 nsIWidget* GeckoEditableSupport::GetWidget() const {

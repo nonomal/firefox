@@ -8,6 +8,7 @@ import { FileUtils } from "resource://gre/modules/FileUtils.sys.mjs";
 import { ProfilesDatastoreService } from "moz-src:///toolkit/profile/ProfilesDatastoreService.sys.mjs";
 import { SelectableProfileService } from "resource:///modules/profiles/SelectableProfileService.sys.mjs";
 import { BackupService } from "resource:///modules/backup/BackupService.sys.mjs";
+import { ArchiveEncryptionState } from "resource:///modules/backup/ArchiveEncryptionState.sys.mjs";
 
 const lazy = {};
 
@@ -50,6 +51,42 @@ const STANDARD_AVATAR_SIZES = [16, 20, 48, 80];
 
 function standardAvatarURL(avatar, size = "80") {
   return `chrome://browser/content/profiles/assets/${size}_${avatar}.svg`;
+}
+
+/**
+ * Resolve a relative path against an absolute path. The relative path may only
+ * contain parent directory or child directory parts.
+ *
+ * @param {string} absolute The absolute path
+ * @param {string} relative The relative path
+ * @returns {string} The resolved path
+ */
+function resolveDir(absolute, relative) {
+  let target = absolute;
+
+  for (let pathPart of PathUtils.splitRelative(relative, {
+    allowParentDir: true,
+  })) {
+    if (pathPart === "..") {
+      target = PathUtils.parent(target);
+
+      // On Windows there is no notion of a single root directory. Instead each
+      // disk has a root directory. Traversing to a different disk means allowing
+      // going above the root of the first disk then the next path part will be
+      // the new disk.
+      if (!target && AppConstants.platform != "win") {
+        throw new Error("Invalid path");
+      }
+    } else {
+      target = target ? PathUtils.join(target, pathPart) : pathPart;
+    }
+  }
+
+  if (!target) {
+    throw new Error("Invalid path");
+  }
+
+  return target;
 }
 
 /**
@@ -118,10 +155,18 @@ export class SelectableProfile {
    * @param {string} aName The new name of the profile
    */
   set name(aName) {
+    this.setNameAsync(aName);
+  }
+
+  /**
+   * Async setter for the name field. Update the user-editable name for the profile,
+   * then trigger saving the profile, which will notify() other running instances.
+   *
+   * @param {string} aName The new name of the profile
+   */
+  async setNameAsync(aName) {
     this.#name = aName;
-
-    this.saveUpdatesToDB();
-
+    await SelectableProfileService.updateProfile(this);
     Services.prefs.setBoolPref("browser.profiles.profile-name.updated", true);
   }
 
@@ -131,7 +176,7 @@ export class SelectableProfile {
    * @returns {string} Path of profile
    */
   get path() {
-    return PathUtils.joinRelative(
+    return resolveDir(
       ProfilesDatastoreService.constructor.getDirectory("UAppData").path,
       this.#path
     );
@@ -154,15 +199,11 @@ export class SelectableProfile {
    * the profile local directory
    */
   get localDir() {
-    return this.rootDir.then(root => {
-      let relative = root.getRelativePath(
-        ProfilesDatastoreService.constructor.getDirectory("DefProfRt")
-      );
-      let local =
-        ProfilesDatastoreService.constructor.getDirectory("DefProfLRt");
-      local.appendRelativePath(relative);
-      return local;
-    });
+    return this.rootDir.then(root =>
+      ProfilesDatastoreService.toolkitProfileService.getLocalDirFromRootDir(
+        root
+      )
+    );
   }
 
   /**
@@ -218,7 +259,10 @@ export class SelectableProfile {
 
     const fileExists = await IOUtils.exists(this.getAvatarPath());
     if (!fileExists) {
-      throw new Error("Custom avatar file doesn't exist.");
+      // The avatar is missing, so fall back to a default.
+      Glean.profilesError.avatar.record();
+      await this.setAvatar("star");
+      return standardAvatarURL("star", size);
     }
     const file = await File.createFromFileName(this.getAvatarPath());
     this.#lastAvatarURL = URL.createObjectURL(file);
@@ -391,15 +435,28 @@ export class SelectableProfile {
    * @param {string} param0.themeBg Background color of theme as CSS style string, like "rgb(0,0,0)".
    */
   set theme({ themeId, themeFg, themeBg }) {
+    this.setThemeAsync({ themeId, themeFg, themeBg });
+  }
+
+  /**
+   * Async setter for the theme fields. Update the theme (all three properties are required),
+   * then trigger saving the profile, which will notify() other running instances.
+   *
+   * @param {object} param0 The theme object
+   * @param {string} param0.themeId L10n id of the theme
+   * @param {string} param0.themeFg Foreground color of theme as CSS style string, like "rgb(1,1,1)",
+   * @param {string} param0.themeBg Background color of theme as CSS style string, like "rgb(0,0,0)".
+   */
+  async setThemeAsync({ themeId, themeFg, themeBg }) {
     this.#themeId = themeId;
     this.#themeFg = themeFg;
     this.#themeBg = themeBg;
 
-    this.saveUpdatesToDB();
+    await SelectableProfileService.updateProfile(this);
   }
 
   saveUpdatesToDB() {
-    SelectableProfileService.updateProfile(this);
+    return SelectableProfileService.updateProfile(this);
   }
 
   /**
@@ -479,22 +536,19 @@ export class SelectableProfile {
     // We set the pref here so the copied profile will inherit this pref and
     // the copied profile will not show the backup welcome messaging.
     Services.prefs.setBoolPref("browser.profiles.profile-copied", true);
+
     const backupServiceInstance = new BackupService();
 
-    let encState = await backupServiceInstance.loadEncryptionState(this.path);
-    let createdEncState = false;
-    if (!encState) {
-      // If we don't have encryption enabled, temporarily create encryption so
-      // we can copy resources that require encryption
-      await backupServiceInstance.enableEncryption(
-        Services.uuid.generateUUID().toString().slice(1, -1),
-        this.path
-      );
-      encState = await backupServiceInstance.loadEncryptionState(this.path);
-      createdEncState = true;
-    }
+    // We want to copy everything, which means telling the BackupService that
+    // encryption is enabled. We instantiate a new ArchiveEncryptionState with
+    // a randomized passphrase (passing nothing to initialize causes a random
+    // one to be generated). Since we don't actually encrypt or decrypt the
+    // backup (since we're just staging, and then recovering from staging),
+    // we can forget the generated passphrase.
+    let { instance: encState } = await ArchiveEncryptionState.initialize();
     let result = await backupServiceInstance.createAndPopulateStagingFolder(
-      this.path
+      this.path,
+      encState
     );
 
     // Clear the pref now that the copied profile has inherited it.
@@ -508,13 +562,8 @@ export class SelectableProfile {
       await backupServiceInstance.recoverFromSnapshotFolderIntoSelectableProfile(
         result.stagingPath,
         true, // shouldLaunch
-        encState, // encState
         this // copiedProfile
       );
-
-    if (createdEncState) {
-      await backupServiceInstance.disableEncryption(this.path);
-    }
 
     copiedProfile.theme = this.theme;
     await copiedProfile.setAvatar(this.avatar);

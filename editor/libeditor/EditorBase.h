@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,7 +17,6 @@
 #include "mozilla/PendingStyles.h"       // for PendingStyle, PendingStyleCache
 #include "mozilla/RangeBoundary.h"       // for RawRangeBoundary, RangeBoundary
 #include "mozilla/SelectionState.h"      // for RangeUpdater, etc.
-#include "mozilla/StyleSheet.h"          // for StyleSheet
 #include "mozilla/TransactionManager.h"  // for TransactionManager
 #include "mozilla/WeakPtr.h"             // for WeakPtr
 #include "mozilla/dom/DataTransfer.h"    // for dom::DataTransfer
@@ -73,6 +71,7 @@ class PresShell;
 class TextComposition;
 class TextInputListener;
 class TextServicesDocument;
+struct LimitersAndCaretData;
 namespace dom {
 class AbstractRange;
 class DataTransfer;
@@ -193,7 +192,7 @@ class EditorBase : public nsIEditor,
 
   PresShell* GetPresShell() const;
   nsPresContext* GetPresContext() const;
-  already_AddRefed<nsCaret> GetCaret() const;
+  already_AddRefed<nsCaret> GetCaretForSelection() const;
 
   already_AddRefed<nsIWidget> GetWidget() const;
 
@@ -215,6 +214,13 @@ class EditorBase : public nsIEditor,
     Selection* selection = sc->GetSelection(ToRawSelectionType(aSelectionType));
     return selection;
   }
+
+  /**
+   * Get frame selection from SelectionRef(), but returns null
+   * for canvas-based EditContext, where we don't want to touch
+   * the DOM selection (since it may be in accessible content.)
+   */
+  nsFrameSelection* GetEditableFrameSelection() const;
 
   /**
    * @return Ancestor limiter of normal selection
@@ -244,6 +250,13 @@ class EditorBase : public nsIEditor,
   Element* GetExposedRoot() const;
 
   /**
+   * Compute EditContext which this editor is currently attached to.
+   * While handling an edit action, use GetEditActionEditContext instead,
+   * in case the active EditContext changed since the edit action started.
+   */
+  virtual dom::EditContext* ComputeEditContext() const { return nullptr; }
+
+  /**
    * Set or unset TextInputListener.  If setting non-nullptr when the editor
    * already has a TextInputListener, this will crash in debug build.
    */
@@ -263,7 +276,8 @@ class EditorBase : public nsIEditor,
   /**
    * Get preferred IME status of current widget.
    */
-  virtual nsresult GetPreferredIMEState(widget::IMEState* aState);
+  [[nodiscard]] virtual Result<widget::IMEState, nsresult>
+  GetPreferredIMEState() const = 0;
 
   /**
    * Returns true if there is composition string and not fixed.
@@ -593,7 +607,10 @@ class EditorBase : public nsIEditor,
   [[nodiscard]] virtual Element* FindSelectionRoot(const nsINode& aNode) const;
 
   /**
-   * OnFocus() is called when we get a focus event.
+   * Called before `eFocus` event is dispatched into the DOM. Any state of the
+   * DOM which can be referred by web content's script should be initialized
+   * during this call because `focus` event should be fired after the focus move
+   * finished.
    *
    * @param aOriginalEventTargetNode    The original event target node of the
    *                                    focus event.
@@ -602,11 +619,23 @@ class EditorBase : public nsIEditor,
       const nsINode& aOriginalEventTargetNode);
 
   /**
-   * OnBlur() is called when we're blurred.
+   * Called when `eFocus` event propagation ends in the web content. The focused
+   * element may be redirected by a `focus` event listener so this editor may
+   * not have focus anymore when this is called.
+   */
+  MOZ_CAN_RUN_SCRIPT virtual void PostHandleFocusEvent(
+      const nsINode& aFocusEventTargetNode);
+
+  /**
+   * Called before `eBlur` event is dispatched into the DOM. Any state of the
+   * DOM which can be referred by web content's script should be finalized
+   * during this call because `blur` event should be fired after the blur
+   * finished.
    *
    * @param aEventTarget        The event target of the blur event.
    */
-  virtual nsresult OnBlur(const dom::EventTarget* aEventTarget) = 0;
+  MOZ_CAN_RUN_SCRIPT virtual nsresult OnBlur(
+      const dom::EventTarget* aEventTarget) = 0;
 
   /** Resyncs spellchecking state (enabled/disabled).  This should be called
    * when anything that affects spellchecking state changes, such as the
@@ -766,6 +795,27 @@ class EditorBase : public nsIEditor,
                 nsIPrincipal* aPrincipal = nullptr);
 
   /**
+   * PasteNoFormattingAsAction() pastes content in clipboard without any style
+   * information.
+   *
+   * @param aClipboardType      nsIClipboard::kGlobalClipboard or
+   *                            nsIClipboard::kSelectionClipboard.
+   * @param aDispatchPasteEvent Yes if this should dispatch ePaste event
+   *                            before pasting.  Otherwise, No.
+   * @param aDataTransfer       The object containing the data to use for the
+   *                            paste operation. May be nullptr, in which case
+   *                            this will just get the data from the clipboard.
+   * @param aPrincipal          Set subject principal if it may be called by
+   *                            JS.  If set to nullptr, will be treated as
+   *                            called by system.
+   */
+  MOZ_CAN_RUN_SCRIPT nsresult
+  PasteNoFormattingAsAction(nsIClipboard::ClipboardType aClipboardType,
+                            DispatchPasteEvent aDispatchPasteEvent,
+                            DataTransfer* aDataTransfer = nullptr,
+                            nsIPrincipal* aPrincipal = nullptr);
+
+  /**
    * Paste aTransferable at Selection.
    *
    * @param aTransferable       Must not be nullptr.
@@ -819,6 +869,8 @@ class EditorBase : public nsIEditor,
    */
   struct MOZ_STACK_CLASS TopLevelEditSubActionData final {
     friend class AutoEditActionDataSetter;
+
+    TopLevelEditSubActionData(const TopLevelEditSubActionData& aOther) = delete;
 
     // Set selected range before edit.  Then, RangeUpdater keep modifying
     // the range while we're changing the DOM tree.
@@ -941,7 +993,6 @@ class EditorBase : public nsIEditor,
                                     const EditorRawDOMPoint& aEnd);
 
     TopLevelEditSubActionData() = default;
-    TopLevelEditSubActionData(const TopLevelEditSubActionData& aOther) = delete;
   };
 
   struct MOZ_STACK_CLASS EditSubActionData final {
@@ -1126,8 +1177,21 @@ class EditorBase : public nsIEditor,
       return *mSelection;
     }
 
+    LimitersAndCaretData SelectionLimitersAndCaretData() const;
+
+    Text* GetCachedTextNode() const {
+      MOZ_ASSERT(mEditorBase.IsTextEditor());
+      return mTextNode;
+    }
+
     nsIPrincipal* GetPrincipal() const { return mPrincipal; }
     EditAction GetEditAction() const { return mEditAction; }
+
+    dom::EditContext* GetEditContext() const { return mEditContext; }
+    void UpdateEditContext();
+    bool EditContextHasBeenChanged() const {
+      return mEditContext != mEditorBase.ComputeEditContext();
+    }
 
     template <typename PT, typename CT>
     void SetSpellCheckRestartPoint(const EditorDOMPointBase<PT, CT>& aPoint) {
@@ -1222,14 +1286,7 @@ class EditorBase : public nsIEditor,
         mParentData->OnEditorDestroy();
       }
     }
-    void OnEditorInitialized() {
-      if (mEditorWasDestroyedDuringHandlingEditAction) {
-        mEditorWasReinitialized = true;
-      }
-      if (mParentData) {
-        mParentData->OnEditorInitialized();
-      }
-    }
+    void OnEditorInitialized();
     /**
      * Return true if the editor was destroyed at least once while the
      * EditAction is being handled.  Note that the editor may have already been
@@ -1435,6 +1492,11 @@ class EditorBase : public nsIEditor,
     RefPtr<Selection> mSelection;
     nsTArray<OwningNonNull<Selection>> mRetiredSelections;
 
+    // mTextNode is the text node if and only if the instance is TextEditor.
+    // This is set when the instance is created and updated when the TextEditor
+    // is reinitialized with the new native anonymous subtree.
+    RefPtr<Text> mTextNode;
+
     // True if the selection was created by doubleclicking a word.
     bool mSelectionCreatedByDoubleclick{false};
 
@@ -1462,6 +1524,9 @@ class EditorBase : public nsIEditor,
     // Start point where spell checker should check from.  This is used only
     // by TextEditor.
     EditorDOMPoint mSpellCheckRestartPoint;
+
+    // EditContext which this edit action is targeting.
+    RefPtr<dom::EditContext> mEditContext;
 
     // Different from mTopLevelEditSubAction, its data should be stored only
     // in the most ancestor AutoEditActionDataSetter instance since we don't
@@ -1592,10 +1657,37 @@ class EditorBase : public nsIEditor,
                SelectionType::eNormal);
     return mEditActionData->SelectionRef();
   }
+  LimitersAndCaretData SelectionLimitersAndCaretData() const;
+
+  // Return the Text if and only if we're a TextEditor instance.  It's cached
+  // while we're handling an edit action, so, this stores the latest value even
+  // after we have been destroyed.
+  Text* GetCachedTextNode() {
+    MOZ_ASSERT(IsTextEditor());
+    return mEditActionData ? mEditActionData->GetCachedTextNode() : nullptr;
+  }
+
+  // Return the Text if and only if we're a TextEditor instance.  It's cached
+  // while we're handling an edit action, so, this stores the latest value even
+  // after we have been destroyed.
+  const Text* GetCachedTextNode() const {
+    MOZ_ASSERT(IsTextEditor());
+    return const_cast<EditorBase*>(this)->GetCachedTextNode();
+  }
 
   nsIPrincipal* GetEditActionPrincipal() const {
     MOZ_ASSERT(mEditActionData);
     return mEditActionData->GetPrincipal();
+  }
+
+  dom::EditContext* GetEditActionEditContext() const {
+    MOZ_ASSERT(mEditActionData);
+    return mEditActionData->GetEditContext();
+  }
+
+  bool EditContextChangedSinceStartOfEditAction() const {
+    MOZ_ASSERT(mEditActionData);
+    return mEditActionData->EditContextHasBeenChanged();
   }
 
   /**
@@ -1807,12 +1899,12 @@ class EditorBase : public nsIEditor,
     SpecifiedPoint,
     ExistingTextNodeIfAvailable,
     ExistingTextNodeIfAvailableAndNotStart,
-    AlwaysCreateNewTextNode
+    AlwaysCreateNewTextNode,
   };
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT virtual Result<InsertTextResult, nsresult>
   InsertTextWithTransaction(const nsAString& aStringToInsert,
                             const EditorDOMPoint& aPointToInsert,
-                            InsertTextTo aInsertTextTo);
+                            InsertTextTo aInsertTextTo, InsertTextFor aPurpose);
 
   /**
    * Compute insertion point from aPoint and aInsertTextTo.
@@ -1826,7 +1918,7 @@ class EditorBase : public nsIEditor,
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT Result<InsertTextResult, nsresult>
   InsertTextIntoTextNodeWithTransaction(
       const nsAString& aStringToInsert,
-      const EditorDOMPointInText& aPointToInsert);
+      const EditorDOMPointInText& aPointToInsert, InsertTextFor aPurpose);
 
   /**
    * SetTextNodeWithoutTransaction() is optimized path to set new value to
@@ -1882,6 +1974,16 @@ class EditorBase : public nsIEditor,
     PaddingForEmptyEditor,
     PaddingForEmptyLastLine
   };
+  friend inline auto format_as(const BRElementType& aType) {
+    constexpr const char* sNames[] = {"Normal", "PaddingForEmptyEditor",
+                                      "PaddingForEmptyLastLine"};
+    return std::string(sNames[static_cast<size_t>(aType)]);
+  }
+  friend inline std::ostream& operator<<(std::ostream& aStream,
+                                         const BRElementType& aType) {
+    return aStream << format_as(aType);
+  }
+
   /**
    * Updates the type of aBRElement.  If it will be hidden or shown from
    * IMEContentObserver and ContentEventHandler points of view, this temporarily
@@ -2137,6 +2239,16 @@ class EditorBase : public nsIEditor,
     AutoCaretBidiLevelManager(const EditorBase& aEditorBase,
                               nsIEditor::EDirection aDirectionAndAmount,
                               const EditorDOMPointBase<PT, CT>& aPointAtCaret);
+    /**
+     * Initialize for use with EditContext.
+     * @param aEditorBase         The editor.
+     * @param aDirectionAndAmount The direction and amount to delete.
+     */
+    AutoCaretBidiLevelManager(const EditorBase& aEditorBase,
+                              nsIEditor::EDirection aDirectionAndAmount,
+                              const dom::EditContext& aEditContext) {
+      InitForEditContext(aEditorBase, aDirectionAndAmount, aEditContext);
+    }
 
     /**
      * Failed() returns true if the constructor failed to handle the bidi
@@ -2158,6 +2270,13 @@ class EditorBase : public nsIEditor,
     void MaybeUpdateCaretBidiLevel(const EditorBase& aEditorBase) const;
 
    private:
+    template <typename PT, typename CT>
+    void Init(const EditorBase& aEditorBase,
+              nsIEditor::EDirection aDirectionAndAmount,
+              const EditorDOMPointBase<PT, CT>& aPointAtCaret);
+    void InitForEditContext(const EditorBase& aEditorBase,
+                            nsIEditor::EDirection aDirectionAndAmount,
+                            const dom::EditContext&);
     Maybe<mozilla::intl::BidiEmbeddingLevel> mNewCaretBidiLevel;
     bool mFailed = false;
     bool mCanceled = false;
@@ -2494,6 +2613,18 @@ class EditorBase : public nsIEditor,
    * asynchronously if it's not safe to dispatch.
    */
   MOZ_CAN_RUN_SCRIPT void DispatchInputEvent();
+
+  /**
+   * Return true if it's NOT blocked by the pref to dispatch `input` event
+   * immediately before `compositionend`.
+   */
+  [[nodiscard]] bool CanDispatchInputEventBeforeCompositionEnd() const;
+
+  /**
+   * Return true if it's NOT blocked by the pref to dispatch `input` event
+   * immediately after `compositionend`.
+   */
+  [[nodiscard]] bool CanDispatchInputEventAfterCompositionEnd() const;
 
   /**
    * Called after a transaction is done successfully.

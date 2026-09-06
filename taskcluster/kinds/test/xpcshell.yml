@@ -3,6 +3,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ---
 task-defaults:
+    worker-type:
+        by-test-platform:
+            windows11.*-(32|64).*-asan/.*: win11-64-25h2-large
+            windows11.*aarch64.*/.*: win11-a64-25h2
+            windows11.*/.*: win11-64-25h2
+            default: default
     suite:
         category: xpcshell
         name: xpcshell
@@ -34,6 +40,7 @@ task-defaults:
                     - unittests/win_unittest.py
         requires-signed-builds:
             by-test-platform:
+                macosx.*-artifact/.*: false
                 macosx1500.*: true
                 windows.*-asan/opt: false    # No XPCShell on ASAN yet
                 windows.*-mingwclang/.*: false
@@ -45,12 +52,10 @@ xpcshell:
     treeherder-symbol: X(X)
     variants:
         - conditioned_profile
-        - socketprocess_networking+no-fission
-        - socketprocess_networking
         - no-fission
         - msix
-        - geckoview-no-fission-no-ship
         - inc-origin-init
+        - privatebrowsing
     instance-size:
         by-variant:
             conditioned_profile:
@@ -62,64 +67,44 @@ xpcshell:
         by-variant:
             conditioned_profile:
                 by-test-platform:
+                    .*-artifact.*: []
                     .*-asan.*: []
                     .*-ccov.*: []
-                    linux1804-64.*/opt: ['trunk']
                     linux2404-64.*/opt: ['trunk']
                     windows11-64.*/opt: ['trunk']
-                    default: []
-            socketprocess_networking+no-fission:
-                by-test-platform:
-                    linux1804-64.*: ['mozilla-central']
-                    linux2404-64.*: ['mozilla-central']
-                    default: []
-            socketprocess_networking:
-                by-test-platform:
-                    macosx1015.*: ['trunk']  # All Mac variants
-                    macosx1470.*: ['trunk']  # All Mac variants
-                    windows.*-asan.*: []
-                    windows11.*: ['trunk']   # All Windows11 except ASAN
                     default: []
             no-fission:
                 by-test-platform:
                     android-em.*/debug-isolated-process: []
                     android.*: built-projects
-                    linux1804-64.*: ['mozilla-central']
                     linux2404-64.*: ['mozilla-central']
                     default: []
             msix:
                 by-test-platform:
-                    windows11-64-24h2(-shippable)?/opt: built-projects
-                    windows11-64-24h2/debug: built-projects
-                    default: []
-            geckoview-no-fission-no-ship:
-                by-test-platform:
-                    android-em.*/debug-isolated-process: []
-                    android-em.*: built-projects
+                    windows11-64-25h2(-shippable)?/opt: built-projects
+                    windows11-64-25h2/debug: built-projects
                     default: []
             inc-origin-init: []
+            privatebrowsing: []
             default:
                 by-test-platform:
                     android.*: built-projects
                     .*-wayland.*: []
                     windows.*-asan/opt: []  # No XPCShell on ASAN yet
                     default: built-projects
-    chunks:
-        by-variant:
-            inc-origin-init: dynamic
-            default:
-                by-test-platform:
-                    .*-asan.*/opt: 4
-                    .*-ccov.*: 8
-                    .*-tsan(-qr)?/opt: 10
-                    android-em-14.*/debug: 16
-                    android-em-14.*/opt: 8
-                    android.*/debug: 10
-                    android.*/opt: 5
-                    macosx.*: 2
-                    linux1804-64.*/opt: 2
-                    linux2404-64.*/opt: 2
-                    default: 4
+    chunks: dynamic
+    default-chunks:
+        by-test-platform:
+            .*-asan.*/opt: 4
+            .*-ccov.*: 8
+            .*-tsan(-qr)?/opt: 10
+            android-em-14.*/debug: 16
+            android-em-14.*/opt: 8
+            android.*/debug: 10
+            android.*/opt: 5
+            macosx.*: 2
+            linux2404-64.*/opt: 2
+            default: 4
     timeoutfactor:
         by-test-platform:
             android-em-14.*: 2
@@ -132,8 +117,8 @@ xpcshell:
             macosx1470-64/debug: 6
             macosx1470-64.*/opt: 4
             windows.*/debug: 2
-            windows11-64-24h2-asan/opt: 2
-            windows11-64-24h2-ccov/opt: 3
+            windows11-64-(24h2|25h2)-asan/opt: 2
+            windows11-64-(24h2|25h2)-ccov/opt: 3
             default: 1
     max-run-time:
         by-variant:
@@ -151,10 +136,6 @@ xpcshell:
                 by-test-platform:
                     linux.*: 2
                     default: default
-            socketprocess_networking+no-fission:
-                by-test-platform:
-                    linux.*: 2
-                    default: default
             default:
                 by-test-platform:
                     windows.*-asan.*: 3
@@ -165,40 +146,38 @@ xpcshell:
     fetches:
         toolchain:
             by-test-platform:
-                linux1804.*:
+                linux.*:
                     - linux64-node
                     - linux64-minidump-stackwalk
                     - linux64-fix-stacks
                     - linux-python-dbusmock
-                    - linux64-1804-dbus-python
-                linux2204.*:
-                    - linux64-node
-                    - linux64-minidump-stackwalk
-                    - linux64-fix-stacks
-                    - linux-python-dbusmock
-                    - linux64-2204-dbus-python
-                linux2404.*:
-                    - linux64-node
-                    - linux64-minidump-stackwalk
-                    - linux64-fix-stacks
-                    - linux-python-dbusmock
-                    - linux64-2404-dbus-python
+                    - linux64-python3.10-dbus-python
+                    - linux64-samply
+                    - profiler-node-tools
                 macosx.*-64.*:
                     - macosx64-node
                     - macosx64-minidump-stackwalk
                     - macosx64-fix-stacks
+                    - macosx64-samply
+                    - profiler-node-tools
                 macosx.*-aarch64.*:
                     - macosx64-aarch64-node
                     - macosx64-aarch64-minidump-stackwalk
                     - macosx64-aarch64-fix-stacks
+                    - macosx64-aarch64-samply
+                    - profiler-node-tools
                 win.*-64.*:
                     - win64-node
                     - win32-minidump-stackwalk
                     - win32-fix-stacks
+                    - win64-samply
+                    - profiler-node-tools
                 win.*32.*:
                     - win32-node
                     - win32-minidump-stackwalk
                     - win32-fix-stacks
+                    - win32-samply
+                    - profiler-node-tools
                 android-em-14.*:
                     - android34-system-image-x86_64-linux
                     - android34-avd-x86_64-linux
@@ -206,6 +185,8 @@ xpcshell:
                     - linux64-node
                     - linux64-minidump-stackwalk
                     - linux64-hostutils
+                    - linux64-samply
+                    - profiler-node-tools
 
 xpcshell-failures:
     description: "xpcshell specific failures test run"
@@ -239,11 +220,17 @@ xpcshell-failures:
                     - macosx64-node
                     - macosx64-minidump-stackwalk
                     - macosx64-fix-stacks
+                    - macosx64-samply
+                    - profiler-node-tools
                 macosx.*-aarch64.*:
                     - macosx64-aarch64-node
                     - macosx64-aarch64-minidump-stackwalk
                     - macosx64-aarch64-fix-stacks
+                    - macosx64-aarch64-samply
+                    - profiler-node-tools
                 win.*32.*:
                     - win32-node
                     - win32-minidump-stackwalk
                     - win32-fix-stacks
+                    - win32-samply
+                    - profiler-node-tools

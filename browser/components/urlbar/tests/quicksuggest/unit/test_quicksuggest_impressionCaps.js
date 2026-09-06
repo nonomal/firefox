@@ -35,16 +35,14 @@ const REMOTE_SETTINGS_RESULTS = [
 ];
 
 const EXPECTED_SPONSORED_URLBAR_RESULT = {
-  type: UrlbarUtils.RESULT_TYPE.URL,
-  source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+  type: UrlbarShared.RESULT_TYPE.URL,
+  source: UrlbarShared.RESULT_SOURCE.SEARCH,
   heuristic: false,
   payload: {
     telemetryType: "adm_sponsored",
     url: "http://example.com/sponsored",
     originalUrl: "http://example.com/sponsored",
-    displayUrl: "http://example.com/sponsored",
     title: "Sponsored suggestion",
-    qsSuggestion: "sponsored",
     icon: null,
     isSponsored: true,
     sponsoredImpressionUrl: "http://example.com/impression",
@@ -55,7 +53,7 @@ const EXPECTED_SPONSORED_URLBAR_RESULT = {
     descriptionL10n: { id: "urlbar-result-action-sponsored" },
     helpUrl: QuickSuggest.HELP_URL,
     helpL10n: {
-      id: "urlbar-result-menu-learn-more-about-firefox-suggest",
+      id: "urlbar-result-menu-learn-more2",
     },
     isBlockable: true,
     source: "remote-settings",
@@ -64,16 +62,14 @@ const EXPECTED_SPONSORED_URLBAR_RESULT = {
 };
 
 const EXPECTED_NONSPONSORED_URLBAR_RESULT = {
-  type: UrlbarUtils.RESULT_TYPE.URL,
-  source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+  type: UrlbarShared.RESULT_TYPE.URL,
+  source: UrlbarShared.RESULT_SOURCE.SEARCH,
   heuristic: false,
   payload: {
     telemetryType: "adm_nonsponsored",
     url: "http://example.com/nonsponsored",
     originalUrl: "http://example.com/nonsponsored",
-    displayUrl: "http://example.com/nonsponsored",
     title: "Non-sponsored suggestion",
-    qsSuggestion: "nonsponsored",
     icon: null,
     isSponsored: false,
     sponsoredImpressionUrl: "http://example.com/impression",
@@ -83,7 +79,7 @@ const EXPECTED_NONSPONSORED_URLBAR_RESULT = {
     sponsoredIabCategory: "5 - Education",
     helpUrl: QuickSuggest.HELP_URL,
     helpL10n: {
-      id: "urlbar-result-menu-learn-more-about-firefox-suggest",
+      id: "urlbar-result-menu-learn-more2",
     },
     isBlockable: true,
     source: "remote-settings",
@@ -3176,7 +3172,8 @@ async function doTimedCallbacks(callbacksBySecond) {
  *   The results that are expected from the search.
  */
 async function checkSearch({ name, searchString, expectedResults }) {
-  let quickSuggestProviderInstance = UrlbarProvidersManager.getProvider(
+  let providersManager = ProvidersManager.getInstanceForSap("urlbar");
+  let quickSuggestProviderInstance = providersManager.getProvider(
     UrlbarProviderQuickSuggest.name
   );
   info(`Preparing search "${name}" with search string "${searchString}"`);
@@ -3197,12 +3194,9 @@ async function checkSearch({ name, searchString, expectedResults }) {
   if (quickSuggestProviderInstance._resultFromLastQuery) {
     quickSuggestProviderInstance._resultFromLastQuery.isVisible = true;
   }
-  const controller = UrlbarTestUtils.newMockController({
+  const controller = UrlbarTestUtils.mockChildController({
     input: {
       isPrivate: true,
-      onFirstResult() {
-        return false;
-      },
       getSearchSource() {
         return "dummy-search-source";
       },

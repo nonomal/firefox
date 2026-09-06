@@ -5,10 +5,7 @@
 
 add_setup(async () => {
   await SpecialPowers.pushPrefEnv({
-    set: [
-      ["dom.require_user_interaction_for_beforeunload", false],
-      ["test.wait300msAfterTabSwitch", true],
-    ],
+    set: [["dom.require_user_interaction_for_beforeunload", false]],
   });
 
   await initGroupDatabase();
@@ -60,7 +57,7 @@ const launchDialog = async tab => {
   let dialogMgr = gBrowser
     .getTabDialogBox(tab.linkedBrowser)
     .getContentDialogManager();
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => dialogMgr._dialogs.length,
     "Waiting for the beforeunload dialog to be displayed"
   );
@@ -103,7 +100,7 @@ const dismissDialog = async (tab, dialog, shouldAccept) => {
     cancelButton.click();
   }
 
-  await BrowserTestUtils.waitForCondition(
+  await TestUtils.waitForCondition(
     () => !dialogMgr.dialogs.length,
     "Waiting for the beforeunload dialog to be removed"
   );
@@ -112,7 +109,7 @@ const dismissDialog = async (tab, dialog, shouldAccept) => {
 const cleanup = async (tab, cardSelector) => {
   // Instead of manually inserting text into the input in the content document,
   // just disconnect the beforeunload listener and close the tab.
-  await tab.linkedBrowser.ownerGlobal.SpecialPowers.spawn(
+  await tab.linkedBrowser.documentGlobal.SpecialPowers.spawn(
     tab.linkedBrowser,
     [cardSelector],
     async selector => {

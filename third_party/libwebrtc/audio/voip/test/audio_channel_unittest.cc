@@ -14,10 +14,10 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 
 #include "absl/functional/any_invocable.h"
-#include "api/array_view.h"
 #include "api/audio/audio_frame.h"
 #include "api/audio/audio_mixer.h"
 #include "api/audio_codecs/audio_decoder_factory.h"
@@ -36,6 +36,7 @@
 #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
 #include "system_wrappers/include/clock.h"
+#include "test/create_test_field_trials.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
 #include "test/mock_transport.h"
@@ -43,7 +44,6 @@
 namespace webrtc {
 namespace {
 
-using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
 using ::testing::Unused;
@@ -62,6 +62,7 @@ class AudioChannelTest : public ::testing::Test {
       : fake_clock_(kStartTime),
         wave_generator_(1000.0, kAudioLevel),
         env_(CreateEnvironment(
+            CreateTestFieldTrialsPtr(),
             &fake_clock_,
             std::make_unique<MockTaskQueueFactory>(&task_queue_))) {
     audio_mixer_ = AudioMixerImpl::Create();
@@ -121,11 +122,11 @@ class AudioChannelTest : public ::testing::Test {
 // Resulted RTP packet is looped back into AudioChannel and gets decoded into
 // audio frame to see if it has some signal to indicate its validity.
 TEST_F(AudioChannelTest, PlayRtpByLocalLoop) {
-  auto loop_rtp = [&](ArrayView<const uint8_t> packet, Unused) {
+  auto loop_rtp = [&](std::span<const uint8_t> packet, Unused) {
     audio_channel_->ReceivedRTPPacket(packet);
     return true;
   };
-  EXPECT_CALL(transport_, SendRtp).WillOnce(Invoke(loop_rtp));
+  EXPECT_CALL(transport_, SendRtp).WillOnce(loop_rtp);
 
   auto audio_sender = audio_channel_->GetAudioSender();
   audio_sender->SendAudioData(GetAudioFrame(0));
@@ -146,11 +147,11 @@ TEST_F(AudioChannelTest, PlayRtpByLocalLoop) {
 // Validate assigned local SSRC is resulted in RTP packet.
 TEST_F(AudioChannelTest, VerifyLocalSsrcAsAssigned) {
   RtpPacketReceived rtp;
-  auto loop_rtp = [&](ArrayView<const uint8_t> packet, Unused) {
+  auto loop_rtp = [&](std::span<const uint8_t> packet, Unused) {
     rtp.Parse(packet);
     return true;
   };
-  EXPECT_CALL(transport_, SendRtp).WillOnce(Invoke(loop_rtp));
+  EXPECT_CALL(transport_, SendRtp).WillOnce(loop_rtp);
 
   auto audio_sender = audio_channel_->GetAudioSender();
   audio_sender->SendAudioData(GetAudioFrame(0));
@@ -161,11 +162,11 @@ TEST_F(AudioChannelTest, VerifyLocalSsrcAsAssigned) {
 
 // Check metrics after processing an RTP packet.
 TEST_F(AudioChannelTest, TestIngressStatistics) {
-  auto loop_rtp = [&](ArrayView<const uint8_t> packet, Unused) {
+  auto loop_rtp = [&](std::span<const uint8_t> packet, Unused) {
     audio_channel_->ReceivedRTPPacket(packet);
     return true;
   };
-  EXPECT_CALL(transport_, SendRtp).WillRepeatedly(Invoke(loop_rtp));
+  EXPECT_CALL(transport_, SendRtp).WillRepeatedly(loop_rtp);
 
   auto audio_sender = audio_channel_->GetAudioSender();
   audio_sender->SendAudioData(GetAudioFrame(0));
@@ -238,16 +239,16 @@ TEST_F(AudioChannelTest, TestIngressStatistics) {
 
 // Check ChannelStatistics metric after processing RTP and RTCP packets.
 TEST_F(AudioChannelTest, TestChannelStatistics) {
-  auto loop_rtp = [&](ArrayView<const uint8_t> packet, Unused) {
+  auto loop_rtp = [&](std::span<const uint8_t> packet, Unused) {
     audio_channel_->ReceivedRTPPacket(packet);
     return true;
   };
-  auto loop_rtcp = [&](ArrayView<const uint8_t> packet, Unused) {
+  auto loop_rtcp = [&](std::span<const uint8_t> packet, Unused) {
     audio_channel_->ReceivedRTCPPacket(packet);
     return true;
   };
-  EXPECT_CALL(transport_, SendRtp).WillRepeatedly(Invoke(loop_rtp));
-  EXPECT_CALL(transport_, SendRtcp).WillRepeatedly(Invoke(loop_rtcp));
+  EXPECT_CALL(transport_, SendRtp).WillRepeatedly(loop_rtp);
+  EXPECT_CALL(transport_, SendRtcp).WillRepeatedly(loop_rtcp);
 
   // Simulate microphone giving audio frame (10 ms). This will trigger transport
   // to send RTP as handled in loop_rtp above.
@@ -307,7 +308,7 @@ TEST_F(AudioChannelTest, RttIsAvailableAfterChangeOfRemoteSsrc) {
   auto send_recv_rtp = [&](scoped_refptr<AudioChannel> rtp_sender,
                            scoped_refptr<AudioChannel> rtp_receiver) {
     // Setup routing logic via transport_.
-    auto route_rtp = [&](ArrayView<const uint8_t> packet, Unused) {
+    auto route_rtp = [&](std::span<const uint8_t> packet, Unused) {
       rtp_receiver->ReceivedRTPPacket(packet);
       return true;
     };
@@ -329,7 +330,7 @@ TEST_F(AudioChannelTest, RttIsAvailableAfterChangeOfRemoteSsrc) {
   auto send_recv_rtcp = [&](scoped_refptr<AudioChannel> rtcp_sender,
                             scoped_refptr<AudioChannel> rtcp_receiver) {
     // Setup routing logic via transport_.
-    auto route_rtcp = [&](ArrayView<const uint8_t> packet, Unused) {
+    auto route_rtcp = [&](std::span<const uint8_t> packet, Unused) {
       rtcp_receiver->ReceivedRTCPPacket(packet);
       return true;
     };

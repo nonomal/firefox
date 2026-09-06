@@ -42,6 +42,7 @@ mr1-return-to-amo-add-extension-label = Add { $addon-name }
 onboarding-welcome-steps-indicator-label =
   .aria-label = Progress: step { $current } of { $total }
 
+
 # This button will open system settings to turn on prefers-reduced-motion
 mr1-onboarding-reduce-motion-button-label = Turn off animations
 
@@ -66,6 +67,15 @@ mr1-onboarding-theme-label-dark = Dark
 mr1-onboarding-theme-label-alpenglow = Alpenglow
 
 onboarding-theme-primary-button-label = Done
+
+## Accessible labels for the icon-only play/pause toggle that controls animated
+## illustrations on the onboarding screen. The button replaces the animation
+## with a static image when clicked.
+
+onboarding-animation-pause-button =
+  .aria-label = Pause animation
+onboarding-animation-play-button =
+  .aria-label = Play animation
 
 ## Please make sure to split the content of the title attribute into lines whose
 ## width corresponds to about 40 Latin characters, to ensure that the tooltip
@@ -435,6 +445,11 @@ onboarding-checklist-pin = Pin { -brand-short-name } to taskbar
 onboarding-checklist-import = Import from previous browser
 onboarding-checklist-extension = Add an extension
 onboarding-checklist-sign-up = Sign up or sign in to your account
+onboarding-checklist-minimize =
+    .label = Minimize
+onboarding-checklist-remove =
+    .label = Remove checklist
+onboarding-checklist-remove-2 = Remove checklist
 
 ## Tab Groups feature onboarding strings
 
@@ -548,6 +563,8 @@ restore-from-backup-title = Let’s get { -brand-short-name } back how you like 
 restore-from-backup-subtitle = Recover all your bookmarks, history, and other data to get back to browsing.
 restore-from-backup-secondary-button = Don’t restore
 
+multiple-backups-info-tile = <strong>Multiple backup files found.</strong> The most recent file is selected. Restore other profiles in <a data-l10n-name="settings-label">Settings.</a>
+
 ## Restored from Backup spotlight
 
 restored-from-backup-success-title = We’re back! Your { -brand-short-name } data has been restored.
@@ -573,3 +590,58 @@ onboarding-personalization-motivation-title = Which features of { -brand-short-n
 onboarding-personalization-motivation-privacy-option = Privacy and Security
 onboarding-personalization-motivation-productivity-option = Productivity
 onboarding-personalization-motivation-other-option = Other
+
+## Onboarding 2026 brand refresh
+
+onboarding-refresh-pin-set-default-subtitle = We protect your data and block companies from spying on your clicks — automatically.
+# "safe paws" is a play on "safe hands", meaning you're being well taken care of or protected
+# If it doesn’t translate well, you can use the alternative: “You’re safe with Firefox.”
+onboarding-refresh-pin-set-default-title = You’re in safe paws
+onboarding-refresh-import-subtitle = Bring over your passwords, bookmarks, history and more.
+onboarding-refresh-import-title = Make { -brand-short-name } feel more like home
+onboarding-refresh-onboarding-addons-subtitle = Extensions are tiny apps that let you customize { -brand-short-name }. They can power up your privacy, enhance productivity, change the way { -brand-short-name } looks, and so much more.
+# "Give your browsing a boost" means to enhance or improve the browsing experience
+onboarding-refresh-onboarding-addons-title = Give your browsing a boost
+onboarding-refresh-sync-subtitle = Grab bookmarks, passwords, and more everywhere you’re signed in to { -brand-short-name }. Plus, your data is encrypted so only you can see it.
+onboarding-refresh-sync-title = Go anywhere. Sync everything.
+onboarding-refresh-gratitude-subtitle = Thank you for using { -brand-short-name }, the only major browser backed by a non-profit. With your support, we’re working to make the internet safer and more accessible for everyone.
+# "has your back" is an idiom suggesting support and protection
+onboarding-refresh-gratitude-title = { -brand-short-name } has your back
+
+## Smart window switcher callout
+
+smartwindow-switcher-callout = Switch between Smart and Classic Windows anytime.
+
+## Smart Window ToU modal
+
+# Existing users
+smartwindow-existing-user-fx-tou-title = { -brand-product-name } Terms of Use
+smartwindow-existing-user-fx-tou-body = To use { -smart-window-brand-name }, please accept the <a data-l10n-name="terms_of_use">Terms of Use</a> and updated <a data-l10n-name="privacy_notice">Privacy Notice</a>.
+smartwindow-existing-user-fx-tou-accept = Accept
+smartwindow-existing-user-fx-tou-go-back = Go back
+
+## Smart Window about:welcome screen
+
+smartwindow-onboarding-title = Make { -smart-window-brand-name } your go-to
+smartwindow-onboarding-subtitle = Summarize, compare, and ask questions without missing a beat.
+smartwindow-onboarding-primary-button = Continue
+# Kit is referring to the Firefox mascot
+smartwindow-onboarding-image-alt =
+  .aria-label = { -brand-product-name } mascot (Kit) with star props
+
+## Smart Window Sidebar Auto-Open Pref
+
+smartwindow-sidebar-auto-open-callout-title = Want to keep the assistant closed?
+smartwindow-sidebar-auto-open-callout-body = You can still open it whenever you need it.
+smartwindow-sidebar-auto-open-callout-accept = Yes, keep closed
+smartwindow-sidebar-auto-open-callout-dismiss = No thanks
+smartwindow-sidebar-auto-open-callout-accepted-title = The assistant will stay closed
+smartwindow-sidebar-auto-open-callout-accepted-subtitle = Use Ask to open it on any page. Change this anytime in <a data-l10n-name="settings">Settings</a>.
+smartwindow-sidebar-auto-open-callout-rejected-title = Got it
+smartwindow-sidebar-auto-open-callout-rejected-subtitle = If you change your mind, you can update the default in <a data-l10n-name="settings">Settings</a> anytime.
+
+## Theme Picker screen strings
+
+onboarding-theme-picker-title = Pick a theme
+onboarding-theme-picker-subtitle = Bring a little more color into { -brand-short-name }.
+onboarding-theme-picker-button-label = Save and continue

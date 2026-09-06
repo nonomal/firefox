@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -85,14 +83,12 @@ SVGPathSegment::SVGPathSegment(SVGPathElement* aSVGPathElement,
       break;
     }
     case StylePathCommand::Tag::HLine:
-      mCommand.AssignLiteral(aCommand.h_line.by_to == StyleByTo::To ? "H"
-                                                                    : "h");
-      mValues.AppendElement(aCommand.h_line.x);
+      mCommand.AssignLiteral(aCommand.h_line.x.IsToPosition() ? "H" : "h");
+      mValues.AppendElement(aCommand.h_line.x.ToGfxCoord());
       break;
     case StylePathCommand::Tag::VLine:
-      mCommand.AssignLiteral(aCommand.v_line.by_to == StyleByTo::To ? "V"
-                                                                    : "v");
-      mValues.AppendElement(aCommand.v_line.y);
+      mCommand.AssignLiteral(aCommand.v_line.y.IsToPosition() ? "V" : "v");
+      mValues.AppendElement(aCommand.v_line.y.ToGfxCoord());
       break;
     case StylePathCommand::Tag::SmoothCubic:
       mCommand.AssignLiteral(aCommand.smooth_cubic.point.IsToPosition() ? "S"

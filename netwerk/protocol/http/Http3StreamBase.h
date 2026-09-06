@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,9 +5,9 @@
 #ifndef mozilla_net_Http3StreamBase_h
 #define mozilla_net_Http3StreamBase_h
 
-#include "nsAHttpTransaction.h"
 #include "ARefBase.h"
 #include "mozilla/WeakPtr.h"
+#include "nsAHttpTransaction.h"
 #include "nsIClassOfService.h"
 
 namespace mozilla::net {
@@ -47,6 +46,11 @@ class Http3StreamBase : public SupportsWeakPtr, public ARefBase {
   virtual void Close(nsresult aResult) = 0;
 
   nsAHttpTransaction* Transaction() { return mTransaction; }
+  // Replace the stream's backing transaction. Used by the HE / 0-RTT
+  // flow when a HappyEyeballsTransaction shim is adopted by the real
+  // nsHttpTransaction so the session's stream and its hash both point
+  // at the real txn (see Http3Session::SwapTransaction).
+  void SetTransaction(nsAHttpTransaction* aTrans) { mTransaction = aTrans; }
 
   // Mirrors nsAHttpTransaction
   virtual bool Do0RTT() { return false; }
@@ -58,6 +62,11 @@ class Http3StreamBase : public SupportsWeakPtr, public ARefBase {
 
   void SetInTxQueue(bool aValue) { mInTxQueue = aValue; }
   bool IsInTxQueue() const { return mInTxQueue; }
+
+  void SetBlockedByFlowControl(bool aValue) { mBlockedByFlowControl = aValue; }
+  bool BlockedByFlowControl() const { return mBlockedByFlowControl; }
+
+  bool Closed() const { return mClosed; }
 
  protected:
   ~Http3StreamBase();
@@ -71,6 +80,8 @@ class Http3StreamBase : public SupportsWeakPtr, public ARefBase {
   bool mFin{false};
   bool mResetRecv{false};
   bool mInTxQueue{false};
+  bool mBlockedByFlowControl{false};
+  bool mClosed{false};
 };
 
 }  // namespace mozilla::net

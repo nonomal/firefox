@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+// @ts-nocheck - TODO - Remove this to type check this file.
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(
   lazy,
   {
     ONNXPipeline: "chrome://global/content/ml/backends/ONNXPipeline.mjs",
-    LlamaPipeline: "chrome://global/content/ml/backends/LlamaPipeline.mjs",
     LlamaCppPipeline:
       "chrome://global/content/ml/backends/LlamaCppPipeline.mjs",
     PipelineOptions: "chrome://global/content/ml/EngineProcess.sys.mjs",
@@ -42,9 +43,6 @@ export async function getBackend(consumer, wasm, options) {
     case "onnx-native":
       factory = lazy.ONNXPipeline.initialize;
       break;
-    case "wllama":
-      factory = lazy.LlamaPipeline.initialize;
-      break;
     case "llama.cpp":
       factory = lazy.LlamaCppPipeline.initialize;
       break;
@@ -58,8 +56,23 @@ export async function getBackend(consumer, wasm, options) {
       factory = lazy.ONNXPipeline.initialize;
   }
 
+  let initStart = ChromeUtils.now();
+
   const BackendErrorWithName = err => new BackendError(backendName, err);
-  return await factory(consumer, wasm, pipelineOptions, BackendErrorWithName);
+  const pipeline = await factory(
+    consumer,
+    wasm,
+    pipelineOptions,
+    BackendErrorWithName
+  );
+
+  ChromeUtils.addProfilerMarker(
+    "MLEngine:Pipeline",
+    { startTime: initStart },
+    `Initialize ${backendName} backend`
+  );
+
+  return pipeline;
 }
 
 /**

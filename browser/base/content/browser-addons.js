@@ -1,5 +1,4 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -19,6 +18,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   OriginControls: "resource://gre/modules/ExtensionPermissions.sys.mjs",
   PERMISSION_L10N: "resource://gre/modules/ExtensionPermissionMessages.sys.mjs",
   SITEPERMS_ADDON_TYPE:
+    "resource://gre/modules/addons/siteperms-addon-utils.sys.mjs",
+  getSitePermsInstallPromptStringIds:
     "resource://gre/modules/addons/siteperms-addon-utils.sys.mjs",
 });
 ChromeUtils.defineLazyGetter(lazy, "l10n", function () {
@@ -371,7 +372,7 @@ customElements.define(
         domainItem.textContent = domain;
         domainsList.appendChild(domainItem);
       }
-      const { DocumentFragment } = this.ownerGlobal;
+      const { DocumentFragment } = this.documentGlobal;
       const fragment = new DocumentFragment();
       fragment.append(label);
       fragment.append(domainsList);
@@ -441,13 +442,8 @@ customElements.define(
     #setAllowButtonEnabled(allowed) {
       let disabled = !allowed;
       // "mainactiondisabled" mirrors the "disabled" boolean attribute of the
-      // "Allow" button. toggleAttribute("mainactiondisabled", disabled) cannot
-      // be used due to bug 1938481.
-      if (disabled) {
-        this.setAttribute("mainactiondisabled", "true");
-      } else {
-        this.removeAttribute("mainactiondisabled");
-      }
+      // "Allow" button.
+      this.toggleAttribute("mainactiondisabled", disabled);
 
       // The "mainactiondisabled" attribute may also be toggled by the
       // PopupNotifications._setNotificationUIState() method, which can be
@@ -824,7 +820,6 @@ customElements.define(
   class MozAddonInstalledNotification extends customElements.get(
     "popupnotification"
   ) {
-    #shouldIgnoreCheckboxStateChangeEvent = false;
     #browserActionWidgetObserver;
     connectedCallback() {
       this.descriptionEl = this.querySelector("#addon-install-description");
@@ -833,13 +828,13 @@ customElements.define(
       );
 
       this.addEventListener("click", this);
-      this.pinExtensionEl.addEventListener("CheckboxStateChange", this);
+      this.pinExtensionEl.addEventListener("command", this);
       this.#browserActionWidgetObserver?.startObserving();
     }
 
     disconnectedCallback() {
       this.removeEventListener("click", this);
-      this.pinExtensionEl.removeEventListener("CheckboxStateChange", this);
+      this.pinExtensionEl.removeEventListener("command", this);
       this.#browserActionWidgetObserver?.stopObserving();
     }
 
@@ -867,10 +862,8 @@ customElements.define(
           }
           break;
         }
-        case "CheckboxStateChange":
-          // CheckboxStateChange fires whenever the checked value changes.
-          // Ignore the event if triggered by us instead of the user.
-          if (!this.#shouldIgnoreCheckboxStateChangeEvent) {
+        case "command":
+          if (target == this.pinExtensionEl) {
             this.#handlePinnedCheckboxStateChange();
           }
           break;
@@ -954,9 +947,7 @@ customElements.define(
         // We only support AREA_ADDONS and AREA_NAVBAR for now.
         return;
       }
-      this.#shouldIgnoreCheckboxStateChangeEvent = true;
       this.pinExtensionEl.checked = shouldPinToToolbar;
-      this.#shouldIgnoreCheckboxStateChangeEvent = false;
       this.pinExtensionEl.hidden = false;
     }
 
@@ -1008,7 +999,7 @@ function removeNotificationOnEnd(notification, installs) {
   }
 }
 
-function buildNotificationAction(msg, callback) {
+function buildNotificationAction(msg, callback, options = {}) {
   let label = "";
   let accessKey = "";
   for (let { name, value } of msg.attributes) {
@@ -1021,7 +1012,11 @@ function buildNotificationAction(msg, callback) {
         break;
     }
   }
-  return { label, accessKey, callback };
+  const action = { label, accessKey, callback };
+  if (options.disableSecurityDelay) {
+    action.disableSecurityDelay = true;
+  }
+  return action;
 }
 
 var gXPInstallObserver = {
@@ -1182,7 +1177,9 @@ var gXPInstallObserver = {
       "addon-install-cancel-button",
     ]);
     const action = buildNotificationAction(acceptMsg, acceptInstallation);
-    const secondaryAction = buildNotificationAction(cancelMsg, () => {});
+    const secondaryAction = buildNotificationAction(cancelMsg, () => {}, {
+      disableSecurityDelay: true,
+    });
 
     if (height) {
       notification.style.minHeight = height + "px";
@@ -1238,7 +1235,7 @@ var gXPInstallObserver = {
       PopupNotifications.getNotification(id, browser)
     ).filter(notification => notification != null);
 
-    PopupNotifications.remove(notifications, true);
+    PopupNotifications.remove(notifications, /* withoutUserResponse = */ true);
 
     return !!notifications.length;
   },
@@ -1263,6 +1260,7 @@ var gXPInstallObserver = {
     Services.console.logMessage(consoleMsg);
   },
 
+  // eslint-disable-next-line complexity
   async observe(aSubject, aTopic) {
     var installInfo = aSubject.wrappedJSObject;
     var browser = installInfo.browser;
@@ -1271,6 +1269,17 @@ var gXPInstallObserver = {
     if (!browser || !gBrowser.browsers.includes(browser)) {
       return;
     }
+
+    const cancelInstallation = () => {
+      for (let install of installInfo.installs) {
+        if (install.state != AddonManager.STATE_CANCELLED) {
+          install.cancel();
+        }
+      }
+      if (installInfo.cancel) {
+        installInfo.cancel();
+      }
+    };
 
     // Make notifications persistent
     var options = {
@@ -1299,7 +1308,11 @@ var gXPInstallObserver = {
           action = buildNotificationAction(disabledMsg, () => {
             Services.prefs.setBoolPref("xpinstall.enabled", true);
           });
-          secondaryActions = [buildNotificationAction(cancelMsg, () => {})];
+          secondaryActions = [
+            buildNotificationAction(cancelMsg, () => {}, {
+              disableSecurityDelay: true,
+            }),
+          ];
         }
 
         PopupNotifications.show(
@@ -1374,12 +1387,22 @@ var gXPInstallObserver = {
         let hasHost = false;
         let headerId, msgId;
         if (isSitePermissionAddon) {
-          // At present, WebMIDI is the only consumer of the site permission
-          // add-on infrastructure, and so we can hard-code a midi string here.
-          // If and when we use it for other things, we'll need to plumb that
-          // information through. See bug 1826747.
-          headerId = "site-permission-install-first-prompt-midi-header";
-          msgId = "site-permission-install-first-prompt-midi-message";
+          const permissionType =
+            installInfo.installs[0].addon.sitePermissions?.[0];
+          const stringIds =
+            lazy.getSitePermsInstallPromptStringIds(permissionType);
+
+          if (stringIds?.header && stringIds?.message) {
+            headerId = stringIds.header;
+            msgId = stringIds.message;
+          } else {
+            console.error(
+              `Unexpected missing or incomplete fluentIds for site permission "${permissionType}", ` +
+                "siteperms-addon-utils.sys.mjs should be updated."
+            );
+            cancelInstallation();
+            return;
+          }
         } else if (options.displayURI) {
           // PopupNotifications.show replaces <> with options.name.
           headerId = { id: "xpinstall-prompt-header", args: { host: "<>" } };
@@ -1461,38 +1484,35 @@ var gXPInstallObserver = {
             "install",
             SitePermissions.BLOCK
           );
-          for (let install of installInfo.installs) {
-            if (install.state != AddonManager.STATE_CANCELLED) {
-              install.cancel();
-            }
-          }
-          if (installInfo.cancel) {
-            installInfo.cancel();
-          }
+          cancelInstallation();
         };
 
         const declineActions = [
-          buildNotificationAction(dontAllowMsg, () => {
-            for (let install of installInfo.installs) {
-              if (install.state != AddonManager.STATE_CANCELLED) {
-                install.cancel();
-              }
-            }
-            if (installInfo.cancel) {
-              installInfo.cancel();
-            }
+          buildNotificationAction(dontAllowMsg, cancelInstallation, {
+            disableSecurityDelay: true,
           }),
-          buildNotificationAction(neverAllowMsg, neverAllowCallback),
+          buildNotificationAction(neverAllowMsg, neverAllowCallback, {
+            disableSecurityDelay: true,
+          }),
         ];
 
         if (isSitePermissionAddon) {
           // Restrict this to site permission add-ons for now pending a decision
           // from product about how to approach this for extensions.
+          const permissionType =
+            installInfo.installs[0].addon.sitePermissions?.[0];
           declineActions.push(
-            buildNotificationAction(neverAllowAndReportMsg, () => {
-              AMTelemetry.recordSuspiciousSiteEvent({ displayURI });
-              neverAllowCallback();
-            })
+            buildNotificationAction(
+              neverAllowAndReportMsg,
+              () => {
+                AMTelemetry.recordSuspiciousSiteEvent({
+                  displayURI,
+                  permissionType,
+                });
+                neverAllowCallback();
+              },
+              { disableSecurityDelay: true }
+            )
           );
         }
 
@@ -1543,13 +1563,17 @@ var gXPInstallObserver = {
         const action = buildNotificationAction(acceptMsg, () => {});
         action.disabled = true;
 
-        const secondaryAction = buildNotificationAction(cancelMsg, () => {
-          for (let install of installInfo.installs) {
-            if (install.state != AddonManager.STATE_CANCELLED) {
-              install.cancel();
+        const secondaryAction = buildNotificationAction(
+          cancelMsg,
+          () => {
+            for (let install of installInfo.installs) {
+              if (install.state != AddonManager.STATE_CANCELLED) {
+                install.cancel();
+              }
             }
-          }
-        });
+          },
+          { disableSecurityDelay: true }
+        );
 
         let notification = PopupNotifications.show(
           browser,
@@ -1586,7 +1610,11 @@ var gXPInstallObserver = {
           let messageString;
           if (
             install.addon &&
-            !Services.policies.mayInstallAddon(install.addon)
+            !Services.policies.mayInstallAddon({
+              id: install.addon.id,
+              type: install.addon.type,
+              permissions: install.addon.userPermissions?.permissions,
+            })
           ) {
             messageString = lazy.l10n.formatValueSync(
               "addon-installation-blocked-by-policy",
@@ -2006,6 +2034,12 @@ var gUnifiedExtensions = {
   MESSAGE_DECK_INDEX_HOVER: 1,
   MESSAGE_DECK_INDEX_MENU_HOVER: 2,
 
+  // Mutually exclusive classes set on the extensions panel empty state's <img>,
+  // selecting which illustration to show when the extensions panel is empty
+  // (see onPanelViewShowing, _updateEmptyStateBox and unified-extensions.css).
+  EMPTY_STATE_ILLUSTRATION_CLASS: "extensions-emptypanel-state",
+  EMPTY_STATE_ILLUSTRATION_ONBOARDING_CLASS: "extensions-onboardingpanel-state",
+
   init() {
     if (this._initialized) {
       return;
@@ -2415,57 +2449,63 @@ var gUnifiedExtensions = {
       list.appendChild(item);
     }
 
-    const emptyStateBox = panelview.querySelector(
-      "#unified-extensions-empty-state"
-    );
     if (this.hasExtensionsInPanel(policies)) {
       // Any of the extension lists are non-empty.
-      emptyStateBox.hidden = true;
+      this._updateEmptyStateBox({ panelview, hidden: true });
     } else if (this.isPrivateWindowMissingExtensionsWithoutPBMAccess()) {
-      document.l10n.setAttributes(
-        emptyStateBox.querySelector("h2"),
-        "unified-extensions-empty-reason-private-browsing-not-allowed"
-      );
-      document.l10n.setAttributes(
-        emptyStateBox.querySelector("description"),
-        "unified-extensions-empty-content-explain-enable2"
-      );
-      emptyStateBox.hidden = false;
+      this._updateEmptyStateBox({
+        panelview,
+        hidden: false,
+        headingL10nId:
+          "unified-extensions-empty-reason-private-browsing-not-allowed",
+        descriptionL10nId: "unified-extensions-empty-content-explain-enable2",
+      });
       this.isAtLeastOneExtensionWithPBMOptIn().then(result => {
-        // The "enable" message is somewhat misleading when the user cannot
-        // enable the extension, show a generic message instead (bug 1992179).
         if (!result) {
-          document.l10n.setAttributes(
-            emptyStateBox.querySelector("description"),
-            "unified-extensions-empty-content-explain-manage2"
-          );
+          this._updateEmptyStateBox({
+            panelview,
+            hidden: false,
+            headingL10nId:
+              "unified-extensions-empty-reason-private-browsing-not-allowed",
+            // The "enable" message is somewhat misleading when the user
+            // cannot enable the extension, show a generic message instead
+            // (bug 1992179).
+            descriptionL10nId:
+              "unified-extensions-empty-content-explain-manage2",
+          });
         }
       });
     } else {
-      emptyStateBox.hidden = true;
+      this._updateEmptyStateBox({ panelview, hidden: true });
       this.getDisabledExtensionsInfo().then(disabledExtensionsInfo => {
         if (disabledExtensionsInfo.isAnyDisabled) {
-          document.l10n.setAttributes(
-            emptyStateBox.querySelector("h2"),
-            "unified-extensions-empty-reason-extension-not-enabled"
-          );
-          document.l10n.setAttributes(
-            emptyStateBox.querySelector("description"),
-            disabledExtensionsInfo.isAnyEnableable
+          this._updateEmptyStateBox({
+            panelview,
+            hidden: false,
+            headingL10nId:
+              "unified-extensions-empty-reason-extension-not-enabled",
+            descriptionL10nId: disabledExtensionsInfo.isAnyEnableable
               ? "unified-extensions-empty-content-explain-enable2"
-              : "unified-extensions-empty-content-explain-manage2"
-          );
-          emptyStateBox.hidden = false;
+              : "unified-extensions-empty-content-explain-manage2",
+          });
         } else if (!policies.length) {
-          document.l10n.setAttributes(
-            emptyStateBox.querySelector("h2"),
-            "unified-extensions-empty-reason-zero-extensions-onboarding"
-          );
-          document.l10n.setAttributes(
-            emptyStateBox.querySelector("description"),
-            "unified-extensions-empty-content-explain-extensions-onboarding"
-          );
-          emptyStateBox.hidden = false;
+          this._updateEmptyStateBox({
+            panelview,
+            hidden: false,
+            onboarding: true,
+            headingL10nId:
+              "unified-extensions-empty-reason-zero-extensions-onboarding2",
+            descriptionL10nId:
+              "unified-extensions-empty-content-explain-extensions-onboarding2",
+          });
+
+          // Without the discovery pane there is nowhere to send the user, so
+          // keep the "Manage Extensions" button instead.
+          if (
+            !Services.prefs.getBoolPref("extensions.getAddons.showPane", true)
+          ) {
+            return;
+          }
 
           // Replace the "Manage Extensions" button with "Discover Extensions".
           // We add the "Discover Extensions" button, and "Manage Extensions"
@@ -2783,6 +2823,14 @@ var gUnifiedExtensions = {
     await this.togglePanel(event, reason);
   },
 
+  /**
+   * @returns {boolean} Whether we are showing the Extensions Panel, or another
+   * (browserAction) panel anchored to the extensions button.
+   */
+  isPanelOpen() {
+    return this._button?.open ?? false;
+  },
+
   updateContextMenu(menu, event) {
     // When the context menu is open, `onpopupshowing` is called when menu
     // items open sub-menus. We don't want to update the context menu in this
@@ -2831,7 +2879,7 @@ var gUnifiedExtensions = {
     if (forBrowserAction) {
       let area = CustomizableUI.getPlacementOfWidget(widgetId).area;
       let inToolbar = area != CustomizableUI.AREA_ADDONS;
-      pinButton.setAttribute("checked", inToolbar);
+      pinButton.toggleAttribute("checked", inToolbar);
 
       const placement = CustomizableUI.getPlacementOfWidget(widgetId);
       const notInPanel = placement?.area !== CustomizableUI.AREA_ADDONS;
@@ -2918,14 +2966,14 @@ var gUnifiedExtensions = {
   },
 
   async onPinToToolbarChange(menu, event) {
-    let shouldPinToToolbar = event.target.getAttribute("checked") == "true";
+    let shouldPinToToolbar = event.target.hasAttribute("checked");
     // Revert the checkbox back to its original state. This is because the
     // addon context menu handlers are asynchronous, and there seems to be
     // a race where the checkbox state won't get set in time to show the
     // right state. So we err on the side of caution, and presume that future
     // attempts to open this context menu on an extension button will show
     // the same checked state that we started in.
-    event.target.setAttribute("checked", !shouldPinToToolbar);
+    event.target.toggleAttribute("checked", !shouldPinToToolbar);
 
     let widgetId = this._getWidgetId(menu);
     if (!widgetId) {
@@ -3017,7 +3065,7 @@ var gUnifiedExtensions = {
   onWidgetOverflow(aNode) {
     // We register a CUI listener for each window so we make sure that we
     // handle the event for the right window here.
-    if (window !== aNode.ownerGlobal) {
+    if (window !== aNode.documentGlobal) {
       return;
     }
 
@@ -3027,7 +3075,7 @@ var gUnifiedExtensions = {
   onWidgetUnderflow(aNode) {
     // We register a CUI listener for each window so we make sure that we
     // handle the event for the right window here.
-    if (window !== aNode.ownerGlobal) {
+    if (window !== aNode.documentGlobal) {
       return;
     }
 
@@ -3037,7 +3085,7 @@ var gUnifiedExtensions = {
   onAreaNodeRegistered(aArea, aContainer) {
     // We register a CUI listener for each window so we make sure that we
     // handle the event for the right window here.
-    if (window !== aContainer.ownerGlobal) {
+    if (window !== aContainer.documentGlobal) {
       return;
     }
 
@@ -3197,6 +3245,40 @@ var gUnifiedExtensions = {
     return messageBar;
   },
 
+  _updateEmptyStateBox({
+    panelview,
+    hidden,
+    onboarding = false,
+    headingL10nId,
+    descriptionL10nId,
+  }) {
+    const emptyStateBox = panelview.querySelector(
+      "#unified-extensions-empty-state"
+    );
+
+    if (!hidden) {
+      document.l10n.setAttributes(
+        emptyStateBox.querySelector("h2"),
+        headingL10nId
+      );
+      document.l10n.setAttributes(
+        emptyStateBox.querySelector("description"),
+        descriptionL10nId
+      );
+
+      const img = emptyStateBox.querySelector("img");
+      img.classList.toggle(
+        this.EMPTY_STATE_ILLUSTRATION_ONBOARDING_CLASS,
+        onboarding
+      );
+      img.classList.toggle(this.EMPTY_STATE_ILLUSTRATION_CLASS, !onboarding);
+    }
+
+    emptyStateBox.hidden = hidden;
+
+    return emptyStateBox;
+  },
+
   _createDiscoverButton() {
     const discoverButton = document.createElement("moz-button");
     discoverButton.id = "unified-extensions-discover-extensions";
@@ -3208,20 +3290,9 @@ var gUnifiedExtensions = {
     );
 
     discoverButton.addEventListener("click", () => {
-      if (
-        // The "Discover Extensions" button is only shown if the user has not
-        // installed any extension. In that case, we direct to the discopane
-        // in about:addons. If the discopane is disabled, open the default
-        // view (Extensions list) instead. This view shows a link to AMO when
-        // the user does not have any extensions installed.
-        Services.prefs.getBoolPref("extensions.getAddons.showPane", true)
-      ) {
-        BrowserAddonUI.openAddonsMgr("addons://list/discover");
-      } else {
-        BrowserAddonUI.openAddonsMgr("addons://list/extension");
-      }
-      // Close panel.
-      this.togglePanel();
+      BrowserAddonUI.openAddonsMgr("addons://list/discover");
+      // The panel closes automatically when the `<moz-button>` is pressed since
+      // the `closepanel` attribute was not set to `none`.
     });
 
     return discoverButton;

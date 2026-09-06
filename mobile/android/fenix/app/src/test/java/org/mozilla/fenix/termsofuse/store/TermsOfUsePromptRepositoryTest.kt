@@ -18,9 +18,7 @@ import org.robolectric.RobolectricTestRunner
 
 private const val TIME_IN_MILLIS = 1759926358L
 
-/**
- * This copies the default set in `nimbus.fml.yaml` `terms-of-use-prompt` `max-display-count`.
- */
+/** This copies the default set in `nimbus.fml.yaml` `terms-of-use-prompt` `max-display-count`. */
 private const val MAX_DISPLAY_COUNT = 2
 
 @RunWith(RobolectricTestRunner::class)
@@ -32,31 +30,47 @@ class TermsOfUsePromptRepositoryTest {
     @Before
     fun setup() {
         settings = Settings(testContext)
-        repository = DefaultTermsOfUsePromptRepository(settings)
+        repository = DefaultTermsOfUsePromptRepository(settings, currentTimeMillisProvider = { TIME_IN_MILLIS })
     }
 
     @Test
     fun `WHEN all conditions satisfied THEN show the prompt`() {
         settings.hasAcceptedTermsOfService = false
         settings.isTermsOfUsePromptEnabled = true
-        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT
+        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT - 1
+        repository.isShowingPrompt = false
 
         assertFalse(settings.hasAcceptedTermsOfService)
         assertTrue(settings.isTermsOfUsePromptEnabled)
-        assertEquals(MAX_DISPLAY_COUNT, settings.termsOfUsePromptDisplayedCount)
+        assertEquals(MAX_DISPLAY_COUNT - 1, settings.termsOfUsePromptDisplayedCount)
 
         assertTrue(repository.canShowTermsOfUsePrompt())
+    }
+
+    @Test
+    fun `WHEN the prompt is already showing THEN do not show the prompt`() {
+        settings.hasAcceptedTermsOfService = false
+        settings.isTermsOfUsePromptEnabled = true
+        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT - 1
+        repository.isShowingPrompt = true
+
+        assertFalse(settings.hasAcceptedTermsOfService)
+        assertTrue(settings.isTermsOfUsePromptEnabled)
+        assertEquals(MAX_DISPLAY_COUNT - 1, settings.termsOfUsePromptDisplayedCount)
+
+        assertFalse(repository.canShowTermsOfUsePrompt())
     }
 
     @Test
     fun `WHEN user has already accepted the ToU THEN don't show the prompt`() {
         settings.hasAcceptedTermsOfService = true
         settings.isTermsOfUsePromptEnabled = true
-        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT
+        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT - 1
+        repository.isShowingPrompt = false
 
         assertTrue(settings.hasAcceptedTermsOfService)
         assertTrue(settings.isTermsOfUsePromptEnabled)
-        assertEquals(MAX_DISPLAY_COUNT, settings.termsOfUsePromptDisplayedCount)
+        assertEquals(MAX_DISPLAY_COUNT - 1, settings.termsOfUsePromptDisplayedCount)
 
         assertFalse(repository.canShowTermsOfUsePrompt())
     }
@@ -65,11 +79,12 @@ class TermsOfUsePromptRepositoryTest {
     fun `WHEN the prompt feature is disabled THEN don't show the prompt`() {
         settings.hasAcceptedTermsOfService = false
         settings.isTermsOfUsePromptEnabled = false
-        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT
+        settings.termsOfUsePromptDisplayedCount = MAX_DISPLAY_COUNT - 1
+        repository.isShowingPrompt = false
 
         assertFalse(settings.hasAcceptedTermsOfService)
         assertFalse(settings.isTermsOfUsePromptEnabled)
-        assertEquals(MAX_DISPLAY_COUNT, settings.termsOfUsePromptDisplayedCount)
+        assertEquals(MAX_DISPLAY_COUNT - 1, settings.termsOfUsePromptDisplayedCount)
 
         assertFalse(repository.canShowTermsOfUsePrompt())
     }
@@ -172,7 +187,7 @@ class TermsOfUsePromptRepositoryTest {
         assertEquals(0, settings.termsOfUseAcceptedVersion)
         assertEquals(0L, settings.termsOfUseAcceptedTimeInMillis)
 
-        repository.updateHasAcceptedTermsOfUsePreference(nowMillis = TIME_IN_MILLIS)
+        repository.updateHasAcceptedTermsOfUsePreference()
 
         assertTrue(settings.hasAcceptedTermsOfService)
         assertEquals(5, settings.termsOfUseAcceptedVersion)

@@ -4,8 +4,16 @@
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
+  AdsClient: "resource://newtab/lib/AdsClient.sys.mjs",
   ContextId: "moz-src:///browser/modules/ContextId.sys.mjs",
-  DEFAULT_SECTION_LAYOUT: "resource://newtab/lib/SectionsLayoutManager.sys.mjs",
+  SectionsLayoutManager: "resource://newtab/lib/SectionsLayoutFeed.sys.mjs",
+  maskLayoutAds: "resource://newtab/lib/SectionsLayoutFeed.sys.mjs",
+  MozAdsPlacementRequestWithCount:
+    "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustAdsClient.sys.mjs",
+  MozAdsIabContent:
+    "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustAdsClient.sys.mjs",
+  MozAdsIabContentTaxonomy:
+    "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustAdsClient.sys.mjs",
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   NewTabUtils: "resource://gre/modules/NewTabUtils.sys.mjs",
   ObliviousHTTP: "resource://gre/modules/ObliviousHTTP.sys.mjs",
@@ -29,6 +37,11 @@ import {
   actionTypes as at,
   actionCreators as ac,
 } from "resource://newtab/common/Actions.mjs";
+import {
+  isSpaceOverridden,
+  isSpacesAssigned,
+  SPACE_IDS,
+} from "resource://newtab/common/PageLayoutVariants.mjs";
 
 import { scoreItemInferred } from "resource://newtab/lib/InferredModel/GreedyContentRanker.mjs";
 
@@ -121,6 +134,12 @@ const PREF_PRIVATE_PING_ENABLED = "telemetry.privatePing.enabled";
 const PREF_SURFACE_ID = "telemetry.surfaceId";
 const PREF_CLIENT_LAYOUT_ENABLED =
   "discoverystream.sections.clientLayout.enabled";
+// Selection key for the RS sections-ordering: "" = off (use Merino), otherwise
+// the name of the sections-ordering record to render.
+const PREF_SECTIONS_ORDERING = "discoverystream.sections.ordering";
+// Comma-separated section ranks that may carry an ad; "" uses the hard-coded set.
+const PREF_SECTIONS_AD_ALLOWED_RANKS =
+  "discoverystream.sections.adAllowedRanks";
 
 let getHardcodedLayout;
 
@@ -141,6 +160,26 @@ export class DiscoveryStreamFeed {
     this._impressionId = this.getOrCreateImpressionId();
     // Internal in-memory cache for parsing json prefs.
     this._prefCache = {};
+    this.adsClient = null;
+
+    this.onPocketExperimentUpdated = this.onPocketExperimentUpdated.bind(this);
+  }
+
+  onPocketExperimentUpdated(event, reason) {
+    if (
+      reason !== "feature-experiment-loaded" &&
+      reason !== "feature-rollout-loaded"
+    ) {
+      this.pocketNewTabExperimentChanged();
+    }
+  }
+
+  pocketNewTabExperimentChanged() {
+    this.store.dispatch(
+      ac.OnlyToMain({
+        type: at.INFERRED_PERSONALIZATION_CLEAR_INTEREST_VECTOR,
+      })
+    );
   }
 
   getOrCreateImpressionId() {
@@ -225,8 +264,13 @@ export class DiscoveryStreamFeed {
         state.Prefs.values.inferredPersonalizationConfig
           ?.local_popular_today_rerank ?? LOCAL_POPULAR_RERANK;
 
+      const overridePref =
+        this.store.getState().InferredPersonalization
+          ?.inferredTelemetrySettingsOverrides?.local_popular_today_rerank ??
+        true; // This can be used to turn off local inferred reranking
+
       // we do it if inferred is on and the experiment is on
-      this._doLocalInferredRerank = systemPref && expPref;
+      this._doLocalInferredRerank = systemPref && expPref && overridePref;
     }
     return this._doLocalInferredRerank;
   }
@@ -241,24 +285,115 @@ export class DiscoveryStreamFeed {
 
   get showStories() {
     // Combine user-set stories opt-out with Mozilla-set config
+    const prefs = this.store.getState().Prefs.values;
     return (
-      this.store.getState().Prefs.values[PREF_SYSTEM_TOPSTORIES] &&
-      this.store.getState().Prefs.values[PREF_USER_TOPSTORIES]
+      prefs[PREF_SYSTEM_TOPSTORIES] &&
+      (prefs[PREF_USER_TOPSTORIES] ||
+        isSpaceOverridden(SPACE_IDS.STORIES, prefs))
     );
   }
 
-  get personalized() {
-    return this.recommendationProvider.personalized;
+  // The selected sections-ordering key. "" means the RS ordering is off and
+  // Merino supplies the layout.
+  get sectionsOrderingKey() {
+    const prefs = this.store.getState().Prefs.values;
+    return (
+      prefs.trainhopConfig?.sections?.ordering ??
+      prefs[PREF_SECTIONS_ORDERING] ??
+      ""
+    );
   }
 
-  get recommendationProvider() {
-    if (this._recommendationProvider) {
-      return this._recommendationProvider;
+  // Section ranks that may carry an ad. Precedence: trainhop (an array), then
+  // the pref (comma-separated), then the hard-coded default set.
+  get sectionsAdAllowedRanks() {
+    const prefs = this.store.getState().Prefs.values;
+    let ranks = prefs.trainhopConfig?.sections?.adAllowedRanks;
+    if (!Array.isArray(ranks)) {
+      const pref = prefs[PREF_SECTIONS_AD_ALLOWED_RANKS];
+      ranks = pref ? pref.split(",").map(Number) : undefined;
     }
-    this._recommendationProvider = this.store.feeds.get(
-      "feeds.recommendationprovider"
-    );
-    return this._recommendationProvider;
+    // Fall back to the hard-coded set for an empty or malformed override.
+    if (!ranks?.length || ranks.some(rank => !Number.isInteger(rank))) {
+      return lazy.SectionsLayoutManager.AD_ALLOWED_RANKS;
+    }
+    return new Set(ranks);
+  }
+
+  /**
+   * Choose the layout to apply across the whole page, or null to fall back to
+   * Merino. The clientLayout override is applied first if enabled; else a usable
+   * Remote Settings ordering; else the hard-coded default if Merino has a gap.
+   *
+   * @param {object[]} sections The page's sections.
+   * @returns {object[]|null} Layout records to apply across sections, else null.
+   */
+  _resolveLayoutOverride(sections) {
+    const prefs = this.store.getState().Prefs.values;
+    const { configs = {}, orderings = {} } =
+      this.store.getState().SectionsLayout || {};
+
+    const forceClientLayout =
+      prefs.trainhopConfig?.clientLayout?.enabled ||
+      prefs[PREF_CLIENT_LAYOUT_ENABLED];
+    if (forceClientLayout) {
+      return lazy.SectionsLayoutManager.DEFAULT_SECTION_LAYOUT;
+    }
+
+    const key = this.sectionsOrderingKey;
+    const names = key ? orderings[key] : null;
+    if (names?.length && names.every(name => configs[name])) {
+      return names.map(name => configs[name]);
+    }
+
+    // If even one section from Merino is missing a layout, replace the whole
+    // page with the hard-coded default rather than filling only the gaps: mixing
+    // default and Merino layouts is an uncontrolled combination that could look
+    // broken, so we fall back to a complete layout.
+    if (sections.some(section => !section.layout)) {
+      return lazy.SectionsLayoutManager.DEFAULT_SECTION_LAYOUT;
+    }
+
+    return null;
+  }
+
+  /**
+   * Assign each section its layout and apply the ad mask. The first section gets
+   * the override's first layout; later sections cycle through the rest. Leaves
+   * Merino's layouts untouched when no override applies.
+   *
+   * @param {object[]} sections Sections to lay out; mutated in place.
+   */
+  _applySectionLayouts(sections) {
+    if (!sections.length) {
+      return;
+    }
+
+    const override = this._resolveLayoutOverride(sections);
+    if (!override) {
+      return;
+    }
+
+    const [topLayout] = override;
+    // A single-entry override applies to the top section while the default cycle
+    // fills the rest, so a top-section experiment doesn't restate the defaults.
+    const cycleLayouts =
+      override.length === 1
+        ? lazy.SectionsLayoutManager.DEFAULT_SECTION_LAYOUT.slice(1)
+        : override.slice(1);
+
+    const allowedRanks = this.sectionsAdAllowedRanks;
+    sections.sort((a, b) => a.receivedRank - b.receivedRank);
+    // Pin the first layout to the top section and exclude it from the cycle: it's
+    // typically a distinct, larger "headline" layout, so repeating it partway
+    // down the page would look out of place. The rest cycle through cycleLayouts.
+    sections.forEach((section, index) => {
+      const layout =
+        index === 0
+          ? topLayout
+          : cycleLayouts[(index - 1) % cycleLayouts.length];
+      section.layout = lazy.maskLayoutAds(layout, section, allowedRanks);
+    });
   }
 
   setupConfig(isStartup = false) {
@@ -452,6 +587,17 @@ export class DiscoveryStreamFeed {
           );
           return null;
         }
+
+        // ObliviousHTTP.ohttpRequest only accepts a key/value object, and not
+        // a Headers instance. We normalize any headers to a key/value object.
+        //
+        // We use instanceof here since isInstance isn't available for node
+        // tests like DiscoveryStreamFeed.test.js.
+        // eslint-disable-next-line mozilla/use-isInstance
+        if (options.headers && options.headers instanceof Headers) {
+          options.headers = Object.fromEntries(options.headers);
+        }
+
         fetchPromise = lazy.ObliviousHTTP.ohttpRequest(
           ohttpRelayURL,
           config,
@@ -488,6 +634,68 @@ export class DiscoveryStreamFeed {
     }
     return null;
   }
+
+  async _fetchSpocsWithAdsClient(placements) {
+    const options = lazy.AdsClient.requestOptions();
+
+    const requests = [];
+    for (let { placement: placementId, count, content } of placements) {
+      let iabContent = null;
+      if (content) {
+        iabContent = new lazy.MozAdsIabContent({
+          categoryIds: content.categories,
+          taxonomy:
+            lazy.MozAdsIabContentTaxonomy[
+              // js-style enum strings (eg. "IAB-3.0") must be converted to
+              // rust-style enum names (eg. "IAB3_0") before looking up
+              // the actual enum value (eg. 4)
+              content.taxonomy.replace("-", "").replace(".", "_")
+            ],
+        });
+      }
+
+      requests.push(
+        new lazy.MozAdsPlacementRequestWithCount({
+          placementId,
+          count,
+          iabContent,
+        })
+      );
+    }
+
+    const spocs = await this.adsClient.requestSpocAds(requests, options);
+
+    return Object.fromEntries(
+      spocs.entries().map(([placementId, placementSpocs]) => [
+        placementId,
+        placementSpocs.map(spoc => ({
+          format: spoc.format,
+          url: spoc.url,
+          callbacks: spoc.callbacks,
+          image_url: spoc.imageUrl,
+          title: spoc.title,
+          domain: spoc.domain,
+          excerpt: spoc.excerpt,
+          sponsor: spoc.sponsor,
+          sponsored_by_override: spoc.sponsoredByOverride,
+          block_key: spoc.blockKey,
+          caps: spoc.caps
+            ? { cap_key: spoc.caps.capKey, day: spoc.caps.day }
+            : undefined,
+          ranking: spoc.ranking
+            ? {
+                item_score: spoc.ranking.itemScore,
+                personalization_models: Object.fromEntries(
+                  spoc.ranking.personalizationModels ?? []
+                ),
+                priority: spoc.ranking.priority,
+              }
+            : undefined,
+        })),
+      ])
+    );
+  }
+
   get spocsOnDemand() {
     if (this._spocsOnDemand === undefined) {
       const { values } = this.store.getState().Prefs;
@@ -773,7 +981,6 @@ export class DiscoveryStreamFeed {
     if (layoutData.spocs) {
       url =
         this.store.getState().Prefs.values[PREF_SPOCS_ENDPOINT] ||
-        this.config.spocs_endpoint ||
         layoutData.spocs.url;
 
       const spocsEndpointQuery =
@@ -987,6 +1194,7 @@ export class DiscoveryStreamFeed {
           sponsor: spoc.sponsor,
           title: spoc.title,
           url: spoc.url,
+          attribution: spoc.attributions || null,
         })),
       };
     }
@@ -1065,22 +1273,20 @@ export class DiscoveryStreamFeed {
     // In this situation, we don't fill iabPlacements,
     // and go with the non IAB default contextual placement prefs.
     if (recsFeed) {
-      iabSections = recsFeed.data.sections
-        .filter(section => section.iab)
-        .sort((a, b) => a.receivedRank - b.receivedRank);
+      iabSections = recsFeed.data.sections.sort(
+        (a, b) => a.receivedRank - b.receivedRank
+      );
 
-      // An array of all iab placement, flattened, sorted, and filtered.
-      iabPlacements = iabSections
-        // .filter(section => section.iab)
-        // .sort((a, b) => a.receivedRank - b.receivedRank)
-        .reduce((acc, section) => {
-          const iabArray = section.layout.responsiveLayouts[0].tiles
-            .filter(tile => tile.hasAd)
-            .map(() => {
-              return section.iab;
-            });
-          return [...acc, ...iabArray];
-        }, []);
+      // Array of IAB placements, sorted by receivedRank.
+      // Placements may be undefined for sections without IAB data.
+      iabPlacements = iabSections.reduce((acc, section) => {
+        const iabArray = section.layout.responsiveLayouts[0].tiles
+          .filter(tile => tile.hasAd)
+          .map(() => {
+            return section.iab;
+          });
+        return [...acc, ...iabArray];
+      }, []);
     }
 
     const spocPlacements = placementSpocsArray.map((placement, index) => ({
@@ -1093,7 +1299,7 @@ export class DiscoveryStreamFeed {
       bannerPlacements = bannerPlacementsArray.map((placement, index) => ({
         placement,
         count: bannerCountsArray[index],
-        ...(iabSections[billboardPosition - 2]
+        ...(iabSections[billboardPosition - 2]?.iab
           ? { content: iabSections[billboardPosition - 2].iab }
           : {}),
       }));
@@ -1101,7 +1307,7 @@ export class DiscoveryStreamFeed {
       bannerPlacements = bannerPlacementsArray.map((placement, index) => ({
         placement,
         count: bannerCountsArray[index],
-        ...(iabSections[leaderboardPosition - 2]
+        ...(iabSections[leaderboardPosition - 2]?.iab
           ? { content: iabSections[leaderboardPosition - 2].iab }
           : {}),
       }));
@@ -1178,16 +1384,15 @@ export class DiscoveryStreamFeed {
       if (placements?.length) {
         const headers = new Headers();
         headers.append("content-type", "application/json");
-        const apiKeyPref = this.config.api_key_pref;
-        const apiKey = Services.prefs.getCharPref(apiKeyPref, "");
         const state = this.store.getState();
         let endpoint = state.DiscoveryStream.spocs.spocs_endpoint;
         let body = {
           pocket_id: this._impressionId,
           version: 2,
-          consumer_key: apiKey,
           ...(placements.length ? { placements } : {}),
         };
+
+        const marsOhttpEnabled = state.Prefs.values[PREF_UNIFIED_ADS_OHTTP];
 
         // Bug 1964715: Remove this logic when AdsFeed is 100% enabled
         if (unifiedAdsEnabled && !adsFeedEnabled) {
@@ -1196,15 +1401,13 @@ export class DiscoveryStreamFeed {
           unifiedAdsPlacements = this.getAdsPlacements();
           const blockedSponsors =
             state.Prefs.values[PREF_UNIFIED_ADS_BLOCKED_LIST];
-          const preFlightConfig =
-            state.Prefs.values?.trainhopConfig?.marsPreFlight || {};
 
           // We need some basic data that we can pass along to the ohttp request.
           // We purposefully don't use ohttp on this request. We also expect to
           // mostly hit the HTTP cache rather than the network with these requests.
-          if (preFlightConfig.enabled) {
+          if (marsOhttpEnabled) {
             const preFlight = await this.fetchFromEndpoint(
-              `${endpointBaseUrl}v1/o`,
+              `${endpointBaseUrl}v1/ads-preflight`,
               {
                 method: "GET",
               }
@@ -1217,17 +1420,20 @@ export class DiscoveryStreamFeed {
                 preFlight.normalized_ua || lazy.userAgent
               );
               headers.append("X-Geoname-ID", preFlight.geoname_id);
+              headers.append("X-Geo-Location", preFlight.geo_location);
             }
           }
 
+          const adsBackendConfig =
+            this.store.getState().Prefs.values?.adsBackendConfig || {};
+
           body = {
             context_id: await lazy.ContextId.request(),
+            flags: adsBackendConfig,
             placements: unifiedAdsPlacements,
             blocks: blockedSponsors.split(","),
           };
         }
-
-        const marsOhttpEnabled = state.Prefs.values[PREF_UNIFIED_ADS_OHTTP];
 
         let spocsResponse;
         // Logic decision point: Query ads servers in this file or utilize AdsFeed method
@@ -1242,15 +1448,20 @@ export class DiscoveryStreamFeed {
           }
         } else {
           try {
-            spocsResponse = await this.fetchFromEndpoint(
-              endpoint,
-              {
-                method: "POST",
-                headers,
-                body: JSON.stringify(body),
-              },
-              marsOhttpEnabled
-            );
+            if (this.adsClient) {
+              spocsResponse =
+                await this._fetchSpocsWithAdsClient(unifiedAdsPlacements);
+            } else {
+              spocsResponse = await this.fetchFromEndpoint(
+                endpoint,
+                {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(body),
+                },
+                marsOhttpEnabled
+              );
+            }
           } catch (error) {
             console.error("Error trying to load spocs feeds:", error);
           }
@@ -1264,17 +1475,6 @@ export class DiscoveryStreamFeed {
               ...spocsResponse,
             },
           };
-
-          if (spocsResponse.settings && spocsResponse.settings.feature_flags) {
-            this.store.dispatch(
-              ac.OnlyToMain({
-                type: at.DISCOVERY_STREAM_PERSONALIZATION_OVERRIDE,
-                data: {
-                  override: !spocsResponse.settings.feature_flags.spoc_v2,
-                },
-              })
-            );
-          }
 
           const spocsResultPromises = this.getPlacements().map(
             async placement => {
@@ -1340,22 +1540,17 @@ export class DiscoveryStreamFeed {
               const { data: blockedResults } =
                 await this.filterBlocked(capResult);
 
-              const { data: spocsWithFetchTimestamp } = this.addFetchTimestamp(
-                blockedResults,
-                fetchTimestamp
-              );
-
-              let items = spocsWithFetchTimestamp;
-              let personalized = false;
+              let items = blockedResults;
 
               // We only need to rank if we don't have contextual ads.
               if (!this.isContextualAds) {
-                const scoreResults = await this.scoreItems(
-                  spocsWithFetchTimestamp,
-                  "spocs"
-                );
-                items = scoreResults.data;
-                personalized = scoreResults.personalized;
+                items = (
+                  await Promise.all(
+                    items.map(item => this.normalizeScore(item))
+                  )
+                )
+                  // Sort by highest scores.
+                  .sort(this.sortItem);
               }
 
               spocsState.spocs = {
@@ -1365,7 +1560,6 @@ export class DiscoveryStreamFeed {
                   context,
                   sponsor,
                   sponsored_by_override,
-                  personalized,
                   items,
                 },
               };
@@ -1391,12 +1585,17 @@ export class DiscoveryStreamFeed {
             lastUpdated: Date.now(),
             spocs: {},
           };
-    await this.cache.set("spocs", {
-      lastUpdated: spocsState.lastUpdated,
-      spocs: spocsState.spocs,
-      spocsOnDemand: this.spocsOnDemand,
-      spocsCacheUpdateTime: this.spocsCacheUpdateTime,
-    });
+    // The ads-client has its own HTTP response cache, so it is the only cache
+    // on that path. Leaving this one unwritten also bypasses the freshness
+    // window, since isExpired() treats a missing entry as expired.
+    if (!lazy.AdsClient.isEnabled(this.store.getState().Prefs.values)) {
+      await this.cache.set("spocs", {
+        lastUpdated: spocsState.lastUpdated,
+        spocs: spocsState.spocs,
+        spocsOnDemand: this.spocsOnDemand,
+        spocsCacheUpdateTime: this.spocsCacheUpdateTime,
+      });
+    }
 
     sendUpdate({
       type: at.DISCOVERY_STREAM_SPOCS_UPDATE,
@@ -1495,17 +1694,11 @@ export class DiscoveryStreamFeed {
     return a.priority - b.priority;
   }
 
-  async scoreItems(items, type) {
-    const spocsPersonalized =
-      this.store.getState().Prefs.values?.pocketConfig?.spocsPersonalized;
-    const recsPersonalized =
-      this.store.getState().Prefs.values?.pocketConfig?.recsPersonalized;
-    const personalizedByType =
-      type === "feed" ? recsPersonalized : spocsPersonalized;
+  async scoreItemsInferred(items) {
     // If this is initialized, we are ready to go.
-    let personalized = this.store.getState().Personalization.initialized;
+    let personalized = false;
     let data = null;
-    if (type === "feed" && this.doLocalInferredRerank) {
+    if (this.doLocalInferredRerank) {
       // make a flag for this
       const { inferredInterests = {} } =
         this.store.getState().InferredPersonalization ?? {};
@@ -1531,11 +1724,7 @@ export class DiscoveryStreamFeed {
         .sort(this.sortItem);
       personalized = true;
     } else {
-      data = (
-        await Promise.all(
-          items.map(item => this.scoreItem(item, personalizedByType))
-        )
-      )
+      data = (await Promise.all(items.map(item => this.normalizeScore(item))))
         // Sort by highest scores.
         .sort(this.sortItem);
     }
@@ -1543,13 +1732,10 @@ export class DiscoveryStreamFeed {
     return { data, personalized };
   }
 
-  async scoreItem(item, personalizedByType) {
+  async normalizeScore(item) {
     item.score = item.item_score;
     if (item.score !== 0 && !item.score) {
       item.score = 1;
-    }
-    if (this.personalized && personalizedByType) {
-      await this.recommendationProvider.calculateItemRelevanceScore(item);
     }
     return item;
   }
@@ -1571,22 +1757,6 @@ export class DiscoveryStreamFeed {
       return { data: filteredItems };
     }
     return { data };
-  }
-
-  // Add the fetch timestamp property to each spoc returned to communicate how
-  // old the spoc is in telemetry when it is used by the client
-  addFetchTimestamp(spocs, fetchTimestamp) {
-    if (spocs && spocs.length) {
-      return {
-        data: spocs.map(s => {
-          return {
-            ...s,
-            fetchTimestamp,
-          };
-        }),
-      };
-    }
-    return { data: spocs };
   }
 
   // For backwards compatibility, older spoc endpoint don't have flight_id,
@@ -1763,9 +1933,6 @@ export class DiscoveryStreamFeed {
         }));
 
         if (sectionsEnabled) {
-          const useClientLayout =
-            this.store.getState().Prefs.values[PREF_CLIENT_LAYOUT_ENABLED];
-
           for (const [sectionKey, sectionData] of Object.entries(
             feedResponse.feeds
           )) {
@@ -1786,6 +1953,7 @@ export class DiscoveryStreamFeed {
                   publisher: item.publisher,
                   raw_image_src: item.imageUrl,
                   received_rank: item.receivedRank,
+                  server_score: item.serverScore,
                   recommended_at: feedResponse.recommendedAt,
                   section: sectionKey,
                   icon_src: item.iconUrl,
@@ -1800,30 +1968,19 @@ export class DiscoveryStreamFeed {
                 receivedRank: sectionData.receivedFeedRank,
                 layout: sectionData.layout,
                 iab: sectionData.iab,
+                allowAds: sectionData.allowAds ?? true,
+                followable: sectionData.followable ?? true,
                 // property if initially shown (with interest picker)
                 visible: sectionData.isInitiallyVisible,
               });
             }
           }
 
-          if (useClientLayout || sections.some(s => !s.layout)) {
-            sections.sort((a, b) => a.receivedRank - b.receivedRank);
-
-            sections.forEach((section, index) => {
-              if (useClientLayout || !section.layout) {
-                section.layout =
-                  lazy.DEFAULT_SECTION_LAYOUT[
-                    index % lazy.DEFAULT_SECTION_LAYOUT.length
-                  ];
-              }
-            });
-          }
+          this._applySectionLayouts(sections);
         }
 
-        const { data: scoredItems, personalized } = await this.scoreItems(
-          recommendations,
-          "feed"
-        );
+        const { data: scoredItems, personalized } =
+          await this.scoreItemsInferred(recommendations);
 
         if (sections.length) {
           const visibleSections = sections
@@ -1848,10 +2005,14 @@ export class DiscoveryStreamFeed {
           feedResponse.interestPicker.sections =
             feedResponse.interestPicker.sections.map(section => {
               const { sectionId } = section;
-              const title = sections.find(
+              const found = sections.find(
                 ({ sectionKey }) => sectionKey === sectionId
-              )?.title;
-              return { sectionId, title };
+              );
+              return {
+                sectionId,
+                title: found?.title,
+                followable: found?.followable,
+              };
             });
         }
         if (feedResponse.inferredLocalModel) {
@@ -1890,8 +2051,12 @@ export class DiscoveryStreamFeed {
     }
 
     // if surfaceID is availible either through the cache or the response set value in Glean
-    if (prefs[PREF_PRIVATE_PING_ENABLED] && feed.data.surfaceId) {
+    if (feed?.data?.surfaceId) {
       Glean.newtabContent.surfaceId.set(feed.data.surfaceId);
+    }
+
+    // Still gated: this pref feeds utc_offset on the Merino request
+    if (prefs[PREF_PRIVATE_PING_ENABLED] && feed?.data?.surfaceId) {
       this.store.dispatch(ac.SetPref(PREF_SURFACE_ID, feed.data.surfaceId));
     }
 
@@ -2009,7 +2174,7 @@ export class DiscoveryStreamFeed {
           // Feed was previously personalized then cached, we don't need to do this again.
           return Promise.resolve();
         }
-        const feedPromise = this.scoreItems(feed.data.recommendations, "feed");
+        const feedPromise = this.scoreItemsInferred(feed.data.recommendations);
         feedPromise.then(({ data: scoredItems, personalized }) => {
           feed = {
             ...feed,
@@ -2037,52 +2202,6 @@ export class DiscoveryStreamFeed {
       await Promise.all(feedsPromises);
       await this.cache.set("feeds", feeds);
     }
-  }
-
-  async scoreSpocs(spocsState) {
-    const spocsResultPromises = this.getPlacements().map(async placement => {
-      const nextSpocs = spocsState.data[placement.name] || {};
-      const { items } = nextSpocs;
-
-      if (nextSpocs.personalized || !items || !items.length) {
-        return;
-      }
-
-      const { data: scoreResult, personalized } = await this.scoreItems(
-        items,
-        "spocs"
-      );
-
-      spocsState.data = {
-        ...spocsState.data,
-        [placement.name]: {
-          ...nextSpocs,
-          personalized,
-          items: scoreResult,
-        },
-      };
-    });
-    await Promise.all(spocsResultPromises);
-
-    // Update cache here so we don't need to re calculate scores on loads from cache.
-    // Related Bug 1606276
-    await this.cache.set("spocs", {
-      lastUpdated: spocsState.lastUpdated,
-      spocs: spocsState.data,
-      spocsOnDemand: this.spocsOnDemand,
-      spocsCacheUpdateTime: this.spocsCacheUpdateTime,
-    });
-    this.store.dispatch(
-      ac.AlsoToPreloaded({
-        type: at.DISCOVERY_STREAM_SPOCS_UPDATE,
-        data: {
-          lastUpdated: spocsState.lastUpdated,
-          spocs: spocsState.data,
-          spocsOnDemand: this.spocsOnDemand,
-          spocsCacheUpdateTime: this.spocsCacheUpdateTime,
-        },
-      })
-    );
   }
 
   /**
@@ -2214,6 +2333,7 @@ export class DiscoveryStreamFeed {
     await this.resetContentCache();
     // Reset in-memory caches.
     this._isContextualAds = undefined;
+    this._doLocalInferredRerank = undefined;
     this._spocsCacheUpdateTime = undefined;
     this._spocsOnDemand = undefined;
   }
@@ -2424,8 +2544,8 @@ export class DiscoveryStreamFeed {
     );
   }
 
-  topicSelectionMaybeLaterEvent() {
-    const age = this.retreiveProfileAge();
+  async topicSelectionMaybeLaterEvent() {
+    const age = await this.retreiveProfileAge();
     const newProfile = age <= 1;
     const day = 24 * 60 * 60 * 1000;
     this.store.dispatch(
@@ -2472,6 +2592,13 @@ export class DiscoveryStreamFeed {
 
   async onTrainhopConfigChanged() {
     this.resetSpocsOnDemand();
+    // The spaces experiment turns stories on without the user pref changing, so
+    // the config arriving is what starts the feed. Scoped to the experiment, so
+    // an unrelated train-hop config does not trigger a refresh.
+    const prefs = this.store.getState().Prefs.values;
+    if (isSpacesAssigned(prefs) && this.showStories) {
+      this.enableStories();
+    }
   }
 
   async onPrefChangedAction(action) {
@@ -2490,8 +2617,13 @@ export class DiscoveryStreamFeed {
         // This is a config reset directly related to Discovery Stream pref.
         this.configReset();
         break;
-      case PREF_CONTEXTUAL_ADS:
       case PREF_USER_INFERRED_PERSONALIZATION:
+        this.configReset();
+        this._isContextualAds = undefined;
+        this._doLocalInferredRerank = undefined;
+        await this.resetContentCache();
+        break;
+      case PREF_CONTEXTUAL_ADS:
       case PREF_SYSTEM_INFERRED_PERSONALIZATION:
         this._isContextualAds = undefined;
         this._doLocalInferredRerank = undefined;
@@ -2578,9 +2710,15 @@ export class DiscoveryStreamFeed {
         // 1. Set-up listeners and initialize the redux state for config;
         this.setupConfig(true /* isStartup */);
         this.setupPrefs(true /* isStartup */);
+        lazy.NimbusFeatures.pocketNewtab.onUpdate(
+          this.onPocketExperimentUpdated
+        );
         // 2. If config.enabled is true, start loading data.
         if (this.config.enabled) {
           await this.enable({ updateOpenTabs: true, isStartup: true });
+        }
+        if (lazy.AdsClient.isEnabled(this.store.getState().Prefs.values)) {
+          this.adsClient = lazy.AdsClient.getClient();
         }
         // This function is async but just for devtools,
         // so we don't need to wait for it.
@@ -2632,21 +2770,6 @@ export class DiscoveryStreamFeed {
           )
         );
         break;
-      case at.DISCOVERY_STREAM_PERSONALIZATION_UPDATED:
-        if (this.personalized) {
-          const { feeds, spocs } = this.store.getState().DiscoveryStream;
-          const spocsPersonalized =
-            this.store.getState().Prefs.values?.pocketConfig?.spocsPersonalized;
-          const recsPersonalized =
-            this.store.getState().Prefs.values?.pocketConfig?.recsPersonalized;
-          if (recsPersonalized && feeds.loaded) {
-            this.scoreFeeds(feeds);
-          }
-          if (spocsPersonalized && spocs.loaded) {
-            this.scoreSpocs(spocs);
-          }
-        }
-        break;
       case at.DISCOVERY_STREAM_CONFIG_RESET:
         // This is a generic config reset likely related to an external feed pref.
         this.configReset();
@@ -2658,6 +2781,7 @@ export class DiscoveryStreamFeed {
         this.retryFeed(action.data.feed);
         break;
       case at.DISCOVERY_STREAM_CONFIG_CHANGE:
+      case at.DISCOVERY_STREAM_DEV_REFRESH_CACHE:
         // When the config pref changes, load or unload data as needed.
         await this.onPrefChange();
         break;
@@ -2818,7 +2942,9 @@ export class DiscoveryStreamFeed {
       case at.UNINIT:
         // When this feed is shutting down:
         this.uninitPrefs();
-        this._recommendationProvider = null;
+        lazy.NimbusFeatures.pocketNewtab.offUpdate(
+          this.onPocketExperimentUpdated
+        );
         break;
       case at.BLOCK_URL: {
         // If we block a story that also has a flight_id
@@ -2982,7 +3108,7 @@ getHardcodedLayout = ({
               },
             ],
             privacyNoticeURL: {
-              url: "https://www.mozilla.org/privacy/firefox/#recommend-relevant-content",
+              url: "https://www.mozilla.org/privacy/firefox/#to-serve-relevant-content-and-advertising-on-firefox-new-tab",
               title: {
                 id: "newtab-section-menu-privacy-notice",
               },

@@ -15,13 +15,12 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.benchmark.utils.measureRepeatedDefault
+import org.mozilla.fenix.benchmark.utils.startupOnlyJourney
 
 /**
  * This test class benchmarks the speed of app startup. Run this benchmark to verify how effective
  * a Baseline Profile is. It does this by comparing [CompilationMode.None], which represents the
  * app with no Baseline Profiles optimizations, and [CompilationMode.Partial], which uses Baseline Profiles.
- *
- * Before running make sure `autosignReleaseWithDebugKey=true` is present in local.properties.
  *
  * Run this benchmark to see startup measurements and captured system traces for verifying
  * the effectiveness of your Baseline Profiles. You can run it directly from Android
@@ -64,7 +63,7 @@ class BaselineProfilesStartupBenchmark {
                 pressHome()
             },
         ) {
-            startActivityAndWait()
+            startupOnlyJourney()
 
             SystemClock.sleep(1000)
             killProcess()

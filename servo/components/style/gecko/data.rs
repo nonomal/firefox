@@ -4,14 +4,15 @@
 
 //! Data needed to style a Gecko document.
 
-use crate::dom::TElement;
+use crate::derives::*;
+use crate::device::Device;
 use crate::gecko_bindings::bindings;
 use crate::gecko_bindings::structs::{
     self, ServoStyleSetSizes, StyleSheet as DomStyleSheet, StyleSheetInfo,
 };
-use crate::media_queries::{Device, MediaList};
+use crate::invalidation::stylesheets::StylesheetInvalidationSet;
+use crate::media_queries::MediaList;
 use crate::properties::ComputedValues;
-use crate::selector_parser::SnapshotMap;
 use crate::shared_lock::{SharedRwLockReadGuard, StylesheetGuards};
 use crate::stylesheets::scope_rule::ImplicitScopeRoot;
 use crate::stylesheets::{StylesheetContents, StylesheetInDocument};
@@ -53,9 +54,11 @@ impl GeckoStyleSheet {
     /// Create a `GeckoStyleSheet` from a raw `DomStyleSheet` pointer.
     #[inline]
     pub unsafe fn new(s: *const DomStyleSheet) -> Self {
-        debug_assert!(!s.is_null());
-        bindings::Gecko_StyleSheet_AddRef(s);
-        Self::from_addrefed(s)
+        unsafe {
+            debug_assert!(!s.is_null());
+            bindings::Gecko_StyleSheet_AddRef(s);
+            Self::from_addrefed(s)
+        }
     }
 
     /// Create a `GeckoStyleSheet` from a raw `DomStyleSheet` pointer that
@@ -197,17 +200,11 @@ impl PerDocumentStyleData {
 
 impl PerDocumentStyleDataImpl {
     /// Recreate the style data if the stylesheets have changed.
-    pub fn flush_stylesheets<E>(
+    pub fn flush_stylesheets(
         &mut self,
         guard: &SharedRwLockReadGuard,
-        document_element: Option<E>,
-        snapshots: Option<&SnapshotMap>,
-    ) -> bool
-    where
-        E: TElement,
-    {
-        self.stylist
-            .flush(&StylesheetGuards::same(guard), document_element, snapshots)
+    ) -> StylesheetInvalidationSet {
+        self.stylist.flush(&StylesheetGuards::same(guard))
     }
 
     /// Get the default computed values for this document.

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,7 +10,6 @@
 #include "mozilla/layers/CompositorManagerChild.h"
 #include "mozilla/layers/CompositorManagerParent.h"
 #include "mozilla/layers/IAPZCTreeManager.h"
-#include "mozilla/layers/UiCompositorControllerChild.h"
 #include "mozilla/widget/CompositorWidget.h"
 #include "mozilla/widget/PlatformWidgetTypes.h"
 #include "nsIWidget.h"
@@ -22,10 +19,9 @@ namespace layers {
 
 InProcessCompositorSession::InProcessCompositorSession(
     nsIWidget* aWidget, widget::CompositorWidget* aCompositorWidget,
-    CompositorBridgeChild* aChild, CompositorBridgeParent* aParent,
-    UiCompositorControllerChild* aUiController)
+    CompositorBridgeChild* aChild, CompositorBridgeParent* aParent)
     : CompositorSession(aWidget, aCompositorWidget->AsDelegate(), aChild,
-                        aUiController, aParent->RootLayerTreeId()),
+                        aParent->RootLayerTreeId()),
       mCompositorBridgeParent(aParent),
       mCompositorWidget(aCompositorWidget) {
   gfx::GPUProcessManager::Get()->RegisterInProcessSession(this);
@@ -33,11 +29,10 @@ InProcessCompositorSession::InProcessCompositorSession(
 
 /* static */
 RefPtr<InProcessCompositorSession> InProcessCompositorSession::Create(
-    nsIWidget* aWidget, WebRenderLayerManager* aLayerManager,
-    const LayersId& aRootLayerTreeId, CSSToLayoutDeviceScale aScale,
-    const CompositorOptions& aOptions, bool aUseExternalSurfaceSize,
-    const gfx::IntSize& aSurfaceSize, uint32_t aNamespace,
-    uint64_t aInnerWindowId) {
+    nsIWidget* aWidget, const LayersId& aRootLayerTreeId,
+    CSSToLayoutDeviceScale aScale, const CompositorOptions& aOptions,
+    bool aUseExternalSurfaceSize, const gfx::IntSize& aSurfaceSize,
+    uint32_t aNamespace, uint64_t aInnerWindowId) {
   widget::CompositorWidgetInitData initData;
   aWidget->GetCompositorWidgetInitData(&initData);
 
@@ -52,25 +47,14 @@ RefPtr<InProcessCompositorSession> InProcessCompositorSession::Create(
 
   RefPtr<CompositorBridgeChild> child =
       CompositorManagerChild::CreateSameProcessWidgetCompositorBridge(
-          aLayerManager, aNamespace);
+          aNamespace);
   MOZ_ASSERT(child);
   if (!child) {
     gfxCriticalNote << "Failed to create CompositorBridgeChild";
     return nullptr;
   }
 
-  RefPtr<UiCompositorControllerChild> uiController = nullptr;
-#if defined(MOZ_WIDGET_ANDROID)
-  uiController = UiCompositorControllerChild::CreateForSameProcess(
-      aRootLayerTreeId, aWidget);
-  MOZ_ASSERT(uiController);
-  if (!uiController) {
-    return nullptr;
-  }
-#endif
-
-  return new InProcessCompositorSession(aWidget, widget, child, parent,
-                                        uiController);
+  return new InProcessCompositorSession(aWidget, widget, child, parent);
 }
 
 void InProcessCompositorSession::NotifySessionLost() {

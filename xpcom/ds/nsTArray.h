@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsTArray_h__
-#define nsTArray_h__
+#ifndef nsTArray_h_
+#define nsTArray_h_
 
 #include <string.h>
 
@@ -68,15 +66,8 @@ template <typename, typename>
 class RecordEntry;
 }
 
-namespace mozilla::dom::ipc {
-class StructuredCloneData;
-}  // namespace mozilla::dom::ipc
-
 namespace mozilla::dom {
-class ClonedMessageData;
-class MessageData;
 class MessagePortIdentifier;
-struct MozPluginParameter;
 template <typename T>
 struct Nullable;
 class OwningFileOrDirectory;
@@ -747,53 +738,29 @@ MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(mozilla::layers::TileClient)
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(
     mozilla::SerializedStructuredCloneBuffer)
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(
-    mozilla::dom::ipc::StructuredCloneData)
-MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(mozilla::dom::ClonedMessageData)
-MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(
     mozilla::dom::indexedDB::ObjectStoreCursorResponse)
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(
     mozilla::dom::indexedDB::IndexCursorResponse)
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(
     mozilla::dom::indexedDB::SerializedStructuredCloneReadInfo);
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(JSStructuredCloneData)
-MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(mozilla::dom::MessageData)
-MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(mozilla::dom::RefMessageData)
 MOZ_DECLARE_RELOCATE_USING_MOVE_CONSTRUCTOR(mozilla::SourceBufferTask)
 
 namespace detail {
 
-// These helpers allow us to differentiate between tri-state comparator
-// functions and classes with LessThan() and Equal() methods. If an object, when
-// called as a function with two instances of our element type, returns an int,
-// we treat it as a tri-state comparator.
-//
-// T is the type of the comparator object we want to check. L and R are the
-// types that we'll be comparing.
-//
-// V is never passed, and is only used to allow us to specialize on the return
-// value of the comparator function.
-template <typename T, typename L, typename R, typename V = int>
-struct IsCompareMethod : std::false_type {};
-
-template <typename T, typename L, typename R>
-struct IsCompareMethod<
-    T, L, R, decltype(std::declval<T>()(std::declval<L>(), std::declval<R>()))>
-    : std::true_type {};
-
-// These two wrappers allow us to use either a tri-state comparator, or an
+// This wrapper allows us to use either a tri-state comparator, or an
 // object with Equals() and LessThan() methods interchangeably. They provide a
 // tri-state Compare() method, and Equals() method, and a LessThan() method.
 //
-// Depending on the type of the underlying comparator, they either pass these
-// through directly, or synthesize them from the methods available on the
+// Depending on the type of the underlying comparator, the calls are either
+// passed through directly, or synthesized from the methods available on the
 // comparator.
 //
 // Callers should always use the most-specific of these methods that match their
 // purpose.
 
 // Comparator wrapper for a tri-state comparator function
-template <typename T, typename L, typename R,
-          bool IsCompare = IsCompareMethod<T, L, R>::value>
+template <typename T>
 struct CompareWrapper {
 #ifdef _MSC_VER
 #  pragma warning(push)
@@ -804,18 +771,36 @@ struct CompareWrapper {
       : mComparator(aComparator) {}
 
   template <typename A, typename B>
-  int Compare(A& aLeft, B& aRight) const {
-    return mComparator(aLeft, aRight);
+  auto Compare(A& aLeft, B& aRight) const {
+    if constexpr (std::is_invocable_v<const T&, A&, B&>) {
+      return std::invoke(mComparator, aLeft, aRight);
+    } else {
+      if (LessThan(aLeft, aRight)) {
+        return -1;
+      }
+      if (Equals(aLeft, aRight)) {
+        return 0;
+      }
+      return 1;
+    }
   }
 
   template <typename A, typename B>
   bool Equals(A& aLeft, B& aRight) const {
-    return Compare(aLeft, aRight) == 0;
+    if constexpr (std::is_invocable_v<const T&, A&, B&>) {
+      return Compare(aLeft, aRight) == 0;
+    } else {
+      return mComparator.Equals(aLeft, aRight);
+    }
   }
 
   template <typename A, typename B>
   bool LessThan(A& aLeft, B& aRight) const {
-    return Compare(aLeft, aRight) < 0;
+    if constexpr (std::is_invocable_v<const T&, A&, B&>) {
+      return Compare(aLeft, aRight) < 0;
+    } else {
+      return mComparator.LessThan(aLeft, aRight);
+    }
   }
 
   const T& mComparator;
@@ -824,37 +809,9 @@ struct CompareWrapper {
 #endif
 };
 
-// Comparator wrapper for a class with Equals() and LessThan() methods.
-template <typename T, typename L, typename R>
-struct CompareWrapper<T, L, R, false> {
-  MOZ_IMPLICIT CompareWrapper(const T& aComparator)
-      : mComparator(aComparator) {}
-
-  template <typename A, typename B>
-  int Compare(A& aLeft, B& aRight) const {
-    if (LessThan(aLeft, aRight)) {
-      return -1;
-    }
-    if (Equals(aLeft, aRight)) {
-      return 0;
-    }
-    return 1;
-  }
-
-  template <typename A, typename B>
-  bool Equals(A& aLeft, B& aRight) const {
-    return mComparator.Equals(aLeft, aRight);
-  }
-
-  template <typename A, typename B>
-  bool LessThan(A& aLeft, B& aRight) const {
-    return mComparator.LessThan(aLeft, aRight);
-  }
-
-  const T& mComparator;
-};
-
 }  // namespace detail
+
+enum class SortBoundsCheck { Enable, Disable };
 
 //
 // nsTArray_Impl contains most of the guts supporting nsTArray, FallibleTArray,
@@ -1222,7 +1179,7 @@ class nsTArray_Impl
   template <class Item, class Comparator>
   [[nodiscard]] index_type IndexOf(const Item& aItem, index_type aStart,
                                    const Comparator& aComp) const {
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     const value_type* iter = Elements() + aStart;
     const value_type* iend = Elements() + Length();
@@ -1256,7 +1213,7 @@ class nsTArray_Impl
   template <class Item, class Comparator>
   [[nodiscard]] index_type LastIndexOf(const Item& aItem, index_type aStart,
                                        const Comparator& aComp) const {
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     size_type endOffset = aStart >= Length() ? Length() : aStart + 1;
     const value_type* iend = Elements() - 1;
@@ -1293,12 +1250,12 @@ class nsTArray_Impl
   [[nodiscard]] index_type BinaryIndexOf(const Item& aItem,
                                          const Comparator& aComp) const {
     using mozilla::BinarySearchIf;
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     size_t index;
     bool found = BinarySearchIf(
         Elements(), 0, Length(),
-        // Note: We pass the Compare() args here in reverse order and negate the
+        // Note: We pass the Compare() args here in reverse order and invert the
         // results for compatibility reasons. Some existing callers use Equals()
         // functions with first arguments which match aElement but not aItem, or
         // second arguments that match aItem but not aElement. To accommodate
@@ -1306,7 +1263,7 @@ class nsTArray_Impl
         // this API. These callers, however, should be fixed, and this special
         // case removed.
         [&](const value_type& aElement) {
-          return -comp.Compare(aElement, aItem);
+          return 0 <=> comp.Compare(aElement, aItem);
         },
         &index);
     return found ? index : NoIndex;
@@ -1354,7 +1311,7 @@ class nsTArray_Impl
   // See also SetLengthAndRetainStorage.
   // Make sure to call Compact() if needed to avoid keeping a huge array
   // around.
-  void ClearAndRetainStorage() {
+  MOZ_REINITIALIZES void ClearAndRetainStorage() {
     if (this->HasEmptyHeader()) {
       return;
     }
@@ -1538,7 +1495,7 @@ class nsTArray_Impl
   [[nodiscard]] index_type IndexOfFirstElementGt(
       const Item& aItem, const Comparator& aComp) const {
     using mozilla::BinarySearchIf;
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     size_t index;
     BinarySearchIf(
@@ -1845,7 +1802,6 @@ class nsTArray_Impl
     if (i == NoIndex) {
       return false;
     }
-
     RemoveElementsAtUnsafe(i, 1);
     return true;
   }
@@ -1855,6 +1811,23 @@ class nsTArray_Impl
   template <class Item>
   bool RemoveElement(const Item& aItem) {
     return RemoveElement(aItem, nsDefaultComparator<value_type, Item>());
+  }
+
+  // Variations for RemoveElement that uses unordered removal.
+  template <class Item, class Comparator>
+  bool UnorderedRemoveElement(const Item& aItem, const Comparator& aComp) {
+    index_type i = IndexOf(aItem, 0, aComp);
+    if (i == NoIndex) {
+      return false;
+    }
+    UnorderedRemoveElementAt(i);
+    return true;
+  }
+
+  template <class Item>
+  bool UnorderedRemoveElement(const Item& aItem) {
+    return UnorderedRemoveElement(aItem,
+                                  nsDefaultComparator<value_type, Item>());
   }
 
   // This helper function combines IndexOfFirstElementGt with
@@ -2015,7 +1988,7 @@ class nsTArray_Impl
             typename mozilla::FunctionTypeTraits<FunctionElse>::ReturnType>,
         "ApplyIf's `Function` and `FunctionElse` must return the same type.");
 
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     const value_type* const elements = Elements();
     const value_type* const iend = elements + Length();
@@ -2036,7 +2009,7 @@ class nsTArray_Impl
             typename mozilla::FunctionTypeTraits<FunctionElse>::ReturnType>,
         "ApplyIf's `Function` and `FunctionElse` must return the same type.");
 
-    ::detail::CompareWrapper<Comparator, value_type, Item> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
 
     value_type* const elements = Elements();
     value_type* const iend = elements + Length();
@@ -2087,7 +2060,8 @@ class nsTArray_Impl
   // @return True if the operation succeeded; false if we ran out of memory
  protected:
   template <typename ActualAlloc = Alloc>
-  typename ActualAlloc::ResultType SetCapacity(size_type aCapacity) {
+  MOZ_REINITIALIZES typename ActualAlloc::ResultType SetCapacity(
+      size_type aCapacity) {
     return ActualAlloc::Result(this->template EnsureCapacity<ActualAlloc>(
         aCapacity, sizeof(value_type)));
   }
@@ -2241,22 +2215,29 @@ class nsTArray_Impl
   // nsTArray_RelocationStrategy.
   //
   // @param aComp The Comparator used to collate elements.
-  template <class Comparator>
+  template <SortBoundsCheck Check = SortBoundsCheck::Enable, class Comparator>
   void Sort(const Comparator& aComp) {
     static_assert(std::is_move_assignable_v<value_type>);
     static_assert(std::is_move_constructible_v<value_type>);
 
-    ::detail::CompareWrapper<Comparator, value_type, value_type> comp(aComp);
+    ::detail::CompareWrapper comp(aComp);
     auto compFn = [&comp](const auto& left, const auto& right) {
       return comp.LessThan(left, right);
     };
-    std::sort(Elements(), Elements() + Length(), compFn);
+    if constexpr (Check == SortBoundsCheck::Enable) {
+      std::sort(begin(), end(), compFn);
+    } else {
+      std::sort(Elements(), Elements() + Length(), compFn);
+    }
     ::detail::AssertStrictWeakOrder(Elements(), Elements() + Length(), compFn);
   }
 
   // A variation on the Sort method defined above that assumes that
   // 'operator<' is defined for 'value_type'.
-  void Sort() { Sort(nsDefaultComparator<value_type, value_type>()); }
+  template <SortBoundsCheck Check = SortBoundsCheck::Enable>
+  void Sort() {
+    Sort(nsDefaultComparator<value_type, value_type>());
+  }
 
   // This method sorts the elements of the array in a stable way (i.e. not
   // changing the relative order of elements considered equal by the
@@ -2267,22 +2248,26 @@ class nsTArray_Impl
   // nsTArray_RelocationStrategy.
   //
   // @param aComp The Comparator used to collate elements.
-  template <class Comparator>
+  template <SortBoundsCheck Check = SortBoundsCheck::Enable, class Comparator>
   void StableSort(const Comparator& aComp) {
     static_assert(std::is_move_assignable_v<value_type>);
     static_assert(std::is_move_constructible_v<value_type>);
 
-    const ::detail::CompareWrapper<Comparator, value_type, value_type> comp(
-        aComp);
+    const ::detail::CompareWrapper comp(aComp);
     auto compFn = [&comp](const auto& lhs, const auto& rhs) {
       return comp.LessThan(lhs, rhs);
     };
-    std::stable_sort(Elements(), Elements() + Length(), compFn);
+    if constexpr (Check == SortBoundsCheck::Enable) {
+      std::stable_sort(begin(), end(), compFn);
+    } else {
+      std::stable_sort(Elements(), Elements() + Length(), compFn);
+    }
     ::detail::AssertStrictWeakOrder(Elements(), Elements() + Length(), compFn);
   }
 
   // A variation on the StableSort method defined above that assumes that
   // 'operator<' is defined for 'value_type'.
+  template <SortBoundsCheck Check = SortBoundsCheck::Enable>
   void StableSort() {
     StableSort(nsDefaultComparator<value_type, value_type>());
   }
@@ -2615,7 +2600,7 @@ class MOZ_GSL_OWNER nsTArray
   using typename base_type::size_type;
   using typename base_type::value_type;
 
-  constexpr nsTArray() {}
+  constexpr nsTArray() = default;
   explicit nsTArray(size_type aCapacity) : base_type(aCapacity) {}
   MOZ_IMPLICIT nsTArray(std::initializer_list<E> aIL) {
     AppendElements(aIL.begin(), aIL.size());
@@ -3739,4 +3724,4 @@ std::ostream& operator<<(std::ostream& aOut,
   return aOut << mozilla::Span(aTArray);
 }
 
-#endif  // nsTArray_h__
+#endif  // nsTArray_h_

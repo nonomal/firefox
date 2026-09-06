@@ -15,11 +15,10 @@
 
 #include <cstddef>
 #include <memory>
-#include <optional>
+#include <span>
 #include <vector>
 
-#include "api/array_view.h"
-#include "api/video/video_codec_type.h"
+#include "absl/base/nullability.h"
 #include "modules/rtp_rtcp/source/rtp_video_header.h"
 
 namespace webrtc {
@@ -36,10 +35,18 @@ class RtpPacketizer {
     int single_packet_reduction_len = 0;
   };
 
-  // If type is not set, returns a raw packetizer.
-  static std::unique_ptr<RtpPacketizer> Create(
-      std::optional<VideoCodecType> type,
-      ArrayView<const uint8_t> payload,
+  enum class PacketizationFormat {
+    kGeneric,
+    kRaw,
+    kH264,
+    kH265,
+    kVP8,
+    kVP9,
+    kAV1,
+  };
+  static absl_nonnull std::unique_ptr<RtpPacketizer> Create(
+      PacketizationFormat format,
+      std::span<const uint8_t> payload,
       PayloadSizeLimits limits,
       // Codec-specific details.
       const RTPVideoHeader& rtp_video_header);
@@ -54,9 +61,9 @@ class RtpPacketizer {
   // Returns true on success, false otherwise.
   virtual bool NextPacket(RtpPacketToSend* packet) = 0;
 
-  // Split payload_len into sum of integers with respect to `limits`.
+  // Splits `payload_size` into sum of integers with respect to `limits`.
   // Returns empty vector on failure.
-  static std::vector<int> SplitAboutEqually(int payload_len,
+  static std::vector<int> SplitAboutEqually(size_t payload_size,
                                             const PayloadSizeLimits& limits);
 };
 }  // namespace webrtc

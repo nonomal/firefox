@@ -43,6 +43,8 @@ loader.lazyRequireGetter(
 ChromeUtils.defineESModuleGetters(lazy, {
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
+  LocalModeMappings:
+    "resource://devtools/client/framework/LocalModeMappings.sys.mjs",
 });
 loader.lazyRequireGetter(
   lazy,
@@ -175,11 +177,11 @@ export class StyleEditorUI extends EventEmitter {
   /**
    * Initiates the style editor ui creation, and start to track TargetCommand updates.
    *
-   * @params {object} options
-   * @params {object} options.stylesheetToSelect
-   * @params {StyleSheetResource} options.stylesheetToSelect.stylesheet
-   * @params {Integer} options.stylesheetToSelect.line
-   * @params {Integer} options.stylesheetToSelect.column
+   * @param {object} options
+   * @param {object} options.stylesheetToSelect
+   * @param {StyleSheetResource} options.stylesheetToSelect.stylesheet
+   * @param {Integer} options.stylesheetToSelect.line
+   * @param {Integer} options.stylesheetToSelect.column
    */
   async initialize(options = {}) {
     this.createUI();
@@ -203,8 +205,8 @@ export class StyleEditorUI extends EventEmitter {
       }
     }
 
-    await this.#toolbox.resourceCommand.watchResources(
-      [this.#toolbox.resourceCommand.TYPES.DOCUMENT_EVENT],
+    await this.#commands.resourceCommand.watchResources(
+      [this.#commands.resourceCommand.TYPES.DOCUMENT_EVENT],
       { onAvailable: this.#onResourceAvailable }
     );
     await this.#commands.targetCommand.watchTargets({
@@ -214,8 +216,8 @@ export class StyleEditorUI extends EventEmitter {
     });
 
     this.#startLoadingStyleSheets();
-    await this.#toolbox.resourceCommand.watchResources(
-      [this.#toolbox.resourceCommand.TYPES.STYLESHEET],
+    await this.#commands.resourceCommand.watchResources(
+      [this.#commands.resourceCommand.TYPES.STYLESHEET],
       {
         onAvailable: this.#onResourceAvailable,
         onUpdated: this.#onResourceUpdated,
@@ -472,8 +474,8 @@ export class StyleEditorUI extends EventEmitter {
   /**
    * Opens the Options Popup Menu
    *
-   * @params {number} screenX
-   * @params {number} screenY
+   * @param {number} screenX
+   * @param {number} screenY
    *   Both obtained from the event object, used to position the popup
    */
   #onOptionsButtonClick = ({ screenX, screenY }) => {
@@ -501,8 +503,8 @@ export class StyleEditorUI extends EventEmitter {
     // same stylesheet resources from ResourceCommand, but `_addStyleSheet` will trigger
     // or ignore the additional source-map mapping.
     this.#root.classList.add("loading");
-    for (const resource of this.#toolbox.resourceCommand.getAllResources(
-      this.#toolbox.resourceCommand.TYPES.STYLESHEET
+    for (const resource of this.#commands.resourceCommand.getAllResources(
+      this.#commands.resourceCommand.TYPES.STYLESHEET
     )) {
       await this.#handleStyleSheetResource(resource);
     }
@@ -851,11 +853,11 @@ export class StyleEditorUI extends EventEmitter {
     this.#copyUrlItem.hidden = !this.#contextMenuStyleSheet;
 
     if (this.#contextMenuStyleSheet) {
-      this.#openLinkNewTabItem.setAttribute(
+      this.#openLinkNewTabItem.toggleAttribute(
         "disabled",
         !this.#contextMenuStyleSheet.href
       );
-      this.#copyUrlItem.setAttribute(
+      this.#copyUrlItem.toggleAttribute(
         "disabled",
         !this.#contextMenuStyleSheet.href
       );
@@ -1442,6 +1444,27 @@ export class StyleEditorUI extends EventEmitter {
           type.append(
             this.#panelDoc.createTextNode(`${rule.propertyName}\u00A0`)
           );
+        } else if (rule.type === "position-try") {
+          type.append(
+            this.#panelDoc.createTextNode(`${rule.positionTryName}\u00A0`)
+          );
+        } else if (rule.type === "custom-media") {
+          const parts = [];
+          const { customMediaName, customMediaQuery } = rule;
+          for (let i = 0, len = customMediaQuery.length; i < len; i++) {
+            const media = customMediaQuery[i];
+            const queryEl = this.#panelDoc.createElementNS(HTML_NS, "span");
+            queryEl.textContent = media.text;
+            if (!media.matches) {
+              queryEl.classList.add("media-condition-unmatched");
+            }
+            parts.push(queryEl);
+            if (len > 1 && i !== len - 1) {
+              parts.push(", ");
+            }
+          }
+
+          type.append(`${customMediaName} `, ...parts);
         }
 
         const cond = this.#panelDoc.createElementNS(HTML_NS, "span");
@@ -1597,6 +1620,13 @@ export class StyleEditorUI extends EventEmitter {
     this.emit("reloaded");
   }
 
+  /**
+   * Handle new non-original stylesheet ressource.
+   * (Original stylesheets are going to be created from #tryAddingOriginalStyleSheets)
+   *
+   * @param  {Resource} resource
+   *         The STYLESHEET resource which is received from resource command.
+   */
   async #handleStyleSheetResource(resource) {
     try {
       // The fileName is in resource means this stylesheet was imported from file by user.
@@ -1609,6 +1639,25 @@ export class StyleEditorUI extends EventEmitter {
         const savedFile = this.savedLocations[identifier];
         if (savedFile) {
           file = savedFile;
+        }
+      }
+
+      // As this method only processes actual stylesheet running on the page
+      // (and not the original stylesheet, which may have a forged URL which is different from the displayed content),
+      // trust the file URL and automatically allow saving to matching local file.
+      // (This may change if we start supporting `//# sourceURL` for stylesheets.)
+      if (!file && resource.href?.startsWith("file://")) {
+        const uri = Services.io.newURI(resource.href);
+        uri.QueryInterface(Ci.nsIFileURL);
+        file = uri.file;
+      }
+
+      // Check if this file relates to a Local Mode mapping
+      // so that we can save directly to the local file
+      if (!file && resource.href) {
+        const path = lazy.LocalModeMappings.getLocalFileForURL(resource.href);
+        if (path) {
+          file = new lazy.FileUtils.File(path);
         }
       }
       resource.file = file;
@@ -1640,7 +1689,8 @@ export class StyleEditorUI extends EventEmitter {
     const promises = [];
     for (const resource of resources) {
       if (
-        resource.resourceType === this.#toolbox.resourceCommand.TYPES.STYLESHEET
+        resource.resourceType ===
+        this.#commands.resourceCommand.TYPES.STYLESHEET
       ) {
         const onStyleSheetHandled = this.#handleStyleSheetResource(resource);
 
@@ -1681,7 +1731,7 @@ export class StyleEditorUI extends EventEmitter {
 
     for (const { resource, update } of updates) {
       if (
-        update.resourceType === this.#toolbox.resourceCommand.TYPES.STYLESHEET
+        update.resourceType === this.#commands.resourceCommand.TYPES.STYLESHEET
       ) {
         const editor = this.editors.find(
           e => e.resourceId === update.resourceId
@@ -1720,7 +1770,8 @@ export class StyleEditorUI extends EventEmitter {
   #onResourceDestroyed = resources => {
     for (const resource of resources) {
       if (
-        resource.resourceType !== this.#toolbox.resourceCommand.TYPES.STYLESHEET
+        resource.resourceType !==
+        this.#commands.resourceCommand.TYPES.STYLESHEET
       ) {
         continue;
       }
@@ -1850,10 +1901,10 @@ export class StyleEditorUI extends EventEmitter {
   }
 
   destroy() {
-    this.#toolbox.resourceCommand.unwatchResources(
+    this.#commands.resourceCommand.unwatchResources(
       [
-        this.#toolbox.resourceCommand.TYPES.DOCUMENT_EVENT,
-        this.#toolbox.resourceCommand.TYPES.STYLESHEET,
+        this.#commands.resourceCommand.TYPES.DOCUMENT_EVENT,
+        this.#commands.resourceCommand.TYPES.STYLESHEET,
       ],
       {
         onAvailable: this.#onResourceAvailable,
@@ -1898,10 +1949,6 @@ export class StyleEditorUI extends EventEmitter {
     }
 
     if (this.#prefObserver) {
-      this.#prefObserver.off(
-        PREF_AT_RULES_SIDEBAR,
-        this.#onAtRulesSidebarPrefChanged
-      );
       this.#prefObserver.destroy();
       this.#prefObserver = null;
     }

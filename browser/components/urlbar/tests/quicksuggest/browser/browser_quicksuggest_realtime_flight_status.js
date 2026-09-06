@@ -869,7 +869,7 @@ add_task(async function activate_multi() {
     let item = items[index];
 
     let newTabOpened = BrowserTestUtils.waitForNewTab(gBrowser, value.url);
-    await EventUtils.synthesizeMouseAtCenter(item, {}, item.ownerGlobal);
+    EventUtils.synthesizeMouseAtCenter(item, {}, item.documentGlobal);
 
     let newTab = await newTabOpened;
     Assert.ok(true, `Expected URL is loaded [${value.url}]`);
@@ -896,7 +896,7 @@ add_task(async function activate_multi() {
     let item = items[index];
 
     let newTabOpened = BrowserTestUtils.waitForNewTab(gBrowser, value.url);
-    await EventUtils.synthesizeMouseAtCenter(item, {}, item.ownerGlobal);
+    EventUtils.synthesizeMouseAtCenter(item, {}, item.documentGlobal);
     let newTab = await newTabOpened;
     Assert.ok(true, `Expected URL is loaded [${value.url}]`);
     BrowserTestUtils.removeTab(newTab);
@@ -907,7 +907,59 @@ add_task(async function activate_multi() {
   gURLBar.handleRevert();
 });
 
+// The l10n IDs of a realtime suggestion's result menu commands are derived from
+// its realtime type, so the menu can be broken for one type only.
+add_task(async function resultMenu() {
+  MerinoTestUtils.server.response.body.suggestions = TEST_MERINO_SINGLE;
+
+  await UrlbarTestUtils.promiseAutocompleteResultPopup({
+    window,
+    value: "only match the Merino suggestion",
+  });
+  await UrlbarTestUtils.openResultMenu(window, { resultIndex: 1 });
+
+  let menuitems = gURLBar.view.resultMenu.querySelectorAll("panel-item");
+  Assert.deepEqual(
+    [...menuitems].map(m => document.l10n.getAttributes(m).id),
+    [
+      "urlbar-result-menu-show-less-frequently2",
+      "urlbar-result-menu-dont-show-flight-status2",
+      "urlbar-result-menu-manage-firefox-suggest2",
+      "urlbar-result-menu-learn-more2",
+    ],
+    "The result menu should contain the expected commands"
+  );
+  await TestUtils.waitForCondition(
+    () => [...menuitems].every(m => m.textContent),
+    "Waiting for all commands to be labeled"
+  );
+
+  gURLBar.view.resultMenu.removeAttribute("open");
+  await UrlbarTestUtils.promisePopupClose(window);
+  gURLBar.handleRevert();
+});
+
 async function assertUI({ row, expectedList }) {
+  if (expectedList.length > 1) {
+    Assert.deepEqual(
+      document.l10n.getAttributes(row._content),
+      {
+        id: "urlbar-result-aria-group-flight-status",
+        args: null,
+      },
+      "ARIA group label should be set on the row inner"
+    );
+  } else {
+    Assert.deepEqual(
+      document.l10n.getAttributes(row._content),
+      {
+        id: null,
+        args: null,
+      },
+      "ARIA group label should not be set on the row inner"
+    );
+  }
+
   let items = row.querySelectorAll(".urlbarView-realtime-item");
   Assert.equal(items.length, expectedList.length);
 

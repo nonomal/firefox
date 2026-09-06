@@ -1,10 +1,9 @@
-/* -*- Mode: C++; tab-width: 40; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsICanvasRenderingContextInternal_h___
-#define nsICanvasRenderingContextInternal_h___
+#ifndef nsICanvasRenderingContextInternal_h_
+#define nsICanvasRenderingContextInternal_h_
 
 #include "gfxRect.h"
 #include "mozilla/EventForwards.h"
@@ -21,7 +20,6 @@
 #include "nsIDocShell.h"
 #include "nsIInputStream.h"
 #include "nsISupports.h"
-#include "nsRFPService.h"
 #include "nsRefreshObservers.h"
 
 #define NS_ICANVASRENDERINGCONTEXTINTERNAL_IID \
@@ -151,6 +149,13 @@ class nsICanvasRenderingContextInternal : public nsISupports,
     return GetSurfaceSnapshot();
   }
 
+  virtual bool SupportAsyncSnapshot() { return false; };
+
+  virtual RefPtr<mozilla::dom::HTMLCanvasElement::SurfaceSnapshotPromise>
+  GetSurfaceSnapshotAsync() {
+    return nullptr;
+  }
+
   // If this is called with true, the backing store of the canvas should
   // be created as opaque; all compositing operators should assume the
   // dst alpha is always 1.0.  If this is never called, the context's
@@ -229,8 +234,12 @@ class nsICanvasRenderingContextInternal : public nsISupports,
   // Checking if fingerprinting protection is enable for the given target.
   bool ShouldResistFingerprinting(mozilla::RFPTarget aTarget) const;
 
-  bool DispatchEvent(const nsAString& eventName, mozilla::CanBubble aCanBubble,
-                     mozilla::Cancelable aIsCancelable) const;
+  MOZ_CAN_RUN_SCRIPT bool DispatchEvent(
+      const nsAString& eventName, mozilla::CanBubble aCanBubble,
+      mozilla::Cancelable aIsCancelable) const;
+
+  void RecordCanvasUsage(mozilla::CanvasExtractionAPI aAPI,
+                         mozilla::CSSIntSize size) const;
 
  protected:
   RefPtr<mozilla::dom::HTMLCanvasElement> mCanvasElement;
@@ -238,4 +247,4 @@ class nsICanvasRenderingContextInternal : public nsISupports,
   RefPtr<nsRefreshDriver> mRefreshDriver;
 };
 
-#endif /* nsICanvasRenderingContextInternal_h___ */
+#endif /* nsICanvasRenderingContextInternal_h_ */

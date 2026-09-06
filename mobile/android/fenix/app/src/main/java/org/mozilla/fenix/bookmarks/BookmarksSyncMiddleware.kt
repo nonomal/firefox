@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
+import mozilla.components.lib.state.Store
 import mozilla.components.lib.state.ext.flow
 import mozilla.components.service.fxa.store.SyncStatus
 import mozilla.components.service.fxa.store.SyncStore
@@ -23,22 +23,26 @@ internal class BookmarksSyncMiddleware(
     private val scope: CoroutineScope,
 ) : Middleware<BookmarksState, BookmarksAction> {
     override fun invoke(
-        context: MiddlewareContext<BookmarksState, BookmarksAction>,
+        store: Store<BookmarksState, BookmarksAction>,
         next: (BookmarksAction) -> Unit,
         action: BookmarksAction,
     ) {
         next(action)
         when (action) {
-            Init -> {
+            is ViewAppeared -> {
+                if (action.bookmarkToLoad != null) return
+
                 // Observe for the account to become signed-in, and then wait for the first
                 // instance of the Sync Engine to finish so we know it's safe to load bookmarks
-                syncStore.flow()
+                syncStore
+                    .flow()
                     .map { it.account != null }
                     .distinctUntilChanged()
                     .onEach { isSignedIn ->
-                        context.store.dispatch(ReceivedSyncSignInUpdate(isSignedIn))
+                        store.dispatch(ReceivedSyncSignInUpdate(isSignedIn))
                         if (isSignedIn) {
-                            syncStore.flow()
+                            syncStore
+                                .flow()
                                 .map { it.status == SyncStatus.Idle }
                                 .onEach { isIdle ->
                                     if (isIdle) {
@@ -46,7 +50,7 @@ internal class BookmarksSyncMiddleware(
                                     }
                                 }
                                 .cancellable()
-                                .catch { context.store.dispatch(FirstSyncCompleted) }
+                                .catch { store.dispatch(FirstSyncCompleted) }
                                 .launchIn(scope)
                         }
                     }

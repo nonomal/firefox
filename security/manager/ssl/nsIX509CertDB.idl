@@ -1,5 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
+/*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -365,10 +364,11 @@ interface nsIX509CertDB : nsISupports {
   nsIX509Cert addCertFromBase64(in ACString base64, in ACString trust);
 
   /*
-   * Get all the known certs in the database
+   * Asynchronously gathers all known certificates and returns them as an array
+   * of nsIX509Cert.
    */
-  [must_use]
-  Array<nsIX509Cert> getCerts();
+  [implicit_jscontext]
+  Promise getCerts();
 
   /**
    * Encode the list of certificates as a PKCS#7 SignedData structure. No data

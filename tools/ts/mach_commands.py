@@ -143,7 +143,6 @@ def subs(ctx):
     maybe_setup(ctx)
     processed = [
         # AppConstants.sys.mjs has a (better) manually created declaration file.
-        "dist/bin/browser/modules/policies/schema.sys.mjs",
         "dist/bin/modules/Readerable.sys.mjs",
         "toolkit/components/nimbus/FeatureManifest.sys.mjs",
         "toolkit/components/promiseworker/worker/PromiseWorker.js",
@@ -160,9 +159,11 @@ def subs(ctx):
 
 
 def tsc(ctx, *args):
-    return ctx._sub_mach(
-        ["node", os.path.join("node_modules", "typescript", "bin", "tsc"), *args]
-    )
+    return ctx._sub_mach([
+        "node",
+        os.path.join("node_modules", "typescript", "bin", "tsc"),
+        *args,
+    ])
 
 
 def node(ctx, script, *args):
@@ -174,8 +175,9 @@ def node(ctx, script, *args):
 def maybe_setup(ctx):
     sys.path.append(mozpath.join(ctx.topsrcdir, "tools", "lint", "eslint"))
     import setup_helper
+    from mozbuild.nodeutil import check_node_executables_valid
 
-    if not setup_helper.check_node_executables_valid():
+    if not check_node_executables_valid():
         return 1
 
     setup_helper.eslint_maybe_setup(package_name="TypeScript")

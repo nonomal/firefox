@@ -4,7 +4,7 @@
 "use strict";
 
 var MockFilePicker = SpecialPowers.MockFilePicker;
-MockFilePicker.init(window.browsingContext);
+MockFilePicker.init();
 
 function mockPromptService() {
   let { prompt } = Services;
@@ -19,12 +19,6 @@ function mockPromptService() {
   return promptService;
 }
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["test.wait300msAfterTabSwitch", true]],
-  });
-});
-
 add_task(async function test_save_link_blocked_by_extension() {
   let ext = ExtensionTestUtils.loadExtension({
     manifest: {
@@ -37,7 +31,7 @@ add_task(async function test_save_link_blocked_by_extension() {
       // eslint-disable-next-line no-undef
       browser.webRequest.onBeforeRequest.addListener(
         details => {
-          // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+          // eslint-disable-next-line sdl/no-insecure-url
           return { cancel: details.url === "http://example.com/" };
         },
         { urls: ["*://*/*"] },

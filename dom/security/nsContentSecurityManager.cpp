@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -152,7 +150,7 @@ void nsContentSecurityManager::ReportBlockedDataURI(nsIURI* aURI,
   const char* stringID =
       aIsRedirect ? "BlockRedirectToDataURI" : "BlockTopLevelDataURINavigation";
   nsresult rv = nsContentUtils::FormatLocalizedString(
-      nsContentUtils::eSECURITY_PROPERTIES, stringID, params, errorText);
+      PropertiesFile::SECURITY_PROPERTIES, stringID, params, errorText);
   if (NS_FAILED(rv)) {
     return;
   }
@@ -283,7 +281,8 @@ static nsresult DoCheckLoadURIChecks(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
   // In practice, these DTDs are just used for localization, so applying the
   // same principal check as Fluent.
   if (aLoadInfo->InternalContentPolicyType() ==
-      nsIContentPolicy::TYPE_INTERNAL_DTD) {
+          nsIContentPolicy::TYPE_INTERNAL_DTD &&
+      mozilla::StaticPrefs::dom_fetch_allow_force_allowed_dtd()) {
     RefPtr<Document> doc;
     aLoadInfo->GetLoadingDocument(getter_AddRefs(doc));
     bool allowed = false;
@@ -297,7 +296,8 @@ static nsresult DoCheckLoadURIChecks(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
   // that need to access localization DTDs. We just allow through
   // TYPE_INTERNAL_FORCE_ALLOWED_DTD no matter what the triggering principal is.
   if (aLoadInfo->InternalContentPolicyType() ==
-      nsIContentPolicy::TYPE_INTERNAL_FORCE_ALLOWED_DTD) {
+          nsIContentPolicy::TYPE_INTERNAL_FORCE_ALLOWED_DTD &&
+      mozilla::StaticPrefs::dom_fetch_allow_force_allowed_dtd()) {
     return NS_OK;
   }
 
@@ -311,7 +311,7 @@ static nsresult DoCheckLoadURIChecks(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
   if (addonPrincipal) {
     // call CheckLoadURIWithPrincipal() as below to continue other checks, but
     // with the addon principal.
-    triggeringPrincipal = addonPrincipal;
+    triggeringPrincipal = std::move(addonPrincipal);
   }
 
   // Only call CheckLoadURIWithPrincipal() using the TriggeringPrincipal and not
@@ -513,6 +513,7 @@ static nsresult DoContentSecurityChecks(nsIChannel* aChannel,
     case ExtContentPolicy::TYPE_WEB_TRANSPORT:
     case ExtContentPolicy::TYPE_WEB_IDENTITY:
     case ExtContentPolicy::TYPE_JSON:
+    case ExtContentPolicy::TYPE_TEXT:
       break;
 
     case ExtContentPolicy::TYPE_INVALID:
@@ -689,7 +690,7 @@ static void DebugDoContentSecurityCheck(nsIChannel* aChannel,
   if (httpChannel || MOZ_LOG_TEST(sCSMLog, LogLevel::Verbose)) {
     MOZ_LOG(sCSMLog, LogLevel::Verbose, ("doContentSecurityCheck:\n"));
 
-    nsAutoCString remoteType;
+    RemoteType remoteType;
     if (XRE_IsParentProcess()) {
       nsCOMPtr<nsIParentChannel> parentChannel;
       NS_QueryNotificationCallbacks(aChannel, parentChannel);
@@ -697,11 +698,10 @@ static void DebugDoContentSecurityCheck(nsIChannel* aChannel,
         parentChannel->GetRemoteType(remoteType);
       }
     } else {
-      remoteType.Assign(
-          mozilla::dom::ContentChild::GetSingleton()->GetRemoteType());
+      remoteType = mozilla::dom::ContentChild::GetSingleton()->GetRemoteType();
     }
     MOZ_LOG(sCSMLog, LogLevel::Verbose,
-            ("  processType: \"%s\"\n", remoteType.get()));
+            ("  processType: \"%s\"\n", remoteType.Stringify().get()));
 
     nsCOMPtr<nsIURI> channelURI;
     nsAutoCString channelSpec;
@@ -789,7 +789,7 @@ static void DebugDoContentSecurityCheck(nsIChannel* aChannel,
 
 /* static */
 void nsContentSecurityManager::MeasureUnexpectedPrivilegedLoads(
-    nsILoadInfo* aLoadInfo, nsIURI* aFinalURI, const nsACString& aRemoteType) {
+    nsILoadInfo* aLoadInfo, nsIURI* aFinalURI, const RemoteType& aRemoteType) {
   if (!StaticPrefs::dom_security_unexpected_system_load_telemetry_enabled()) {
     return;
   }
@@ -844,9 +844,10 @@ void nsContentSecurityManager::MeasureUnexpectedPrivilegedLoads(
   if (fileNameTypeAndDetails.second.isSome()) {
     loggedFileDetails.Assign(fileNameTypeAndDetails.second.value());
   }
-  // sanitize remoteType because it may contain sensitive
-  // info, like URLs. e.g. `webIsolated=https://example.com`
-  nsAutoCString loggedRemoteType(dom::RemoteTypePrefix(aRemoteType));
+  // We only include the kind part of the remote type, as the rest of the
+  // remote type may contain sensitive information like URLs. e.g.
+  // `webIsolated=https://example.com`
+  nsCString loggedRemoteType = aRemoteType.StringifyKind();
   nsAutoCString loggedContentType(NS_CP_ContentTypeName(contentPolicyType));
 
   MOZ_LOG(sUELLog, LogLevel::Debug, ("UnexpectedPrivilegedLoadTelemetry:\n"));
@@ -994,7 +995,7 @@ nsresult nsContentSecurityManager::CheckAllowLoadInSystemPrivilegedContext(
   // URI_IS_UI_RESOURCE, first remove layers of view-source:, if present.
   nsCOMPtr<nsIURI> innerURI = NS_GetInnermostURI(finalURI);
 
-  nsAutoCString remoteType;
+  RemoteType remoteType;
   if (XRE_IsParentProcess()) {
     nsCOMPtr<nsIParentChannel> parentChannel;
     NS_QueryNotificationCallbacks(aChannel, parentChannel);
@@ -1002,8 +1003,7 @@ nsresult nsContentSecurityManager::CheckAllowLoadInSystemPrivilegedContext(
       parentChannel->GetRemoteType(remoteType);
     }
   } else {
-    remoteType.Assign(
-        mozilla::dom::ContentChild::GetSingleton()->GetRemoteType());
+    remoteType = mozilla::dom::ContentChild::GetSingleton()->GetRemoteType();
   }
 
   // GetInnerURI can return null for malformed nested URIs like moz-icon:trash
@@ -1112,7 +1112,7 @@ nsresult nsContentSecurityManager::CheckAllowLoadInPrivilegedAboutContext(
     return NS_OK;
   }
 
-  nsAutoCString remoteType;
+  RemoteType remoteType;
   if (XRE_IsParentProcess()) {
     nsCOMPtr<nsIParentChannel> parentChannel;
     NS_QueryNotificationCallbacks(aChannel, parentChannel);
@@ -1120,12 +1120,11 @@ nsresult nsContentSecurityManager::CheckAllowLoadInPrivilegedAboutContext(
       parentChannel->GetRemoteType(remoteType);
     }
   } else {
-    remoteType.Assign(
-        mozilla::dom::ContentChild::GetSingleton()->GetRemoteType());
+    remoteType = mozilla::dom::ContentChild::GetSingleton()->GetRemoteType();
   }
 
   // only perform check for privileged about process
-  if (!remoteType.Equals(PRIVILEGEDABOUT_REMOTE_TYPE)) {
+  if (!remoteType.IsPrivilegedAbout()) {
     return NS_OK;
   }
 
@@ -1246,7 +1245,7 @@ static nsresult CheckAllowFileProtocolScriptLoad(nsIChannel* aChannel) {
 
     nsContentUtils::ReportToConsole(nsIScriptError::warningFlag,
                                     "FILE_SCRIPT_BLOCKED"_ns, doc,
-                                    nsContentUtils::eSECURITY_PROPERTIES,
+                                    PropertiesFile::SECURITY_PROPERTIES,
                                     "BlockFileScriptWithWrongMimeType", params);
 
     return NS_ERROR_CONTENT_BLOCKED;
@@ -1314,7 +1313,7 @@ static nsresult CheckAllowExtensionProtocolScriptLoad(nsIChannel* aChannel) {
 
     nsContentUtils::ReportToConsole(nsIScriptError::warningFlag,
                                     "EXTENSION_SCRIPT_BLOCKED"_ns, doc,
-                                    nsContentUtils::eSECURITY_PROPERTIES,
+                                    PropertiesFile::SECURITY_PROPERTIES,
                                     "BlockExtensionScriptWithWrongExt", params);
 
     return NS_ERROR_CONTENT_BLOCKED;
@@ -1331,6 +1330,26 @@ static nsresult CheckAllowLoadByTriggeringRemoteType(nsIChannel* aChannel) {
 
   nsCOMPtr<nsILoadInfo> loadInfo = aChannel->LoadInfo();
 
+  RemoteType triggeringRemoteType;
+  nsresult rv = loadInfo->GetTriggeringRemoteType(triggeringRemoteType);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Before getting to document-load content policy checks, validate the
+  // principal to inherit against the triggering remote type.
+  if (!ValidatePrincipalCouldPotentiallyBeLoadedBy(
+          loadInfo->PrincipalToInherit(), triggeringRemoteType,
+          {ValidatePrincipalOptions::AllowNullPtr,
+           ValidatePrincipalOptions::AllowNotLoadedOrigin})) {
+    if (MOZ_LOG_TEST(sUELLog, LogLevel::Warning)) {
+      nsAutoCString origin;
+      loadInfo->PrincipalToInherit()->GetOrigin(origin);
+      MOZ_LOG(sUELLog, LogLevel::Warning,
+              ("Unexpected PrincipalToInherit %s for remote %s", origin.get(),
+               triggeringRemoteType.Stringify().get()));
+    }
+    return NS_ERROR_CONTENT_BLOCKED;
+  }
+
   // For now, only restrict loads for documents. We currently have no
   // interesting subresource checks for protocols which are are not fully
   // handled within the content process.
@@ -1345,19 +1364,9 @@ static nsresult CheckAllowLoadByTriggeringRemoteType(nsIChannel* aChannel) {
                         "Unexpected off-the-main-thread call to "
                         "CheckAllowLoadByTriggeringRemoteType");
 
-  // Due to the way that session history is handled without SHIP, we cannot run
-  // these checks when SHIP is disabled.
-  if (!mozilla::SessionHistoryInParent()) {
-    return NS_OK;
-  }
-
-  nsAutoCString triggeringRemoteType;
-  nsresult rv = loadInfo->GetTriggeringRemoteType(triggeringRemoteType);
-  NS_ENSURE_SUCCESS(rv, rv);
-
   // For now, only restrict loads coming from web remote types. In the future we
   // may want to expand this a bit.
-  if (!StringBeginsWith(triggeringRemoteType, WEB_REMOTE_TYPE)) {
+  if (!triggeringRemoteType.IsWeb()) {
     return NS_OK;
   }
 
@@ -1457,25 +1466,19 @@ nsresult nsContentSecurityManager::doContentSecurityCheck(
     DebugDoContentSecurityCheck(aChannel, loadInfo);
   }
 
-  nsresult rv = CheckAllowLoadInSystemPrivilegedContext(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckAllowLoadInSystemPrivilegedContext(aChannel));
 
-  rv = CheckAllowLoadInPrivilegedAboutContext(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckAllowLoadInPrivilegedAboutContext(aChannel));
 
   // We want to also check redirected requests to ensure
   // the target maintains the proper javascript file extensions.
-  rv = CheckAllowExtensionProtocolScriptLoad(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckAllowExtensionProtocolScriptLoad(aChannel));
 
-  rv = CheckChannelHasProtocolSecurityFlag(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckChannelHasProtocolSecurityFlag(aChannel));
 
-  rv = CheckAllowLoadByTriggeringRemoteType(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckAllowLoadByTriggeringRemoteType(aChannel));
 
-  rv = CheckForIncoherentResultPrincipal(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckForIncoherentResultPrincipal(aChannel));
 
   // if dealing with a redirected channel then we have already installed
   // streamlistener and redirect proxies and so we are done.
@@ -1485,24 +1488,19 @@ nsresult nsContentSecurityManager::doContentSecurityCheck(
 
   // make sure that only one of the five security flags is set in the loadinfo
   // e.g. do not require same origin and allow cross origin at the same time
-  rv = ValidateSecurityFlags(loadInfo);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(ValidateSecurityFlags(loadInfo));
 
   if (loadInfo->GetSecurityMode() ==
       nsILoadInfo::SEC_REQUIRE_CORS_INHERITS_SEC_CONTEXT) {
-    rv = DoCORSChecks(aChannel, loadInfo, aInAndOutListener);
-    NS_ENSURE_SUCCESS(rv, rv);
+    MOZ_TRY(DoCORSChecks(aChannel, loadInfo, aInAndOutListener));
   }
 
-  rv = CheckChannel(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckChannel(aChannel));
 
   // Perform all ContentPolicy checks (MixedContent, CSP, ...)
-  rv = DoContentSecurityChecks(aChannel, loadInfo);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(DoContentSecurityChecks(aChannel, loadInfo));
 
-  rv = CheckAllowFileProtocolScriptLoad(aChannel);
-  NS_ENSURE_SUCCESS(rv, rv);
+  MOZ_TRY(CheckAllowFileProtocolScriptLoad(aChannel));
 
   // now lets set the initialSecurityFlag for subsequent calls
   loadInfo->SetInitialSecurityCheckDone(true);
@@ -1771,16 +1769,18 @@ nsresult nsContentSecurityManager::CheckForIncoherentResultPrincipal(
     return NS_OK;
   }
 
-  nsCOMPtr<nsIPrincipal> resultOrPrecursor;
+  nsCOMPtr<nsIPrincipal> result;
   nsresult rv = nsScriptSecurityManager::GetScriptSecurityManager()
                     ->GetChannelResultPrincipalIfNotSandboxed(
-                        aChannel, getter_AddRefs(resultOrPrecursor));
+                        aChannel, getter_AddRefs(result));
   NS_ENSURE_SUCCESS(rv, rv);
-  NS_ENSURE_STATE(resultOrPrecursor);
+  NS_ENSURE_STATE(result);
 
-  if (nsCOMPtr<nsIPrincipal> precursor =
-          resultOrPrecursor->GetPrecursorPrincipal()) {
+  nsCOMPtr<nsIPrincipal> resultOrPrecursor;
+  if (nsCOMPtr<nsIPrincipal> precursor = result->GetPrecursorPrincipal()) {
     resultOrPrecursor = precursor;
+  } else {
+    resultOrPrecursor = result;
   }
 
   if (!resultOrPrecursor->GetIsContentPrincipal()) {
@@ -1798,6 +1798,35 @@ nsresult nsContentSecurityManager::CheckForIncoherentResultPrincipal(
   nsCOMPtr<nsIURI> channelURI;
   aChannel->GetURI(getter_AddRefs(channelURI));
   NS_ENSURE_STATE(channelURI);
+
+  if (channelURI->SchemeIs("data") && !result->GetIsNullPrincipal()) {
+    // Carve out for `ExtensionPolicyService::GetGeneratedBackgroundPageUrl`:
+    if (!BasePrincipal::Cast(result)->AddonPolicy()) {
+      MOZ_ASSERT_UNREACHABLE("data URI with a non-null principal");
+      return NS_ERROR_CONTENT_BLOCKED;
+    }
+
+    RemoteType triggeringRemoteType;
+    rv = loadInfo->GetTriggeringRemoteType(triggeringRemoteType);
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    if (!triggeringRemoteType.IsNotRemote() &&
+        !triggeringRemoteType.IsExtension()) {
+      MOZ_ASSERT_UNREACHABLE(
+          "Generated addon background page in incorrect process");
+      return NS_ERROR_CONTENT_BLOCKED;
+    }
+  }
+
+  if (NS_IsAboutSrcdoc(channelURI)) {
+    nsIPrincipal* loadingPrincipal = loadInfo->GetLoadingPrincipal();
+    if (!loadingPrincipal || !loadingPrincipal->Subsumes(result)) {
+      // This is fine for sandboxed srcdoc because result is unsandboxed.
+      MOZ_ASSERT_UNREACHABLE(
+          "about:srcdoc result principal not subsumed by embedder");
+      return NS_ERROR_CONTENT_BLOCKED;
+    }
+  }
 
   nsCOMPtr<nsIPrincipal> channelUriPrincipal =
       BasePrincipal::CreateContentPrincipal(channelURI, {});

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -55,16 +53,19 @@ nsresult nsMathMLmunderoverFrame::AttributeChanged(int32_t aNameSpaceID,
 }
 
 NS_IMETHODIMP
-nsMathMLmunderoverFrame::UpdatePresentationData(uint32_t aFlagsValues,
-                                                uint32_t aFlagsToUpdate) {
+nsMathMLmunderoverFrame::UpdatePresentationData(
+    MathMLPresentationFlags aFlagsValues,
+    MathMLPresentationFlags aFlagsToUpdate) {
   nsMathMLContainerFrame::UpdatePresentationData(aFlagsValues, aFlagsToUpdate);
   // disable the stretch-all flag if we are going to act like a
   // subscript-superscript pair
-  if (NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishData.flags) &&
+  if (mEmbellishData.flags.contains(MathMLEmbellishFlag::MovableLimits) &&
       StyleFont()->mMathStyle == StyleMathStyle::Compact) {
-    mPresentationData.flags &= ~NS_MATHML_STRETCH_ALL_CHILDREN_HORIZONTALLY;
+    mPresentationData.flags -=
+        MathMLPresentationFlag::StretchAllChildrenHorizontally;
   } else {
-    mPresentationData.flags |= NS_MATHML_STRETCH_ALL_CHILDREN_HORIZONTALLY;
+    mPresentationData.flags +=
+        MathMLPresentationFlag::StretchAllChildrenHorizontally;
   }
   return NS_OK;
 }
@@ -74,7 +75,8 @@ nsMathMLmunderoverFrame::InheritAutomaticData(nsIFrame* aParent) {
   // let the base class get the default from our parent
   nsMathMLContainerFrame::InheritAutomaticData(aParent);
 
-  mPresentationData.flags |= NS_MATHML_STRETCH_ALL_CHILDREN_HORIZONTALLY;
+  mPresentationData.flags +=
+      MathMLPresentationFlag::StretchAllChildrenHorizontally;
 
   return NS_OK;
 }
@@ -206,7 +208,7 @@ XXX The winner is the outermost setting in conflicting settings like these:
 
   // if our base is an embellished operator, let its state bubble to us (in
   // particular, this is where we get the flag for
-  // NS_MATHML_EMBELLISH_MOVABLELIMITS). Our flags are reset to the default
+  // MovableLimits). Our flags are reset to the default
   // values of false if the base frame isn't embellished.
   mPresentationData.baseFrame = baseFrame;
   GetEmbellishDataFrom(baseFrame, mEmbellishData);
@@ -218,24 +220,25 @@ XXX The winner is the outermost setting in conflicting settings like these:
   if (mContent->IsAnyOfMathMLElements(nsGkAtoms::munder,
                                       nsGkAtoms::munderover)) {
     GetEmbellishDataFrom(underscriptFrame, embellishData);
-    if (NS_MATHML_EMBELLISH_IS_ACCENT(embellishData.flags)) {
-      mEmbellishData.flags |= NS_MATHML_EMBELLISH_ACCENTUNDER;
+    if (embellishData.flags.contains(MathMLEmbellishFlag::Accent)) {
+      mEmbellishData.flags += MathMLEmbellishFlag::AccentUnder;
     } else {
-      mEmbellishData.flags &= ~NS_MATHML_EMBELLISH_ACCENTUNDER;
+      mEmbellishData.flags -= MathMLEmbellishFlag::AccentUnder;
     }
 
     // if we have an accentunder attribute, it overrides what the underscript
     // said
     if (mContent->AsElement()->GetAttr(nsGkAtoms::accentunder, value)) {
       if (value.LowerCaseEqualsLiteral("true")) {
-        mEmbellishData.flags |= NS_MATHML_EMBELLISH_ACCENTUNDER;
+        mEmbellishData.flags += MathMLEmbellishFlag::AccentUnder;
       } else if (value.LowerCaseEqualsLiteral("false")) {
-        mEmbellishData.flags &= ~NS_MATHML_EMBELLISH_ACCENTUNDER;
+        mEmbellishData.flags -= MathMLEmbellishFlag::AccentUnder;
       }
-    } else if (NS_MATHML_EMBELLISH_IS_ACCENTUNDER(mEmbellishData.flags)) {
+    } else if (mEmbellishData.flags.contains(
+                   MathMLEmbellishFlag::AccentUnder)) {
       AutoTArray<nsString, 1> params;
       params.AppendElement(mContent->NodeInfo()->NodeName());
-      PresContext()->Document()->WarnOnceAbout(
+      PresContext()->Document()->WarnOnceAndReportAbout(
           dom::DeprecatedOperations::
               eMathML_DeprecatedMunderNonExplicitAccentunder,
           false, params);
@@ -247,35 +250,36 @@ XXX The winner is the outermost setting in conflicting settings like these:
   if (mContent->IsAnyOfMathMLElements(nsGkAtoms::mover,
                                       nsGkAtoms::munderover)) {
     GetEmbellishDataFrom(overscriptFrame, embellishData);
-    if (NS_MATHML_EMBELLISH_IS_ACCENT(embellishData.flags)) {
-      mEmbellishData.flags |= NS_MATHML_EMBELLISH_ACCENTOVER;
+    if (embellishData.flags.contains(MathMLEmbellishFlag::Accent)) {
+      mEmbellishData.flags += MathMLEmbellishFlag::AccentOver;
     } else {
-      mEmbellishData.flags &= ~NS_MATHML_EMBELLISH_ACCENTOVER;
+      mEmbellishData.flags -= MathMLEmbellishFlag::AccentOver;
     }
 
     // if we have an accent attribute, it overrides what the overscript said
     if (mContent->AsElement()->GetAttr(nsGkAtoms::accent, value)) {
       if (value.LowerCaseEqualsLiteral("true")) {
-        mEmbellishData.flags |= NS_MATHML_EMBELLISH_ACCENTOVER;
+        mEmbellishData.flags += MathMLEmbellishFlag::AccentOver;
       } else if (value.LowerCaseEqualsLiteral("false")) {
-        mEmbellishData.flags &= ~NS_MATHML_EMBELLISH_ACCENTOVER;
+        mEmbellishData.flags -= MathMLEmbellishFlag::AccentOver;
       }
-    } else if (NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags)) {
+    } else if (mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentOver)) {
       AutoTArray<nsString, 1> params;
       params.AppendElement(mContent->NodeInfo()->NodeName());
-      PresContext()->Document()->WarnOnceAbout(
+      PresContext()->Document()->WarnOnceAndReportAbout(
           dom::DeprecatedOperations::eMathML_DeprecatedMoverNonExplicitAccent,
           false, params);
     }
   }
 
   bool subsupDisplay =
-      NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishData.flags) &&
+      mEmbellishData.flags.contains(MathMLEmbellishFlag::MovableLimits) &&
       StyleFont()->mMathStyle == StyleMathStyle::Compact;
 
   // disable the stretch-all flag if we are going to act like a superscript
   if (subsupDisplay) {
-    mPresentationData.flags &= ~NS_MATHML_STRETCH_ALL_CHILDREN_HORIZONTALLY;
+    mPresentationData.flags -=
+        MathMLPresentationFlag::StretchAllChildrenHorizontally;
   }
 
   // Now transmit any change that we want to our children so that they
@@ -292,46 +296,27 @@ XXX The winner is the outermost setting in conflicting settings like these:
      Within subscript and superscript it increments scriptlevel by 1, and
      sets displaystyle to "false", but leaves both attributes unchanged within
      base.
-
-     The TeXBook treats 'over' like a superscript, so p.141 or Rule 13a
-     say it shouldn't be compressed. However, The TeXBook says
-     that math accents and \overline change uncramped styles to their
-     cramped counterparts.
   */
   if (mContent->IsAnyOfMathMLElements(nsGkAtoms::mover,
                                       nsGkAtoms::munderover)) {
-    mIncrementOver = !NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags) ||
-                     subsupDisplay;
+    mIncrementOver =
+        !mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentOver) ||
+        subsupDisplay;
     SetIncrementScriptLevel(mContent->IsMathMLElement(nsGkAtoms::mover) ? 1 : 2,
                             mIncrementOver);
     if (mIncrementOver) {
       PropagateFrameFlagFor(overscriptFrame, NS_FRAME_MATHML_SCRIPT_DESCENDANT);
     }
-    if (!StaticPrefs::mathml_math_shift_enabled()) {
-      uint32_t compress =
-          NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags)
-              ? NS_MATHML_COMPRESSED
-              : 0;
-      PropagatePresentationDataFor(overscriptFrame, compress, compress);
-    }
   }
-  /*
-     The TeXBook treats 'under' like a subscript, so p.141 or Rule 13a
-     say it should be compressed
-  */
   if (mContent->IsAnyOfMathMLElements(nsGkAtoms::munder,
                                       nsGkAtoms::munderover)) {
     mIncrementUnder =
-        !NS_MATHML_EMBELLISH_IS_ACCENTUNDER(mEmbellishData.flags) ||
+        !mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentUnder) ||
         subsupDisplay;
     SetIncrementScriptLevel(1, mIncrementUnder);
     if (mIncrementUnder) {
       PropagateFrameFlagFor(underscriptFrame,
                             NS_FRAME_MATHML_SCRIPT_DESCENDANT);
-    }
-    if (!StaticPrefs::mathml_math_shift_enabled()) {
-      PropagatePresentationDataFor(underscriptFrame, NS_MATHML_COMPRESSED,
-                                   NS_MATHML_COMPRESSED);
     }
   }
 
@@ -351,9 +336,10 @@ XXX The winner is the outermost setting in conflicting settings like these:
      "font-feature-settings: 'dtls' 0"
    */
   if (overscriptFrame &&
-      NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags) &&
-      !NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishData.flags)) {
-    PropagatePresentationDataFor(baseFrame, NS_MATHML_DTLS, NS_MATHML_DTLS);
+      mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentOver) &&
+      !mEmbellishData.flags.contains(MathMLEmbellishFlag::MovableLimits)) {
+    PropagatePresentationDataFor(baseFrame, MathMLPresentationFlag::Dtls,
+                                 MathMLPresentationFlag::Dtls);
   }
 
   return NS_OK;
@@ -369,7 +355,7 @@ The REC says:
    used for limits on symbols such as &sum;.
 
 i.e.,:
- if (NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishDataflags) &&
+ if (mEmbellishDataflags.contains(MathMLEmbellishFlag::MovableLimits) &&
      StyleFont()->mMathStyle == StyleMathStyle::Compact) {
   // place like subscript-superscript pair
  }
@@ -383,7 +369,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
                                     const PlaceFlags& aFlags,
                                     ReflowOutput& aDesiredSize) {
   float fontSizeInflation = nsLayoutUtils::FontSizeInflationFor(this);
-  if (NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishData.flags) &&
+  if (mEmbellishData.flags.contains(MathMLEmbellishFlag::MovableLimits) &&
       StyleFont()->mMathStyle == StyleMathStyle::Compact) {
     // place like sub sup or subsup
     if (mContent->IsMathMLElement(nsGkAtoms::munderover)) {
@@ -489,7 +475,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
   nscoord underDelta1 = 0;  // gap between base and underscript
   nscoord underDelta2 = 0;  // extra space beneath underscript
 
-  if (!NS_MATHML_EMBELLISH_IS_ACCENTUNDER(mEmbellishData.flags)) {
+  if (!mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentUnder)) {
     // Rule 13a, App. G, TeXbook
     nscoord bigOpSpacing2, bigOpSpacing4, bigOpSpacing5, dummy;
     GetBigOpSpacings(fm, dummy, bigOpSpacing2, dummy, bigOpSpacing4,
@@ -525,7 +511,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
   nscoord overDelta1 = 0;  // gap between base and overscript
   nscoord overDelta2 = 0;  // extra space above overscript
 
-  if (!NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags)) {
+  if (!mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentOver)) {
     // Rule 13a, App. G, TeXbook
     // XXXfredw The Open Type MATH table has some StretchStack* parameters
     // that we may use when the base is a stretchy horizontal operator. See
@@ -619,7 +605,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
     dxOver = -bmOver.leftBearing;
   }
 
-  if (NS_MATHML_EMBELLISH_IS_ACCENTOVER(mEmbellishData.flags)) {
+  if (mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentOver)) {
     mBoundingMetrics.width = bmBase.width + baseMargin.LeftRight();
     dxOver += correction;
   } else {
@@ -665,7 +651,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
   }
 
   nscoord maxWidth = std::max(bmAnonymousBase.width, underWidth);
-  if (!NS_MATHML_EMBELLISH_IS_ACCENTUNDER(mEmbellishData.flags)) {
+  if (!mEmbellishData.flags.contains(MathMLEmbellishFlag::AccentUnder)) {
     GetItalicCorrection(bmAnonymousBase, correction);
     dxUnder += -correction / 2;
   }
@@ -750,7 +736,7 @@ void nsMathMLmunderoverFrame::Place(DrawTarget* aDrawTarget,
 
 bool nsMathMLmunderoverFrame::IsMathContentBoxHorizontallyCentered() const {
   bool subsupDisplay =
-      NS_MATHML_EMBELLISH_IS_MOVABLELIMITS(mEmbellishData.flags) &&
+      mEmbellishData.flags.contains(MathMLEmbellishFlag::MovableLimits) &&
       StyleFont()->mMathStyle == StyleMathStyle::Compact;
   return !subsupDisplay;
 }

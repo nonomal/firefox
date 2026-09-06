@@ -76,6 +76,9 @@ function openCertDownloadDialog(cert) {
 
 add_task(async function openFromPopUp() {
   info("Testing openFromPopUp");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", false]],
+  });
 
   const certdb = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
@@ -217,6 +220,9 @@ add_task(async function testBadCertIframe_feltPrivacyToTrue() {
 
 add_task(async function testBadCert() {
   info("Testing bad cert");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", false]],
+  });
   let tab = await openErrorPage();
 
   let tabsCount = gBrowser.tabs.length;
@@ -248,6 +254,9 @@ add_task(async function testBadCert() {
 
 add_task(async function testBadCertIframe() {
   info("Testing bad cert in an iframe");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", false]],
+  });
   let tab = await openErrorPage(true);
 
   let tabsCount = gBrowser.tabs.length;
@@ -280,6 +289,9 @@ add_task(async function testBadCertIframe() {
 
 add_task(async function testGoodCert() {
   info("Testing page info");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", false]],
+  });
   let url = "https://example.com/";
 
   let tabsCount = gBrowser.tabs.length;
@@ -316,6 +328,9 @@ add_task(async function testGoodCert() {
 
 add_task(async function testPreferencesCert() {
   info("Testing preferences cert");
+  await SpecialPowers.pushPrefEnv({
+    set: [["security.certerrors.felt-privacy-v1", false]],
+  });
   let url = "about:preferences#privacy";
 
   let tabsCount;
@@ -325,6 +340,12 @@ add_task(async function testPreferencesCert() {
     { gBrowser, url },
     async function (browser) {
       tabsCount = gBrowser.tabs.length;
+      if (
+        Services.prefs.getBoolPref("browser.settings-redesign.enabled", false)
+      ) {
+        await browser.contentWindow.gotoPref("connectionSecurity");
+        await new Promise(r => browser.contentWindow.requestAnimationFrame(r));
+      }
       checkAndClickButton(browser.contentDocument, "viewCertificatesButton");
 
       let certDialogLoaded = promiseLoadSubDialog(
@@ -336,6 +357,10 @@ add_task(async function testPreferencesCert() {
 
       doc.getElementById("certmanagertabs").selectedTab =
         doc.getElementById("mine_tab");
+      await TestUtils.waitForCondition(
+        () => !!doc.getElementById("user-tree").view.rowCount,
+        "cert list populated"
+      );
       let treeView = doc.getElementById("user-tree").view;
       let selectedCert;
       // See https://searchfox.org/mozilla-central/rev/40ef22080910c2e2c27d9e2120642376b1d8b8b2/browser/components/preferences/in-content/tests/browser_cert_export.js#41

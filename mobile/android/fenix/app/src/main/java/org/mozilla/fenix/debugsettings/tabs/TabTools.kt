@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,27 +33,25 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.tooling.preview.PreviewParameter
-import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
 import androidx.core.text.isDigitsOnly
+import kotlinx.coroutines.flow.map
 import mozilla.components.browser.state.action.TabListAction
 import mozilla.components.browser.state.state.createTab
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.button.FilledButton
 import mozilla.components.compose.base.textfield.TextField
+import mozilla.components.compose.base.theme.PreviewThemeProvider
+import mozilla.components.compose.base.theme.Theme
 import mozilla.components.compose.base.utils.toLocaleString
-import mozilla.components.lib.state.ext.observeAsState
 import org.mozilla.fenix.R
 import org.mozilla.fenix.debugsettings.ui.DebugDrawer
 import org.mozilla.fenix.ext.maxActiveTime
 import org.mozilla.fenix.tabstray.ext.isNormalTabInactive
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
-@VisibleForTesting
-internal const val MAX_TABS_GENERATED = 1000
+@VisibleForTesting internal const val MAX_TABS_GENERATED = 1000
 
 /**
  * Tab Tools UI for [DebugDrawer] that displays the tab counts and allows easy bulk-opening of tabs.
@@ -65,16 +64,17 @@ fun TabTools(
     store: BrowserStore,
     inactiveTabsEnabled: Boolean,
 ) {
-    val tabs by store.observeAsState(initialValue = emptyList()) { state -> state.tabs }
+    val tabs by remember { store.stateFlow.map { state -> state.tabs } }.collectAsState(initial = emptyList())
     val totalTabCount = remember(tabs) { tabs.size }
     val privateTabCount = remember(tabs) { tabs.filter { it.content.private }.size }
-    val inactiveTabCount = remember(tabs) {
-        if (inactiveTabsEnabled) {
-            tabs.filter { it.isNormalTabInactive(maxActiveTime) }.size
-        } else {
-            0
+    val inactiveTabCount =
+        remember(tabs) {
+            if (inactiveTabsEnabled) {
+                tabs.filter { it.isNormalTabInactive(maxActiveTime) }.size
+            } else {
+                0
+            }
         }
-    }
     val activeTabCount = remember(tabs) { totalTabCount - privateTabCount - inactiveTabCount }
 
     Surface {
@@ -87,12 +87,13 @@ fun TabTools(
             onCreateTabsClick = { quantity, isInactive, isPrivate ->
                 store.dispatch(
                     TabListAction.AddMultipleTabsAction(
-                        tabs = generateTabList(
-                            quantity = quantity,
-                            isInactive = isInactive,
-                            isPrivate = isPrivate,
-                        ),
-                    ),
+                        tabs =
+                            generateTabList(
+                                quantity = quantity,
+                                isInactive = isInactive,
+                                isPrivate = isPrivate,
+                            )
+                    )
                 )
             },
         )
@@ -103,13 +104,16 @@ private fun generateTabList(
     quantity: Int,
     isInactive: Boolean = false,
     isPrivate: Boolean = false,
-) = List(quantity) {
-    createTab(
-        url = "www.example.com",
-        private = isPrivate,
-        createdAt = if (isInactive) 0L else System.currentTimeMillis(),
-    )
-}
+    now: Long = System.currentTimeMillis(),
+) =
+    List(quantity) { index ->
+        createTab(
+            url = "www.example.com",
+            private = isPrivate,
+            title = "Debug Tab $index",
+            createdAt = if (isInactive) 0L else now,
+        )
+    }
 
 @Composable
 private fun TabToolsContent(
@@ -121,10 +125,7 @@ private fun TabToolsContent(
     onCreateTabsClick: ((quantity: Int, isInactive: Boolean, isPrivate: Boolean) -> Unit),
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(all = 16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(all = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         TabCounter(
@@ -194,9 +195,7 @@ private fun TabCountRow(
     count: Int,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
@@ -242,28 +241,28 @@ private fun TabCreationTool(
                 hasError = textErrorID != null
             },
             placeholder = "",
-            errorText = when (textErrorID) {
-                null -> {
-                    ""
-                }
-                R.string.debug_drawer_tab_tools_tab_quantity_exceed_max_error -> {
-                    stringResource(id = textErrorID!!, MAX_TABS_GENERATED)
-                }
-                else -> {
-                    stringResource(id = textErrorID!!)
-                }
-            },
+            errorText =
+                when (textErrorID) {
+                    null -> {
+                        ""
+                    }
+                    R.string.debug_drawer_tab_tools_tab_quantity_exceed_max_error -> {
+                        stringResource(id = textErrorID!!, MAX_TABS_GENERATED)
+                    }
+                    else -> {
+                        stringResource(id = textErrorID!!)
+                    }
+                },
             modifier = Modifier.fillMaxWidth(),
             label = stringResource(R.string.debug_drawer_tab_tools_tab_creation_tool_text_field_label),
             isError = hasError,
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Number,
-            ),
-            keyboardActions = KeyboardActions(
-                onDone = {
-                    keyboardController?.hide()
-                },
-            ),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            keyboardActions =
+                KeyboardActions(
+                    onDone = {
+                        keyboardController?.hide()
+                    }
+                ),
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -314,44 +313,24 @@ internal fun validateTextField(text: String): Int? {
     }
 }
 
-private data class TabToolsPreviewModel(
-    val inactiveTabsEnabled: Boolean = true,
-)
-
-private class TabToolsPreviewParameterProvider : PreviewParameterProvider<TabToolsPreviewModel> {
-    override val values: Sequence<TabToolsPreviewModel>
-        get() = sequenceOf(
-            TabToolsPreviewModel(
-                inactiveTabsEnabled = true,
-            ),
-            TabToolsPreviewModel(
-                inactiveTabsEnabled = false,
-            ),
-        )
-}
-
+@Preview
 @Composable
-@PreviewLightDark
-private fun TabToolsPreview(
-    @PreviewParameter(TabToolsPreviewParameterProvider::class) model: TabToolsPreviewModel,
-) {
-    FirefoxTheme {
+private fun TabToolsPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         TabTools(
             store = BrowserStore(),
-            inactiveTabsEnabled = model.inactiveTabsEnabled,
+            inactiveTabsEnabled = true,
         )
     }
 }
 
-@Composable
 @Preview
-private fun TabToolsPrivatePreview(
-    @PreviewParameter(TabToolsPreviewParameterProvider::class) model: TabToolsPreviewModel,
-) {
-    FirefoxTheme(theme = Theme.Private) {
+@Composable
+private fun TabToolsInactiveTabsDisabledPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
+    FirefoxTheme(theme) {
         TabTools(
             store = BrowserStore(),
-            inactiveTabsEnabled = model.inactiveTabsEnabled,
+            inactiveTabsEnabled = false,
         )
     }
 }

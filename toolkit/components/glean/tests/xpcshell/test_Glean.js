@@ -698,12 +698,6 @@ add_task(
 );
 
 add_task(async function test_fog_complex_object_works() {
-  if (!Glean.testOnly.crashStack) {
-    // FIXME(bug 1883857): object metric type not available, e.g. in artifact builds.
-    // Skipping this test.
-    return;
-  }
-
   Assert.equal(
     undefined,
     Glean.testOnly.crashStack.testGetValue(),

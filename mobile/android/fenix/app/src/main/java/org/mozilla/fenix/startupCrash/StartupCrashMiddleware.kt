@@ -13,7 +13,6 @@ import mozilla.components.lib.crash.CrashReporter
 import mozilla.components.lib.crash.store.CrashReportCache
 import mozilla.components.lib.crash.store.TimeInMillis
 import mozilla.components.lib.state.Middleware
-import mozilla.components.lib.state.MiddlewareContext
 import mozilla.components.lib.state.Store
 import org.mozilla.fenix.crashes.SettingsCrashReportCache
 import org.mozilla.fenix.utils.Settings
@@ -30,7 +29,7 @@ internal class StartupCrashMiddleware(
 ) : Middleware<StartupCrashState, StartupCrashAction> {
 
     override fun invoke(
-        context: MiddlewareContext<StartupCrashState, StartupCrashAction>,
+        store: Store<StartupCrashState, StartupCrashAction>,
         next: (StartupCrashAction) -> Unit,
         action: StartupCrashAction,
     ) {
@@ -39,7 +38,7 @@ internal class StartupCrashMiddleware(
         when (action) {
             ReportTapped -> {
                 scope.launch {
-                    sendUnsentCrashReports(context.store)
+                    sendUnsentCrashReports(store)
                 }
             }
             ReopenTapped -> restartHandler()
@@ -48,21 +47,24 @@ internal class StartupCrashMiddleware(
                     cache.setDeferredUntil(currentTimeInMillis() + FIVE_DAYS_IN_MILLIS)
                 }
             }
-            CrashReportCompleted,
-            -> {}
+            CrashReportCompleted -> {}
         }
     }
 
     private suspend fun sendUnsentCrashReports(store: Store<StartupCrashState, StartupCrashAction>) {
-        crashReporter.unsentCrashReportsSince(cutoffDate()).map {
-            crashReporter.submitReport(it)
-        }.joinAll()
+        crashReporter
+            .unsentCrashReportsSince(cutoffDate())
+            .map {
+                crashReporter.submitReport(it)
+            }
+            .joinAll()
         store.dispatch(CrashReportCompleted)
     }
 
     private suspend fun cutoffDate(): TimeInMillis {
-        return cache.getCutoffDate() ?: currentTimeInMillis().also {
-            cache.setCutoffDate(it)
-        }
+        return cache.getCutoffDate()
+            ?: currentTimeInMillis().also {
+                cache.setCutoffDate(it)
+            }
     }
 }

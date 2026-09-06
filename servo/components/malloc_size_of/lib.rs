@@ -46,15 +46,6 @@
 //!   Note: WebRender has a reduced fork of this crate, so that we can avoid
 //!   publishing this crate on crates.io.
 
-extern crate app_units;
-extern crate cssparser;
-extern crate euclid;
-extern crate selectors;
-extern crate servo_arc;
-extern crate smallbitvec;
-extern crate smallvec;
-extern crate void;
-
 use std::hash::{BuildHasher, Hash};
 use std::mem::size_of;
 use std::ops::Range;
@@ -117,7 +108,7 @@ impl MallocSizeOfOps {
         if MallocSizeOfOps::is_empty(ptr) {
             0
         } else {
-            (self.size_of_op)(ptr as *const c_void)
+            unsafe { (self.size_of_op)(ptr as *const c_void) }
         }
     }
 
@@ -130,7 +121,7 @@ impl MallocSizeOfOps {
     /// must not be empty.
     pub unsafe fn malloc_enclosing_size_of<T>(&self, ptr: *const T) -> usize {
         assert!(!MallocSizeOfOps::is_empty(ptr));
-        (self.enclosing_size_of_op.unwrap())(ptr as *const c_void)
+        unsafe { (self.enclosing_size_of_op.unwrap())(ptr as *const c_void) }
     }
 
     /// Call `have_seen_ptr_op` on `ptr`.
@@ -283,6 +274,14 @@ impl<T: MallocSizeOf + Copy> MallocSizeOf for std::cell::Cell<T> {
 impl<T: MallocSizeOf> MallocSizeOf for std::cell::RefCell<T> {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.borrow().size_of(ops)
+    }
+}
+
+impl<T: MallocSizeOf> MallocSizeOf for std::sync::OnceLock<T> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.get()
+            .map(|value| value.size_of(ops))
+            .unwrap_or_default()
     }
 }
 
@@ -440,6 +439,7 @@ macro_rules! malloc_size_of_hash_set {
 }
 
 malloc_size_of_hash_set!(std::collections::HashSet<T, S>);
+malloc_size_of_hash_set!(hashbrown::HashSet<T, S>);
 
 macro_rules! malloc_size_of_hash_map {
     ($ty:ty) => {
@@ -479,6 +479,7 @@ macro_rules! malloc_size_of_hash_map {
 }
 
 malloc_size_of_hash_map!(std::collections::HashMap<K, V, S>);
+malloc_size_of_hash_map!(hashbrown::HashMap<K, V, S>);
 
 impl<K, V> MallocShallowSizeOf for std::collections::BTreeMap<K, V>
 where
@@ -523,6 +524,12 @@ impl<T> MallocSizeOf for std::marker::PhantomData<T> {
 // rc_arc_must_not_derive_malloc_size_of.rs)
 //impl<T> !MallocSizeOf for Arc<T> { }
 //impl<T> !MallocShallowSizeOf for Arc<T> { }
+
+impl<T> MallocSizeOf for servo_arc::ArcBorrow<'_, T> {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        0
+    }
+}
 
 impl<T> MallocUnconditionalShallowSizeOf for servo_arc::Arc<T> {
     fn unconditional_shallow_size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
@@ -714,16 +721,16 @@ where
         use selectors::parser::Component;
 
         match self {
-            Component::AttributeOther(ref attr_selector) => attr_selector.size_of(ops),
-            Component::Negation(ref components) => components.unconditional_size_of(ops),
-            Component::NonTSPseudoClass(ref pseudo) => (*pseudo).size_of(ops),
-            Component::Slotted(ref selector) | Component::Host(Some(ref selector)) => {
+            Component::AttributeOther(attr_selector) => attr_selector.size_of(ops),
+            Component::Negation(components) => components.unconditional_size_of(ops),
+            Component::NonTSPseudoClass(pseudo) => (*pseudo).size_of(ops),
+            Component::Slotted(selector) | Component::Host(Some(selector)) => {
                 selector.unconditional_size_of(ops)
             },
-            Component::Is(ref list) | Component::Where(ref list) => list.unconditional_size_of(ops),
-            Component::Has(ref relative_selectors) => relative_selectors.size_of(ops),
-            Component::NthOf(ref nth_of_data) => nth_of_data.size_of(ops),
-            Component::PseudoElement(ref pseudo) => (*pseudo).size_of(ops),
+            Component::Is(list) | Component::Where(list) => list.unconditional_size_of(ops),
+            Component::Has(relative_selectors) => relative_selectors.size_of(ops),
+            Component::NthOf(nth_of_data) => nth_of_data.size_of(ops),
+            Component::PseudoElement(pseudo) => (*pseudo).size_of(ops),
             Component::Combinator(..)
             | Component::ExplicitAnyNamespace
             | Component::ExplicitNoNamespace
@@ -809,6 +816,7 @@ malloc_size_of_is_0!(f32, f64);
 
 malloc_size_of_is_0!(std::sync::atomic::AtomicBool);
 malloc_size_of_is_0!(std::sync::atomic::AtomicIsize);
+malloc_size_of_is_0!(std::sync::atomic::AtomicU32);
 malloc_size_of_is_0!(std::sync::atomic::AtomicUsize);
 malloc_size_of_is_0!(std::num::NonZeroUsize);
 malloc_size_of_is_0!(std::num::NonZeroU64);
@@ -822,7 +830,8 @@ malloc_size_of_is_0!(app_units::Au);
 malloc_size_of_is_0!(
     cssparser::TokenSerializationType,
     cssparser::SourceLocation,
-    cssparser::SourcePosition
+    cssparser::SourcePosition,
+    cssparser::UnicodeRange
 );
 
 malloc_size_of_is_0!(selectors::OpaqueElement);

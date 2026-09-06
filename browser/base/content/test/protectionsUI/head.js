@@ -107,7 +107,7 @@ async function openProtectionsPanelWithKeyNav() {
   // This will trigger the focus event for the shield icon for pre-fetching
   // the tracker count.
   EventUtils.synthesizeKey("KEY_Tab", { shiftKey: true });
-  is(document.activeElement.id, "urlbar-searchmode-switcher");
+  ok(document.activeElement.classList.contains("searchmode-switcher"));
   EventUtils.synthesizeKey("KEY_ArrowRight");
   EventUtils.synthesizeKey("KEY_Enter");
 
@@ -176,40 +176,6 @@ async function waitForAboutProtectionsTab() {
   });
 
   return tab;
-}
-
-/**
- * Waits for a load (or custom) event to finish in a given tab. If provided
- * load an uri into the tab.
- *
- * @param tab
- *        The tab to load into.
- * @param [optional] url
- *        The url to load, or the current url.
- * @return {Promise} resolved when the event is handled.
- * @resolves to the received event
- * @rejects if a valid load event is not received within a meaningful interval
- */
-function promiseTabLoadEvent(tab, url) {
-  info("Wait tab event: load");
-
-  function handle(loadedUrl) {
-    if (loadedUrl === "about:blank" || (url && loadedUrl !== url)) {
-      info(`Skipping spurious load event for ${loadedUrl}`);
-      return false;
-    }
-
-    info("Tab event received: load");
-    return true;
-  }
-
-  let loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser, false, handle);
-
-  if (url) {
-    BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, url);
-  }
-
-  return loaded;
 }
 
 function waitForSecurityChange(numChanges = 1, win = null) {

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -19,7 +17,6 @@
 #include "mozilla/StaticPrefs_content.h"
 #include "nsCOMPtr.h"
 #include "nsCycleCollectionParticipant.h"
-#include "nsGkAtoms.h"
 #include "nsICSSLoaderObserver.h"
 #include "nsIContentSink.h"
 #include "nsITimer.h"
@@ -93,8 +90,9 @@ class nsContentSink : public nsICSSLoaderObserver,
   NS_DECL_NSINAMED
 
   // nsICSSLoaderObserver
-  NS_IMETHOD StyleSheetLoaded(mozilla::StyleSheet* aSheet, bool aWasDeferred,
-                              nsresult aStatus) override;
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY NS_IMETHOD
+  StyleSheetLoaded(mozilla::StyleSheet* aSheet, bool aWasDeferred,
+                   nsresult aStatus) override;
 
   // nsIContentSink implementation helpers
   nsresult WillParseImpl(void);
@@ -102,7 +100,7 @@ class nsContentSink : public nsICSSLoaderObserver,
   void WillResumeImpl();
   nsresult DidProcessATokenImpl(void);
   void WillBuildModelImpl(void);
-  void DidBuildModelImpl(bool aTerminated);
+  MOZ_CAN_RUN_SCRIPT void DidBuildModelImpl(bool aTerminated);
   void DropParserAndPerfHint(void);
   bool IsScriptExecutingImpl();
   void ContinueParsingDocumentAfterCurrentScriptImpl();
@@ -126,13 +124,13 @@ class nsContentSink : public nsICSSLoaderObserver,
 
   nsresult ProcessHTTPHeaders(nsIChannel* aChannel);
   // aEarlyHintPreloaderId zero means no early hint channel to connect back
-  nsresult ProcessLinkFromHeader(const mozilla::net::LinkHeader& aHeader,
-                                 uint64_t aEarlyHintPreloaderId);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult ProcessLinkFromHeader(
+      const mozilla::net::LinkHeader& aHeader, uint64_t aEarlyHintPreloaderId);
 
   // @param aFetchPriority Accepts a case-insensitive fetch priority keyword and
   //                       other values too, see
   //                       <https://html.spec.whatwg.org/#fetch-priority-attribute>.
-  virtual nsresult ProcessStyleLinkFromHeader(
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsresult ProcessStyleLinkFromHeader(
       const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
       const nsAString& aIntegrity, const nsAString& aType,
       const nsAString& aMedia, const nsAString& aReferrerPolicy,
@@ -179,7 +177,7 @@ class nsContentSink : public nsICSSLoaderObserver,
  public:
   void StartLayout(bool aIgnorePendingSheets);
 
-  static void NotifyDocElementCreated(Document* aDoc);
+  MOZ_CAN_RUN_SCRIPT static void NotifyDocElementCreated(Document* aDoc);
 
   Document* GetDocument() { return mDocument; }
 

@@ -1,20 +1,20 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsFilePicker_h__
-#define nsFilePicker_h__
+#ifndef nsFilePicker_h_
+#define nsFilePicker_h_
 
 #include <gtk/gtk.h>
 
 #include "nsBaseFilePicker.h"
+#include "nsCOMArray.h"
 #include "nsString.h"
 #include "nsTArray.h"
-#include "nsCOMArray.h"
 
 class nsIWidget;
 class nsIFile;
+class nsWindow;
 
 class nsFilePicker final : public nsBaseFilePicker {
  public:
@@ -23,7 +23,8 @@ class nsFilePicker final : public nsBaseFilePicker {
   NS_DECL_ISUPPORTS
 
   // nsIFilePicker (less what's in nsBaseFilePicker)
-  NS_IMETHOD Open(nsIFilePickerShownCallback* aCallback) override;
+  MOZ_CAN_RUN_SCRIPT NS_IMETHOD
+  Open(nsIFilePickerShownCallback* aCallback) override;
   NS_IMETHOD IsModeSupported(nsIFilePicker::Mode, JSContext*,
                              mozilla::dom::Promise**) override;
   NS_IMETHOD AppendFilters(int32_t aFilterMask) override;
@@ -68,7 +69,7 @@ class nsFilePicker final : public nsBaseFilePicker {
 
   void DoneCommon(ResultCode);
 
-  nsCOMPtr<nsIWidget> mParentWidget;
+  RefPtr<nsWindow> mParentWidget;
   nsCOMPtr<nsIFilePickerShownCallback> mCallback;
   nsCOMArray<nsIFile> mFiles;
 

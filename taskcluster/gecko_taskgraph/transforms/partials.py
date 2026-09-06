@@ -7,15 +7,15 @@ Transform the partials task into an actual task description.
 
 import logging
 
+from mozilla_taskgraph.util.attributes import (
+    copy_attributes_from_dependent_job,
+    release_level,
+)
 from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.dependencies import get_primary_dependency
 from taskgraph.util.taskcluster import get_artifact_prefix
 from taskgraph.util.treeherder import inherit_treeherder_from_dep
 
-from gecko_taskgraph.util.attributes import (
-    copy_attributes_from_dependent_job,
-    release_level,
-)
 from gecko_taskgraph.util.partials import get_builds
 from gecko_taskgraph.util.platforms import architecture
 
@@ -30,20 +30,16 @@ def _generate_task_output_files(job, filenames, locale=None):
 
     data = list()
     for filename in filenames:
-        data.append(
-            {
-                "type": "file",
-                "path": f"/home/worker/artifacts/{filename}",
-                "name": f"{artifact_prefix}/{locale_output_path}{filename}",
-            }
-        )
-    data.append(
-        {
+        data.append({
             "type": "file",
-            "path": "/home/worker/artifacts/manifest.json",
-            "name": f"{artifact_prefix}/{locale_output_path}manifest.json",
-        }
-    )
+            "path": f"/home/worker/artifacts/{filename}",
+            "name": f"{artifact_prefix}/{locale_output_path}{filename}",
+        })
+    data.append({
+        "type": "file",
+        "path": "/home/worker/artifacts/manifest.json",
+        "name": f"{artifact_prefix}/{locale_output_path}manifest.json",
+    })
     return data
 
 
@@ -150,7 +146,10 @@ def make_task_description(config, jobs):
                 "MAR_CHANNEL_ID": attributes["mar-channel-id"],
             },
         }
-        if release_level(config.params["project"]) == "staging":
+        if (
+            release_level(config.graph_config["release-branches"], config.params)
+            == "staging"
+        ):
             worker["env"]["FUNSIZE_ALLOW_STAGING_PREFIXES"] = "true"
 
         task = {
@@ -167,9 +166,9 @@ def make_task_description(config, jobs):
         }
 
         # We only want caching on linux/windows due to bug 1436977
-        if int(level) == 3 and any(
-            [build_platform.startswith(prefix) for prefix in ["linux", "win"]]
-        ):
+        if int(level) == 3 and any([
+            build_platform.startswith(prefix) for prefix in ["linux", "win"]
+        ]):
             task["scopes"].append(
                 "auth:aws-s3:read-write:tc-gp-private-1d-us-east-1/releng/mbsdiff-cache/"
             )

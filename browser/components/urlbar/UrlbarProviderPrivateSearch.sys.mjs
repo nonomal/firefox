@@ -15,11 +15,11 @@ import {
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
-  UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
+  SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
-  UrlbarTokenizer:
-    "moz-src:///browser/components/urlbar/UrlbarTokenizer.sys.mjs",
+  UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
 });
 
 /**
@@ -31,10 +31,10 @@ export class UrlbarProviderPrivateSearch extends UrlbarProvider {
   }
 
   /**
-   * @returns {Values<typeof UrlbarUtils.PROVIDER_TYPE>}
+   * @returns {Values<typeof lazy.UrlbarShared.PROVIDER_TYPE>}
    */
   get type() {
-    return UrlbarUtils.PROVIDER_TYPE.PROFILE;
+    return lazy.UrlbarShared.PROVIDER_TYPE.PROFILE;
   }
 
   /**
@@ -58,12 +58,13 @@ export class UrlbarProviderPrivateSearch extends UrlbarProvider {
    * @param {UrlbarQueryContext} queryContext
    * @param {(provider: UrlbarProvider, result: UrlbarResult) => void} addCallback
    *   Callback invoked by the provider to add a new result.
+   * @param {UrlbarParentController} controller The controller instance.
    */
-  async startQuery(queryContext, addCallback) {
+  async startQuery(queryContext, addCallback, controller) {
     let searchString = queryContext.trimmedSearchString;
     if (
       queryContext.tokens.some(
-        t => t.type == lazy.UrlbarTokenizer.TYPE.RESTRICT_SEARCH
+        t => t.type == lazy.UrlbarShared.TOKEN_TYPE.RESTRICT_SEARCH
       )
     ) {
       if (queryContext.tokens.length == 1) {
@@ -72,7 +73,7 @@ export class UrlbarProviderPrivateSearch extends UrlbarProvider {
       }
       // Remove the restriction char from the search string.
       searchString = queryContext.tokens
-        .filter(t => t.type != lazy.UrlbarTokenizer.TYPE.RESTRICT_SEARCH)
+        .filter(t => t.type != lazy.UrlbarShared.TOKEN_TYPE.RESTRICT_SEARCH)
         .map(t => t.value)
         .join(" ");
     }
@@ -80,11 +81,11 @@ export class UrlbarProviderPrivateSearch extends UrlbarProvider {
     let instance = this.queryInstance;
 
     let engine = queryContext.searchMode?.engineName
-      ? Services.search.getEngineByName(queryContext.searchMode.engineName)
-      : await Services.search.getDefaultPrivate();
+      ? lazy.SearchService.getEngineByName(queryContext.searchMode.engineName)
+      : await lazy.SearchService.getDefaultPrivate();
     let isPrivateEngine =
       lazy.UrlbarSearchUtils.separatePrivateDefault &&
-      engine != (await Services.search.getDefault());
+      engine != (await lazy.SearchService.getDefault());
     this.logger.info(`isPrivateEngine: ${isPrivateEngine}`);
 
     // This is a delay added before returning results, to avoid flicker.
@@ -97,22 +98,26 @@ export class UrlbarProviderPrivateSearch extends UrlbarProvider {
       logger: this.logger,
     }).promise;
 
-    let icon = await engine.getIconURL();
+    let icon = await UrlbarUtils.getEngineIconUrl(engine, controller);
     if (instance != this.queryInstance) {
       return;
     }
 
     let result = new lazy.UrlbarResult({
-      type: UrlbarUtils.RESULT_TYPE.SEARCH,
-      source: UrlbarUtils.RESULT_SOURCE.SEARCH,
+      type: lazy.UrlbarShared.RESULT_TYPE.SEARCH,
+      source: lazy.UrlbarShared.RESULT_SOURCE.SEARCH,
       suggestedIndex: 1,
-      ...lazy.UrlbarResult.payloadAndSimpleHighlights(queryContext.tokens, {
-        engine: [engine.name, UrlbarUtils.HIGHLIGHT.TYPED],
-        query: [searchString, UrlbarUtils.HIGHLIGHT.NONE],
+      payload: {
+        engine: engine.name,
+        query: searchString,
+        title: searchString,
         icon,
         inPrivateWindow: true,
         isPrivateEngine,
-      }),
+      },
+      highlights: {
+        engine: lazy.UrlbarShared.HIGHLIGHT.TYPED,
+      },
     });
     addCallback(this, result);
   }

@@ -1,4 +1,3 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,8 +8,8 @@
 
 */
 
-#ifndef nsXULElement_h__
-#define nsXULElement_h__
+#ifndef nsXULElement_h_
+#define nsXULElement_h_
 
 #include <stdint.h>
 #include <stdio.h>
@@ -49,6 +48,7 @@
 #include "nsStyledElement.h"
 #include "nsTArray.h"
 #include "nsTLiteralString.h"
+#include "nsWindowSizes.h"
 #include "nscore.h"
 
 class JSObject;
@@ -167,9 +167,6 @@ class nsXULPrototypeElement : public nsXULPrototypeNode {
   explicit nsXULPrototypeElement(mozilla::dom::NodeInfo* aNodeInfo = nullptr)
       : nsXULPrototypeNode(eType_Element),
         mNodeInfo(aNodeInfo),
-        mHasIdAttribute(false),
-        mHasClassAttribute(false),
-        mHasStyleAttribute(false),
         mIsAtom(nullptr) {}
 
  private:
@@ -201,9 +198,6 @@ class nsXULPrototypeElement : public nsXULPrototypeNode {
 
   RefPtr<mozilla::dom::NodeInfo> mNodeInfo;
 
-  uint32_t mHasIdAttribute : 1;
-  uint32_t mHasClassAttribute : 1;
-  uint32_t mHasStyleAttribute : 1;
   nsTArray<nsXULPrototypeAttribute> mAttributes;  // [OWNER]
   RefPtr<nsAtom> mIsAtom;
 };
@@ -265,6 +259,8 @@ class nsXULPrototypeScript : public nsXULPrototypeNode {
 
   nsresult InstantiateScript(JSContext* aCx,
                              JS::MutableHandle<JSScript*> aScript);
+
+  void AddSizeOfExcludingThis(nsWindowSizes& aSizes, size_t* aNodeSize) const;
 
   nsCOMPtr<nsIURI> mSrcURI;
   uint32_t mLineNo;
@@ -341,7 +337,7 @@ class nsXULElement : public nsStyledElement {
   using Document = mozilla::dom::Document;
 
   // Use Construct to construct elements instead of this constructor.
-  explicit nsXULElement(already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+  explicit nsXULElement(already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
  public:
   using Element::Blur;
@@ -352,18 +348,13 @@ class nsXULElement : public nsStyledElement {
 
   // This is the constructor for nsXULElements.
   static nsXULElement* Construct(
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
   NS_IMPL_FROMNODE(nsXULElement, kNameSpaceID_XUL)
 
   // nsISupports
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(nsXULElement, nsStyledElement)
-
-  // This doesn't work on XUL elements! You probably want
-  // GetXULBoolAttr(nsGkAtoms::disabled) or so.
-  // TODO(emilio): Maybe we should unify HTML and XUL here.
-  bool IsDisabled() const = delete;
 
   // nsINode
   void GetEventTargetParent(mozilla::EventChainPreVisitor& aVisitor) override;
@@ -400,31 +391,13 @@ class nsXULElement : public nsStyledElement {
   XULFocusability GetXULFocusability(mozilla::IsFocusableFlags);
   Focusable IsFocusableWithoutStyle(mozilla::IsFocusableFlags) override;
 
-  NS_IMETHOD_(bool) IsAttributeMapped(const nsAtom* aAttribute) const override;
+  bool IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const override;
 
   nsresult Clone(mozilla::dom::NodeInfo*, nsINode** aResult) const override;
 
   bool IsEventAttributeNameInternal(nsAtom* aName) override;
 
   using DOMString = mozilla::dom::DOMString;
-  void GetXULAttr(nsAtom* aName, DOMString& aResult) const {
-    GetAttr(aName, aResult);
-  }
-  void SetXULAttr(nsAtom* aName, const nsAString& aValue,
-                  mozilla::ErrorResult& aError) {
-    SetAttr(aName, aValue, aError);
-  }
-  bool GetXULBoolAttr(nsAtom* aName) const {
-    return AttrValueIs(kNameSpaceID_None, aName, u"true"_ns, eCaseMatters);
-  }
-  void SetXULBoolAttr(nsAtom* aName, bool aValue,
-                      mozilla::ErrorResult& aError) {
-    if (aValue) {
-      SetAttr(aName, u"true"_ns, aError);
-    } else {
-      UnsetAttr(aName, aError);
-    }
-  }
 
   // WebIDL API
   bool Autofocus() const { return GetBoolAttr(nsGkAtoms::autofocus); }
@@ -438,36 +411,36 @@ class nsXULElement : public nsStyledElement {
     SetBoolAttr(nsGkAtoms::collapsed, aCollapsed);
   }
   void GetObserves(DOMString& aValue) const {
-    GetXULAttr(nsGkAtoms::observes, aValue);
+    GetAttr(nsGkAtoms::observes, aValue);
   }
   void SetObserves(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::observes, aValue, rv);
+    SetAttr(nsGkAtoms::observes, aValue, rv);
   }
-  void GetMenu(DOMString& aValue) const { GetXULAttr(nsGkAtoms::menu, aValue); }
+  void GetMenu(DOMString& aValue) const { GetAttr(nsGkAtoms::menu, aValue); }
   void SetMenu(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::menu, aValue, rv);
+    SetAttr(nsGkAtoms::menu, aValue, rv);
   }
   void GetContextMenu(DOMString& aValue) {
-    GetXULAttr(nsGkAtoms::contextmenu, aValue);
+    GetAttr(nsGkAtoms::contextmenu, aValue);
   }
   void SetContextMenu(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::contextmenu, aValue, rv);
+    SetAttr(nsGkAtoms::contextmenu, aValue, rv);
   }
   void GetTooltip(DOMString& aValue) const {
-    GetXULAttr(nsGkAtoms::tooltip, aValue);
+    GetAttr(nsGkAtoms::tooltip, aValue);
   }
   void SetTooltip(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::tooltip, aValue, rv);
+    SetAttr(nsGkAtoms::tooltip, aValue, rv);
   }
   void GetTooltipText(DOMString& aValue) const {
-    GetXULAttr(nsGkAtoms::tooltiptext, aValue);
+    GetAttr(nsGkAtoms::tooltiptext, aValue);
   }
   void SetTooltipText(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::tooltiptext, aValue, rv);
+    SetAttr(nsGkAtoms::tooltiptext, aValue, rv);
   }
-  void GetSrc(DOMString& aValue) const { GetXULAttr(nsGkAtoms::src, aValue); }
+  void GetSrc(DOMString& aValue) const { GetAttr(nsGkAtoms::src, aValue); }
   void SetSrc(const nsAString& aValue, mozilla::ErrorResult& rv) {
-    SetXULAttr(nsGkAtoms::src, aValue, rv);
+    SetAttr(nsGkAtoms::src, aValue, rv);
   }
   nsIControllers* GetExtantControllers() const {
     const nsExtendedDOMSlots* slots = GetExistingExtendedDOMSlots();
@@ -521,7 +494,6 @@ class nsXULElement : public nsStyledElement {
   /**
    * Add a listener for the specified attribute, if appropriate.
    */
-  void AddListenerForAttributeIfNeeded(const nsAttrName& aName);
   void AddListenerForAttributeIfNeeded(nsAtom* aLocalName);
 
  protected:
@@ -530,15 +502,16 @@ class nsXULElement : public nsStyledElement {
 
   bool SupportsAccessKey() const;
   void RegUnRegAccessKey(bool aDoReg) override;
-  bool BoolAttrIsTrue(nsAtom* aName) const;
 
   friend nsXULElement* NS_NewBasicXULElement(
-      already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo);
+      already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo);
 
-  friend nsresult NS_NewXULElement(mozilla::dom::Element** aResult,
-                                   mozilla::dom::NodeInfo* aNodeInfo,
-                                   mozilla::dom::FromParser aFromParser,
-                                   const nsAString* aIs);
+  friend nsresult NS_NewXULElement(
+      mozilla::dom::Element** aResult, mozilla::dom::NodeInfo* aNodeInfo,
+      mozilla::dom::FromParser aFromParser, nsAtom* aIsAtom,
+      mozilla::dom::CustomElementDefinition* aDefinition,
+      mozilla::Maybe<RefPtr<mozilla::dom::CustomElementRegistry>>
+          aCustomElementRegistry);
   friend void NS_TrustedNewXULElement(mozilla::dom::Element** aResult,
                                       mozilla::dom::NodeInfo* aNodeInfo);
 
@@ -551,4 +524,4 @@ class nsXULElement : public nsStyledElement {
                               nsAutoString& aCommand);
 };
 
-#endif  // nsXULElement_h__
+#endif  // nsXULElement_h_

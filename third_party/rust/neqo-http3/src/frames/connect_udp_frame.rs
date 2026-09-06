@@ -5,7 +5,7 @@
 // except according to those terms.
 
 use super::hframe::HFrameType;
-use crate::{frames::reader::FrameDecoder, Res};
+use crate::{Res, frames::reader::FrameDecoder};
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum Frame {
@@ -20,13 +20,16 @@ impl FrameDecoder<Self> for Frame {
     fn is_known_type(_frame_type: HFrameType) -> bool {
         false
     }
+
+    fn max_frame_data(_frame_type: HFrameType) -> usize {
+        unreachable!("is_known_type is false, so frame_length_decoded never calls this")
+    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::frames::reader::FrameDecoder;
 
     const DATAGRAM: HFrameType = HFrameType(0x0);
 

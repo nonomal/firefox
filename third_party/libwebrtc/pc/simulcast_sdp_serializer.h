@@ -11,6 +11,7 @@
 #ifndef PC_SIMULCAST_SDP_SERIALIZER_H_
 #define PC_SIMULCAST_SDP_SERIALIZER_H_
 
+#include <cstddef>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -21,6 +22,11 @@
 
 namespace webrtc {
 
+// Generous upper bound on the number of parsed RIDs to prevent CPU/memory
+// exhaustion attacks from maliciously large inputs. Practical simulcast limits
+// are much lower (e.g. kMaxSimulcastStreams = 3).
+inline constexpr size_t kMaxSimulcastRids = 16;
+
 // This class serializes simulcast components of the SDP.
 // Example:
 //     SimulcastDescription can be serialized and deserialized by this class.
@@ -28,8 +34,8 @@ namespace webrtc {
 //     format without knowing about the SDP attribute details (a=simulcast:)
 // Usage:
 //     Consider the SDP attribute for simulcast a=simulcast:<configuration>.
-//     The SDP serializtion code (webrtc_sdp.h) should use `SdpSerializer` to
-//     serialize and deserialize the <configuration> section.
+//     The SDP serialization code (webrtc_sdp.h) should use `SdpSerialize`
+//     to serialize and deserialize the <configuration> section.
 // This class will allow testing the serialization of components without
 // having to serialize the entire SDP while hiding implementation details
 // from callers of sdp serialization (webrtc_sdp.h).

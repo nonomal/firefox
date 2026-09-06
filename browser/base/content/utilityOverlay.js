@@ -1,5 +1,4 @@
-/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -13,14 +12,19 @@ var { XPCOMUtils } = ChromeUtils.importESModule(
 
 ChromeUtils.defineESModuleGetters(this, {
   AboutNewTab: "resource:///modules/AboutNewTab.sys.mjs",
+  AIWindow:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
+  ContainerCreationPanel:
+    "chrome://browser/content/usercontext/ContainerCreationPanel.mjs",
   ContextualIdentityService:
-    "resource://gre/modules/ContextualIdentityService.sys.mjs",
+    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   ExtensionSettingsStore:
     "resource://gre/modules/ExtensionSettingsStore.sys.mjs",
   ExtensionUtils: "resource://gre/modules/ExtensionUtils.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
+  Referrals: "resource:///modules/referrals/Referrals.sys.mjs",
   ShellService: "moz-src:///browser/components/shell/ShellService.sys.mjs",
   URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
 });
@@ -62,6 +66,9 @@ Object.defineProperty(this, "BROWSER_NEW_TAB_URL", {
       ) {
         return "about:privatebrowsing";
       }
+    }
+    if (AIWindow.isAIWindowActive(window)) {
+      return AIWindow.newTabURL;
     }
     return AboutNewTab.newTabURL;
   },
@@ -127,7 +134,7 @@ function checkForMiddleClick(node, event) {
   // We should be using the disabled property here instead of the attribute,
   // but some elements that this function is used with don't support it (e.g.
   // menuitem).
-  if (node.getAttribute("disabled") == "true") {
+  if (node.hasAttribute("disabled")) {
     return;
   } // Do nothing
 
@@ -178,6 +185,9 @@ function createUserContextMenu(
     excludeUserContextId = 0,
     showDefaultTab = false,
     useAccessKeys = true,
+    showAddContainer = true,
+    showManageContainers = true,
+    containerSource = "unknown",
   } = {}
 ) {
   while (event.target.hasChildNodes()) {
@@ -187,19 +197,21 @@ function createUserContextMenu(
   MozXULElement.insertFTLIfNeeded("toolkit/global/contextual-identity.ftl");
   let docfrag = document.createDocumentFragment();
 
-  // If we are excluding a userContextId, we want to add a 'no-container' item.
+  // Add an item for a tab without a container, labeled "New Tab".
   if (excludeUserContextId || showDefaultTab) {
     let menuitem = document.createXULElement("menuitem");
     if (useAccessKeys) {
-      document.l10n.setAttributes(menuitem, "user-context-none");
+      document.l10n.setAttributes(menuitem, "user-context-new-tab");
     } else {
-      const label =
-        ContextualIdentityService.formatContextLabel("user-context-none");
+      const label = ContextualIdentityService.formatContextLabel(
+        "user-context-new-tab"
+      );
       menuitem.setAttribute("label", label);
     }
     menuitem.setAttribute("data-usercontextid", "0");
     if (!isContextMenu) {
       menuitem.setAttribute("command", "Browser:NewUserContextTab");
+      menuitem.setAttribute("data-container-entrypoint", containerSource);
     }
 
     docfrag.appendChild(menuitem);
@@ -231,6 +243,7 @@ function createUserContextMenu(
 
     if (!isContextMenu) {
       menuitem.setAttribute("command", "Browser:NewUserContextTab");
+      menuitem.setAttribute("data-container-entrypoint", containerSource);
     }
 
     menuitem.classList.add("identity-icon-" + identity.icon);
@@ -238,9 +251,28 @@ function createUserContextMenu(
     docfrag.appendChild(menuitem);
   });
 
-  if (!isContextMenu) {
+  if (showAddContainer || showManageContainers) {
     docfrag.appendChild(document.createXULElement("menuseparator"));
+  }
 
+  if (showAddContainer) {
+    let menuitem = document.createXULElement("menuitem");
+    if (useAccessKeys) {
+      document.l10n.setAttributes(menuitem, "user-context-add-container");
+    } else {
+      const label = ContextualIdentityService.formatContextLabel(
+        "user-context-add-container"
+      );
+      menuitem.setAttribute("label", label);
+    }
+    menuitem.addEventListener("command", commandEvent => {
+      commandEvent.stopPropagation();
+      ContainerCreationPanel.open(window, containerSource);
+    });
+    docfrag.appendChild(menuitem);
+  }
+
+  if (showManageContainers) {
     let menuitem = document.createXULElement("menuitem");
     if (useAccessKeys) {
       document.l10n.setAttributes(menuitem, "user-context-manage-containers");
@@ -250,7 +282,12 @@ function createUserContextMenu(
       );
       menuitem.setAttribute("label", label);
     }
-    menuitem.setAttribute("command", "Browser:OpenAboutContainers");
+    menuitem.addEventListener("command", commandEvent => {
+      commandEvent.stopPropagation();
+      openPreferences("paneContainers", {
+        urlParams: { entrypoint: containerSource },
+      });
+    });
     docfrag.appendChild(menuitem);
   }
 
@@ -320,44 +357,13 @@ function eventMatchesKey(aEvent, aKey) {
 }
 
 // Gather all descendent text under given document node.
+// NOTE: Keep this in sync with _gatherTextUnder in
+// browser/actors/ContextMenuChild.sys.mjs
 function gatherTextUnder(root) {
-  var text = "";
-  var node = root.firstChild;
-  var depth = 1;
-  while (node && depth > 0) {
-    // See if this node is text.
-    if (node.nodeType == Node.TEXT_NODE) {
-      // Add this text to our collection.
-      text += " " + node.data;
-    } else if (HTMLImageElement.isInstance(node)) {
-      // If it has an "alt" attribute, add that.
-      var altText = node.getAttribute("alt");
-      if (altText) {
-        text += " " + altText;
-      }
-    }
-    // Find next node to test.
-    // First, see if this node has children.
-    if (node.hasChildNodes()) {
-      // Go to first child.
-      node = node.firstChild;
-      depth++;
-    } else {
-      // No children, try next sibling (or parent next sibling).
-      while (depth > 0 && !node.nextSibling) {
-        node = node.parentNode;
-        depth--;
-      }
-      if (node.nextSibling) {
-        node = node.nextSibling;
-      }
-    }
-  }
-  // Strip leading and tailing whitespace.
-  text = text.trim();
-  // Compress remaining whitespace.
-  text = text.replace(/\s+/g, " ");
-  return text;
+  const encoder = Cu.createDocumentEncoder("text/plain");
+  encoder.init(root.ownerDocument, "text/plain", 0);
+  encoder.setContainerNode(root);
+  return encoder.encodeToString().trim();
 }
 
 // This function exists for legacy reasons.
@@ -399,7 +405,12 @@ function openAboutDialog() {
     features += "centerscreen,dependent,dialog=no";
   }
 
-  window.openDialog("chrome://browser/content/aboutDialog.xhtml", "", features);
+  var win = BrowserWindowTracker.getTopWindow() || window;
+  win.openDialog("chrome://browser/content/aboutDialog.xhtml", "", features);
+}
+
+function openReferralsPage() {
+  Referrals.openReferralsTab(window, "help_menu");
 }
 
 async function openPreferences(paneID, extraArgs) {
@@ -524,6 +535,9 @@ function buildHelpMenu() {
 
   document.getElementById("troubleShooting").disabled =
     !Services.policies.isAllowed("aboutSupport");
+
+  document.getElementById("menu_referralsPage").hidden =
+    !Services.prefs.getBoolPref("browser.referrals.enabled");
 
   let supportMenu = Services.policies.getSupportMenu();
   if (supportMenu) {

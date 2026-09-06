@@ -27,7 +27,7 @@ async function insertIFrame() {
   });
 
   // Wait for the new frame to get a pres shell and be styled.
-  await BrowserTestUtils.waitForCondition(async function () {
+  await TestUtils.waitForCondition(async function () {
     return (
       bc.children.length == len + 1 && (await getColor(bc.children[len])) != ""
     );
@@ -83,7 +83,7 @@ add_task(async function test_disable_style() {
   let { menupopup } = document.getElementById("pageStyleMenu");
   gPageStyleMenu.fillPopup(menupopup);
   Assert.equal(
-    menupopup.querySelector("menuitem[checked='true']").dataset.l10nId,
+    menupopup.querySelector("menuitem[checked]").dataset.l10nId,
     "menu-view-page-style-no-style",
     "No style menu should be checked."
   );

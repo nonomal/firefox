@@ -6,7 +6,7 @@
 var secureURL =
   "https://example.com/browser/browser/base/content/test/general/browser_star_hsts.sjs";
 var unsecureURL =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://example.com/browser/browser/base/content/test/general/browser_star_hsts.sjs";
 
 add_task(async function test_star_redirect() {
@@ -16,7 +16,7 @@ add_task(async function test_star_redirect() {
       Ci.nsISiteSecurityService
     );
     sss.resetState(
-      // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+      // eslint-disable-next-line sdl/no-insecure-url
       NetUtil.newURI("http://example.com/"),
       { partitionKey: "(http,example.com)" }
     );
@@ -26,9 +26,16 @@ add_task(async function test_star_redirect() {
 
   let tab = (gBrowser.selectedTab = BrowserTestUtils.addTab(gBrowser));
   // This will add the page to the HSTS cache.
-  await promiseTabLoadEvent(tab, secureURL, secureURL);
+  await BrowserTestUtils.loadURIString({
+    browser: tab.linkedBrowser,
+    uriString: secureURL,
+  });
   // This should transparently be redirected to the secure page.
-  await promiseTabLoadEvent(tab, unsecureURL, secureURL);
+  await BrowserTestUtils.loadURIString({
+    browser: tab.linkedBrowser,
+    uriString: unsecureURL,
+    finalURI: secureURL,
+  });
 
   await promiseStarState(BookmarkingUI.STATUS_UNSTARRED);
 
@@ -61,25 +68,4 @@ function promiseStarState(aValue) {
       }
     })();
   });
-}
-
-/**
- * Starts a load in an existing tab and waits for it to finish (via some event).
- *
- * @param aTab
- *        The tab to load into.
- * @param aUrl
- *        The url to load.
- * @param [optional] aFinalURL
- *        The url to wait for, same as aURL if not defined.
- * @return {Promise} resolved when the event is handled.
- */
-function promiseTabLoadEvent(aTab, aURL, aFinalURL) {
-  if (!aFinalURL) {
-    aFinalURL = aURL;
-  }
-
-  info("Wait for load tab event");
-  BrowserTestUtils.startLoadingURIString(aTab.linkedBrowser, aURL);
-  return BrowserTestUtils.browserLoaded(aTab.linkedBrowser, false, aFinalURL);
 }

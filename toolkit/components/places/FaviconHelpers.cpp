@@ -1,6 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: sw=2 ts=2 et lcs=trail\:.,tab\:>~ :
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -305,16 +303,19 @@ nsresult FetchMostFrecentSubPageIcon(const UniquePtr<ConnectionAdapter>& aConn,
                                      const nsACString& aPageRoot,
                                      const nsACString& aPageHost,
                                      IconData& aIconData) {
+  // width is a uint16, so packing it under frecency makes the single max()
+  // rank rows exactly like ORDER BY frecency DESC, width DESC, without a sort.
+  // The HAVING avoids the all-NULL row a bare aggregate returns on no match.
   nsCOMPtr<mozIStorageStatement> stmt = aConn->GetStatement(
-      "SELECT i.icon_url, i.id, i.expire_ms, i.data, i.width, i.root "
+      "SELECT i.icon_url, i.id, i.expire_ms, i.data, i.width, i.root, "
+      "max(p.frecency * 65536 + i.width) "
       "FROM moz_pages_w_icons pwi "
-      "JOIN moz_icons_to_pages itp ON pwi.id = itp.page_id "
-      "JOIN moz_icons i ON itp.icon_id = i.id "
+      "JOIN moz_icons_to_pages itp ON itp.page_id = pwi.id "
+      "JOIN moz_icons i ON i.id = itp.icon_id "
       "JOIN moz_places p ON p.url_hash = pwi.page_url_hash "
       "WHERE p.rev_host = get_unreversed_host(:pageHost || '.') || '.' "
-      "AND p.url BETWEEN :pageRoot AND :pageRoot || X'FFFF' "
-      "ORDER BY p.frecency DESC, i.width DESC "
-      "LIMIT 1"_ns);
+      "AND p.url BETWEEN :pageRoot || '/' AND :pageRoot || '/'  || X'FFFF' "
+      "HAVING count(*) > 0"_ns);
   NS_ENSURE_STATE(stmt);
   mozStorageStatementScoper scoperFallback(stmt);
 
@@ -454,8 +455,13 @@ nsresult FetchIconInfo(const UniquePtr<ConnectionAdapter>& aConn,
   // than 4 times greater than the difference between the preferred width and
   // the smaller icon, we prefer the smaller icon.
   // Non-rich icons are prioritized over rich ones for preferred widths <=
-  // THRESHOLD_WIDTH. After the inital selection, we check if a suitable SVG
+  // THRESHOLD_WIDTH. After the initial selection, we check if a suitable SVG
   // icon exists that could override the initial selection.
+  // Finally, if the main selection chose a root domain icon but an associated
+  // icon exists with an acceptable rescale factor, we prefer the associated
+  // icon. Any downscale is acceptable; the risk of quality degradation from
+  // downscaling a large image is limited because we already skip rich icons for
+  // small sizes. For upscales we cap at 4x.
 
   bool hasResult;
 
@@ -474,14 +480,15 @@ nsresult FetchIconInfo(const UniquePtr<ConnectionAdapter>& aConn,
     int64_t id = -1;
     nsCString data;
     PRTime expiration = 0;
-    bool isRich = 0;
-    bool rootIcon = 0;
+    bool isRich = false;
+    bool rootIcon = false;
     uint16_t width = 0;
     nsAutoCString spec;
   };
 
   UniquePtr<IconInfo> svgIcon;
   UniquePtr<IconInfo> selectedIcon;
+  UniquePtr<IconInfo> bestAssociatedIcon;
   uint16_t lastIconWidth = 0;
 
   bool preferNonRichIcons = aPreferredWidth <= THRESHOLD_WIDTH;
@@ -534,6 +541,17 @@ nsresult FetchIconInfo(const UniquePtr<ConnectionAdapter>& aConn,
       break;
     }
 
+    // Track the best-fitting non-SVG associated icon. Icons arrive in width
+    // DESC order, so we update while width >= aPreferredWidth (giving the
+    // smallest icon still at or above preferred = closest from above), and
+    // set once on first encounter if all are below preferred (giving the
+    // largest below = closest from below).
+    if (!isSVG && !rootIcon &&
+        (!bestAssociatedIcon || width >= aPreferredWidth)) {
+      bestAssociatedIcon = MakeUnique<IconInfo>(iconId, data, expiration,
+                                                isRich, false, width, iconURL);
+    }
+
     if (!_icon.spec.IsEmpty() && width < aPreferredWidth) {
       // We found the best match, or we already found a match so we don't need
       // to fallback to the root domain icon.
@@ -555,6 +573,12 @@ nsresult FetchIconInfo(const UniquePtr<ConnectionAdapter>& aConn,
                                         rootIcon, width, EmptyCString());
     rv = stmt->GetUTF8String(4, _icon.spec);
     NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  if (selectedIcon && selectedIcon->rootIcon && bestAssociatedIcon &&
+      static_cast<uint32_t>(bestAssociatedIcon->width) * 4 >= aPreferredWidth) {
+    _icon.spec = bestAssociatedIcon->spec;
+    selectedIcon = std::move(bestAssociatedIcon);
   }
 
   // Check to see if we should overwrite the original icon selection with an
@@ -690,14 +714,12 @@ AsyncAssociateIconToPage::Run() {
   MOZ_ASSERT(mPage.canAddToHistory || !mPage.bookmarkedSpec.IsEmpty(),
              "The page should be addable to history or a bookmark");
 
-  bool shouldUpdateIcon = mIcon.status & ICON_STATUS_CHANGED;
-  if (!shouldUpdateIcon) {
-    for (const auto& payload : mIcon.payloads) {
-      // If the entry is missing from the database, we should add it.
-      if (payload.id == 0) {
-        shouldUpdateIcon = true;
-        break;
-      }
+  bool shouldUpdateIcon = false;
+  for (const auto& payload : mIcon.payloads) {
+    // If the entry is missing from the database, we should add it.
+    if (payload.id == 0) {
+      shouldUpdateIcon = true;
+      break;
     }
   }
 
@@ -787,10 +809,9 @@ AsyncAssociateIconToPage::Run() {
     stmt = DB->GetStatement(
         "INSERT INTO moz_icons_to_pages (page_id, icon_id, expire_ms) "
         "VALUES ((SELECT id from moz_pages_w_icons WHERE page_url_hash = "
-        "hash(:page_url) AND page_url = :page_url), "
-        ":icon_id, :expire) "
+        "  hash(:page_url) AND page_url = :page_url), :icon_id, :expire) "
         "ON CONFLICT(page_id, icon_id) DO "
-        "UPDATE SET expire_ms = :expire ");
+        "  UPDATE SET expire_ms = :expire ");
     NS_ENSURE_STATE(stmt);
 
     // For some reason using BindingParamsArray here fails execution, so we must
@@ -1036,11 +1057,13 @@ NS_IMETHODIMP AsyncTryCopyFaviconsRunnable::Run() {
 
   // Create the relations.
   nsCOMPtr<mozIStorageStatement> stmt = DB->GetStatement(
-      "INSERT OR IGNORE INTO moz_icons_to_pages (page_id, icon_id, expire_ms) "
+      "INSERT INTO moz_icons_to_pages (page_id, icon_id, expire_ms) "
       "SELECT :id, icon_id, expire_ms "
       "FROM moz_icons_to_pages "
-      "WHERE page_id = (SELECT id FROM moz_pages_w_icons WHERE page_url_hash = "
-      "hash(:url) AND page_url = :url) ");
+      "WHERE page_id = (SELECT id FROM moz_pages_w_icons "
+      "                 WHERE page_url_hash = hash(:url) AND page_url = :url) "
+      "ON CONFLICT (page_id, icon_id) DO "
+      "  UPDATE SET expire_ms = max(excluded.expire_ms, :min_expiration_ms)");
   NS_ENSURE_STATE(stmt);
   mozStorageStatementScoper scoper(stmt);
   rv = stmt->BindInt64ByName("id"_ns, toPageData.id);
@@ -1049,12 +1072,77 @@ NS_IMETHODIMP AsyncTryCopyFaviconsRunnable::Run() {
   mFromPageURI->GetSpec(fromPageSpec);
   rv = URIBinder::Bind(stmt, "url"_ns, fromPageSpec);
   NS_ENSURE_SUCCESS(rv, rv);
+  rv = stmt->BindInt64ByName("min_expiration_ms"_ns,
+                             (PR_Now() + MIN_FAVICON_EXPIRATION) / 1000);
+  NS_ENSURE_SUCCESS(rv, rv);
   rv = stmt->Execute();
   NS_ENSURE_SUCCESS(rv, rv);
 
   // Setting this will make us send pageChanged notifications.
   // The scope exit will take care of the callback and notifications.
   fromIconData.status |= ICON_STATUS_ASSOCIATED;
+
+  return NS_OK;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//// AsyncExpireFaviconsForPage
+
+AsyncExpireFaviconsForPage::AsyncExpireFaviconsForPage(
+    const nsCOMPtr<nsIURI>& aPageURI, dom::Promise* aPromise)
+    : Runnable("places::AsyncExpireFaviconsForPage"),
+      mPageURI(aPageURI),
+      mPromise(new nsMainThreadPtrHolder<dom::Promise>(
+          "AsyncExpireFaviconsForPage::Promise", aPromise, false)) {}
+
+NS_IMETHODIMP
+AsyncExpireFaviconsForPage::Run() {
+  MOZ_ASSERT(!NS_IsMainThread());
+
+  nsresult rv = NS_OK;
+  auto guard = MakeScopeExit([&]() {
+    NS_DispatchToMainThread(
+        NS_NewRunnableFunction("AsyncExpireFaviconsForPage::Promise",
+                               [rv, promise = std::move(mPromise)]() {
+                                 if (NS_SUCCEEDED(rv)) {
+                                   promise->MaybeResolveWithUndefined();
+                                 } else {
+                                   promise->MaybeReject(rv);
+                                 }
+                               }));
+  });
+
+  RefPtr<Database> DB = Database::GetDatabase();
+  if (MOZ_UNLIKELY(!DB)) {
+    return (rv = NS_ERROR_UNEXPECTED);
+  }
+
+  // Delete all icon associations for the given page, using the same page
+  // lookup logic as FetchIconInfo: match the exact URL and, if it has a
+  // fragment, also match the fragment-stripped URL (since bookmarks typically
+  // point to the URL without fragment).
+  nsCOMPtr<mozIStorageStatement> stmt = DB->GetStatement(
+      "DELETE FROM moz_icons_to_pages WHERE page_id IN ( "
+      "  SELECT id FROM moz_pages_w_icons "
+      "  WHERE (page_url_hash = hash(:page_url) AND page_url = :page_url) "
+      "  OR (:hash_idx AND page_url_hash = hash(substr(:page_url, 0, "
+      ":hash_idx)) "
+      "      AND page_url = substr(:page_url, 0, :hash_idx)) "
+      ")");
+  if (MOZ_UNLIKELY(!stmt)) {
+    return (rv = NS_ERROR_UNEXPECTED);
+  }
+  mozStorageStatementScoper scoper(stmt);
+  nsAutoCString spec;
+  rv = mPageURI->GetSpec(spec);
+  NS_ENSURE_SUCCESS(rv, rv);
+  int32_t hashIdx = spec.RFind("#") + 1;
+  rv = URIBinder::Bind(stmt, "page_url"_ns, spec);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = stmt->BindInt32ByName("hash_idx"_ns, hashIdx);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = stmt->Execute();
+  NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;
 }

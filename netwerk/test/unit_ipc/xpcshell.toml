@@ -17,12 +17,10 @@ support-files = [
   "!/netwerk/test/unit/test_duplicate_headers.js",
   "!/netwerk/test/unit/test_event_sink.js",
   "!/netwerk/test/unit/test_getHost.js",
-  "!/netwerk/test/unit/test_gio_protocol.js",
   "!/netwerk/test/unit/test_head.js",
   "!/netwerk/test/unit/test_headers.js",
   "!/netwerk/test/unit/test_httpsuspend.js",
   "!/netwerk/test/unit/test_post.js",
-  "!/netwerk/test/unit/test_predictor.js",
   "!/netwerk/test/unit/test_progress.js",
   "!/netwerk/test/unit/test_redirect_veto.js",
   "!/netwerk/test/unit/test_redirect-caching_canceled.js",
@@ -70,6 +68,7 @@ support-files = [
   "!/netwerk/test/unit/http2-ca.pem",
   "!/netwerk/test/unit/test_orb_empty_header.js",
   "!/netwerk/test/unit/test_simple_unknown_uris.js",
+  "!/netwerk/test/unit/test_compressConv_offmainthread_js_listener.js",
   "child_is_proxy_used.js",
   "child_cookie_header.js",
   "child_dns_by_type_resolve.js",
@@ -127,6 +126,15 @@ prefs = [
  "security.allow_eval_with_system_principal=true",
 ]
 
+["test_compressConv_offmainthread_js_listener_wrap.js"]
+prefs = [
+  "network.allow_raw_sockets_in_content_processes=true",
+  "network.decompression_off_mainthread2=true",
+  "network.decompression_off_mainthread_min_size=1",
+  "network.http.encoding.trustworthy_is_https=false",
+  "media.rdd-process.enabled=false",
+]
+
 ["test_cookie_header_stripped.js"]
 
 ["test_cookiejars_wrap.js"]
@@ -148,11 +156,6 @@ prefs = ["network.allow_raw_sockets_in_content_processes=true"]
 ["test_getHost_wrap.js"]
 prefs = ["network.allow_raw_sockets_in_content_processes=true"]
 
-["test_gio_protocol_wrap.js"]
-run-if = [
-  "os == 'linux'",
-]
-
 ["test_head_wrap.js"]
 prefs = ["network.allow_raw_sockets_in_content_processes=true"]
 
@@ -164,6 +167,7 @@ run-sequentially = ["true"] # http3server
 skip-if = [
   "os == 'android' && os_version == '14' && arch == 'x86_64'", # Bug 1982955
   "os == 'win' && os_version == '11.26100' && arch == 'x86_64' && msix", # Bug 1807925
+  "os == 'win' && os_version == '11.26200' && arch == 'x86_64' && msix", # Bug 1807925
 ]
 
 ["test_http3_prio_enabled_wrap.js"]
@@ -193,9 +197,6 @@ prefs = ["network.allow_raw_sockets_in_content_processes=true"]
 
 ["test_post_wrap.js"]
 prefs = ["network.allow_raw_sockets_in_content_processes=true"]
-
-["test_predictor_wrap.js"]
-run-sequentially = ["os == 'mac'"] # frequent timeouts on Mac in parallel
 
 ["test_progress_wrap.js"]
 prefs = ["network.allow_raw_sockets_in_content_processes=true"]

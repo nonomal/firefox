@@ -5,36 +5,31 @@
 Transform the per-locale balrog task into an actual task description.
 """
 
+from mozilla_taskgraph.util.attributes import copy_attributes_from_dependent_job
 from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.dependencies import get_primary_dependency
-from taskgraph.util.schema import Schema, optionally_keyed_by, resolve_keyed_by
+from taskgraph.util.schema import Schema
 from taskgraph.util.treeherder import replace_group
-from voluptuous import Optional, Required
 
-from gecko_taskgraph.transforms.task import task_description_schema
-from gecko_taskgraph.util.attributes import copy_attributes_from_dependent_job
+from gecko_taskgraph.transforms.task import TaskDescriptionSchema
 
-balrog_description_schema = Schema(
-    {
-        # unique label to describe this balrog task, defaults to balrog-{dep.label}
-        Required("label"): str,
-        Optional(
-            "update-no-wnp",
-            description="Whether the parallel `-No-WNP` blob should be updated as well.",
-        ): optionally_keyed_by("release-type", bool),
-        # treeherder is allowed here to override any defaults we use for beetmover.  See
-        # taskcluster/gecko_taskgraph/transforms/task.py for the schema details, and the
-        # below transforms for defaults of various values.
-        Optional("treeherder"): task_description_schema["treeherder"],
-        Optional("attributes"): task_description_schema["attributes"],
-        Optional("dependencies"): task_description_schema["dependencies"],
-        Optional("task-from"): task_description_schema["task-from"],
-        # Shipping product / phase
-        Optional("shipping-product"): task_description_schema["shipping-product"],
-        Optional("shipping-phase"): task_description_schema["shipping-phase"],
-        Optional("run-on-repo-type"): task_description_schema["run-on-repo-type"],
-    }
-)
+
+class BalrogDescriptionSchema(Schema, kw_only=True):
+    # unique label to describe this balrog task, defaults to balrog-{dep.label}
+    label: str
+    # Whether the parallel `-No-WNP` blob should be updated as well.
+    update_no_wnp: bool
+    # treeherder is allowed here to override any defaults we use for beetmover.  See
+    # taskcluster/gecko_taskgraph/transforms/task.py for the schema details, and the
+    # below transforms for defaults of various values.
+    treeherder: TaskDescriptionSchema.__annotations__["treeherder"] = None
+    attributes: TaskDescriptionSchema.__annotations__["attributes"] = None
+    dependencies: TaskDescriptionSchema.__annotations__["dependencies"] = None
+    task_from: TaskDescriptionSchema.__annotations__["task_from"] = None
+    # Shipping product / phase
+    shipping_product: TaskDescriptionSchema.__annotations__["shipping_product"] = None
+    shipping_phase: TaskDescriptionSchema.__annotations__["shipping_phase"] = None
+    run_on_repo_type: TaskDescriptionSchema.__annotations__["run_on_repo_type"] = None
 
 
 transforms = TransformSequence()
@@ -48,27 +43,7 @@ def remove_name(config, jobs):
         yield job
 
 
-transforms.add_validate(balrog_description_schema)
-
-
-@transforms.add
-def handle_keyed_by(config, jobs):
-    """Resolve fields that can be keyed by platform, etc."""
-    fields = [
-        "update-no-wnp",
-    ]
-    for job in jobs:
-        for field in fields:
-            resolve_keyed_by(
-                item=job,
-                field=field,
-                item_name=job["label"],
-                **{
-                    "project": config.params["project"],
-                    "release-type": config.params["release_type"],
-                },
-            )
-        yield job
+transforms.add_validate(BalrogDescriptionSchema)
 
 
 @transforms.add
@@ -82,7 +57,8 @@ def make_task_description(config, jobs):
         treeherder = job.get("treeherder", {})
         treeherder.setdefault("symbol", "c-Up(N)")
         dep_th_platform = (
-            dep_job.task.get("extra", {})
+            dep_job.task
+            .get("extra", {})
             .get("treeherder", {})
             .get("machine", {})
             .get("platform", "")
@@ -122,7 +98,7 @@ def make_task_description(config, jobs):
 
         dependencies = {"beetmover": dep_job.label}
         # don't block on startup-test for release/esr, they block on manual testing anyway
-        if config.params["release_type"] in ("nightly", "beta", "release-rc"):
+        if config.params["release_type"] in ("nightly", "beta"):
             for kind_dep in config.kind_dependencies_tasks.values():
                 if (
                     kind_dep.kind == "startup-test"

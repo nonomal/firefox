@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +12,7 @@
 #include "PresShell.h"
 #include "mozilla/OverflowChangedTracker.h"
 #include "mozilla/ScrollContainerFrame.h"
+#include "mozilla/layers/LayersTypes.h"
 #include "nsIFrame.h"
 #include "nsIFrameInlines.h"
 #include "nsLayoutUtils.h"
@@ -24,22 +23,34 @@ StickyScrollContainer::StickyScrollContainer(
     ScrollContainerFrame* aScrollContainerFrame)
     : mScrollContainerFrame(aScrollContainerFrame) {}
 
-StickyScrollContainer::~StickyScrollContainer() = default;
+static ScrollContainerFrame* GetScrollContainerForStickyFrame(
+    const nsIFrame* aFrame) {
+  return nsLayoutUtils::GetNearestScrollContainerFrame(
+      aFrame->GetParent(), nsLayoutUtils::SCROLLABLE_SAME_DOC |
+                               nsLayoutUtils::SCROLLABLE_STOP_AT_PAGE |
+                               nsLayoutUtils::SCROLLABLE_INCLUDE_HIDDEN);
+}
 
 // static
 StickyScrollContainer* StickyScrollContainer::GetOrCreateForFrame(
     nsIFrame* aFrame) {
   ScrollContainerFrame* scrollContainerFrame =
-      nsLayoutUtils::GetNearestScrollContainerFrame(
-          aFrame->GetParent(), nsLayoutUtils::SCROLLABLE_SAME_DOC |
-                                   nsLayoutUtils::SCROLLABLE_STOP_AT_PAGE |
-                                   nsLayoutUtils::SCROLLABLE_INCLUDE_HIDDEN);
+      GetScrollContainerForStickyFrame(aFrame);
   if (!scrollContainerFrame) {
     // We might not find any, for instance in the case of
     // <html style="position: fixed">
     return nullptr;
   }
   return &scrollContainerFrame->EnsureStickyContainer();
+}
+
+// static
+StickyScrollContainer* StickyScrollContainer::GetForFrame(
+    const nsIFrame* aFrame) {
+  ScrollContainerFrame* scrollContainerFrame =
+      GetScrollContainerForStickyFrame(aFrame);
+  return scrollContainerFrame ? scrollContainerFrame->GetStickyContainer()
+                              : nullptr;
 }
 
 static nscoord ComputeStickySideOffset(Side aSide,
@@ -56,6 +67,15 @@ static nscoord ComputeStickySideOffset(Side aSide,
                                                 side->AsLengthPercentage());
 }
 
+static nsSize GetScrollContainerSize(
+    const ScrollContainerFrame* aScrollContainer) {
+  if (aScrollContainer->IsRootScrollFrameOfDocument() &&
+      aScrollContainer->PresContext()->IsRootContentDocumentCrossProcess()) {
+    return aScrollContainer->PresShell()->GetFixedViewportSize();
+  }
+  return aScrollContainer->GetScrolledFrameSize();
+}
+
 // static
 void StickyScrollContainer::ComputeStickyOffsets(nsIFrame* aFrame) {
   ScrollContainerFrame* scrollContainerFrame =
@@ -68,9 +88,7 @@ void StickyScrollContainer::ComputeStickyOffsets(nsIFrame* aFrame) {
     return;
   }
 
-  nsSize scrollContainerSize =
-      scrollContainerFrame->GetScrolledFrameSizeAccountingForDynamicToolbar();
-
+  nsSize scrollContainerSize = GetScrollContainerSize(scrollContainerFrame);
   nsMargin computedOffsets;
   const nsStylePosition* position = aFrame->StylePosition();
 
@@ -83,14 +101,8 @@ void StickyScrollContainer::ComputeStickyOffsets(nsIFrame* aFrame) {
   computedOffsets.bottom = ComputeStickySideOffset(eSideBottom, *position,
                                                    scrollContainerSize.height);
 
-  // Store the offset
-  nsMargin* offsets = aFrame->GetProperty(nsIFrame::ComputedOffsetProperty());
-  if (offsets) {
-    *offsets = computedOffsets;
-  } else {
-    aFrame->SetProperty(nsIFrame::ComputedOffsetProperty(),
-                        new nsMargin(computedOffsets));
-  }
+  aFrame->SetOrUpdateDeletableProperty(nsIFrame::ComputedOffsetProperty(),
+                                       computedOffsets);
 }
 
 static constexpr nscoord gUnboundedNegative = nscoord_MIN / 2;
@@ -100,9 +112,14 @@ static constexpr nscoord gUnboundedPositive =
 
 void StickyScrollContainer::ComputeStickyLimits(nsIFrame* aFrame,
                                                 nsRect* aStick,
-                                                nsRect* aContain) const {
+                                                nsRect* aContain,
+                                                StickyLimitSpace aSpace) const {
   NS_ASSERTION(nsLayoutUtils::IsFirstContinuationOrIBSplitSibling(aFrame),
                "Can't sticky position individual continuations");
+
+  const nsPoint scrollPosition = aSpace == StickyLimitSpace::IgnoreCurrentScroll
+                                     ? nsPoint()
+                                     : mScrollPosition;
 
   aStick->SetRect(gUnboundedNegative, gUnboundedNegative, gUnboundedExtent,
                   gUnboundedExtent);
@@ -171,49 +188,74 @@ void StickyScrollContainer::ComputeStickyLimits(nsIFrame* aFrame,
 
   nsMargin sfPadding = scrolledFrame->GetUsedPadding();
   nsPoint sfOffset = aFrame->GetParent()->GetOffsetTo(scrolledFrame);
+  nsSize sfSize = GetScrollContainerSize(mScrollContainerFrame);
+  StyleDirection direction = cbFrame->StyleVisibility()->mDirection;
+  nsMargin effectiveOffsets = *computedOffsets;
+
+  if (computedOffsets->top != NS_AUTOOFFSET &&
+      computedOffsets->bottom != NS_AUTOOFFSET) {
+    // Decrease the effective end-edge inset of the sticky view rectangle
+    // when its height is less than the height of the border-box of the sticky
+    // box.
+    nscoord stickyViewHeight = sfSize.height - computedOffsets->TopBottom();
+    if (rect.height > stickyViewHeight) {
+      nscoord delta = rect.height - stickyViewHeight;
+      effectiveOffsets.bottom -= delta;
+    }
+  }
+
+  if (computedOffsets->left != NS_AUTOOFFSET &&
+      computedOffsets->right != NS_AUTOOFFSET) {
+    // Decrease the effective end-edge inset of the sticky view rectangle
+    // when its width is less than the width of the border-box of the sticky
+    // box.
+    nscoord stickyViewWidth = sfSize.width - computedOffsets->LeftRight();
+    if (rect.width > stickyViewWidth) {
+      nscoord delta = rect.width - stickyViewWidth;
+      if (direction == StyleDirection::Ltr) {
+        effectiveOffsets.right -= delta;
+      } else {
+        effectiveOffsets.left -= delta;
+      }
+    }
+  }
+
+  // The limits have so far been computed for the "position" of the union of
+  // aFrame and its continuations, but our consumers expect the limits to be
+  // on the position of aFrame, so we need to shift the limits by the
+  // difference.
+  // - For |aContain| we're otherwise done, so we apply the offset directly.
+  // - For |aStick| we apply the offset as part of setting |aStick| (applying
+  //   it via `MoveBy` after we set |aStick| would trash any sentinel values).
+  const nsPoint frameOffset = aFrame->GetPosition() - rect.TopLeft();
+
+  aContain->MoveBy(frameOffset);
 
   // Top
   if (computedOffsets->top != NS_AUTOOFFSET) {
-    aStick->SetTopEdge(mScrollPosition.y + sfPadding.top +
-                       computedOffsets->top - sfOffset.y);
+    aStick->SetTopEdge(scrollPosition.y + sfPadding.top + effectiveOffsets.top -
+                       sfOffset.y + frameOffset.y);
   }
-
-  nsSize sfSize =
-      mScrollContainerFrame->GetScrolledFrameSizeAccountingForDynamicToolbar();
 
   // Bottom
-  if (computedOffsets->bottom != NS_AUTOOFFSET &&
-      (computedOffsets->top == NS_AUTOOFFSET ||
-       rect.height <= sfSize.height - computedOffsets->TopBottom())) {
-    aStick->SetBottomEdge(mScrollPosition.y + sfPadding.top + sfSize.height -
-                          computedOffsets->bottom - rect.height - sfOffset.y);
+  if (computedOffsets->bottom != NS_AUTOOFFSET) {
+    aStick->SetBottomEdge(scrollPosition.y + sfPadding.top + sfSize.height -
+                          effectiveOffsets.bottom - rect.height - sfOffset.y +
+                          frameOffset.y);
   }
 
-  StyleDirection direction = cbFrame->StyleVisibility()->mDirection;
-
   // Left
-  if (computedOffsets->left != NS_AUTOOFFSET &&
-      (computedOffsets->right == NS_AUTOOFFSET ||
-       direction == StyleDirection::Ltr ||
-       rect.width <= sfSize.width - computedOffsets->LeftRight())) {
-    aStick->SetLeftEdge(mScrollPosition.x + sfPadding.left +
-                        computedOffsets->left - sfOffset.x);
+  if (computedOffsets->left != NS_AUTOOFFSET) {
+    aStick->SetLeftEdge(scrollPosition.x + sfPadding.left +
+                        effectiveOffsets.left - sfOffset.x + frameOffset.x);
   }
 
   // Right
-  if (computedOffsets->right != NS_AUTOOFFSET &&
-      (computedOffsets->left == NS_AUTOOFFSET ||
-       direction == StyleDirection::Rtl ||
-       rect.width <= sfSize.width - computedOffsets->LeftRight())) {
-    aStick->SetRightEdge(mScrollPosition.x + sfPadding.left + sfSize.width -
-                         computedOffsets->right - rect.width - sfOffset.x);
+  if (computedOffsets->right != NS_AUTOOFFSET) {
+    aStick->SetRightEdge(scrollPosition.x + sfPadding.left + sfSize.width -
+                         effectiveOffsets.right - rect.width - sfOffset.x +
+                         frameOffset.x);
   }
-
-  // These limits are for the bounding box of aFrame's continuations. Convert
-  // to limits for aFrame itself.
-  nsPoint frameOffset = aFrame->GetPosition() - rect.TopLeft();
-  aStick->MoveBy(frameOffset);
-  aContain->MoveBy(frameOffset);
 }
 
 nsPoint StickyScrollContainer::ComputePosition(nsIFrame* aFrame) const {
@@ -300,6 +342,67 @@ void StickyScrollContainer::GetScrollRanges(nsIFrame* aFrame,
     // extend outside aOuter.
     *aInner = aInner->MoveInsideAndClamp(*aOuter);
   }
+}
+
+StickyScrollContainer::StickyScrollRanges
+StickyScrollContainer::GetStickyScrollRangesForAxis(
+    const nsIFrame* aFrame, layers::ScrollDirection aAxis) const {
+  StickyScrollRanges result;
+
+  nsIFrame* firstCont =
+      nsLayoutUtils::FirstContinuationOrIBSplitSibling(aFrame);
+
+  const nsMargin* computedOffsets =
+      firstCont->GetProperty(nsIFrame::ComputedOffsetProperty());
+  if (!computedOffsets) {
+    return result;
+  }
+
+  const bool isVertical = aAxis == layers::ScrollDirection::eVertical;
+  const nscoord startInset =
+      isVertical ? computedOffsets->top : computedOffsets->left;
+  const nscoord endInset =
+      isVertical ? computedOffsets->bottom : computedOffsets->right;
+  if (startInset == NS_AUTOOFFSET && endInset == NS_AUTOOFFSET) {
+    return result;
+  }
+
+  nsRect stick;
+  nsRect contain;
+  ComputeStickyLimits(firstCont, &stick, &contain,
+                      StickyLimitSpace::IgnoreCurrentScroll);
+
+  const nsPoint normalPosition = firstCont->GetNormalPosition();
+  const nscoord normal = isVertical ? normalPosition.y : normalPosition.x;
+
+  // Sticking to a side begins/ends at the scroll offset where the
+  // (scroll-invariant) stick edge reaches the frame's normal position.
+  if (startInset != NS_AUTOOFFSET) {
+    const nscoord stickStart = isVertical ? stick.Y() : stick.X();
+    MOZ_ASSERT(stickStart != gUnboundedNegative,
+               "A non-auto start inset implies a bounded stick edge");
+    const nscoord containEnd = isVertical ? contain.YMost() : contain.XMost();
+    result.mStartSide.emplace(StickyScrollRange{
+        normal - stickStart, std::max(0, containEnd - normal)});
+  }
+
+  if (endInset != NS_AUTOOFFSET) {
+    const nscoord stickEnd = isVertical ? stick.YMost() : stick.XMost();
+    MOZ_ASSERT(stickEnd != gUnboundedPositive,
+               "A non-auto end inset implies a bounded stick edge");
+    const nscoord containStart = isVertical ? contain.Y() : contain.X();
+    result.mEndSide.emplace(StickyScrollRange{
+        normal - stickEnd, std::max(0, normal - containStart)});
+  }
+
+  if (result.mStartSide && result.mEndSide &&
+      result.mEndSide->mScrollPosition > result.mStartSide->mScrollPosition) {
+    MOZ_ASSERT_UNREACHABLE(
+        "End-side sticking should end before start-side sticking begins");
+    result = {};
+  }
+
+  return result;
 }
 
 void StickyScrollContainer::PositionContinuations(nsIFrame* aFrame) {

@@ -7,6 +7,7 @@ import pathlib
 import platform
 import shutil
 import signal
+import subprocess
 import sys
 import time
 
@@ -20,7 +21,9 @@ Python dependencies needed for mozperftest have to be installed when running
 via shellscript there is an issue with the way the shellscript runner does
 not have all of the environment variables and system settings
 """
-DEPENDENCIES = ["opencv-python==4.10.0.84"]
+INTERNAL_PYPI = "https://pypi.pub.build.mozilla.org/pub/"
+NUMPY_DEPENDENCY = "numpy<2"
+OPENCV_DEPENDENCY = "opencv-python==4.10.0.84"
 
 
 class UnknownScriptError(Exception):
@@ -30,6 +33,8 @@ class UnknownScriptError(Exception):
 
 
 class ShellScriptData:
+    SUBMETRICS_SUFFIX = "_submetrics"
+
     def open_data(self, data):
         return {
             "name": "shellscript",
@@ -41,12 +46,33 @@ class ShellScriptData:
             "shouldAlert": data.get("shouldAlert", True),
             "unit": data.get("unit", "ms"),
             "lowerIsBetter": data.get("lowerIsBetter", True),
+            "alertSeverity": data.get("alertSeverity"),
         }
 
     def transform(self, data):
         return data
 
     merge = transform
+
+    def summary(self, suite):
+        """Use the primary submetric's value as the grouped suite summary.
+
+        Submetric suites are named `<primary>_submetrics` and gather a set of
+        related measurements as subtests, one of which (named `<primary>`) is
+        the representative value for the group. Reporting that subtest's value
+        as the suite summary keeps the grouped suite anchored to a single,
+        meaningful number. Returns None for regular suites so the default
+        summary (mean of the subtests) applies.
+
+        Only available in the Perfherder layer.
+        """
+        if not suite["name"].endswith(self.SUBMETRICS_SUFFIX):
+            return None
+        primary_name = suite["name"][: -len(self.SUBMETRICS_SUFFIX)]
+        for subtest in suite["subtests"]:
+            if subtest["name"] == primary_name:
+                return subtest["value"]
+        return None
 
 
 class ShellScriptRunner(Layer):
@@ -70,15 +96,26 @@ class ShellScriptRunner(Layer):
     }
 
     def __init__(self, env, mach_cmd):
-        super(ShellScriptRunner, self).__init__(env, mach_cmd)
+        super().__init__(env, mach_cmd)
         self.metrics = []
         self.timed_out = False
         self.output_timed_out = False
 
     def setup(self):
-        # Install dependencies
-        for dep in DEPENDENCIES:
-            install_package(self.mach_cmd.virtualenv_manager, dep)
+        # Install numpy first so opencv-python's numpy>=1.17.0 dep is already
+        # satisfied, then install opencv-python, see similar fix in (bug 2033807)
+        install_package(self.mach_cmd.virtualenv_manager, NUMPY_DEPENDENCY)
+        subprocess.check_call([
+            self.mach_cmd.virtualenv_manager.python_path,
+            "-m",
+            "pip",
+            "install",
+            OPENCV_DEPENDENCY,
+            "--no-deps",
+            "--no-index",
+            "--find-links",
+            INTERNAL_PYPI,
+        ])
 
     def kill(self, proc):
         if "win" in platform.system().lower():
@@ -91,7 +128,8 @@ class ShellScriptRunner(Layer):
         parsed_metrics = []
         for metrics in self.metrics:
             prepared_metrics = (
-                metrics.replace("perfMetrics:", "")
+                metrics
+                .replace("perfMetrics:", "")
                 .replace("{{", "{")
                 .replace("}}", "}")
                 .strip()
@@ -200,14 +238,23 @@ class ShellScriptRunner(Layer):
                     shutil.copytree(testing_dir, output_dir)
                     self.env.set_arg("output", output_dir)
 
-        metadata.add_result(
-            {
-                "name": test["name"],
+        # Route each metric to a suite based on its optional `suite` tag,
+        # defaulting to the test name. Grouping the submetrics and computing a
+        # suite summary value is left to the metrics layer (see ShellScriptData),
+        # keeping this layer focused on running the test and reporting raw data.
+        default_suite = test["name"]
+        suites = {}
+        for m in self.parse_metrics():
+            suite_name = m.pop("suite", default_suite)
+            suites.setdefault(suite_name, []).append(m)
+
+        for suite_name, suite_metrics in suites.items():
+            metadata.add_result({
+                "name": suite_name,
                 "framework": {"name": "mozperftest"},
                 "transformer": "mozperftest.test.shellscript:ShellScriptData",
                 "shouldAlert": True,
-                "results": self.parse_metrics(),
-            }
-        )
+                "results": suite_metrics,
+            })
 
         return metadata

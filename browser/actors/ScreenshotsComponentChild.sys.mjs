@@ -6,7 +6,8 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   DeferredTask: "resource://gre/modules/DeferredTask.sys.mjs",
-  ScreenshotsOverlay: "resource:///modules/ScreenshotsOverlayChild.sys.mjs",
+  ScreenshotsOverlay:
+    "moz-src:///browser/components/screenshots/ScreenshotsOverlayChild.sys.mjs",
 });
 
 const SCREENSHOTS_PREVENT_CONTENT_EVENTS_PREF =
@@ -221,8 +222,8 @@ export class ScreenshotsComponentChild extends JSWindowActorChild {
   /**
    * Resolves when the document is ready to have an overlay injected into it.
    *
-   * @returns {Promise}
-   * @resolves {boolean} true when document is ready or rejects
+   * @returns {Promise<boolean>}
+   *   Resolves to true when document is ready or rejects.
    */
   documentIsReady() {
     const document = this.document;

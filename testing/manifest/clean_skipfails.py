@@ -17,7 +17,6 @@ ERROR = "error"
 
 
 class CleanSkipfails:
-
     def __init__(
         self,
         command_context=None,
@@ -58,7 +57,9 @@ class CleanSkipfails:
     def full_path(self, filename: str):
         """Returns full path for the relative filename"""
 
-        return os.path.join(self.topsrcdir, os.path.normpath(filename.split(":")[-1]))
+        return os.path.join(
+            self.topsrcdir, os.path.normpath(filename.rsplit(":", 1)[-1])
+        )
 
     def isdir(self, filename: str):
         """Returns True if filename is a directory"""
@@ -108,10 +109,8 @@ class CleanSkipfails:
             manifest_paths = set(t["manifest"] for t in tests)
         else:
             myPath = Path(".").parent
-            manifest_paths = set(
-                [
-                    str(x).replace("\\", "/")
-                    for x in myPath.glob(self.manifest_search_path)
-                ]
-            )
+            manifest_paths = set([
+                str(x).replace("\\", "/")
+                for x in myPath.glob(self.manifest_search_path)
+            ])
         return manifest_paths

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,7 +23,7 @@ SVGElement::NumberInfo SVGFEDropShadowElement::sNumberInfo[2] = {
     {nsGkAtoms::dx, 2}, {nsGkAtoms::dy, 2}};
 
 SVGElement::NumberPairInfo SVGFEDropShadowElement::sNumberPairInfo[1] = {
-    {nsGkAtoms::stdDeviation, 2, 2}};
+    {nsGkAtoms::stdDeviation, 2}};
 
 SVGElement::StringInfo SVGFEDropShadowElement::sStringInfo[2] = {
     {nsGkAtoms::result, kNameSpaceID_None, true},
@@ -52,12 +50,12 @@ already_AddRefed<DOMSVGAnimatedNumber> SVGFEDropShadowElement::Dy() {
 
 already_AddRefed<DOMSVGAnimatedNumber> SVGFEDropShadowElement::StdDeviationX() {
   return mNumberPairAttributes[STD_DEV].ToDOMAnimatedNumber(
-      SVGAnimatedNumberPair::eFirst, this);
+      SVGAnimatedNumberPairWhichOne::First, this);
 }
 
 already_AddRefed<DOMSVGAnimatedNumber> SVGFEDropShadowElement::StdDeviationY() {
   return mNumberPairAttributes[STD_DEV].ToDOMAnimatedNumber(
-      SVGAnimatedNumberPair::eSecond, this);
+      SVGAnimatedNumberPairWhichOne::Second, this);
 }
 
 void SVGFEDropShadowElement::SetStdDeviation(float stdDeviationX,
@@ -70,23 +68,20 @@ FilterPrimitiveDescription SVGFEDropShadowElement::GetPrimitiveDescription(
     SVGFilterInstance* aInstance, const IntRect& aFilterSubregion,
     const nsTArray<bool>& aInputsAreTainted,
     nsTArray<RefPtr<SourceSurface>>& aInputImages) {
-  float stdX = aInstance->GetPrimitiveNumber(SVGContentUtils::X,
-                                             &mNumberPairAttributes[STD_DEV],
-                                             SVGAnimatedNumberPair::eFirst);
-  float stdY = aInstance->GetPrimitiveNumber(SVGContentUtils::Y,
-                                             &mNumberPairAttributes[STD_DEV],
-                                             SVGAnimatedNumberPair::eSecond);
-  if (stdX < 0 || stdY < 0) {
-    return FilterPrimitiveDescription();
-  }
+  float stdX = aInstance->GetPrimitiveNumber(
+      SVGLength::Axis::X, &mNumberPairAttributes[STD_DEV],
+      SVGAnimatedNumberPairWhichOne::First);
+  float stdY = aInstance->GetPrimitiveNumber(
+      SVGLength::Axis::Y, &mNumberPairAttributes[STD_DEV],
+      SVGAnimatedNumberPairWhichOne::Second);
 
   Point offset(
-      aInstance->GetPrimitiveNumber(SVGContentUtils::X, &mNumberAttributes[DX]),
-      aInstance->GetPrimitiveNumber(SVGContentUtils::Y,
+      aInstance->GetPrimitiveNumber(SVGLength::Axis::X, &mNumberAttributes[DX]),
+      aInstance->GetPrimitiveNumber(SVGLength::Axis::Y,
                                     &mNumberAttributes[DY]));
 
   DropShadowAttributes atts;
-  atts.mStdDeviation = Size(stdX, stdY);
+  atts.mStdDeviation = Size(std::max(stdX, 0.f), std::max(stdY, 0.f));
   atts.mOffset = offset;
 
   if (const auto* frame = GetPrimaryFrame()) {
@@ -105,7 +100,7 @@ bool SVGFEDropShadowElement::OutputIsTainted(
     const nsTArray<bool>& aInputsAreTainted,
     nsIPrincipal* aReferencePrincipal) {
   if (const auto* frame = GetPrimaryFrame()) {
-    if (frame->Style()->StyleSVGReset()->mFloodColor.IsCurrentColor()) {
+    if (frame->Style()->StyleSVGReset()->mFloodColor.DependsOnCurrentColor()) {
       return true;
     }
   }

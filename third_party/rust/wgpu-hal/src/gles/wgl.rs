@@ -1,3 +1,8 @@
+#![expect(
+    missing_debug_implementations,
+    reason = "TODO: someone developing on Windows add Debug impls where possible"
+)]
+
 use alloc::{borrow::ToOwned as _, ffi::CString, string::String, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_int, c_void, CStr},
@@ -6,10 +11,7 @@ use core::{
     time::Duration,
 };
 use std::{
-    sync::{
-        mpsc::{sync_channel, SyncSender},
-        LazyLock,
-    },
+    sync::mpsc::{sync_channel, SyncSender},
     thread,
 };
 
@@ -19,8 +21,8 @@ use glutin_wgl_sys::wgl_extra::{
     CONTEXT_PROFILE_MASK_ARB,
 };
 use hashbrown::HashSet;
-use parking_lot::{Mutex, MutexGuard, RwLock};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use wgpu_sync::{Lazy, Mutex, MutexGuard, RwLock};
 use wgt::InstanceFlags;
 use windows::{
     core::{Error, PCSTR},
@@ -41,8 +43,8 @@ pub struct AdapterContext {
     inner: Arc<Mutex<Inner>>,
 }
 
-unsafe impl Sync for AdapterContext {}
-unsafe impl Send for AdapterContext {}
+#[cfg(send_sync)]
+static_assertions::assert_impl_all!(AdapterContext: Send, Sync);
 
 impl AdapterContext {
     pub fn is_owned(&self) -> bool {
@@ -182,8 +184,8 @@ pub struct Instance {
     inner: Arc<Mutex<Inner>>,
 }
 
-unsafe impl Send for Instance {}
-unsafe impl Sync for Instance {}
+#[cfg(send_sync)]
+static_assertions::assert_impl_all!(Instance: Send, Sync);
 
 fn load_gl_func(name: &str, module: Option<Foundation::HMODULE>) -> *const c_void {
     let addr = CString::new(name.as_bytes()).unwrap();
@@ -281,6 +283,21 @@ fn create_global_window_class() -> Result<CString, crate::InstanceError> {
     let name = format!("wgpu Device Class {:x}\0", class_addr as usize);
     let name = CString::from_vec_with_nul(name.into_bytes()).unwrap();
 
+    // The window class may already be registered if we are a dynamic library that got
+    // unloaded & loaded back into the same process. If so, just skip creation.
+    let already_exists = unsafe {
+        let mut wc = mem::zeroed::<WindowsAndMessaging::WNDCLASSEXA>();
+        WindowsAndMessaging::GetClassInfoExA(
+            Some(instance.into()),
+            PCSTR(name.as_ptr().cast()),
+            &mut wc,
+        )
+        .is_ok()
+    };
+    if already_exists {
+        return Ok(name);
+    }
+
     // Use a wrapper function for compatibility with `windows-rs`.
     unsafe extern "system" fn wnd_proc(
         window: Foundation::HWND,
@@ -321,8 +338,8 @@ fn create_global_window_class() -> Result<CString, crate::InstanceError> {
 }
 
 fn get_global_window_class() -> Result<CString, crate::InstanceError> {
-    static GLOBAL: LazyLock<Result<CString, crate::InstanceError>> =
-        LazyLock::new(create_global_window_class);
+    static GLOBAL: Lazy<Result<CString, crate::InstanceError>> =
+        Lazy::new(create_global_window_class);
     GLOBAL.clone()
 }
 
@@ -433,7 +450,7 @@ fn create_instance_device() -> Result<InstanceDevice, crate::InstanceError> {
 impl crate::Instance for Instance {
     type A = super::Api;
 
-    unsafe fn init(desc: &crate::InstanceDescriptor) -> Result<Self, crate::InstanceError> {
+    unsafe fn init(desc: &crate::InstanceDescriptor<'_>) -> Result<Self, crate::InstanceError> {
         profiling::scope!("Init OpenGL (WGL) Backend");
         let opengl_module =
             unsafe { LibraryLoader::LoadLibraryA(PCSTR(c"opengl32.dll".as_ptr().cast())) }
@@ -548,12 +565,12 @@ impl crate::Instance for Instance {
         })
     }
 
-    #[cfg_attr(target_os = "macos", allow(unused, unused_mut, unreachable_code))]
     unsafe fn create_surface(
         &self,
-        _display_handle: RawDisplayHandle,
+        display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
     ) -> Result<Surface, crate::InstanceError> {
+        assert!(matches!(display_handle, RawDisplayHandle::Windows(_)));
         let window = if let RawWindowHandle::Win32(handle) = window_handle {
             handle
         } else {
@@ -858,7 +875,7 @@ impl crate::Surface for Surface {
         &self,
         _timeout_ms: Option<Duration>,
         _fence: &super::Fence,
-    ) -> Result<Option<crate::AcquiredSurfaceTexture<super::Api>>, crate::SurfaceError> {
+    ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let swapchain = self.swapchain.read();
         let sc = swapchain.as_ref().unwrap();
         let texture = super::Texture {
@@ -876,10 +893,10 @@ impl crate::Surface for Surface {
                 depth: 1,
             },
         };
-        Ok(Some(crate::AcquiredSurfaceTexture {
+        Ok(crate::AcquiredSurfaceTexture {
             texture,
             suboptimal: false,
-        }))
+        })
     }
     unsafe fn discard_texture(&self, _texture: super::Texture) {}
 }

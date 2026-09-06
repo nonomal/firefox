@@ -10,8 +10,8 @@
  * @param {number} promptCount How many dialogs we expected to have been
  * opened.
  *
- * @return {Promise}
- * @resolves {undefined} Once the dialogs have all been closed.
+ * @returns {Promise<void>}
+ *   Resolves once the dialogs have all been closed.
  */
 async function closeDialogs(tab, dialogCount) {
   let dialogElementsCount = dialogCount;
@@ -66,7 +66,7 @@ add_task(async function () {
 
   let tab = await BrowserTestUtils.openNewForegroundTab(
     gBrowser,
-    // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+    // eslint-disable-next-line sdl/no-insecure-url
     "http://example.com",
     true
   );

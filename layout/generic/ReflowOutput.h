@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,6 +8,7 @@
 #define mozilla_ReflowOutput_h
 
 #include "mozilla/EnumeratedRange.h"
+#include "mozilla/TypedEnumBits.h"
 #include "mozilla/WritingModes.h"
 #include "nsBoundingMetrics.h"
 #include "nsRect.h"
@@ -24,6 +23,20 @@ constexpr auto AllOverflowTypes() {
   return MakeInclusiveEnumeratedRange(OverflowType::Ink,
                                       OverflowType::Scrollable);
 }
+
+// Flags controlling how a child's overflow areas are unioned into a parent's
+// overflow areas.
+enum class OverflowAreaUnionFlags : uint8_t {
+  None = 0,
+  // Treat the frame as if it were a scroll container: bypass the contain:layout
+  // check so the scrollable overflow of children still contributes.
+  AsIfScrolled = 1 << 0,
+  // The child being considered is absolutely positioned. The child's overflow
+  // is unioned via OverflowAreas::UnionWithAbsoluteOverflowAreas (which skips
+  // empty overflow rects).
+  ChildIsAbsPos = 1 << 1,
+};
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(OverflowAreaUnionFlags)
 
 struct OverflowAreas {
  public:
@@ -52,10 +65,6 @@ struct OverflowAreas {
            ScrollableOverflow().IsEqualEdges(aOther.ScrollableOverflow());
   }
 
-  bool operator!=(const OverflowAreas& aOther) const {
-    return !(*this == aOther);
-  }
-
   OverflowAreas operator+(const nsPoint& aPoint) const {
     OverflowAreas result(*this);
     result += aPoint;
@@ -73,6 +82,10 @@ struct OverflowAreas {
   // Mutates |this| by unioning both overflow areas with |aOther|.
   void UnionWith(const OverflowAreas& aOther);
 
+  // Mutates |this| by unioning both overflow areas with |aOther|, which is
+  // assumed to be overflow areas of an absolutely positioned frame.
+  void UnionWithAbsoluteOverflowAreas(const OverflowAreas& aOther);
+
   // Mutates |this| by unioning both overflow areas with |aRect|.
   void UnionAllWith(const nsRect& aRect);
 
@@ -82,7 +95,7 @@ struct OverflowAreas {
   // Applies overflow clipping (for e.g. overflow: clip) as needed to both our
   // overflow rects.
   void ApplyClipping(const nsRect& aBounds, PhysicalAxes aClipAxes,
-                     const nsSize& aOverflowMargin) {
+                     const nsMargin& aOverflowMargin) {
     ApplyOverflowClippingOnRect(InkOverflow(), aBounds, aClipAxes,
                                 aOverflowMargin);
     ApplyOverflowClippingOnRect(ScrollableOverflow(), aBounds, aClipAxes,
@@ -94,14 +107,14 @@ struct OverflowAreas {
   static nsRect GetOverflowClipRect(const nsRect& aRectToClip,
                                     const nsRect& aBounds,
                                     PhysicalAxes aClipAxes,
-                                    const nsSize& aOverflowMargin);
+                                    const nsMargin& aOverflowMargin);
 
   // Applies the overflow clipping to a given overflow rect, given the frame
   // bounds, and the physical axes on which to apply the overflow clip.
   static void ApplyOverflowClippingOnRect(nsRect& aOverflowRect,
                                           const nsRect& aBounds,
                                           PhysicalAxes aClipAxes,
-                                          const nsSize& aOverflowMargin);
+                                          const nsMargin& aOverflowMargin);
 
  private:
   nsRect mInk;
@@ -119,13 +132,7 @@ struct OverflowAreas {
  */
 class CollapsingMargin final {
  public:
-  bool operator==(const CollapsingMargin& aOther) const {
-    return mMostPos == aOther.mMostPos && mMostNeg == aOther.mMostNeg;
-  }
-
-  bool operator!=(const CollapsingMargin& aOther) const {
-    return !(*this == aOther);
-  }
+  bool operator==(const CollapsingMargin&) const = default;
 
   void Include(nscoord aCoord) {
     if (aCoord > mMostPos) {
@@ -233,6 +240,10 @@ class ReflowOutput {
   // Carried out block-end margin values. This is the collapsed
   // (generational) block-end margin value.
   CollapsingMargin mCarriedOutBEndMargin;
+
+  // Set when the frame needs to retry reflow to apply text-box-trim-end
+  // at a fragment boundary.
+  bool mNeedsTextBoxTrimAtFragmentEndRetry = false;
 
   // For frames that have content that overflow their content area
   // (HasOverflowAreas() is true) these rectangles represent the total

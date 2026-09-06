@@ -46,10 +46,12 @@ const DEFAULT_EXTENSION_ICON =
   "chrome://mozapps/skin/extensions/extensionGeneric.svg";
 
 function getTabBrowser(browser) {
-  while (browser.ownerGlobal.docShell.itemType !== Ci.nsIDocShell.typeChrome) {
-    browser = browser.ownerGlobal.docShell.chromeEventHandler;
+  while (
+    browser.documentGlobal.docShell.itemType !== Ci.nsIDocShell.typeChrome
+  ) {
+    browser = browser.documentGlobal.docShell.chromeEventHandler;
   }
-  let window = browser.ownerGlobal;
+  let window = browser.documentGlobal;
   let viewType = browser.getAttribute("webextension-view-type");
   if (viewType == "sidebar") {
     window = window.browsingContext.topChromeWindow;
@@ -142,7 +144,7 @@ export var ExtensionsUI = {
       shouldShowTechnicalAndInteractionCheckbox = false,
     } = {}
   ) {
-    let global = tabbrowser.selectedBrowser.ownerGlobal;
+    let global = tabbrowser.selectedBrowser.documentGlobal;
     return global.BrowserAddonUI.openAddonsMgr("addons://list/extension").then(
       aomWin => {
         let aomBrowser = aomWin.docShell.chromeEventHandler;
@@ -242,7 +244,14 @@ export var ExtensionsUI = {
         );
       }
 
-      let strings = this._buildStrings(info);
+      let strings;
+      try {
+        strings = this._buildStrings(info);
+      } catch (err) {
+        console.error(err);
+        info.reject();
+        return;
+      }
 
       // If this is an update with no promptable permissions, just apply it
       if (
@@ -292,7 +301,15 @@ export var ExtensionsUI = {
     } else if (topic == "webextension-update-permission-prompt") {
       let info = subject.wrappedJSObject;
       info.type = "update";
-      let strings = this._buildStrings(info);
+
+      let strings;
+      try {
+        strings = this._buildStrings(info);
+      } catch (err) {
+        console.error(err);
+        info.reject();
+        return;
+      }
 
       // If we don't prompt for any new permissions, just apply it
       if (!strings.msgs.length && !strings.dataCollectionPermissions?.msg) {
@@ -391,6 +408,11 @@ export var ExtensionsUI = {
     const strings = lazy.ExtensionData.formatPermissionStrings(info, {
       fullDomainsList: true,
     });
+    if (!strings) {
+      throw new Error(
+        "ExtensionData.formatPermissionStrings failed to return localized strings"
+      );
+    }
     strings.addonName = info.addon.name;
     return strings;
   },
@@ -479,6 +501,11 @@ export var ExtensionsUI = {
         persistent: true,
         eventCallback,
         removeOnDismissal: true,
+        // Autofocus the panel on open, so users using keyboard navigation can
+        // reach it more easily (Bug 2059855). This flag does not focus yet
+        // any specific control inside it (so that a user pressing Enter
+        // right after the panel opens can't accidentally grant permissions).
+        autofocus: true,
         popupOptions: {
           position: "bottomright topright",
         },
@@ -536,7 +563,7 @@ export var ExtensionsUI = {
         browser,
         "addon-webext-permissions",
         strings.header,
-        browser.ownerGlobal.gUnifiedExtensions.getPopupAnchorID(
+        browser.documentGlobal.gUnifiedExtensions.getPopupAnchorID(
           browser,
           window
         ),
@@ -768,7 +795,7 @@ export var ExtensionsUI = {
   originControlsMenu(popup, extensionId) {
     let policy = WebExtensionPolicy.getByID(extensionId);
 
-    let win = popup.ownerGlobal;
+    let win = popup.documentGlobal;
     let doc = popup.ownerDocument;
     let tab = win.gBrowser.selectedTab;
     let uri = tab.linkedBrowser?.currentURI;
@@ -806,7 +833,7 @@ export var ExtensionsUI = {
     if (state.allDomains) {
       let allDomains = doc.createXULElement("menuitem");
       allDomains.setAttribute("type", "radio");
-      allDomains.setAttribute("checked", state.hasAccess);
+      allDomains.toggleAttribute("checked", state.hasAccess);
       doc.l10n.setAttributes(allDomains, "origin-controls-option-all-domains");
       items.push(allDomains);
     }
@@ -814,7 +841,7 @@ export var ExtensionsUI = {
     if (state.whenClicked) {
       let whenClicked = doc.createXULElement("menuitem");
       whenClicked.setAttribute("type", "radio");
-      whenClicked.setAttribute("checked", !state.hasAccess);
+      whenClicked.toggleAttribute("checked", !state.hasAccess);
       doc.l10n.setAttributes(
         whenClicked,
         "origin-controls-option-when-clicked"
@@ -829,7 +856,7 @@ export var ExtensionsUI = {
     if (state.alwaysOn) {
       let alwaysOn = doc.createXULElement("menuitem");
       alwaysOn.setAttribute("type", "radio");
-      alwaysOn.setAttribute("checked", state.hasAccess);
+      alwaysOn.toggleAttribute("checked", state.hasAccess);
       doc.l10n.setAttributes(alwaysOn, "origin-controls-option-always-on", {
         domain: uri.host,
       });

@@ -15,10 +15,8 @@ import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.toolbar.Toolbar
 import mozilla.components.support.test.any
 import mozilla.components.support.test.mock
-import mozilla.components.support.test.rule.MainCoroutineRule
 import mozilla.components.ui.tabcounter.TabCounterMenu
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.never
@@ -26,9 +24,6 @@ import org.mockito.Mockito.verify
 
 @RunWith(AndroidJUnit4::class)
 class TabsToolbarFeatureTest {
-
-    @get:Rule
-    val coroutinesTestRule = MainCoroutineRule()
 
     private val showTabs: () -> Unit = mock()
     private val tabCounterMenu: TabCounterMenu = mock()
@@ -38,9 +33,10 @@ class TabsToolbarFeatureTest {
     private lateinit var lifecycleOwner: MockedLifecycleOwner
 
     internal class MockedLifecycleOwner(initialState: Lifecycle.State) : LifecycleOwner {
-        override val lifecycle: Lifecycle = LifecycleRegistry(this).apply {
-            currentState = initialState
-        }
+        override val lifecycle: Lifecycle =
+            LifecycleRegistry(this).apply {
+                currentState = initialState
+            }
     }
 
     @Before
@@ -53,14 +49,15 @@ class TabsToolbarFeatureTest {
         val store = BrowserStore()
         val sessionId: String? = null
 
-        tabsToolbarFeature = TabsToolbarFeature(
-            toolbar = toolbar,
-            store = store,
-            sessionId = sessionId,
-            lifecycleOwner = lifecycleOwner,
-            showTabs = showTabs,
-            tabCounterMenu = tabCounterMenu,
-        )
+        tabsToolbarFeature =
+            TabsToolbarFeature(
+                toolbar = toolbar,
+                store = store,
+                sessionId = sessionId,
+                lifecycleOwner = lifecycleOwner,
+                showTabs = showTabs,
+                tabCounterMenu = tabCounterMenu,
+            )
 
         verify(toolbar).addBrowserAction(any())
     }
@@ -78,14 +75,15 @@ class TabsToolbarFeatureTest {
         val browserState = BrowserState(customTabs = listOf(customTabSessionState))
         val store = BrowserStore(initialState = browserState)
 
-        tabsToolbarFeature = TabsToolbarFeature(
-            toolbar = toolbar,
-            store = store,
-            sessionId = customTabId,
-            lifecycleOwner = lifecycleOwner,
-            showTabs = showTabs,
-            tabCounterMenu = tabCounterMenu,
-        )
+        tabsToolbarFeature =
+            TabsToolbarFeature(
+                toolbar = toolbar,
+                store = store,
+                sessionId = customTabId,
+                lifecycleOwner = lifecycleOwner,
+                showTabs = showTabs,
+                tabCounterMenu = tabCounterMenu,
+            )
 
         verify(toolbar, never()).addBrowserAction(any())
     }
@@ -97,14 +95,15 @@ class TabsToolbarFeatureTest {
         val browserState = BrowserState()
         val store = BrowserStore(initialState = browserState)
 
-        tabsToolbarFeature = TabsToolbarFeature(
-            toolbar = toolbar,
-            store = store,
-            sessionId = tabId,
-            lifecycleOwner = lifecycleOwner,
-            showTabs = showTabs,
-            tabCounterMenu = tabCounterMenu,
-        )
+        tabsToolbarFeature =
+            TabsToolbarFeature(
+                toolbar = toolbar,
+                store = store,
+                sessionId = tabId,
+                lifecycleOwner = lifecycleOwner,
+                showTabs = showTabs,
+                tabCounterMenu = tabCounterMenu,
+            )
 
         verify(toolbar).addBrowserAction(any())
     }

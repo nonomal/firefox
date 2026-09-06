@@ -84,6 +84,10 @@ bitflags! {
         const RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING =
             Self::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING.bits() |
             Self::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR.bits();
+
+        /// A child of this element may be using sibling-index() or sibling-count(),
+        /// and must be recascaded if other children are added or removed.
+        const MAY_HAVE_TREE_COUNTING_FUNCTION = 1 << 11;
     }
 }
 
@@ -103,7 +107,8 @@ impl ElementSelectorFlags {
             | ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS
             | ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH
             | ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF
-            | ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR)
+            | ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR
+            | ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION)
     }
 }
 
@@ -318,6 +323,37 @@ pub enum CompoundSelectorMatchingResult {
     NotMatched,
 }
 
+fn complex_selector_early_reject_by_local_name<E: Element>(
+    list: &SelectorList<E::Impl>,
+    element: &E,
+) -> bool {
+    list.slice()
+        .iter()
+        .all(|s| early_reject_by_local_name(s, 0, element))
+}
+
+/// Returns true if this compound would not match the given element by due
+/// to a local name selector (If one exists).
+pub fn early_reject_by_local_name<E: Element>(
+    selector: &Selector<E::Impl>,
+    from_offset: usize,
+    element: &E,
+) -> bool {
+    let iter = selector.iter_from(from_offset);
+    for component in iter {
+        if match component {
+            Component::LocalName(name) => !matches_local_name(element, name),
+            Component::Is(list) | Component::Where(list) => {
+                complex_selector_early_reject_by_local_name(list, element)
+            },
+            _ => continue,
+        } {
+            return true;
+        }
+    }
+    false
+}
+
 /// Matches a compound selector belonging to `selector`, starting at offset
 /// `from_offset`, matching left to right.
 ///
@@ -406,7 +442,7 @@ where
 
 /// Matches a complex selector.
 #[inline(always)]
-fn matches_complex_selector<E>(
+pub fn matches_complex_selector<E>(
     mut iter: SelectorIter<E::Impl>,
     element: &E,
     context: &mut MatchingContext<E::Impl>,
@@ -417,7 +453,10 @@ where
 {
     // If this is the special pseudo-element mode, consume the ::pseudo-element
     // before proceeding, since the caller has already handled that part.
-    if context.matching_mode() == MatchingMode::ForStatelessPseudoElement && !context.is_nested() {
+    if context.matching_mode() == MatchingMode::ForStatelessPseudoElement
+        && !context.is_nested()
+        && rightmost == SubjectOrPseudoElement::Yes
+    {
         // Consume the pseudo.
         match *iter.next().unwrap() {
             Component::PseudoElement(ref pseudo) => {
@@ -724,8 +763,9 @@ fn hover_and_active_quirk_applies<Impl: SelectorImpl>(
     })
 }
 
+/// Whether we're matching either the subject, or the pseudo-element.
 #[derive(Clone, Copy, PartialEq)]
-enum SubjectOrPseudoElement {
+pub enum SubjectOrPseudoElement {
     Yes,
     No,
 }
@@ -1112,7 +1152,7 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
             Component::PseudoElement(..) => {},
             // We allow logical pseudo-classes, but we'll fail matching of the inner selectors if
             // necessary.
-            Component::Is(ref l) | Component::Where(ref l) => {
+            Component::Is(l) | Component::Where(l) => {
                 let mut any_yes = false;
                 let mut any_no = false;
                 for selector in l.slice() {
@@ -1137,7 +1177,7 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
                     matches = MatchesFeaturelessHost::Yes;
                 }
             },
-            Component::Negation(ref l) => {
+            Component::Negation(l) => {
                 // For now preserving behavior, see
                 // https://github.com/w3c/csswg-drafts/issues/10179 for existing resolutions that
                 // tweak this behavior.
@@ -1271,18 +1311,18 @@ where
             None => element.is_root(),
         },
         Component::Scope | Component::ImplicitScope => {
-            if let Some(may_return_unknown) = context.shared.matching_for_invalidation_comparison()
-            {
+            let matching_for_invalidation = context.shared.matching_for_invalidation_comparison();
+            if context.shared.matching_for_revalidation() || matching_for_invalidation.is_some() {
+                let may_return_unknown = matching_for_invalidation.unwrap_or(false);
                 return if may_return_unknown {
                     KleeneValue::Unknown
                 } else {
                     KleeneValue::from(!context.shared.in_negation())
                 };
-            } else {
-                match context.shared.scope_element {
-                    Some(ref scope_element) => element.opaque() == *scope_element,
-                    None => element.is_root(),
-                }
+            }
+            match context.shared.scope_element {
+                Some(ref scope_element) => element.opaque() == *scope_element,
+                None => element.is_root(),
             }
         },
         Component::Nth(ref nth_data) => {
@@ -1428,11 +1468,11 @@ where
         } else {
             ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS
         };
-        flags |= if has_selectors {
-            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF
-        } else {
-            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH
-        };
+        if has_selectors {
+            flags |= ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF;
+        } else if !is_edge_child_selector {
+            flags |= ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH;
+        }
         element.apply_selector_flags(flags);
     }
 

@@ -1,22 +1,21 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- * vim: set ts=8 sts=2 et sw=2 tw=80:
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #ifndef gc_Cell_h
 #define gc_Cell_h
 
-#include "mozilla/EndianUtils.h"
-
+#include <bit>
 #include <type_traits>
 
 #include "gc/GCContext.h"
 #include "gc/Heap.h"
+#include "gc/LightLock.h"
 #include "gc/TraceKind.h"
 #include "js/GCAnnotations.h"
 #include "js/shadow/Zone.h"  // JS::shadow::Zone
 #include "js/TypeDecls.h"
+#include "vm/MutexIDs.h"
 
 namespace JS {
 enum class TraceKind;
@@ -41,6 +40,11 @@ extern void TraceManuallyBarrieredGenericPointerEdge(JSTracer* trc,
                                                      gc::Cell** thingp,
                                                      const char* name);
 
+#ifdef MOZ_TSAN
+extern void TSANMemoryAcquireFence(JSRuntime* runtime);
+extern void TSANMemoryReleaseFence(JSRuntime* runtime);
+#endif
+
 namespace gc {
 
 enum class AllocKind : uint8_t;
@@ -50,6 +54,9 @@ class TenuredCell;
 
 extern void PerformIncrementalReadBarrier(TenuredCell* cell);
 extern void PerformIncrementalPreWriteBarrier(TenuredCell* cell);
+#ifdef ENABLE_WASM_JSPI
+extern void PerformIncrementalPreWriteBarrierAllChildren(JSObject* cell);
+#endif
 extern void PerformIncrementalBarrierDuringFlattening(JSString* str);
 extern void UnmarkGrayGCThingRecursively(TenuredCell* cell);
 
@@ -113,9 +120,26 @@ class HeaderWord {
     setAtomic(value);
   }
 
+  // Atomic bitwise operations on the cell flags.
+  void setBitAtomic(uintptr_t flag) {
+    MOZ_ASSERT((flag & RESERVED_MASK) == 0);
+    __atomic_fetch_or(&value_, flag, __ATOMIC_RELAXED);
+  }
+  void clearBitAtomic(uintptr_t flag) {
+    MOZ_ASSERT((flag & RESERVED_MASK) == 0);
+    __atomic_fetch_and(&value_, ~flag, __ATOMIC_RELAXED);
+  }
+  void toggleBitAtomic(uintptr_t flag) {
+    MOZ_ASSERT((flag & RESERVED_MASK) == 0);
+    __atomic_fetch_xor(&value_, flag, __ATOMIC_RELAXED);
+  }
+
   // Accessors for GC data.
   uintptr_t flags() const { return getAtomic() & RESERVED_MASK; }
   bool isForwarded() const { return flags() & FORWARD_BIT; }
+  // Non-atomic variant. Only safe when no other thread can be mutating the
+  // header concurrently.
+  bool isForwardedNonAtomic() const { return value_ & FORWARD_BIT; }
   void setForwardingAddress(uintptr_t ptr) {
     MOZ_ASSERT((ptr & RESERVED_MASK) == 0);
     setAtomic(ptr | FORWARD_BIT);
@@ -141,7 +165,8 @@ class HeaderWord {
 // During moving GC operation a Cell may be marked as forwarded. This indicates
 // that a gc::RelocationOverlay is currently stored in the Cell's memory and
 // should be used to find the new location of the Cell.
-struct Cell {
+class Cell {
+ protected:
   // Cell header word. Stores GC flags and derived class data.
   HeaderWord header_;
 
@@ -152,6 +177,7 @@ struct Cell {
   void operator=(const Cell&) = delete;
 
   bool isForwarded() const { return header_.isForwarded(); }
+  bool isForwardedNonAtomic() const { return header_.isForwardedNonAtomic(); }
   uintptr_t flags() const { return header_.flags(); }
 
   MOZ_ALWAYS_INLINE bool isTenured() const { return !IsInsideNursery(this); }
@@ -210,6 +236,13 @@ struct Cell {
   inline JS::Zone* nurseryZone() const;
   inline JS::Zone* nurseryZoneFromAnyThread() const;
 
+  MOZ_ALWAYS_INLINE JS::shadow::Zone* shadowZone() const {
+    return JS::shadow::Zone::from(zone());
+  }
+  MOZ_ALWAYS_INLINE JS::shadow::Zone* shadowZoneFromAnyThread() const {
+    return JS::shadow::Zone::from(zoneFromAnyThread());
+  }
+
   inline ChunkBase* chunk() const;
 
   // Default implementation for kinds that cannot be permanent. This may be
@@ -264,13 +297,6 @@ class TenuredCell : public Cell {
   inline JS::Zone* zone() const;
   inline JS::Zone* zoneFromAnyThread() const;
   inline bool isInsideZone(JS::Zone* zone) const;
-
-  MOZ_ALWAYS_INLINE JS::shadow::Zone* shadowZone() const {
-    return JS::shadow::Zone::from(zone());
-  }
-  MOZ_ALWAYS_INLINE JS::shadow::Zone* shadowZoneFromAnyThread() const {
-    return JS::shadow::Zone::from(zoneFromAnyThread());
-  }
 
   template <typename T, typename = std::enable_if_t<JS::IsBaseTraceType_v<T>>>
   inline bool is() const {
@@ -358,8 +384,10 @@ inline uintptr_t Cell::address() const {
 ChunkBase* Cell::chunk() const {
   uintptr_t addr = uintptr_t(this);
   MOZ_ASSERT(addr % CellAlignBytes == 0);
-  addr &= ~ChunkMask;
-  return reinterpret_cast<ChunkBase*>(addr);
+  auto* chunk = reinterpret_cast<ChunkBase*>(addr & ~ChunkMask);
+  MOZ_ASSERT(chunk->isNurseryChunk() ||
+             chunk->kind == ChunkKind::TenuredArenas);
+  return chunk;
 }
 
 inline StoreBuffer* Cell::storeBuffer() const { return chunk()->storeBuffer; }
@@ -405,7 +433,7 @@ inline JS::TraceKind Cell::getTraceKind() const {
 }
 
 /* static */ MOZ_ALWAYS_INLINE bool Cell::needPreWriteBarrier(JS::Zone* zone) {
-  return JS::shadow::Zone::from(zone)->needsIncrementalBarrier();
+  return JS::shadow::Zone::from(zone)->needsMarkingBarrier();
 }
 
 MOZ_ALWAYS_INLINE bool TenuredCell::isMarkedAny() const {
@@ -463,7 +491,7 @@ JS::Zone* TenuredCell::zone() const {
   return zone;
 }
 
-JS::Zone* TenuredCell::zoneFromAnyThread() const { return arena()->zone(); }
+JS::Zone* TenuredCell::zoneFromAnyThread() const { return chunk()->info.zone; }
 
 bool TenuredCell::isInsideZone(JS::Zone* zone) const {
   return zone == zoneFromAnyThread();
@@ -487,7 +515,7 @@ MOZ_ALWAYS_INLINE void ReadBarrierImpl(TenuredCell* thing) {
   MOZ_ASSERT(thing);
 
   JS::shadow::Zone* shadowZone = thing->shadowZoneFromAnyThread();
-  if (shadowZone->needsIncrementalBarrier()) {
+  if (shadowZone->needsMarkingBarrier()) {
     PerformIncrementalReadBarrier(thing);
     return;
   }
@@ -527,7 +555,7 @@ MOZ_ALWAYS_INLINE void PreWriteBarrierImpl(TenuredCell* thing) {
   // AutoDisableBarriers.
 
   JS::shadow::Zone* zone = thing->shadowZoneFromAnyThread();
-  if (zone->needsIncrementalBarrier()) {
+  if (zone->needsMarkingBarrier()) {
     PerformIncrementalPreWriteBarrier(thing);
   }
 }
@@ -561,7 +589,7 @@ MOZ_ALWAYS_INLINE void PreWriteBarrier(JS::Zone* zone, T* data,
   MOZ_ASSERT(!CurrentThreadIsGCMarking());
 
   auto* shadowZone = JS::shadow::Zone::from(zone);
-  if (!shadowZone->needsIncrementalBarrier()) {
+  if (!shadowZone->needsMarkingBarrier()) {
     return;
   }
 
@@ -577,6 +605,44 @@ template <typename T>
 MOZ_ALWAYS_INLINE void PreWriteBarrier(JS::Zone* zone, T* data) {
   MOZ_ASSERT(data);
   PreWriteBarrier(zone, data, [](JSTracer* trc, T* data) { data->trace(trc); });
+}
+
+MOZ_ALWAYS_INLINE void MemoryReleaseFence(JS::Zone* zone) {
+#ifdef JS_GC_CONCURRENT_MARKING
+  MOZ_ASSERT(!CurrentThreadIsIonCompiling());
+  MOZ_ASSERT(!CurrentThreadIsGCMarking());
+
+  if (JS::shadow::Zone::from(zone)->needsMarkingBarrier(
+          JS::shadow::Zone::Concurrent)) {
+    std::atomic_thread_fence(std::memory_order_release);
+#  ifdef MOZ_TSAN
+    JSRuntime* runtime = JS::shadow::Zone::from(zone)->runtimeFromMainThread();
+    TSANMemoryReleaseFence(runtime);
+#  endif
+  }
+#endif
+}
+
+template <typename T>
+MOZ_ALWAYS_INLINE void MemoryReleaseFence(T* thing) {
+#ifdef JS_GC_CONCURRENT_MARKING
+  static_assert(std::is_base_of_v<Cell, T>);
+
+  MOZ_ASSERT(!CurrentThreadIsIonCompiling());
+  MOZ_ASSERT(!CurrentThreadIsGCMarking());
+
+  // todo: may not be worth doing isPermanentAndMayBeShared check.
+  // todo: may or may not have concrete type
+  if (!thing) {
+    return;
+  }
+
+  // todo: Ideally this would be zone() but stencil writes into objects
+  // off-thread during under PrivateScriptData::InitFromStencil.
+  JS::Zone* zone = thing->zoneFromAnyThread();
+
+  MemoryReleaseFence(zone);
+#endif
 }
 
 #ifdef DEBUG
@@ -639,6 +705,14 @@ class alignas(gc::CellAlignBytes) CellWithLengthAndFlags : public Cell {
     return uint32_t(header_.getAtomic());
   }
 
+#if JS_GC_CONCURRENT_MARKING
+  uintptr_t headerFlagsFieldForTracing() const {
+    return headerFlagsFieldAtomic();
+  }
+#else
+  uintptr_t headerFlagsFieldForTracing() const { return headerFlagsField(); }
+#endif
+
   void setHeaderFlagBit(uint32_t flag) {
     header_.set(header_.get() | uintptr_t(flag));
   }
@@ -647,6 +721,11 @@ class alignas(gc::CellAlignBytes) CellWithLengthAndFlags : public Cell {
   }
   void toggleHeaderFlagBit(uint32_t flag) {
     header_.set(header_.get() ^ uintptr_t(flag));
+  }
+  void setHeaderFlagBitAtomic(uint32_t flag) { header_.setBitAtomic(flag); }
+  void clearHeaderFlagBitAtomic(uint32_t flag) { header_.clearBitAtomic(flag); }
+  void toggleHeaderFlagBitAtomic(uint32_t flag) {
+    header_.toggleBitAtomic(flag);
   }
 
   void setHeaderLengthAndFlags(uint32_t len, uint32_t flags) {
@@ -667,28 +746,28 @@ class alignas(gc::CellAlignBytes) CellWithLengthAndFlags : public Cell {
 
   // Offsets for direct field from jit code. A number of places directly
   // access 32-bit length and flags fields so do endian trickery here.
+  static constexpr size_t offsetOfHeaderFlags() {
 #if JS_BITS_PER_WORD == 32
-  static constexpr size_t offsetOfHeaderFlags() {
     return offsetof(CellWithLengthAndFlags, header_);
-  }
-  static constexpr size_t offsetOfHeaderLength() {
-    return offsetof(CellWithLengthAndFlags, length_);
-  }
-#elif MOZ_LITTLE_ENDIAN()
-  static constexpr size_t offsetOfHeaderFlags() {
-    return offsetof(CellWithLengthAndFlags, header_);
-  }
-  static constexpr size_t offsetOfHeaderLength() {
-    return offsetof(CellWithLengthAndFlags, header_) + sizeof(uint32_t);
-  }
 #else
-  static constexpr size_t offsetOfHeaderFlags() {
-    return offsetof(CellWithLengthAndFlags, header_) + sizeof(uint32_t);
+    if constexpr (std::endian::native == std::endian::little) {
+      return offsetof(CellWithLengthAndFlags, header_);
+    } else {
+      return offsetof(CellWithLengthAndFlags, header_) + sizeof(uint32_t);
+    }
+#endif
   }
   static constexpr size_t offsetOfHeaderLength() {
-    return offsetof(CellWithLengthAndFlags, header_);
-  }
+#if JS_BITS_PER_WORD == 32
+    return offsetof(CellWithLengthAndFlags, length_);
+#else
+    if constexpr (std::endian::native == std::endian::little) {
+      return offsetof(CellWithLengthAndFlags, header_) + sizeof(uint32_t);
+    } else {
+      return offsetof(CellWithLengthAndFlags, header_);
+    }
 #endif
+  }
 };
 
 // Base class for non-nursery-allocatable GC things that allows storing a non-GC
@@ -715,6 +794,15 @@ class alignas(gc::CellAlignBytes) TenuredCellWithNonGCPointer
     MOZ_ASSERT(flags() == 0);
     return reinterpret_cast<PtrT*>(uintptr_t(header_.get()));
   }
+
+#if JS_GC_CONCURRENT_MARKING
+  PtrT* headerPtrForTracing() const {
+    MOZ_ASSERT(flags() == 0);
+    return reinterpret_cast<PtrT*>(uintptr_t(header_.getAtomic()));
+  }
+#else
+  PtrT* headerPtrForTracing() const { return headerPtr(); }
+#endif
 
   void setHeaderPtr(PtrT* newValue) {
     // As above, no flags are expected to be set here.
@@ -743,6 +831,15 @@ class alignas(gc::CellAlignBytes) TenuredCellWithFlags : public TenuredCell {
     MOZ_ASSERT(flags() == 0);
     return header_.get();
   }
+
+#if JS_GC_CONCURRENT_MARKING
+  uintptr_t headerFlagsFieldForTracing() const {
+    MOZ_ASSERT(flags() == 0);
+    return header_.getAtomic();
+  }
+#else
+  uintptr_t headerFlagsFieldForTracing() const { return headerFlagsField(); }
+#endif
 
   void setHeaderFlagBits(uintptr_t flags) {
     header_.set(header_.get() | flags);
@@ -803,6 +900,12 @@ class alignas(gc::CellAlignBytes) CellWithTenuredGCPointer : public BaseCell {
     MOZ_ASSERT(this->flags() == 0);
     return reinterpret_cast<PtrT*>(uintptr_t(this->header_.getAtomic()));
   }
+
+#if JS_GC_CONCURRENT_MARKING
+  PtrT* headerPtrForTracing() const { return headerPtrAtomic(); }
+#else
+  PtrT* headerPtrForTracing() const { return headerPtr(); }
+#endif
 
   void unbarrieredSetHeaderPtr(PtrT* newValue) {
     uintptr_t data = uintptr_t(newValue);
@@ -891,6 +994,63 @@ template <>
 inline bool TenuredThingIsMarkedAny<Cell>(Cell* thing) {
   return thing->asTenured().isMarkedAny();
 }
+
+class MarkingLock : public LightLock {
+ public:
+  MarkingLock() : LightLock(js::mutexid::GCMarkingLock) {}
+};
+
+class AtomRefLock : public LightLock {
+ public:
+  AtomRefLock() : LightLock(js::mutexid::GCAtomRefLock) {}
+};
+
+// A lock used to synchronize access to some data structures during concurrent
+// marking. This is only intended for use where lock-free approaches are
+// infeasible.
+//
+// Currently this is used for ICScript only. The lock must be taken when
+// mutating data structures owned by ICScript on the main thread. Reading is
+// safe and doesn't require the lock.
+//
+// This is a no op outside concurrent marking builds.
+class MOZ_RAII AutoMarkingLock {
+#ifdef JS_GC_CONCURRENT_MARKING
+  LightLock* lock = nullptr;
+  JSRuntime* runtime = nullptr;
+#endif
+
+  AutoMarkingLock(const AutoMarkingLock& other) = delete;
+  AutoMarkingLock& operator=(const AutoMarkingLock& other) = delete;
+
+ public:
+  // Take the lock if concurrent marking is currently happening in zone |zone|.
+  AutoMarkingLock(JS::Zone* zone, LightLock& markingLock) {
+#ifdef JS_GC_CONCURRENT_MARKING
+    auto* shadowZone = JS::shadow::Zone::from(zone);
+    if (shadowZone->needsMarkingBarrier(JS::shadow::Zone::Concurrent)) {
+      lock = &markingLock;
+      runtime = shadowZone->runtimeFromAnyThread();
+      lock->lock(runtime);
+    }
+#endif
+  }
+
+  // Take the lock if |trc| is a concurrent marking tracer.
+  inline AutoMarkingLock(JSTracer* trc, LightLock& markingLock);
+
+  // Take the lock if any concurrent marking is currently happening.
+  inline AutoMarkingLock(JSRuntime* rt, LightLock& markingLock);
+
+  ~AutoMarkingLock() {
+#ifdef JS_GC_CONCURRENT_MARKING
+    if (lock) {
+      MOZ_ASSERT(runtime);
+      lock->unlock(runtime);
+    }
+#endif
+  }
+};
 
 } /* namespace gc */
 } /* namespace js */

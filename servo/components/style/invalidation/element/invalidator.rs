@@ -169,6 +169,12 @@ where
     /// `of`.
     fn invalidated_sibling(&mut self, sibling: E, of: E);
 
+    /// Called when a highlight pseudo-element (::selection, ::highlight,
+    /// ::target-text) style is invalidated. These pseudos have their styles
+    /// resolved lazily during painting rather than during the restyle traversal,
+    /// so style changes don't automatically trigger repaints.
+    fn invalidated_highlight_pseudo(&mut self, _element: E) {}
+
     /// Executes an action when any descendant of `Self` is invalidated.
     fn invalidated_descendants(&mut self, element: E, child: E);
 
@@ -493,13 +499,8 @@ impl SelectorVisitor for NegationScopeVisitor {
     }
 
     fn visit_simple_selector(&mut self, component: &Component<Self::Impl>) -> bool {
-        if self.in_negation {
-            match component {
-                Component::Scope => {
-                    self.found_scope_in_negation = true;
-                },
-                _ => {},
-            }
+        if self.in_negation && component == &Component::Scope {
+            self.found_scope_in_negation = true;
         }
         true
     }
@@ -738,13 +739,6 @@ where
     ) -> bool {
         let mut sibling_invalidations = InvalidationVector::new();
 
-        let result = self.invalidate_child(
-            child,
-            invalidations,
-            &mut sibling_invalidations,
-            DescendantInvalidationKind::Dom,
-        );
-
         // Roots of NAC subtrees can indeed generate sibling invalidations, but
         // they can be just ignored, since they have no siblings.
         //
@@ -752,7 +746,12 @@ where
         // matching due to this being NAC, like those coming from document
         // rules, but we overinvalidate instead of checking this.
 
-        result
+        self.invalidate_child(
+            child,
+            invalidations,
+            &mut sibling_invalidations,
+            DescendantInvalidationKind::Dom,
+        )
     }
 
     /// Invalidate a child and recurse down invalidating its descendants if
@@ -771,10 +770,12 @@ where
             let mut child_invalidator =
                 TreeStyleInvalidator::new(child, self.stack_limit_checker, self.processor);
 
-            invalidated_child |= child_invalidator.process_sibling_invalidations(
-                &mut invalidations_for_descendants,
-                sibling_invalidations,
-            );
+            if !sibling_invalidations.is_empty() {
+                invalidated_child |= child_invalidator.process_sibling_invalidations(
+                    &mut invalidations_for_descendants,
+                    sibling_invalidations,
+                );
+            }
 
             invalidated_child |= child_invalidator.process_descendant_invalidations(
                 invalidations,
@@ -1016,6 +1017,9 @@ where
     /// ones we got from the previous one.
     ///
     /// Returns whether invalidated the current element's style.
+    ///
+    /// Callers should skip this when `sibling_invalidations` is empty, as it
+    /// builds and drains a `SmallVec` to do nothing.
     fn process_sibling_invalidations(
         &mut self,
         descendant_invalidations: &mut DescendantInvalidationLists<'b>,
@@ -1189,7 +1193,9 @@ where
                     invalidation_kind,
                     DependencyInvalidationKind::Normal(NormalDependencyInvalidationKind::Element)
                 ) || (matches!(invalidation_kind, DependencyInvalidationKind::Scope(_))
-                    && cur_dependency.selector.is_rightmost(cur_dependency.selector_offset))
+                    && cur_dependency
+                        .selector
+                        .is_rightmost(cur_dependency.selector_offset))
                 {
                     // Add to dependency stack to process its next dependencies.
                     to_process.push(cur_dependency);
@@ -1204,7 +1210,7 @@ where
                 ));
             }
         }
-        return (result, next_invalidations);
+        (result, next_invalidations)
     }
 
     /// Processes a given invalidation, potentially invalidating the style of
@@ -1297,15 +1303,19 @@ where
                     //
                     // Note that we'll also restyle the pseudo-element because it would
                     // match this invalidation.
-                    //
-                    // FIXME: For non-element-backed pseudos this is still not quite
-                    // correct. For example for ::selection even though we invalidate
-                    // the style properly there's nothing that triggers a repaint
-                    // necessarily. Though this matches old Gecko behavior, and the
-                    // ::selection implementation needs to change significantly anyway
-                    // to implement https://github.com/w3c/csswg-drafts/issues/2474 for
-                    // example.
                     result.invalidated_self = true;
+
+                    // For highlight pseudos (::selection, ::highlight, ::target-text),
+                    // we also need to trigger a repaint since their styles are resolved
+                    // lazily during painting.
+                    if next_invalidation
+                        .dependency
+                        .selector
+                        .pseudo_element()
+                        .is_some_and(|p| p.is_lazy_painted_highlight_pseudo())
+                    {
+                        self.processor.invalidated_highlight_pseudo(self.element);
+                    }
                 }
 
                 debug!(

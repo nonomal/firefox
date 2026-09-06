@@ -3,10 +3,10 @@
 
 const TP_PREF = "privacy.trackingprotection.enabled";
 const TRACKING_PAGE =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://tracking.example.org/browser/browser/base/content/test/protectionsUI/trackingPage.html";
 const BENIGN_PAGE =
-  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
+  // eslint-disable-next-line sdl/no-insecure-url
   "http://tracking.example.org/browser/browser/base/content/test/protectionsUI/benignPage.html";
 const ABOUT_PAGE = "about:preferences";
 
@@ -31,7 +31,10 @@ add_task(async function testResetOnLocationChange() {
   );
 
   await Promise.all([
-    promiseTabLoadEvent(tab, TRACKING_PAGE),
+    BrowserTestUtils.loadURIString({
+      browser: tab.linkedBrowser,
+      uriString: TRACKING_PAGE,
+    }),
     waitForContentBlockingEvent(2),
   ]);
 
@@ -42,7 +45,10 @@ add_task(async function testResetOnLocationChange() {
   );
   ok(gProtectionsHandler.iconBox.hasAttribute("active"), "shield is active");
 
-  await promiseTabLoadEvent(tab, BENIGN_PAGE);
+  await BrowserTestUtils.loadURIString({
+    browser: tab.linkedBrowser,
+    uriString: BENIGN_PAGE,
+  });
 
   is(
     browser.getContentBlockingEvents(),
@@ -97,12 +103,18 @@ add_task(async function testResetOnTabChange() {
   );
 
   await Promise.all([
-    promiseTabLoadEvent(tab, TRACKING_PAGE),
+    BrowserTestUtils.loadURIString({
+      browser: tab.linkedBrowser,
+      uriString: TRACKING_PAGE,
+    }),
     waitForContentBlockingEvent(3),
   ]);
   ok(gProtectionsHandler.iconBox.hasAttribute("active"), "shield is active");
 
-  await promiseTabLoadEvent(tab, ABOUT_PAGE);
+  await BrowserTestUtils.loadURIString({
+    browser: tab.linkedBrowser,
+    uriString: ABOUT_PAGE,
+  });
   ok(
     !gProtectionsHandler.iconBox.hasAttribute("active"),
     "shield is not active"

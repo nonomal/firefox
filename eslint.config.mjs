@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import sdl from "@microsoft/eslint-plugin-sdl";
+import sdl from "eslint-plugin-sdl";
 import eslintConfigPrettier from "eslint-config-prettier/flat";
 import html from "eslint-plugin-html";
 import importPlugin from "eslint-plugin-import";
-import json from "eslint-plugin-json";
+import json from "@eslint/json";
 import lit from "eslint-plugin-lit";
 import mozilla from "eslint-plugin-mozilla";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -126,7 +126,7 @@ let config = [
       // rule is able to be automatically fixed, then ESLint will remove the
       // inline comment and apply the fix. We don't want this because we have
       // some rules that intentionally need to be turned off in specific cases,
-      // e.g. @microsoft/sdl/no-insecure-url.
+      // e.g. sdl/no-insecure-url.
       reportUnusedDisableDirectives: "off",
     },
     plugins: { lit },
@@ -147,7 +147,21 @@ let config = [
   {
     name: "json-recommended-with-comments",
     files: ["**/*.json"],
-    ...json.configs["recommended-with-comments"],
+    language: "json/jsonc",
+    ...json.configs.recommended,
+  },
+  {
+    name: "json-recommended-no-comments",
+    files: ["**/package.json"],
+    language: "json/json",
+    ...json.configs.recommended,
+  },
+  {
+    name: "json-empty-keys-off-for-image_builder",
+    files: ["taskcluster/docker/image_builder/policy.json"],
+    rules: {
+      "json/no-empty-keys": "off",
+    },
   },
   {
     name: "eslint-plugin-html",
@@ -171,7 +185,19 @@ let config = [
       "tools/lint/eslint/**",
     ],
     languageOptions: {
-      globals: globals.browser,
+      // `when` is a global that has been added by Google Chrome as a result of
+      // adding it to `EventTarget.prototype`. `window` is an `EventTarget`, hence
+      // it is available in the global scope.
+      // This is part of the Observable proposal
+      // https://wicg.github.io/observable/#event-target-integration
+      // If Firefox implements the proposal (bug 1871732), then we may need to
+      // reconsider this exclusion.
+      // For now, it is conflicting with Lit's definition of `when`, and hence
+      // to avoid having to disable no-shadow on a lot of files using lit, we
+      // instead skip it here for now.
+      globals: Object.fromEntries(
+        Object.entries(globals.browser).filter(([key]) => key != "when")
+      ),
     },
   },
   {
@@ -266,6 +292,31 @@ let config = [
   {
     ...mozilla.configs["flat/general-test"],
     files: wrapPaths({ paths: ["**/test/**", "**/tests/**"] }),
+    plugins: { sdl },
+    rules: {
+      // No using of insecure url, so no http urls.
+      // Note: This is turned off for xpcshell-tests as it is not considered
+      // necessary for xpcshell level tests.
+      "sdl/no-insecure-url": [
+        "error",
+        {
+          exceptions: [
+            "^http:\\/\\/mochi\\.test?.*",
+            "^http:\\/\\/mochi\\.xorigin-test?.*",
+            "^http:\\/\\/localhost?.*",
+            "^http:\\/\\/127\\.0\\.0\\.1?.*",
+            // Exempt xmlns urls
+            "^http:\\/\\/www\\.w3\\.org?.*",
+            "^http:\\/\\/www\\.mozilla\\.org\\/keymaster\\/gatekeeper?.*",
+            // Exempt urls that start with ftp or ws.
+            "^ws:?.*",
+            "^ftp:?.*",
+          ],
+          varExceptions: ["insecure?.*"],
+        },
+      ],
+      ...mozilla.configs["flat/general-test"].rules,
+    },
   },
   {
     ...mozilla.configs["flat/xpcshell-test"],
@@ -273,6 +324,14 @@ let config = [
       paths: testPaths.xpcshell,
       excludedExtensions: ["mjs", "sjs"],
     }),
+    plugins: { sdl },
+    rules: {
+      // No using of insecure url, so no http urls.
+      // Note: This is turned off for xpcshell-tests as it is not considered
+      // necessary for xpcshell level tests.
+      "sdl/no-insecure-url": "off",
+      ...mozilla.configs["flat/xpcshell-test"].rules,
+    },
   },
   {
     name: "no-unused-vars-disable-on-headjs",
@@ -399,9 +458,9 @@ let config = [
     name: "disable-no-insecure-url-for-http-testing",
     // Exempt files with these paths since they have to use http for full coverage
     files: httpTestingPaths,
-    plugins: { "@microsoft/sdl": sdl },
+    plugins: { sdl },
     rules: {
-      "@microsoft/sdl/no-insecure-url": "off",
+      "sdl/no-insecure-url": "off",
     },
   },
   {

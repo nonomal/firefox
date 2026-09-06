@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,14 +5,15 @@
 #ifdef XP_WIN
 #  include "WMF.h"
 #  include "WMFDecoderModule.h"
+#  include "WMFEncoderModule.h"
 #endif
 #include "FFVPXRuntimeLinker.h"
 #include "GLContextProvider.h"
 #include "GPUParent.h"
 #include "GPUProcessHost.h"
 #include "GPUProcessManager.h"
-#include "gfxGradientCache.h"
 #include "GfxInfoBase.h"
+#include "MediaCodecsSupport.h"
 #include "VRGPUChild.h"
 #include "VRManager.h"
 #include "VRManagerParent.h"
@@ -22,8 +21,8 @@
 #include "cairo.h"
 #include "gfxConfig.h"
 #include "gfxCrashReporterUtils.h"
+#include "gfxGradientCache.h"
 #include "gfxPlatform.h"
-#include "MediaCodecsSupport.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Components.h"
 #include "mozilla/FOGIPC.h"
@@ -46,6 +45,7 @@
 #include "mozilla/ipc/CrashReporterClient.h"
 #include "mozilla/ipc/ProcessChild.h"
 #include "mozilla/ipc/ProcessUtils.h"
+#include "mozilla/layers/APZInputBridgeParent.h"
 #include "mozilla/layers/APZPublicUtils.h"  // for apz::InitializeGlobalState
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/CompositorBridgeParent.h"
@@ -54,6 +54,7 @@
 #include "mozilla/layers/ImageBridgeParent.h"
 #include "mozilla/layers/LayerTreeOwnerTracker.h"
 #include "mozilla/layers/RemoteTextureMap.h"
+#include "mozilla/layers/UiCompositorControllerParent.h"
 #include "mozilla/layers/VideoBridgeParent.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -72,6 +73,7 @@
 #  include <process.h>
 #  include <windows.h>
 
+#  include "WMFDecoderModule.h"
 #  include "gfxDWriteFonts.h"
 #  include "gfxWindowsPlatform.h"
 #  include "mozilla/gfx/DeviceManagerDx.h"
@@ -79,7 +81,6 @@
 #  include "mozilla/layers/GpuProcessD3D11TextureMap.h"
 #  include "mozilla/layers/TextureD3D11.h"
 #  include "mozilla/widget/WinCompositorWindowThread.h"
-#  include "WMFDecoderModule.h"
 #else
 #  include <unistd.h>
 #endif
@@ -90,6 +91,7 @@
 #endif
 #ifdef ANDROID
 #  include "mozilla/layers/AndroidHardwareBuffer.h"
+#  include "mozilla/layers/AndroidImageReader.h"
 #  include "skia/include/ports/SkTypeface_cairo.h"
 #endif
 #include "ChildProfilerController.h"
@@ -270,6 +272,18 @@ void GPUParent::NotifyDisableRemoteCanvas() {
   (void)SendNotifyDisableRemoteCanvas();
 }
 
+void GPUParent::ReportGLStrings(GfxInfoGLStrings&& aStrings) {
+  if (!NS_IsMainThread()) {
+    NS_DispatchToMainThread(NS_NewRunnableFunction(
+        "gfx::GPUParent::ReportGLStrings",
+        [strings = std::move(aStrings)]() mutable -> void {
+          GPUParent::GetSingleton()->ReportGLStrings(std::move(strings));
+        }));
+    return;
+  }
+  (void)SendReportGLStrings(std::move(aStrings));
+}
+
 mozilla::ipc::IPCResult GPUParent::RecvInit(
     nsTArray<GfxVarUpdate>&& vars, const DevicePrefs& devicePrefs,
     nsTArray<LayerTreeIdMapping>&& aMappings,
@@ -376,8 +390,11 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
   SkInitCairoFT(false);
 
   if (gfxVars::UseAHardwareBufferSharedSurfaceWebglOop()) {
-    layers::AndroidHardwareBufferApi::Init();
     layers::AndroidHardwareBufferManager::Init();
+  }
+
+  if (gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
+    layers::GpuProcessAndroidImageReaderMap::Init();
   }
 
 #endif
@@ -431,7 +448,8 @@ mozilla::ipc::IPCResult GPUParent::RecvInitSandboxTesting(
 mozilla::ipc::IPCResult GPUParent::RecvInitCompositorManager(
     Endpoint<PCompositorManagerParent>&& aEndpoint, uint32_t aNamespace) {
   CompositorManagerParent::Create(std::move(aEndpoint), ContentParentId(),
-                                  aNamespace, /* aIsRoot */ true);
+                                  aNamespace, /* aContentBridgeNamespace */ 0,
+                                  /* aIsRoot */ true);
   return IPC_OK();
 }
 
@@ -442,8 +460,8 @@ mozilla::ipc::IPCResult GPUParent::RecvInitVsyncBridge(
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvInitImageBridge(
-    Endpoint<PImageBridgeParent>&& aEndpoint) {
-  ImageBridgeParent::CreateForGPUProcess(std::move(aEndpoint));
+    Endpoint<PImageBridgeParent>&& aEndpoint, uint32_t aNamespace) {
+  ImageBridgeParent::CreateForGPUProcess(std::move(aEndpoint), aNamespace);
   return IPC_OK();
 }
 
@@ -459,14 +477,28 @@ mozilla::ipc::IPCResult GPUParent::RecvInitVideoBridge(
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvInitVRManager(
-    Endpoint<PVRManagerParent>&& aEndpoint) {
-  VRManagerParent::CreateForGPUProcess(std::move(aEndpoint));
+    Endpoint<PVRManagerParent>&& aEndpoint, uint32_t aNamespace) {
+  VRManagerParent::CreateForGPUProcess(std::move(aEndpoint), aNamespace);
   return IPC_OK();
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvInitVR(
     Endpoint<PVRGPUChild>&& aEndpoint) {
   gfx::VRGPUChild::InitForGPUProcess(std::move(aEndpoint));
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult GPUParent::RecvInitUiCompositorController(
+    const LayersId& aRootLayerTreeId,
+    Endpoint<PUiCompositorControllerParent>&& aEndpoint) {
+  UiCompositorControllerParent::Start(aRootLayerTreeId, std::move(aEndpoint));
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult GPUParent::RecvInitAPZInputBridge(
+    const LayersId& aRootLayerTreeId,
+    Endpoint<PAPZInputBridgeParent>&& aEndpoint) {
+  APZInputBridgeParent::Create(aRootLayerTreeId, std::move(aEndpoint));
   return IPC_OK();
 }
 
@@ -485,6 +517,7 @@ mozilla::ipc::IPCResult GPUParent::RecvUpdateVar(
           []() {
 #ifdef XP_WIN
             WMFDecoderModule::Init();
+            WMFEncoderModule::ClearCache();
 #endif
             if (StaticPrefs::media_ffvpx_hw_enabled()) {
               FFVPXRuntimeLinker::Init();
@@ -570,23 +603,29 @@ mozilla::ipc::IPCResult GPUParent::RecvSimulateDeviceReset() {
 
 mozilla::ipc::IPCResult GPUParent::RecvNewContentCompositorManager(
     Endpoint<PCompositorManagerParent>&& aEndpoint,
-    const ContentParentId& aChildId, uint32_t aNamespace) {
+    const ContentParentId& aChildId, uint32_t aNamespace,
+    uint32_t aContentBridgeNamespace) {
   CompositorManagerParent::Create(std::move(aEndpoint), aChildId, aNamespace,
+                                  aContentBridgeNamespace,
                                   /* aIsRoot */ false);
   return IPC_OK();
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvNewContentImageBridge(
-    Endpoint<PImageBridgeParent>&& aEndpoint, const ContentParentId& aChildId) {
-  if (!ImageBridgeParent::CreateForContent(std::move(aEndpoint), aChildId)) {
+    Endpoint<PImageBridgeParent>&& aEndpoint, const ContentParentId& aChildId,
+    uint32_t aNamespace) {
+  if (!ImageBridgeParent::CreateForContent(std::move(aEndpoint), aChildId,
+                                           aNamespace)) {
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvNewContentVRManager(
-    Endpoint<PVRManagerParent>&& aEndpoint, const ContentParentId& aChildId) {
-  if (!VRManagerParent::CreateForContent(std::move(aEndpoint), aChildId)) {
+    Endpoint<PVRManagerParent>&& aEndpoint, const ContentParentId& aChildId,
+    uint32_t aNamespace) {
+  if (!VRManagerParent::CreateForContent(std::move(aEndpoint), aChildId,
+                                         aNamespace)) {
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();
@@ -615,12 +654,11 @@ mozilla::ipc::IPCResult GPUParent::RecvRemoveLayerTreeIdMapping(
   return IPC_OK();
 }
 
-mozilla::ipc::IPCResult GPUParent::RecvNotifyGpuObservers(
-    const nsCString& aTopic) {
+mozilla::ipc::IPCResult GPUParent::RecvFlushActiveCheckerboardReports() {
   nsCOMPtr<nsIObserverService> obsSvc = mozilla::services::GetObserverService();
   MOZ_ASSERT(obsSvc);
   if (obsSvc) {
-    obsSvc->NotifyObservers(nullptr, aTopic.get(), nullptr);
+    obsSvc->NotifyObservers(nullptr, "APZ:FlushActiveCheckerboard", nullptr);
   }
   return IPC_OK();
 }
@@ -657,7 +695,8 @@ mozilla::ipc::IPCResult GPUParent::RecvRequestMemoryReport(
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvShutdownVR() {
-  if (StaticPrefs::dom_vr_process_enabled_AtStartup()) {
+  if (StaticPrefs::dom_vr_process_enabled_AtStartup() &&
+      StaticPrefs::dom_vr_enabled()) {
     VRGPUChild::Shutdown();
   }
   return IPC_OK();
@@ -728,6 +767,9 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
         CanvasRenderThread::Shutdown();
         CompositorThreadHolder::Shutdown();
         RemoteTextureMap::Shutdown();
+#ifdef ANDROID
+        layers::GpuProcessAndroidImageReaderMap::Shutdown();
+#endif
         // There is a case that RenderThread exists when gfxVars::UseWebRender()
         // is false. This could happen when WebRender was fallbacked to
         // compositor.
@@ -745,13 +787,11 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
         // Shut down the default GL context provider.
         gl::GLContextProvider::Shutdown();
 
-#if defined(XP_WIN)
-        // The above shutdown calls operate on the available context providers
-        // on most platforms.  Windows is a "special snowflake", though, and has
-        // three context providers available, so we have to shut all of them
-        // down. We should only support the default GL provider on Windows;
-        // then, this could go away. Unfortunately, we currently support WGL
-        // (the default) for WebGL on Optimus.
+#if defined(XP_WIN) || defined(XP_MACOSX)
+        // The above shutdown call shuts down the default context provider,
+        // which is the only context provider on most platforms. Windows and
+        // Mac, however, may initialize EGL for ANGLE in addition to their
+        // respective defaults.
         gl::GLContextProviderEGL::Shutdown();
 #endif
 

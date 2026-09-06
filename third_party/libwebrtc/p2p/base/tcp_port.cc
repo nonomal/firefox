@@ -70,10 +70,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <list>
+#include <span>
 #include <utility>
 
 #include "absl/algorithm/container.h"
-#include "absl/memory/memory.h"
 #include "absl/strings/string_view.h"
 #include "api/candidate.h"
 #include "api/environment/environment.h"
@@ -96,7 +96,6 @@
 #include "rtc_base/net_helper.h"
 #include "rtc_base/network/received_packet.h"
 #include "rtc_base/network/sent_packet.h"
-#include "rtc_base/rate_tracker.h"
 #include "rtc_base/socket.h"
 #include "rtc_base/socket_address.h"
 #include "rtc_base/weak_ptr.h"
@@ -200,8 +199,7 @@ void TCPPort::PrepareAddress() {
   }
 }
 
-int TCPPort::SendTo(const void* data,
-                    size_t size,
+int TCPPort::SendTo(std::span<const uint8_t> data,
                     const SocketAddress& addr,
                     const AsyncSocketPacketOptions& options,
                     bool payload) {
@@ -238,13 +236,13 @@ int TCPPort::SendTo(const void* data,
   }
   AsyncSocketPacketOptions modified_options(options);
   CopyPortInformationToPacketInfo(&modified_options.info_signaled_after_sent);
-  int sent = socket->Send(data, size, modified_options);
+  int sent = socket->Send(data.data(), data.size(), modified_options);
   if (sent < 0) {
     error_ = socket->GetError();
     // Error from this code path for a Connection (instead of from a bare
     // socket) will not trigger reconnecting. In theory, this shouldn't matter
     // as OnClose should always be called and set connected to false.
-    RTC_LOG(LS_ERROR) << ToString() << ": TCP send of " << size
+    RTC_LOG(LS_ERROR) << ToString() << ": TCP send of " << data.size()
                       << " bytes failed with error " << error_;
   }
   return sent;
@@ -290,8 +288,12 @@ void TCPPort::OnNewConnection(AsyncListenSocket* socket,
       [&](AsyncPacketSocket* socket, const ReceivedIpPacket& packet) {
         OnReadPacket(socket, packet);
       });
-  incoming.socket->SignalReadyToSend.connect(this, &TCPPort::OnReadyToSend);
-  incoming.socket->SignalSentPacket.connect(this, &TCPPort::OnSentPacket);
+  incoming.socket->SubscribeReadyToSend(
+      this, [this](AsyncPacketSocket* socket) { OnReadyToSend(socket); });
+  incoming.socket->SubscribeSentPacket(
+      this, [this](AsyncPacketSocket* socket, const SentPacketInfo& info) {
+        OnSentPacket(socket, info);
+      });
 
   RTC_LOG(LS_VERBOSE) << ToString() << ": Accepted connection from "
                       << incoming.addr.ToSensitiveString();
@@ -299,16 +301,20 @@ void TCPPort::OnNewConnection(AsyncListenSocket* socket,
 }
 
 void TCPPort::TryCreateServerSocket() {
-  listen_socket_ = absl::WrapUnique(socket_factory()->CreateServerTcpSocket(
-      SocketAddress(Network()->GetBestIP(), 0), min_port(), max_port(),
-      false /* ssl */));
+  listen_socket_ = socket_factory()->CreateServerTcpSocket(
+      env(), SocketAddress(Network()->GetBestIP(), 0), min_port(), max_port(),
+      /*opts=*/0);
   if (!listen_socket_) {
     RTC_LOG(LS_WARNING)
         << ToString()
         << ": TCP server socket creation failed; continuing anyway.";
     return;
   }
-  listen_socket_->SignalNewConnection.connect(this, &TCPPort::OnNewConnection);
+  listen_socket_->SubscribeNewConnection(
+      this, [this](AsyncListenSocket* listen_socket,
+                   AsyncPacketSocket* packet_socket) {
+        OnNewConnection(listen_socket, packet_socket);
+      });
 }
 
 AsyncPacketSocket* TCPPort::GetIncoming(const SocketAddress& addr,
@@ -333,14 +339,14 @@ void TCPPort::OnReadPacket(AsyncPacketSocket* socket,
 
 void TCPPort::OnSentPacket(AsyncPacketSocket* socket,
                            const SentPacketInfo& sent_packet) {
-  PortInterface::SignalSentPacket(sent_packet);
+  NotifySentPacket(sent_packet);
 }
 
 void TCPPort::OnReadyToSend(AsyncPacketSocket* socket) {
   Port::OnReadyToSend();
 }
 
-// TODO(qingsi): `CONNECTION_WRITE_CONNECT_TIMEOUT` is overriden by
+// TODO(qingsi): `kConnectionWriteConnectTimeout` is overriden by
 // `ice_unwritable_timeout` in IceConfig when determining the writability state.
 // Replace this constant with the config parameter assuming the default value if
 // we decide it is also applicable here.
@@ -354,12 +360,13 @@ TCPConnection::TCPConnection(const Environment& env,
       outgoing_(socket == nullptr),
       connection_pending_(false),
       pretending_to_be_writable_(false),
-      reconnection_timeout_(CONNECTION_WRITE_CONNECT_TIMEOUT) {
+      reconnection_timeout_(kConnectionWriteConnectTimeout.ms()) {
   RTC_DCHECK_RUN_ON(network_thread());
   RTC_DCHECK_EQ(port()->GetProtocol(),
                 PROTO_TCP);  // Needs to be TCPPort.
 
-  SignalDestroyed.connect(this, &TCPConnection::OnDestroyed);
+  SubscribeDestroyed(
+      this, [this](Connection* connection) { OnDestroyed(connection); });
 
   if (outgoing_) {
     CreateOutgoingTcpSocket();
@@ -381,8 +388,7 @@ TCPConnection::~TCPConnection() {
   RTC_DCHECK_RUN_ON(network_thread());
 }
 
-int TCPConnection::Send(const void* data,
-                        size_t size,
+int TCPConnection::Send(std::span<const uint8_t> data,
                         const AsyncSocketPacketOptions& options) {
   if (!socket_) {
     error_ = ENOTCONN;
@@ -409,13 +415,13 @@ int TCPConnection::Send(const void* data,
   AsyncSocketPacketOptions modified_options(options);
   tcp_port()->CopyPortInformationToPacketInfo(
       &modified_options.info_signaled_after_sent);
-  int sent = socket_->Send(data, size, modified_options);
-  Timestamp now = Connection::AlignTime(env().clock().CurrentTime());
+  int sent = socket_->Send(data.data(), data.size(), modified_options);
+  Timestamp now = env().clock().CurrentTime();
   if (sent < 0) {
     mutable_stats().sent_discarded_packets++;
     error_ = socket_->GetError();
   } else {
-    send_rate_tracker().AddSamplesAtTime(now.ms(), sent);
+    AddSentBytesToStats(sent, now);
   }
   set_last_send_data(now);
   return sent;
@@ -429,7 +435,7 @@ void TCPConnection::OnSentPacket(AsyncPacketSocket* socket,
                                  const SentPacketInfo& sent_packet) {
   RTC_DCHECK_RUN_ON(network_thread());
   if (port()) {
-    port()->SignalSentPacket(sent_packet);
+    port()->NotifySentPacket(sent_packet);
   }
 }
 
@@ -599,9 +605,9 @@ void TCPConnection::CreateOutgoingTcpSocket() {
 
   PacketSocketTcpOptions tcp_opts;
   tcp_opts.opts = opts;
-  socket_.reset(port()->socket_factory()->CreateClientTcpSocket(
-      SocketAddress(port()->Network()->GetBestIP(), 0),
-      remote_candidate().address(), tcp_opts));
+  socket_ = port()->socket_factory()->CreateClientTcpSocket(
+      env(), SocketAddress(port()->Network()->GetBestIP(), 0),
+      remote_candidate().address(), tcp_opts);
   if (socket_) {
     RTC_LOG(LS_VERBOSE) << ToString() << ": Connecting from "
                         << socket_->GetLocalAddress().ToSensitiveString()
@@ -627,9 +633,14 @@ void TCPConnection::ConnectSocketSignals(AsyncPacketSocket* socket) {
   // Incoming connections register SignalSentPacket and SignalReadyToSend
   // directly on the port in TCPPort::OnNewConnection.
   if (outgoing_) {
-    socket->SignalConnect.connect(this, &TCPConnection::OnConnect);
-    socket->SignalSentPacket.connect(this, &TCPConnection::OnSentPacket);
-    socket->SignalReadyToSend.connect(this, &TCPConnection::OnReadyToSend);
+    socket->SubscribeConnect(
+        this, [this](AsyncPacketSocket* socket) { OnConnect(socket); });
+    socket->SubscribeSentPacket(
+        this, [this](AsyncPacketSocket* socket, const SentPacketInfo& info) {
+          OnSentPacket(socket, info);
+        });
+    socket->SubscribeReadyToSend(
+        this, [this](AsyncPacketSocket* socket) { OnReadyToSend(socket); });
   }
 
   // For incoming connections, this re-register ReceivedPacketCallback to the
@@ -648,9 +659,9 @@ void TCPConnection::ConnectSocketSignals(AsyncPacketSocket* socket) {
 void TCPConnection::DisconnectSocketSignals(AsyncPacketSocket* socket) {
   if (outgoing_) {
     // Incoming connections do not register these signals in TCPConnection.
-    socket->SignalConnect.disconnect(this);
-    socket->SignalReadyToSend.disconnect(this);
-    socket->SignalSentPacket.disconnect(this);
+    socket->UnsubscribeConnect(this);
+    socket->UnsubscribeReadyToSend(this);
+    socket->UnsubscribeSentPacket(this);
   }
   socket->DeregisterReceivedPacketCallback();
   socket->UnsubscribeCloseEvent(this);

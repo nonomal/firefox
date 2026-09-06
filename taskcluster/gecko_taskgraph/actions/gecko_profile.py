@@ -3,10 +3,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 
+import json
 import logging
 
 import requests
 from taskcluster.exceptions import TaskclusterRestFailure
+from taskgraph.taskgraph import TaskGraph
 from taskgraph.util.taskcluster import get_artifact_from_index, get_task_definition
 
 from .registry import register_callback_action
@@ -14,6 +16,42 @@ from .util import combine_task_graph_files, create_tasks, fetch_graph_and_labels
 
 PUSHLOG_TMPL = "{}/json-pushes?version=2&startID={}&endID={}"
 INDEX_TMPL = "gecko.v2.{}.pushlog-id.{}.decision"
+SIMPLEPERF_COMPATIBLE_TESTS = ["-homeview-", "-applink-", "-restore-"]
+
+SIMPLEPERF_DEPENDENCY = {
+    "artifact": "project/gecko/android-simpleperf/android-simpleperf.tar.zst",
+    "extract": True,
+    "task": "<toolchain-linux64-android-simpleperf-linux-repack>",
+}
+SAMPLY_DEPENDENCY = {
+    "artifact": "public/build/samply.tar.zst",
+    "extract": True,
+    "task": "<toolchain-linux64-samply>",
+}
+PROFILER_NODE_TOOLS_DEPENDENCY = {
+    "artifact": "public/build/profiler-node-tools.tar.zst",
+    "extract": True,
+    "task": "<toolchain-profiler-node-tools>",
+}
+SYMBOLS_DEPENDENCY = {
+    "artifact": "public/build/target.crashreporter-symbols.zip",
+    "extract": False,
+    "task": "<build-android-aarch64-shippable/opt>",
+}
+
+DEPENDANCY_TO_ADD_FOR_TASK_REFERENCE = [
+    SIMPLEPERF_DEPENDENCY,
+    SAMPLY_DEPENDENCY,
+    PROFILER_NODE_TOOLS_DEPENDENCY,
+    SYMBOLS_DEPENDENCY,
+]
+dependencies_to_add_dict = {
+    "build-android-aarch64-shippable/opt": "build-android-aarch64-shippable/opt",
+    "toolchain-profiler-node-tools": "toolchain-profiler-node-tools",
+    "toolchain-linux64-android-simpleperf-linux-repack": "toolchain-linux64-android-simpleperf-linux-repack",
+    "toolchain-linux64-samply": "toolchain-linux64-samply",
+}
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +86,7 @@ logger = logging.getLogger(__name__)
                 "description": "How many pushes to backfill the profiling task on.",
             },
             "gecko_profile_interval": {
-                "type": "integer",
+                "type": "number",
                 "default": None,
                 "title": "Sampling interval (ms)",
                 "description": "How often to sample the profiler (in ms).",
@@ -58,7 +96,7 @@ logger = logging.getLogger(__name__)
                 "default": "",
                 "title": "Features",
                 "description": "Comma-separated Gecko profiler features. "
-                "Example: js,stackwalk,cpu,screenshots,memory",
+                "Example: js,stackwalk,screenshots,memory",
             },
             "gecko_profile_threads": {
                 "type": "string",
@@ -137,6 +175,16 @@ def geckoprofile_action(parameters, graph_config, input, task_group_id, task_id)
                         env["MOZ_PROFILER_STARTUP_FEATURES"] = features
                     if threads is not None:
                         env["MOZ_PROFILER_STARTUP_FILTERS"] = threads
+                    if any(test in label for test in SIMPLEPERF_COMPATIBLE_TESTS):
+                        #  We will need to unify the options for enabling gecko_profiling across test harnesses, see bug 2000281
+                        env["PERF_FLAGS"] = (
+                            perf_flags
+                            + " ".join([
+                                "simpleperf",
+                                "simpleperf-path=$MOZ_FETCHES_DIR/android-simpleperf",
+                                "geckoprofiler",
+                            ])
+                        ).strip()
 
                 elif test_suite == "raptor":
                     # Use PERF_FLAGS env to cusomize profiler settings.
@@ -174,9 +222,95 @@ def geckoprofile_action(parameters, graph_config, input, task_group_id, task_id)
                         cmd, profiling_command_flags
                     )
 
+                # A single profile is enough, don't inherit the retrigger count
+                # of the task being profiled.
+                task.attributes["task_duplicates"] = 1
+
                 task.task["extra"]["treeherder"]["symbol"] += "-p"
                 task.task["extra"]["treeherder"]["groupName"] += " (profiling)"
                 return task
+
+            # When Treeherder's "Generate performance profile" button is pressed,
+            # add dependencies for processing raw Simpleperf or Gecko profiles
+            # The Samply dependency is needed to serve symbols and the profile and
+            # profiler-node-tools dependency provides profiler-edit, a node tool
+            # that performs the profile symbolication.
+            if any(test in label for test in SIMPLEPERF_COMPATIBLE_TESTS):
+                full_task_graph = full_task_graph.to_json()
+                for key, value in dependencies_to_add_dict.items():
+                    full_task_graph[label]["dependencies"][key] = value
+                full_task_graph = TaskGraph.from_json(full_task_graph)[1]
+
+                full_task_graph[label].task["scopes"].append(
+                    "queue:get-artifact:project/gecko/android-simpleperf/*"
+                )
+
+                task_reference_full_taskgraph = json.loads(
+                    full_task_graph.tasks[label].task["payload"]["env"]["MOZ_FETCHES"][
+                        "task-reference"
+                    ]
+                )
+                task_reference_full_taskgraph.extend(
+                    DEPENDANCY_TO_ADD_FOR_TASK_REFERENCE
+                )
+                full_task_graph.tasks[label].task["payload"]["env"]["MOZ_FETCHES"][
+                    "task-reference"
+                ] = json.dumps(task_reference_full_taskgraph)
+            else:
+                test_platform = full_task_graph.tasks[label].attributes.get(
+                    "test_platform", ""
+                )
+                if "macosx" in test_platform and "aarch64" in test_platform:
+                    samply_platform_toolchain = "toolchain-macosx64-aarch64-samply"
+                    node_toolchain = "toolchain-macosx64-aarch64-node-22"
+                elif "macosx" in test_platform:
+                    samply_platform_toolchain = "toolchain-macosx64-samply"
+                    node_toolchain = "toolchain-macosx64-node-22"
+                elif "win" in test_platform:
+                    samply_platform_toolchain = "toolchain-win64-samply"
+                    node_toolchain = "toolchain-win64-node-22"
+                else:
+                    samply_platform_toolchain = "toolchain-linux64-samply"
+                    node_toolchain = "toolchain-linux64-node-22"
+
+                samply_platform_dependency = {
+                    "artifact": "public/build/samply.tar.zst",
+                    "extract": True,
+                    "task": f"<{samply_platform_toolchain}>",
+                }
+
+                full_task_graph = full_task_graph.to_json()
+                dependencies = full_task_graph[label]["dependencies"]
+                dependencies["toolchain-profiler-node-tools"] = (
+                    "toolchain-profiler-node-tools"
+                )
+                dependencies[samply_platform_toolchain] = samply_platform_toolchain
+
+                # Add node as there are non-Raptor frameworks that support
+                # Gecko profiling (e.g. Talos).
+                has_node = node_toolchain in dependencies
+                if not has_node:
+                    dependencies[node_toolchain] = node_toolchain
+
+                full_task_graph = TaskGraph.from_json(full_task_graph)[1]
+                task_reference_full_taskgraph = json.loads(
+                    full_task_graph.tasks[label].task["payload"]["env"]["MOZ_FETCHES"][
+                        "task-reference"
+                    ]
+                )
+                if not has_node:
+                    task_reference_full_taskgraph.append({
+                        "artifact": "public/build/node.tar.zst",
+                        "extract": True,
+                        "task": f"<{node_toolchain}>",
+                    })
+                task_reference_full_taskgraph.extend([
+                    PROFILER_NODE_TOOLS_DEPENDENCY,
+                    samply_platform_dependency,
+                ])
+                full_task_graph.tasks[label].task["payload"]["env"]["MOZ_FETCHES"][
+                    "task-reference"
+                ] = json.dumps(task_reference_full_taskgraph)
 
             create_tasks(
                 graph_config,

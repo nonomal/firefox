@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,12 +10,10 @@
 #include "MediaInfo.h"
 #include "MediaSink.h"
 #include "mozilla/AbstractThread.h"
-#include "mozilla/AwakeTimeStamp.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MozPromise.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/StateMirroring.h"
-#include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 
 namespace mozilla {
@@ -29,6 +25,7 @@ class VideoData;
 struct PlaybackInfoInit;
 class ProcessedMediaTrack;
 struct SharedDummyTrack;
+class TimeStamp;
 
 template <class T>
 class MediaQueue;
@@ -40,6 +37,7 @@ class DecodedStream : public MediaSink {
                 CopyableTArray<RefPtr<ProcessedMediaTrack>> aOutputTracks,
                 AbstractCanonical<PrincipalHandle>* aCanonicalOutputPrincipal,
                 double aVolume, double aPlaybackRate, bool aPreservesPitch,
+                bool aShouldConfigAudioOutput, AudioDeviceInfo* aDevice,
                 MediaQueue<AudioData>& aAudioQueue,
                 MediaQueue<VideoData>& aVideoQueue);
 
@@ -59,30 +57,28 @@ class DecodedStream : public MediaSink {
   void SetVolume(double aVolume) override;
   void SetPlaybackRate(double aPlaybackRate) override;
   void SetPreservesPitch(bool aPreservesPitch) override;
-  void SetPlaying(bool aPlaying) override;
+  void SetPlaying(bool aPlaying,
+                  StopReason aReason = StopReason::Regular) override;
   RefPtr<GenericPromise> SetAudioDevice(
       RefPtr<AudioDeviceInfo> aDevice) override;
 
   double PlaybackRate() const override;
 
-  nsresult Start(const media::TimeUnit& aStartTime,
-                 const MediaInfo& aInfo) override;
-  void Stop() override;
+  nsresult Start(const media::TimeUnit& aStartTime, const MediaInfo& aInfo,
+                 StartType aStartType = StartType::Initial) override;
+  void Stop(StopReason aReason = StopReason::Regular) override;
   bool IsStarted() const override;
   bool IsPlaying() const override;
   void Shutdown() override;
   void GetDebugInfo(dom::MediaSinkDebugInfo& aInfo) override;
 
   MediaEventSource<bool>& AudibleEvent() { return mAudibleEvent; }
+  MediaEventSource<void>& PlaybackRateFallbackEvent() {
+    return mPlaybackRateFallbackForwarder;
+  }
 
  protected:
   virtual ~DecodedStream();
-
-  // A bit many clocks to sample, but what do you do...
-  media::TimeUnit GetPositionImpl(TimeStamp aNow, AwakeTimeStamp aAwakeNow,
-                                  TimeStamp* aTimeStamp = nullptr);
-  AwakeTimeStamp LastOutputSystemTime() const;
-  TimeStamp LastVideoTimeStamp() const;
 
  private:
   void DestroyData(UniquePtr<DecodedStreamData>&& aData);
@@ -91,8 +87,7 @@ class DecodedStream : public MediaSink {
   void ResetAudio();
   void ResetVideo(const PrincipalHandle& aPrincipalHandle);
   void SendData();
-  void NotifyOutput(int64_t aTime, TimeStamp aSystemTime,
-                    AwakeTimeStamp aAwakeSystemTime);
+  void NotifyOutput(int64_t aTime);
   void CheckIsDataAudible(const AudioData* aData);
 
   void AssertOwnerThread() const {
@@ -133,15 +128,19 @@ class DecodedStream : public MediaSink {
   double mPlaybackRate;
   bool mPreservesPitch;
 
+  // True if the audio output should be configured to mDevice.
+  const bool mShouldConfigAudioOutput;
+  RefPtr<AudioDeviceInfo> mDevice;
+  bool mAudioOutputRegistered MOZ_GUARDED_BY(sMainThreadCapability) = false;
+
   media::NullableTimeUnit mStartTime;
   media::TimeUnit mLastOutputTime;
-  Maybe<AwakeTimeStamp> mLastOutputSystemTime;
-  Maybe<media::TimeUnit> mLastReportedPosition;
   MediaInfo mInfo;
   // True when stream is producing audible sound, false when stream is silent.
   bool mIsAudioDataAudible = false;
   Maybe<AudibilityMonitor> mAudibilityMonitor;
   MediaEventProducer<bool> mAudibleEvent;
+  MediaEventForwarder<void> mPlaybackRateFallbackForwarder;
 
   MediaQueue<AudioData>& mAudioQueue;
   MediaQueue<VideoData>& mVideoQueue;

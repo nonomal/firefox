@@ -163,11 +163,14 @@ class InputTestHelpers extends LitTestHelpers {
    * all reusable moz- input elements.
    *
    * @param {string} elementName - HTML tag of the element under test.
+   * @param {object} options - Custom properties to assert. Currently only type is supported.
+   * @param {string} options.type - The input type to verify. Defaults to "text".
    */
-  async testCommonInputProperties(elementName) {
+  async testCommonInputProperties(elementName, { type = "text" } = {}) {
     await this.verifyLabel(elementName);
     await this.verifyAriaLabel(elementName);
     await this.verifyAriaDescription(elementName);
+    await this.verifyTitle(elementName);
     await this.verifyName(elementName);
     await this.verifyValue(elementName);
     await this.verifyIcon(elementName);
@@ -176,6 +179,7 @@ class InputTestHelpers extends LitTestHelpers {
     await this.verifySupportPage(elementName);
     await this.verifyAccesskey(elementName);
     await this.verifyNoWhitespace(elementName);
+    await this.verifyType(elementName, type);
     if (this.activatedProperty) {
       await this.verifyActivated(elementName);
       await this.verifyNestedFields(elementName);
@@ -722,7 +726,7 @@ class InputTestHelpers extends LitTestHelpers {
     let renderTarget = await this.renderTemplate(whitespaceTemplate);
     let firstInput = renderTarget.querySelector(selector);
 
-    if (!firstInput.isInlineLayout) {
+    if (firstInput.inputLayout == "block") {
       return;
     }
 
@@ -765,6 +769,12 @@ class InputTestHelpers extends LitTestHelpers {
       !containsWhitespace,
       "Label content doesn't contain any extra whitespace."
     );
+  }
+
+  async verifyType(selector, type) {
+    let renderTarget = await this.renderTemplate();
+    let firstInput = renderTarget.querySelector(selector);
+    is(firstInput.inputEl.type, type, `The input type is ${type}`);
   }
 
   async testTextBasedInputEvents(selector) {
@@ -845,6 +855,35 @@ class InputTestHelpers extends LitTestHelpers {
       input.inputEl.getAttribute("aria-description"),
       ARIA_DESCRIPTION,
       "The aria-description is set on the input element."
+    );
+  }
+
+  /**
+   * Verifies that the title attribute is applied to the input element.
+   *
+   * @param {string} selector - HTML tag of the element under test.
+   */
+  async verifyTitle(selector) {
+    const TITLE = "More information about this control";
+    let titleTemplate = this.templateFn({
+      value: "default",
+      title: TITLE,
+    });
+    let renderTarget = await this.renderTemplate(titleTemplate);
+    let input = renderTarget.querySelector(selector);
+
+    ok(!input.hasAttribute("title"), "title is not set on the outer element.");
+    is(
+      input.inputEl.getAttribute("title"),
+      TITLE,
+      "The title is set on the input element."
+    );
+
+    input.title = null;
+    await input.updateComplete;
+    ok(
+      !input.inputEl.hasAttribute("title"),
+      "title is cleared from the input element when unset."
     );
   }
 
@@ -1109,5 +1148,47 @@ class InputTestHelpers extends LitTestHelpers {
       "Input has a readonly property set to false again."
     );
     ok(!firstInput.inputEl.readOnly, "Readonly state is propagated.");
+  }
+
+  /**
+   * Verifies it is possible to set the required attribute on the input
+   * element and that the indicator is shown next to the label.
+   *
+   * @param {string} selector - HTML tag of the element under test.
+   */
+  async verifyRequired(selector) {
+    let requiredTemplate = this.templateFn({ label: "Label" });
+    let renderTarget = await this.renderTemplate(requiredTemplate);
+    let firstInput = renderTarget.querySelector(selector);
+
+    ok(!firstInput.required, "Input is not required by default.");
+    ok(
+      !firstInput.inputEl.required,
+      "Inner element is not required by default either."
+    );
+    ok(
+      !firstInput.labelEl.querySelector(".required-indicator"),
+      "No required indicator is present."
+    );
+
+    firstInput.required = true;
+    await firstInput.updateComplete;
+
+    ok(firstInput.required, "Input is required.");
+    ok(firstInput.inputEl.required, "Required state is propagated.");
+    ok(
+      firstInput.labelEl.querySelector(".required-indicator"),
+      "Required indicator is shown next to the label."
+    );
+
+    firstInput.required = false;
+    await firstInput.updateComplete;
+
+    ok(!firstInput.required, "Input is not required again.");
+    ok(!firstInput.inputEl.required, "Required state is propagated.");
+    ok(
+      !firstInput.labelEl.querySelector(".required-indicator"),
+      "Required indicator is removed."
+    );
   }
 }

@@ -32,13 +32,14 @@ export const MenuMessage = {
     pxi_menu: new Set(["fxa_cta"]),
   }),
   SHOWING_FXA_MENU_MESSAGE_ATTR: "showing-fxa-menu-message",
+  SHOWING_SET_TO_DEFAULT_MENU_MESSAGE_ATTR: "showing-default-cta-menu-message",
 
   async showMenuMessage(browser, message, trigger, force) {
     if (!browser) {
       return;
     }
 
-    let win = browser.ownerGlobal;
+    let win = browser.documentGlobal;
 
     if (!win || lazy.PrivateBrowsingUtils.isWindowPrivate(win)) {
       return;
@@ -121,8 +122,9 @@ export const MenuMessage = {
   },
 
   async showAppMenuMessage(browser, message, force) {
-    const win = browser.ownerGlobal;
+    const win = browser.documentGlobal;
     const msgContainer = this.hideAppMenuMessage(browser);
+    const type = message?.content?.messageType;
 
     // This version of the browser only supports the fxa_cta and
     // default_cta versions of this message in the AppMenu.
@@ -136,27 +138,31 @@ export const MenuMessage = {
       return;
     }
 
-    win.PanelUI.mainView.setAttribute(
-      MenuMessage.SHOWING_FXA_MENU_MESSAGE_ATTR,
-      message.id
-    );
+    const menuMessageAttribute =
+      type === this.MESSAGE_TYPES.DEFAULT_CTA
+        ? MenuMessage.SHOWING_SET_TO_DEFAULT_MENU_MESSAGE_ATTR
+        : MenuMessage.SHOWING_FXA_MENU_MESSAGE_ATTR;
 
-    let msgElement = await this.constructFxAMessage(
+    let msgElement = await this.constructMenuMessage(
       win,
       message,
       MenuMessage.SOURCES.APP_MENU
     );
 
+    win.PanelUI.mainView.setAttribute(menuMessageAttribute, message.id);
+
     msgElement.addEventListener("MenuMessage:Close", () => {
-      win.PanelUI.mainView.removeAttribute(
-        MenuMessage.SHOWING_FXA_MENU_MESSAGE_ATTR
-      );
+      win.PanelUI.mainView.removeAttribute(menuMessageAttribute);
     });
 
     msgElement.addEventListener("MenuMessage:PrimaryButton", () => {
       win.PanelUI.hide();
     });
 
+    if (message.content.layout === "simple") {
+      msgContainer.style.display = "flex";
+      msgElement.style.flex = "1";
+    }
     msgContainer.appendChild(msgElement);
 
     if (force) {
@@ -165,22 +171,25 @@ export const MenuMessage = {
   },
 
   hideAppMenuMessage(browser) {
-    const win = browser.ownerGlobal;
+    const win = browser.documentGlobal;
     const document = browser.ownerDocument;
     const msgContainer = lazy.PanelMultiView.getViewNode(
       document,
-      "appMenu-fxa-menu-message"
+      "appMenu-menu-message"
     );
     msgContainer.innerHTML = "";
     win.PanelUI.mainView.removeAttribute(
       MenuMessage.SHOWING_FXA_MENU_MESSAGE_ATTR
+    );
+    win.PanelUI.mainView.removeAttribute(
+      MenuMessage.SHOWING_SET_TO_DEFAULT_MENU_MESSAGE_ATTR
     );
 
     return msgContainer;
   },
 
   async showPxiMenuMessage(browser, message, force) {
-    const win = browser.ownerGlobal;
+    const win = browser.documentGlobal;
     const { document } = win;
     const msgContainer = this.hidePxiMenuMessage(browser);
 
@@ -195,7 +204,7 @@ export const MenuMessage = {
       message.id
     );
 
-    let msgElement = await this.constructFxAMessage(
+    let msgElement = await this.constructMenuMessage(
       win,
       message,
       MenuMessage.SOURCES.PXI_MENU
@@ -213,6 +222,10 @@ export const MenuMessage = {
       }
     });
 
+    if (message.content.layout === "simple") {
+      msgContainer.style.display = "flex";
+      msgElement.style.flex = "1";
+    }
     msgContainer.appendChild(msgElement);
 
     if (force) {
@@ -235,14 +248,23 @@ export const MenuMessage = {
     return msgContainer;
   },
 
-  async constructFxAMessage(win, message, source) {
+  async constructMenuMessage(win, message, source) {
     let { document, gBrowser } = win;
 
     win.MozXULElement.insertFTLIfNeeded("browser/newtab/asrouter.ftl");
 
-    const msgElement = document.createElement("fxa-menu-message");
+    const msgElement = document.createElement("menu-message");
     msgElement.layout = message.content.layout ?? "column";
+    if (message.content.imagePosition !== undefined) {
+      msgElement.imagePosition = message.content.imagePosition;
+    }
+    if (message.content.directionalImage) {
+      msgElement.directionalImage = true;
+    }
     msgElement.imageURL = message.content.imageURL;
+    if (message.content.rtlImageURL !== undefined) {
+      msgElement.rtlImageURL = message.content.rtlImageURL;
+    }
     msgElement.logoURL = message.content.logoURL;
     msgElement.primaryButtonSize =
       message.content.primaryButtonSize ?? "default";
@@ -252,14 +274,23 @@ export const MenuMessage = {
     msgElement.primaryText = await lazy.RemoteL10n.formatLocalizableText(
       message.content.primaryText
     );
-    msgElement.secondaryText = await lazy.RemoteL10n.formatLocalizableText(
-      message.content.secondaryText
-    );
+    // Simple layout does not support secondary text
+    if (message.content.layout !== "simple" && message.content.secondaryText) {
+      msgElement.secondaryText = await lazy.RemoteL10n.formatLocalizableText(
+        message.content.secondaryText
+      );
+    }
     msgElement.dataset.navigableWithTabOnly = "true";
     if (message.content.imageWidth !== undefined) {
       msgElement.style.setProperty(
         "--image-width",
         `${message.content.imageWidth}px`
+      );
+    }
+    if (message.content.imageHeight !== undefined) {
+      msgElement.style.setProperty(
+        "--image-height",
+        `${message.content.imageHeight}px`
       );
     }
     if (message.content.logoWidth !== undefined) {
@@ -268,18 +299,30 @@ export const MenuMessage = {
         `${message.content.logoWidth}px`
       );
     }
-    msgElement.style.setProperty(
-      "--illustration-margin-block-start-offset",
-      `${message.content.imageVerticalTopOffset}px`
-    );
-    msgElement.style.setProperty(
-      "--illustration-margin-block-end-offset",
-      `${message.content.imageVerticalBottomOffset}px`
-    );
-    msgElement.style.setProperty(
-      "--container-margin-block-end-offset",
-      `${message.content.containerVerticalBottomOffset}px`
-    );
+    if (message.content.imageVerticalTopOffset !== undefined) {
+      msgElement.style.setProperty(
+        "--illustration-margin-block-start-offset",
+        `${message.content.imageVerticalTopOffset}px`
+      );
+    }
+    if (message.content.imageVerticalBottomOffset !== undefined) {
+      msgElement.style.setProperty(
+        "--illustration-margin-block-end-offset",
+        `${message.content.imageVerticalBottomOffset}px`
+      );
+    }
+    if (message.content.containerVerticalBottomOffset !== undefined) {
+      msgElement.style.setProperty(
+        "--container-margin-block-end-offset",
+        `${message.content.containerVerticalBottomOffset}px`
+      );
+    }
+    if (message.content.containerPaddingBottom !== undefined) {
+      msgElement.style.setProperty(
+        "--container-padding-block-end",
+        `${message.content.containerPaddingBottom}px`
+      );
+    }
 
     msgElement.addEventListener("MenuMessage:Close", () => {
       msgElement.remove();

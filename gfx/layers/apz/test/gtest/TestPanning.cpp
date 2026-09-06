@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -19,9 +17,11 @@ class APZCPanningTester : public APZCBasicTester {
  protected:
   void DoPanTest(bool aShouldTriggerScroll, bool aShouldBeConsumed,
                  uint32_t aBehavior) {
+    apzc->DisableDefaultTouchBehaviors();
+
     if (aShouldTriggerScroll) {
-      // Three repaint request for each pan.
-      EXPECT_CALL(*mcc, RequestContentRepaint(_)).Times(6);
+      // Four repaint request for each pan.
+      EXPECT_CALL(*mcc, RequestContentRepaint(_)).Times(8);
     } else {
       EXPECT_CALL(*mcc, RequestContentRepaint(_)).Times(0);
     }
@@ -61,6 +61,7 @@ class APZCPanningTester : public APZCBasicTester {
   }
 
   void DoPanWithPreventDefaultTest() {
+    apzc->DisableDefaultTouchBehaviors();
     MakeApzcWaitForMainThread();
 
     int touchStart = 50;
@@ -168,9 +169,6 @@ TEST_F(APZCPanningTester, PanWithHistoricalTouchData) {
   // First simulation: full data
 
   APZEventResult result = TouchDown(apzc, ScreenIntPoint(0, 50), mcc->Time());
-  if (result.GetStatus() != nsEventStatus_eConsumeNoDefault) {
-    SetDefaultAllowedTouchBehavior(apzc, result.mInputBlockId);
-  }
 
   mcc->AdvanceByMillis(50);
   result = TouchMove(apzc, ScreenIntPoint(0, 45), mcc->Time());
@@ -189,9 +187,6 @@ TEST_F(APZCPanningTester, PanWithHistoricalTouchData) {
   // Second simulation: partial data
 
   result = TouchDown(apzc, ScreenIntPoint(0, 50), mcc->Time());
-  if (result.GetStatus() != nsEventStatus_eConsumeNoDefault) {
-    SetDefaultAllowedTouchBehavior(apzc, result.mInputBlockId);
-  }
 
   mcc->AdvanceByMillis(50);
   result = TouchMove(apzc, ScreenIntPoint(0, 45), mcc->Time());
@@ -206,9 +201,6 @@ TEST_F(APZCPanningTester, PanWithHistoricalTouchData) {
   // Third simulation: full data via historical data
 
   result = TouchDown(apzc, ScreenIntPoint(0, 50), mcc->Time());
-  if (result.GetStatus() != nsEventStatus_eConsumeNoDefault) {
-    SetDefaultAllowedTouchBehavior(apzc, result.mInputBlockId);
-  }
 
   mcc->AdvanceByMillis(50);
   result = TouchMove(apzc, ScreenIntPoint(0, 45), mcc->Time());
@@ -343,7 +335,7 @@ TEST_F(APZCPanningTesterMock, HoldGesture_ActiveWheelListener) {
   UpdateHitTestingTree();
 
   RefPtr<TestAsyncPanZoomController> apzc = ApzcOf(root);
-  ScrollableLayerGuid::ViewID scrollId = ScrollableLayerGuid::START_SCROLL_ID;
+  ViewID scrollId = START_SCROLL_ID;
   ScreenIntPoint panPoint(50, 80);
 
   // Simulate an active wheel listener by having the MockHitTester
@@ -413,7 +405,7 @@ TEST_F(APZCPanningTesterMock, HoldGesture_PreventDefaultAfterLongHold) {
   UpdateHitTestingTree();
 
   RefPtr<TestAsyncPanZoomController> apzc = ApzcOf(root);
-  ScrollableLayerGuid::ViewID scrollId = ScrollableLayerGuid::START_SCROLL_ID;
+  ViewID scrollId = START_SCROLL_ID;
   ScreenIntPoint panPoint(50, 80);
 
   // Simulate an active wheel listener by having the MockHitTester
@@ -484,9 +476,8 @@ TEST_F(APZCPanningTesterMock, HoldGesture_SubframeTargeting) {
       LayerIntRect(0, 0, 100, 100),
   };
   CreateScrollData(treeShape, layerVisibleRect);
-  SetScrollableFrameMetrics(root, ScrollableLayerGuid::START_SCROLL_ID,
-                            CSSRect(0, 0, 100, 100));
-  SetScrollableFrameMetrics(layers[1], ScrollableLayerGuid::START_SCROLL_ID + 1,
+  SetScrollableFrameMetrics(root, START_SCROLL_ID, CSSRect(0, 0, 100, 100));
+  SetScrollableFrameMetrics(layers[1], START_SCROLL_ID + 1,
                             CSSRect(0, 0, 100, 200));
   SetScrollHandoff(layers[1], root);
   ScopedLayerTreeRegistration registration(LayersId{0}, mcc);
@@ -502,8 +493,7 @@ TEST_F(APZCPanningTesterMock, HoldGesture_SubframeTargeting) {
       OverscrollBehaviorInfo::FromStyleConstants(
           StyleOverscrollBehavior::None, StyleOverscrollBehavior::None));
 
-  ScrollableLayerGuid::ViewID subframeScrollId =
-      ScrollableLayerGuid::START_SCROLL_ID + 1;
+  ViewID subframeScrollId = START_SCROLL_ID + 1;
   ScreenIntPoint panPoint(50, 50);
 
   // Send a MAYSTART. Note that this has zero delta, and causes its input
@@ -561,4 +551,35 @@ TEST_F(APZCPanningTester, HoldGesture_DuringAutoscrollAnimation) {
 
   // Check that this did NOT cancel the autoscroll animation.
   apzc->AssertStateIsAutoscroll();
+}
+TEST_F(APZCPanningTester, Autoscroll_ScrollWheelCooldown) {
+  auto cooldownMS = StaticPrefs::apz_autoscroll_scroll_wheel_cooldown();
+  // Tell APZ about the current mouse position. This is needed for
+  // autoscroll to work correctly.
+  tm->SetCurrentMousePosition(ScreenPoint(5, 5));
+
+  // Start an autoscroll animation.
+  apzc->StartAutoscroll(ScreenPoint(5, 5));
+  apzc->AssertStateIsAutoscroll();
+
+  // Send a scroll wheel and check that this did NOT cancel the autoscroll
+  // animation.
+  Wheel(apzc, ScreenIntPoint(10, 10), ScreenPoint(0, 10), mcc->Time());
+  apzc->AssertStateIsAutoscroll();
+
+  // Advance to right before cooldown ends
+  if (cooldownMS - 1 > 0) {
+    mcc->AdvanceByMillis(cooldownMS - 1);
+    // Send a scroll wheel and check that this did NOT cancel the autoscroll
+    // animation.
+    Wheel(apzc, ScreenIntPoint(10, 10), ScreenPoint(0, 10), mcc->Time());
+    apzc->AssertStateIsAutoscroll();
+  }
+  // Advance the time to right after cooldown
+  mcc->AdvanceByMillis(2);
+
+  // Send a scroll wheel and check that this DID cancel the autoscroll
+  // animation.
+  Wheel(apzc, ScreenIntPoint(10, 10), ScreenPoint(0, 10), mcc->Time());
+  apzc->AssertStateIsReset();
 }

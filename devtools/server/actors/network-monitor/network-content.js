@@ -37,7 +37,7 @@ const {
  * This actor manages all network functionality runnning
  * in the content process.
  *
- * @constructor
+ * @class
  */
 class NetworkContentActor extends Actor {
   constructor(conn, targetActor) {
@@ -124,7 +124,7 @@ class NetworkContentActor extends Actor {
           "@mozilla.org/io/string-input-stream;1"
         ].createInstance(Ci.nsIStringInputStream);
         bodyStream.setByteStringData(body);
-        channel.explicitSetUploadStream(bodyStream, null, -1, method, false);
+        channel.explicitSetUploadStream(bodyStream, null, -1, method);
       }
 
       // Make sure the fetch has completed before sending the channel id,

@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// Configuration options for the dot backend
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Only emit function bodies
     pub cfg_only: bool,
@@ -307,25 +307,6 @@ impl StatementGraph {
                         crate::RayQueryFunction::Terminate => "RayQueryTerminate",
                     }
                 }
-                S::MeshFunction(crate::MeshFunction::SetMeshOutputs {
-                    vertex_count,
-                    primitive_count,
-                }) => {
-                    self.dependencies.push((id, vertex_count, "vertex_count"));
-                    self.dependencies
-                        .push((id, primitive_count, "primitive_count"));
-                    "SetMeshOutputs"
-                }
-                S::MeshFunction(crate::MeshFunction::SetVertex { index, value }) => {
-                    self.dependencies.push((id, index, "index"));
-                    self.dependencies.push((id, value, "value"));
-                    "SetVertex"
-                }
-                S::MeshFunction(crate::MeshFunction::SetPrimitive { index, value }) => {
-                    self.dependencies.push((id, index, "index"));
-                    self.dependencies.push((id, value, "value"));
-                    "SetPrimitive"
-                }
                 S::SubgroupBallot { result, predicate } => {
                     if let Some(predicate) = predicate {
                         self.dependencies.push((id, predicate, "predicate"));
@@ -422,6 +403,32 @@ impl StatementGraph {
                         },
                     }
                 }
+                S::CooperativeStore { target, data } => {
+                    self.dependencies.push((id, target, "target"));
+                    self.dependencies.push((id, data.pointer, "pointer"));
+                    self.dependencies.push((id, data.stride, "stride"));
+                    if data.row_major {
+                        "CoopStoreT"
+                    } else {
+                        "CoopStore"
+                    }
+                }
+                S::RayPipelineFunction(func) => match func {
+                    crate::RayPipelineFunction::TraceRay {
+                        acceleration_structure,
+                        descriptor,
+                        payload,
+                    } => {
+                        self.dependencies.push((
+                            id,
+                            acceleration_structure,
+                            "acceleration_structure",
+                        ));
+                        self.dependencies.push((id, descriptor, "descriptor"));
+                        self.dependencies.push((id, payload, "payload"));
+                        "TraceRay"
+                    }
+                },
             };
             // Set the last node to the merge node
             last_node = merge_id;
@@ -760,6 +767,18 @@ fn write_function_expressions(
                 edges.insert("", query);
                 let ty = if committed { "Committed" } else { "Candidate" };
                 (format!("get{ty}HitVertexPositions").into(), 4)
+            }
+            E::CooperativeLoad { ref data, .. } => {
+                edges.insert("pointer", data.pointer);
+                edges.insert("stride", data.stride);
+                let suffix = if data.row_major { "T " } else { "" };
+                (format!("coopLoad{suffix}").into(), 4)
+            }
+            E::CooperativeMultiplyAdd { a, b, c } => {
+                edges.insert("a", a);
+                edges.insert("b", b);
+                edges.insert("c", c);
+                ("cooperativeMultiplyAdd".into(), 4)
             }
         };
 

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,6 +14,7 @@
 
 #include "mozilla/Logging.h"
 #include "nsFmtString.h"
+#include "GeckoProfiler.h"
 
 mozilla::LazyLogModule gLlamaBackendLog("GeckoMLLlamaBackendNative");
 
@@ -89,6 +88,37 @@ ggml_type GgmlTypeFromKVCacheDtype(LlamaKVCacheDtype aDtype) {
   return GGML_TYPE_F16;
 }
 
+// Whether GPU offload can actually be used on this machine. Some configurations
+// register a GPU device that then fails during real backend initialization
+// (e.g. Metal on CI VMs or older Intel Macs, where the device exists but the
+// command queue / shader library can't be created). The vendored library is
+// built without exceptions (see third_party/llama.cpp/moz-overrides.h), so
+// letting llama_context hit that failure would abort instead of falling back.
+// Probe the GPU backend once, up front, and treat it as unusable if there is no
+// GPU device or if a real init attempt fails; callers then load on CPU.
+static bool GpuOffloadUsable(const LlamaLibWrapper* aLib) {
+  static const bool sUsable = [aLib]() {
+    ggml_backend_dev_t dev =
+        aLib->ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+    if (!dev) {
+      dev = aLib->ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU);
+    }
+    if (!dev) {
+      return false;
+    }
+    // A real init: this is what llama_context does internally, and it is where
+    // Metal actually fails on affected machines. ggml_backend_dev_init returns
+    // null (it does not abort) on failure, so this is safe to probe.
+    ggml_backend_t backend = aLib->ggml_backend_dev_init(dev, nullptr);
+    if (!backend) {
+      return false;
+    }
+    aLib->ggml_backend_free(backend);
+    return true;
+  }();
+  return sUsable;
+}
+
 LlamaBackend::~LlamaBackend() {
   LOGD("Entered {}", __PRETTY_FUNCTION__);
   // Note: mLib is not freed here because LlamaRuntimeLinker manages
@@ -104,11 +134,10 @@ ResultStatus LlamaBackend::Reinitialize(const LlamaModelOptions& aOptions,
   }
 
   if (!mLib) {
-    auto msg =
-        nsFmtCString(FMT_STRING("{}: Failed to get llama runtime linker"),
-                     __PRETTY_FUNCTION__);
+    auto msg = nsFmtCString("{}: Failed to get llama runtime linker",
+                            __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   mModelOptions = aOptions;
@@ -143,6 +172,13 @@ ResultStatus LlamaBackend::Reinitialize(const LlamaModelOptions& aOptions,
   // initialize the model
   llama_model_params modelParams = mLib->llama_model_default_params();
   modelParams.n_gpu_layers = aOptions.mNGpuLayers;
+  if (modelParams.n_gpu_layers > 0 && !GpuOffloadUsable(mLib)) {
+    LOGW(
+        "GPU offload was requested but no usable GPU backend is available "
+        "(none "
+        "present, or it failed to initialize); falling back to CPU.");
+    modelParams.n_gpu_layers = 0;
+  }
   modelParams.use_mmap = aOptions.mUseMmap;
   modelParams.use_mlock = aOptions.mUseMlock;
   modelParams.check_tensors = aOptions.mCheckTensors;
@@ -150,11 +186,11 @@ ResultStatus LlamaBackend::Reinitialize(const LlamaModelOptions& aOptions,
   mModel.reset(mLib->llama_model_load_from_file_handle(aFp, modelParams));
 
   if (!mModel) {
-    auto msg = nsFmtCString(
-        FMT_STRING("{}: Unable to load the model during initialization"),
-        __PRETTY_FUNCTION__);
+    auto msg =
+        nsFmtCString("{}: Unable to load the model during initialization",
+                     __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   // Preallocate buffer based on rough estimate of the size of the name
@@ -199,7 +235,9 @@ ResultStatus LlamaBackend::ReinitializeContext(
   ctxParams.type_k = GgmlTypeFromKVCacheDtype(aOptions.mKCacheDtype);
   ctxParams.type_v = GgmlTypeFromKVCacheDtype(aOptions.mVCacheDtype);
   ctxParams.offload_kqv = aOptions.mOffloadKqv;
-  ctxParams.flash_attn = aOptions.mFlashAttn;
+  ctxParams.flash_attn_type = aOptions.mFlashAttn
+                                  ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+                                  : LLAMA_FLASH_ATTN_TYPE_DISABLED;
   ctxParams.no_perf = aOptions.mNoPerf;
   ctxParams.op_offload = aOptions.mOpOffload;
   ctxParams.swa_full = aOptions.mSwaFull;
@@ -209,11 +247,10 @@ ResultStatus LlamaBackend::ReinitializeContext(
   // alive for the entire lifetime of mCtx.
   mCtx.reset(mLib->llama_init_from_model(mModel.get(), ctxParams));
   if (!mCtx) {
-    auto msg =
-        nsFmtCString(FMT_STRING("{}: failed to create the llama_context {}"),
-                     __PRETTY_FUNCTION__, mModelGeneralName);
+    auto msg = nsFmtCString("{}: failed to create the llama_context {}",
+                            __PRETTY_FUNCTION__, mModelGeneralName);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   // ggml_threadpool_params_init/ggml_threadpool_new do not retain pointers
@@ -221,19 +258,25 @@ ResultStatus LlamaBackend::ReinitializeContext(
   // safely go out of scope after threadpool creation.
   ggml_threadpool_params tpp;
   mLib->ggml_threadpool_params_init(&tpp, ctxParams.n_threads);
+  tpp.thread_create_callback = []() { PROFILER_REGISTER_THREAD("llama.cpp"); };
+  tpp.thread_destroy_callback = []() { PROFILER_UNREGISTER_THREAD(); };
+
   ggml_threadpool_params tppBatch;
   mLib->ggml_threadpool_params_init(&tppBatch, ctxParams.n_threads_batch);
+  tppBatch.thread_create_callback = []() {
+    PROFILER_REGISTER_THREAD("llama.cpp");
+  };
+  tppBatch.thread_destroy_callback = []() { PROFILER_UNREGISTER_THREAD(); };
 
   mThreadpoolBatch.reset();
   if (!mLib->ggml_threadpool_params_match(&tpp, &tppBatch)) {
     mThreadpoolBatch.reset(mLib->ggml_threadpool_new(&tppBatch));
     if (!mThreadpoolBatch) {
       auto msg = nsFmtCString(
-          FMT_STRING(
-              "{}: Failed to create decoding threadpool: n_threads: {}  {}"),
+          "{}: Failed to create decoding threadpool: n_threads: {}  {}",
           __PRETTY_FUNCTION__, ctxParams.n_threads_batch, mModelGeneralName);
       LOGE("{}", msg);
-      return mozilla::Err(Error{msg});
+      return mozilla::Err(Error{std::move(msg)});
     }
     // Start the non-batch threadpool in the paused state
     tpp.paused = true;
@@ -241,11 +284,11 @@ ResultStatus LlamaBackend::ReinitializeContext(
 
   mThreadpool.reset(mLib->ggml_threadpool_new(&tpp));
   if (!mThreadpool) {
-    auto msg = nsFmtCString(
-        FMT_STRING("{}: Failed to create threadpool: n_threads: {} {}"),
-        __PRETTY_FUNCTION__, ctxParams.n_threads, mModelGeneralName);
+    auto msg = nsFmtCString("{}: Failed to create threadpool: n_threads: {} {}",
+                            __PRETTY_FUNCTION__, ctxParams.n_threads,
+                            mModelGeneralName);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   // llama_attach_threadpool does not take ownership of the threadpools.
@@ -267,11 +310,10 @@ ChatMessageResult LlamaBackend::FormatChat(
   MOZ_ASSERT(mLib, "No shared library pointer in FormatChat, fix this");
 
   if (!mModel) {
-    auto msg = nsFmtCString(
-        FMT_STRING("{}: Model not loaded when trying to format chat"),
-        __PRETTY_FUNCTION__);
+    auto msg = nsFmtCString("{}: Model not loaded when trying to format chat",
+                            __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return ChatMessageResult(Error{msg});
+    return ChatMessageResult(Error{std::move(msg)});
   }
 
   nsTArray<llama_chat_message> chatMessages;
@@ -310,10 +352,10 @@ ChatMessageResult LlamaBackend::FormatChat(
       aOptions.mAddAssistant, formatted.BeginWriting(), formatted.Length());
 
   if (chatTemplateLength < 0) {
-    auto msg = nsFmtCString(FMT_STRING("{}: failed to apply the chat template"),
+    auto msg = nsFmtCString("{}: failed to apply the chat template",
                             __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return ChatMessageResult(Error{msg});
+    return ChatMessageResult(Error{std::move(msg)});
   }
 
   // Retry if the estimated buffer size was too small
@@ -334,7 +376,7 @@ ChatMessageResult LlamaBackend::FormatChat(
 
   LOGD("{}: Successfully formatted chat", __PRETTY_FUNCTION__);
 
-  return ChatMessageResult(formatted);
+  return ChatMessageResult(std::move(formatted));
 }
 
 LlamaBackend::SamplerResult LlamaBackend::InitializeSampler(
@@ -401,10 +443,10 @@ LlamaBackend::SamplerResult LlamaBackend::InitializeSampler(
 
       default:
 
-        auto msg = nsFmtCString(FMT_STRING("{}: Unimplemented sampler type"),
-                                __PRETTY_FUNCTION__);
+        auto msg =
+            nsFmtCString("{}: Unimplemented sampler type", __PRETTY_FUNCTION__);
         LOGE("{}", msg);
-        return mozilla::Err(Error{msg});
+        return mozilla::Err(Error{std::move(msg)});
     }
 
     if (samplerElement) {
@@ -435,21 +477,19 @@ ResultStatus LlamaBackend::Generate(
   });
 
   if (!mModel) {
-    auto msg = nsFmtCString(FMT_STRING("{}: error: Model not loaded"),
-                            __PRETTY_FUNCTION__);
+    auto msg = nsFmtCString("{}: error: Model not loaded", __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   // Just a non-owned pointer to existing data, so fast to get each time
   const llama_vocab* vocab = mLib->llama_model_get_vocab(mModel.get());
 
   if (!vocab) {
-    auto msg =
-        nsFmtCString(FMT_STRING("{}: error: Unable to get model vocabulary."),
-                     __PRETTY_FUNCTION__);
+    auto msg = nsFmtCString("{}: error: Unable to get model vocabulary.",
+                            __PRETTY_FUNCTION__);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   auto samplerResult = InitializeSampler(aOptions.mSamplers, vocab);
@@ -474,10 +514,10 @@ ResultStatus LlamaBackend::Generate(
       aOptions.mTokenizationOptions.mParseSpecilControlTokens);
 
   if (nPromptTokens < 0) {
-    auto msg = nsFmtCString(FMT_STRING("{}: failed to tokenize the prompt {}"),
+    auto msg = nsFmtCString("{}: failed to tokenize the prompt {}",
                             __PRETTY_FUNCTION__, mModelGeneralName);
     LOGE("{}", msg);
-    return mozilla::Err(Error{msg});
+    return mozilla::Err(Error{std::move(msg)});
   }
 
   // If the estimate was wrong, retry with the correct number
@@ -544,10 +584,10 @@ ResultStatus LlamaBackend::Generate(
   mozilla::HashSet<int32_t> stopTokens;
   for (const auto& v : aOptions.mStopTokens) {
     if (!stopTokens.put(v)) {
-      auto msg = nsFmtCString(FMT_STRING("{}: Unable to create stopTokens {}"),
+      auto msg = nsFmtCString("{}: Unable to create stopTokens {}",
                               __PRETTY_FUNCTION__, mModelGeneralName);
       LOGE("{}", msg);
-      return mozilla::Err(Error{msg});
+      return mozilla::Err(Error{std::move(msg)});
     };
   }
 
@@ -573,22 +613,22 @@ ResultStatus LlamaBackend::Generate(
     int nCtxUsed =
         mLib->llama_memory_seq_pos_max(mLib->llama_get_memory(mCtx.get()), 0);
     if (nCtxUsed + batch.n_tokens > nCtx) {
-      auto msg = nsFmtCString(
-          FMT_STRING("{}: context size exceeded. Size is: {} Needed: {} {}"),
-          __PRETTY_FUNCTION__, nCtx, nCtxUsed + batch.n_tokens,
-          mModelGeneralName);
+      auto msg =
+          nsFmtCString("{}: context size exceeded. Size is: {} Needed: {} {}",
+                       __PRETTY_FUNCTION__, nCtx, nCtxUsed + batch.n_tokens,
+                       mModelGeneralName);
       LOGE("{}", msg);
-      return mozilla::Err(Error{msg});
+      return mozilla::Err(Error{std::move(msg)});
     }
 
     LOGV("{}: Decoding to generate next token probabilities {}",
          __PRETTY_FUNCTION__, mModelGeneralName);
 
     if (mLib->llama_decode(mCtx.get(), batch) != 0) {
-      auto msg = nsFmtCString(FMT_STRING("{}: failed to decode {}"),
-                              __PRETTY_FUNCTION__, mModelGeneralName);
+      auto msg = nsFmtCString("{}: failed to decode {}", __PRETTY_FUNCTION__,
+                              mModelGeneralName);
       LOGE("{}", msg);
-      return mozilla::Err(Error{msg});
+      return mozilla::Err(Error{std::move(msg)});
     }
 
     LOGV("{}: Sampling the generated probabilities to generate next token {}",
@@ -639,18 +679,17 @@ ResultStatus LlamaBackend::Generate(
         aOptions.mDeTokenizationOptions.mRenderSpecialTokens);
 
     if (n < 0) {
-      auto msg = nsFmtCString(
-          FMT_STRING("{}: failed to convert token to string piece {}"),
-          __PRETTY_FUNCTION__, mModelGeneralName);
+      auto msg = nsFmtCString("{}: failed to convert token to string piece {}",
+                              __PRETTY_FUNCTION__, mModelGeneralName);
       LOGE("{}", msg);
-      return mozilla::Err(Error{msg});
+      return mozilla::Err(Error{std::move(msg)});
     }
     buffer.SetLength(n);
 
     LOGV("{}: Sending the generated token to the callback {}",
          __PRETTY_FUNCTION__, mModelGeneralName);
     auto onTokenResult =
-        onToken(buffer, {token}, LlamaChatPhase::Generation, false);
+        onToken(std::move(buffer), {token}, LlamaChatPhase::Generation, false);
     if (onTokenResult.isErr()) {
       LOGE("{}", onTokenResult.inspectErr().mMessage);
       return onTokenResult;

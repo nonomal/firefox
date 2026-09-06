@@ -12,8 +12,7 @@ use crate::values::computed::angle::Angle;
 use crate::values::computed::url::ComputedUrl;
 use crate::values::computed::{Image, LengthPercentage, Position};
 use crate::values::generics::basic_shape as generic;
-use crate::values::generics::basic_shape::ShapePosition;
-use crate::values::specified::svg_path::{CoordPair, PathCommand};
+use crate::values::specified::svg_path::{CoordPair, PathCommand, SVGPathPosition};
 use crate::values::CSSFloat;
 
 /// A computed alias for FillRule.
@@ -32,10 +31,10 @@ pub type BasicShape = generic::GenericBasicShape<Angle, Position, LengthPercenta
 pub type InsetRect = generic::GenericInsetRect<LengthPercentage>;
 
 /// A computed circle.
-pub type Circle = generic::Circle<LengthPercentage>;
+pub type Circle = generic::Circle<Position, LengthPercentage>;
 
 /// A computed ellipse.
-pub type Ellipse = generic::Ellipse<LengthPercentage>;
+pub type Ellipse = generic::Ellipse<Position, LengthPercentage>;
 
 /// The computed value of `ShapeRadius`.
 pub type ShapeRadius = generic::GenericShapeRadius<LengthPercentage>;
@@ -62,14 +61,17 @@ pub type RelativeControlPoint = generic::RelativeControlPoint<LengthPercentage>;
 /// The computed value of 'CommandEndPoint'.
 pub type CommandEndPoint = generic::CommandEndPoint<Position, LengthPercentage>;
 
+/// The computed value of hline and vline's endpoint.
+pub type AxisEndPoint = generic::AxisEndPoint<LengthPercentage>;
+
 /// Animate from `Shape` to `Path`, and vice versa.
 macro_rules! animate_shape {
     (
         $from:ident,
         $to:ident,
         $procedure:ident,
-        $from_as_shape:tt,
-        $to_as_shape:tt
+        $from_as_shape:expr,
+        $to_as_shape:expr
     ) => {{
         // Check fill-rule.
         if $from.fill != $to.fill {
@@ -107,13 +109,9 @@ impl Animate for PathOrShapeFunction {
         //
         // https://drafts.csswg.org/css-shapes-2/#interpolating-shape
         match (self, other) {
-            (Self::Path(ref from), Self::Path(ref to)) => {
-                from.animate(to, procedure).map(Self::Path)
-            },
-            (Self::Shape(ref from), Self::Shape(ref to)) => {
-                from.animate(to, procedure).map(Self::Shape)
-            },
-            (Self::Shape(ref from), Self::Path(ref to)) => {
+            (Self::Path(from), Self::Path(to)) => from.animate(to, procedure).map(Self::Path),
+            (Self::Shape(from), Self::Shape(to)) => from.animate(to, procedure).map(Self::Shape),
+            (Self::Shape(from), Self::Path(to)) => {
                 // Animate from shape() to path(). We convert each PathCommand into ShapeCommand,
                 // and return shape().
                 animate_shape!(
@@ -121,18 +119,18 @@ impl Animate for PathOrShapeFunction {
                     to,
                     procedure,
                     (|shape_cmd| shape_cmd),
-                    (|path_cmd| ShapeCommand::from(path_cmd))
+                    ShapeCommand::from
                 )
                 .map(Self::Shape)
             },
-            (Self::Path(ref from), Self::Shape(ref to)) => {
+            (Self::Path(from), Self::Shape(to)) => {
                 // Animate from path() to shape(). We convert each PathCommand into ShapeCommand,
                 // and return shape().
                 animate_shape!(
                     from,
                     to,
                     procedure,
-                    (|path_cmd| ShapeCommand::from(path_cmd)),
+                    ShapeCommand::from,
                     (|shape_cmd| shape_cmd)
                 )
                 .map(Self::Shape)
@@ -144,47 +142,34 @@ impl Animate for PathOrShapeFunction {
 impl From<&PathCommand> for ShapeCommand {
     #[inline]
     fn from(path: &PathCommand) -> Self {
-        use crate::values::computed::CSSPixelLength;
         match path {
             &PathCommand::Close => Self::Close,
-            &PathCommand::Move { ref point } => Self::Move {
+            PathCommand::Move { point } => Self::Move {
                 point: point.into(),
             },
-            &PathCommand::Line { ref point } => Self::Move {
+            PathCommand::Line { point } => Self::Move {
                 point: point.into(),
             },
-            &PathCommand::HLine { by_to, x } => Self::HLine {
-                by_to,
-                x: LengthPercentage::new_length(CSSPixelLength::new(x)),
-            },
-            &PathCommand::VLine { by_to, y } => Self::VLine {
-                by_to,
-                y: LengthPercentage::new_length(CSSPixelLength::new(y)),
-            },
-            &PathCommand::CubicCurve {
-                ref point,
-                ref control1,
-                ref control2,
+            PathCommand::HLine { x } => Self::HLine { x: x.into() },
+            PathCommand::VLine { y } => Self::VLine { y: y.into() },
+            PathCommand::CubicCurve {
+                point,
+                control1,
+                control2,
             } => Self::CubicCurve {
                 point: point.into(),
                 control1: control1.into(),
                 control2: control2.into(),
             },
-            &PathCommand::QuadCurve {
-                ref point,
-                ref control1,
-            } => Self::QuadCurve {
+            PathCommand::QuadCurve { point, control1 } => Self::QuadCurve {
                 point: point.into(),
                 control1: control1.into(),
             },
-            &PathCommand::SmoothCubic {
-                ref point,
-                ref control2,
-            } => Self::SmoothCubic {
+            PathCommand::SmoothCubic { point, control2 } => Self::SmoothCubic {
                 point: point.into(),
                 control2: control2.into(),
             },
-            &PathCommand::SmoothQuad { ref point } => Self::SmoothQuad {
+            PathCommand::SmoothQuad { point } => Self::SmoothQuad {
                 point: point.into(),
             },
             &PathCommand::Arc {
@@ -215,9 +200,9 @@ impl From<&CoordPair> for CoordinatePair {
     }
 }
 
-impl From<&ShapePosition<CSSFloat>> for Position {
+impl From<&SVGPathPosition> for Position {
     #[inline]
-    fn from(p: &ShapePosition<CSSFloat>) -> Self {
+    fn from(p: &SVGPathPosition) -> Self {
         use crate::values::computed::CSSPixelLength;
         Self::new(
             LengthPercentage::new_length(CSSPixelLength::new(p.horizontal)),
@@ -226,9 +211,9 @@ impl From<&ShapePosition<CSSFloat>> for Position {
     }
 }
 
-impl From<&generic::CommandEndPoint<ShapePosition<CSSFloat>, CSSFloat>> for CommandEndPoint {
+impl From<&generic::CommandEndPoint<SVGPathPosition, CSSFloat>> for CommandEndPoint {
     #[inline]
-    fn from(p: &generic::CommandEndPoint<ShapePosition<CSSFloat>, CSSFloat>) -> Self {
+    fn from(p: &generic::CommandEndPoint<SVGPathPosition, CSSFloat>) -> Self {
         match p {
             generic::CommandEndPoint::ToPosition(pos) => Self::ToPosition(pos.into()),
             generic::CommandEndPoint::ByCoordinate(coord) => Self::ByCoordinate(coord.into()),
@@ -236,9 +221,28 @@ impl From<&generic::CommandEndPoint<ShapePosition<CSSFloat>, CSSFloat>> for Comm
     }
 }
 
-impl From<&generic::ControlPoint<ShapePosition<CSSFloat>, CSSFloat>> for ControlPoint {
+impl From<&generic::AxisEndPoint<CSSFloat>> for AxisEndPoint {
     #[inline]
-    fn from(p: &generic::ControlPoint<ShapePosition<CSSFloat>, CSSFloat>) -> Self {
+    fn from(p: &generic::AxisEndPoint<CSSFloat>) -> Self {
+        use crate::values::computed::CSSPixelLength;
+        use generic::AxisPosition;
+        match p {
+            generic::AxisEndPoint::ToPosition(AxisPosition::LengthPercent(lp)) => Self::ToPosition(
+                AxisPosition::LengthPercent(LengthPercentage::new_length(CSSPixelLength::new(*lp))),
+            ),
+            generic::AxisEndPoint::ToPosition(AxisPosition::Keyword(_)) => {
+                unreachable!("Invalid state: SVG path commands cannot contain a keyword.")
+            },
+            generic::AxisEndPoint::ByCoordinate(pos) => {
+                Self::ByCoordinate(LengthPercentage::new_length(CSSPixelLength::new(*pos)))
+            },
+        }
+    }
+}
+
+impl From<&generic::ControlPoint<SVGPathPosition, CSSFloat>> for ControlPoint {
+    #[inline]
+    fn from(p: &generic::ControlPoint<SVGPathPosition, CSSFloat>) -> Self {
         match p {
             generic::ControlPoint::Absolute(pos) => Self::Absolute(pos.into()),
             generic::ControlPoint::Relative(point) => Self::Relative(RelativeControlPoint {

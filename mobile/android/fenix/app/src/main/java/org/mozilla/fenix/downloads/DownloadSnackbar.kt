@@ -4,7 +4,9 @@
 
 package org.mozilla.fenix.downloads
 
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.mapNotNull
@@ -21,31 +23,38 @@ import org.mozilla.fenix.components.appstate.snackbar.SnackbarState
  *
  * @param store The [BrowserStore] instance to observe download states from.
  * @param appStore The [AppStore] instance to dispatch snackbar-related actions to.
+ * @param mainDispatcher The [CoroutineDispatcher] to use for main-thread operations.
  */
 class DownloadSnackbar(
     private val store: BrowserStore,
     private val appStore: AppStore,
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : LifecycleAwareFeature {
     private var scope: CoroutineScope? = null
 
     override fun start() {
-        scope = store.flowScoped { flow ->
-            flow.mapNotNull { it.downloads }
-                .distinctUntilChangedBy { it.values }
-                .collect { downloads ->
-                    val snackbarState = appStore.state.snackbarState
-                    if (snackbarState is SnackbarState.None &&
-                        snackbarState.previous is SnackbarState.DownloadInProgress
-                    ) {
-                        val previousDownloadId = snackbarState.previous.downloadId
-                        downloads.values.find {
-                            it.status == DownloadState.Status.CANCELLED && it.id == previousDownloadId
-                        }?.let {
-                            appStore.dispatch(AppAction.SnackbarAction.SnackbarDismissed)
+        scope =
+            store.flowScoped(dispatcher = mainDispatcher) { flow ->
+                flow
+                    .mapNotNull { it.downloads }
+                    .distinctUntilChangedBy { it.values }
+                    .collect { downloads ->
+                        val snackbarState = appStore.state.snackbarState
+                        if (
+                            snackbarState is SnackbarState.None &&
+                                snackbarState.previous is SnackbarState.DownloadInProgress
+                        ) {
+                            val previousDownloadId = snackbarState.previous.downloadId
+                            downloads.values
+                                .find {
+                                    it.status == DownloadState.Status.CANCELLED && it.id == previousDownloadId
+                                }
+                                ?.let {
+                                    appStore.dispatch(AppAction.SnackbarAction.SnackbarDismissed)
+                                }
                         }
                     }
-                }
-        }
+            }
     }
 
     override fun stop() {

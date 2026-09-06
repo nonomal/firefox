@@ -15,6 +15,7 @@
 #include <optional>
 #include <vector>
 
+#include "api/rtp_header_extension_id.h"
 #include "api/rtp_headers.h"
 #include "api/units/data_rate.h"
 #include "api/units/data_size.h"
@@ -34,7 +35,7 @@ namespace {
 
 using ::testing::_;
 using ::testing::ElementsAre;
-using ::testing::Invoke;
+
 using ::testing::MockFunction;
 using ::testing::Return;
 using ::testing::SizeIs;
@@ -88,8 +89,8 @@ class TransportSequenceNumberFeedbackGeneneratorTest : public ::testing::Test {
                       Timestamp arrival_time,
                       std::optional<uint32_t> abs_send_time = std::nullopt) {
     RtpHeaderExtensionMap map;
-    map.Register<TransportSequenceNumber>(1);
-    map.Register<AbsoluteSendTime>(2);
+    map.Register<TransportSequenceNumber>(RtpHeaderExtensionId(1));
+    map.Register<AbsoluteSendTime>(RtpHeaderExtensionId(2));
     RtpPacketReceived packet(&map, arrival_time);
     packet.SetSsrc(kMediaSsrc);
     packet.SetExtension<TransportSequenceNumber>(seq);
@@ -104,7 +105,7 @@ class TransportSequenceNumberFeedbackGeneneratorTest : public ::testing::Test {
       Timestamp arrival_time,
       std::optional<FeedbackRequest> feedback_request = std::nullopt) {
     RtpHeaderExtensionMap map;
-    map.Register<TransportSequenceNumberV2>(1);
+    map.Register<TransportSequenceNumberV2>(RtpHeaderExtensionId(1));
     RtpPacketReceived packet(&map, arrival_time);
     packet.SetSsrc(kMediaSsrc);
     packet.SetExtension<TransportSequenceNumberV2>(seq, feedback_request);
@@ -127,7 +128,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq, kBaseTime);
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -138,7 +139,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_THAT(SequenceNumbers(*feedback_packet),
                         ElementsAre(kBaseSeq));
             EXPECT_THAT(Timestamps(*feedback_packet), ElementsAre(kBaseTime));
-          }));
+          });
 
   Process();
 }
@@ -148,7 +149,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest, DuplicatedPackets) {
   IncomingPacket(kBaseSeq, kBaseTime + TimeDelta::Seconds(1));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -160,7 +161,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest, DuplicatedPackets) {
                         ElementsAre(kBaseSeq));
             EXPECT_THAT(Timestamps(*feedback_packet), ElementsAre(kBaseTime));
             return true;
-          }));
+          });
 
   Process();
 }
@@ -177,7 +178,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq + 3, kBaseTime + TimeDelta::Seconds(3));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -189,7 +190,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                         ElementsAre(kBaseSeq + 3));
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + TimeDelta::Seconds(3)));
-          }));
+          });
 
   Process();
 }
@@ -202,7 +203,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                  kBaseTime + (2 * kMaxSmallDelta) + TimeDelta::Millis(1));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -216,7 +217,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                         ElementsAre(kBaseTime, kBaseTime + kMaxSmallDelta,
                                     kBaseTime + (2 * kMaxSmallDelta) +
                                         TimeDelta::Millis(1)));
-          }));
+          });
 
   Process();
 }
@@ -230,7 +231,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq + 1, kBaseTime + kTooLargeDelta);
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -241,8 +242,8 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_THAT(SequenceNumbers(*feedback_packet),
                         ElementsAre(kBaseSeq));
             EXPECT_THAT(Timestamps(*feedback_packet), ElementsAre(kBaseTime));
-          }))
-      .WillOnce(Invoke(
+          })
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -254,7 +255,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                         ElementsAre(kBaseSeq + 1));
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + kTooLargeDelta));
-          }));
+          });
 
   Process();
 }
@@ -267,7 +268,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kLargeSeq, kBaseTime + kDelta);
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -277,7 +278,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + kDelta, kBaseTime));
-          }));
+          });
 
   Process();
 }
@@ -297,7 +298,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 
   // Only expect feedback for the last two packets.
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -308,7 +309,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_THAT(
                 Timestamps(*feedback_packet),
                 ElementsAre(kBaseTime + 28 * kDelta, kBaseTime + 29 * kDelta));
-          }));
+          });
 
   Process();
 }
@@ -327,7 +328,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 
   // Only expect feedback for the first two packets.
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -338,7 +339,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                         ElementsAre(kBaseSeq + 40000, kBaseSeq));
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + kDelta, kBaseTime));
-          }));
+          });
 
   Process();
 }
@@ -349,7 +350,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq + 2, kBaseTime + TimeDelta::Millis(2));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -362,14 +363,14 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_THAT(
                 Timestamps(*feedback_packet),
                 ElementsAre(kBaseTime, kBaseTime + TimeDelta::Millis(2)));
-          }));
+          });
 
   Process();
 
   IncomingPacket(kBaseSeq + 1, kBaseTime + TimeDelta::Millis(1));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -382,7 +383,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + TimeDelta::Millis(1),
                                     kBaseTime + TimeDelta::Millis(2)));
-          }));
+          });
 
   Process();
 }
@@ -394,7 +395,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq + 2, kBaseTime);
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -402,14 +403,14 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
             EXPECT_EQ(kBaseSeq + 2, feedback_packet->GetBaseSequence());
 
             EXPECT_THAT(Timestamps(*feedback_packet), ElementsAre(kBaseTime));
-          }));
+          });
 
   Process();
 
   IncomingPacket(kBaseSeq + 3, kTimeoutTime);  // kBaseSeq + 2 times out here.
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -418,7 +419,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kTimeoutTime));
-          }));
+          });
 
   Process();
 
@@ -428,7 +429,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   IncomingPacket(kBaseSeq + 1, kTimeoutTime - TimeDelta::Millis(1));
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -441,7 +442,7 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
                 Timestamps(*feedback_packet),
                 ElementsAre(kBaseTime - TimeDelta::Millis(1),
                             kTimeoutTime - TimeDelta::Millis(1), kTimeoutTime));
-          }));
+          });
 
   Process();
 }
@@ -455,7 +456,8 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
        TimeUntilNextProcessIsMinIntervalOn300kbps) {
   feedback_generator_.OnSendBandwidthEstimateChanged(
-      DataRate::BitsPerSec(300'000));
+      DataRate::BitsPerSec(300'000), /*is_bandwidth_limited=*/true,
+      /*transport_overhead=*/std::nullopt);
   EXPECT_EQ(feedback_generator_.Process(clock_.CurrentTime()),
             kMinSendInterval);
 }
@@ -465,7 +467,9 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
   // TimeUntilNextProcess should be limited by `kMaxSendIntervalMs` when
   // bitrate is small. We choose 0 bps as a special case, which also tests
   // erroneous behaviors like division-by-zero.
-  feedback_generator_.OnSendBandwidthEstimateChanged(DataRate::Zero());
+  feedback_generator_.OnSendBandwidthEstimateChanged(
+      DataRate::Zero(), /*is_bandwidth_limited=*/true,
+      /*transport_overhead=*/std::nullopt);
   EXPECT_EQ(feedback_generator_.Process(clock_.CurrentTime()),
             kMaxSendInterval);
 }
@@ -473,7 +477,8 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
        TimeUntilNextProcessIsMaxIntervalOn20kbps) {
   feedback_generator_.OnSendBandwidthEstimateChanged(
-      DataRate::BitsPerSec(20'000));
+      DataRate::BitsPerSec(20'000), /*is_bandwidth_limited=*/true,
+      /*transport_overhead=*/std::nullopt);
   EXPECT_EQ(feedback_generator_.Process(clock_.CurrentTime()),
             kMaxSendInterval);
 }
@@ -481,7 +486,8 @@ TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
 TEST_F(TransportSequenceNumberFeedbackGeneneratorTest,
        TwccReportsUse5PercentOfAvailableBandwidth) {
   feedback_generator_.OnSendBandwidthEstimateChanged(
-      DataRate::BitsPerSec(80'000));
+      DataRate::BitsPerSec(80'000), /*is_bandwidth_limited=*/true,
+      /*transport_overhead=*/std::nullopt);
   // 80kbps * 0.05 = TwccReportSize(68B * 8b/B) * 1000ms / SendInterval(136ms)
   EXPECT_EQ(feedback_generator_.Process(clock_.CurrentTime()),
             TimeDelta::Millis(136));
@@ -511,7 +517,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest, RequestSinglePacketFeedback) {
   IncomingPacketV2(kBaseSeq + 2, kBaseTime + 2 * kMaxSmallDelta);
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -523,7 +529,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest, RequestSinglePacketFeedback) {
                         ElementsAre(kBaseSeq + 3));
             EXPECT_THAT(Timestamps(*feedback_packet),
                         ElementsAre(kBaseTime + 3 * kMaxSmallDelta));
-          }));
+          });
 
   constexpr FeedbackRequest kSinglePacketFeedbackRequest = {
       .include_timestamps = true, .sequence_count = 1};
@@ -538,7 +544,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest, RequestLastFivePacketFeedback) {
   }
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -555,7 +561,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest, RequestLastFivePacketFeedback) {
                                     kBaseTime + 8 * kMaxSmallDelta,
                                     kBaseTime + 9 * kMaxSmallDelta,
                                     kBaseTime + 10 * kMaxSmallDelta));
-          }));
+          });
 
   constexpr FeedbackRequest kFivePacketsFeedbackRequest = {
       .include_timestamps = true, .sequence_count = 5};
@@ -572,7 +578,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest,
   }
 
   EXPECT_CALL(feedback_sender_, Call)
-      .WillOnce(Invoke(
+      .WillOnce(
           [](std::vector<std::unique_ptr<rtcp::RtcpPacket>> feedback_packets) {
             rtcp::TransportFeedback* feedback_packet =
                 static_cast<rtcp::TransportFeedback*>(
@@ -586,7 +592,7 @@ TEST_F(RemoteEstimatorProxyOnRequestTest,
                         ElementsAre(kBaseTime + 6 * kMaxSmallDelta,
                                     kBaseTime + 8 * kMaxSmallDelta,
                                     kBaseTime + 10 * kMaxSmallDelta));
-          }));
+          });
 
   constexpr FeedbackRequest kFivePacketsFeedbackRequest = {
       .include_timestamps = true, .sequence_count = 5};

@@ -1,5 +1,3 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -50,7 +48,7 @@ nsresult FetchUtil::GetValidRequestMethod(const nsACString& aMethod,
       upperCaseMethod.EqualsLiteral("OPTIONS") ||
       upperCaseMethod.EqualsLiteral("POST") ||
       upperCaseMethod.EqualsLiteral("PUT")) {
-    outMethod = upperCaseMethod;
+    outMethod = std::move(upperCaseMethod);
   } else {
     outMethod = aMethod;  // Case unchanged for non-standard methods
   }
@@ -653,7 +651,7 @@ class JSStreamConsumer final : public nsIInputStreamCallback,
 NS_IMPL_ISUPPORTS(JSStreamConsumer, nsIInputStreamCallback)
 
 // static
-MOZ_CONSTINIT nsCString FetchUtil::WasmAltDataType;
+constinit nsCString FetchUtil::WasmAltDataType;
 
 // static
 void FetchUtil::InitWasmAltDataType() {
@@ -700,9 +698,13 @@ bool FetchUtil::StreamResponseToJS(JSContext* aCx, JS::Handle<JSObject*> aObj,
       break;
   }
 
+  // For WASM, the Content-Type must be exactly "application/wasm" with no
+  // parameters. Check the raw header value before parsing normalizes it.
+  ErrorResult result;
   nsAutoCString mimeType;
-  nsAutoCString mixedCaseMimeType;  // unused
-  response->GetMimeType(mimeType, mixedCaseMimeType);
+  response->GetInternalHeaders()->Get("Content-Type"_ns, mimeType, result);
+  MOZ_ALWAYS_TRUE(!result.Failed());
+  ToLowerCase(mimeType);
 
   if (!mimeType.EqualsASCII(requiredMimeType)) {
     JS_ReportErrorNumberASCII(aCx, js::GetErrorMessage, nullptr,

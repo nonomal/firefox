@@ -48,7 +48,7 @@ enum PeerConnectionMetricsName {
 enum IceCandidatePairType {
   // HostHost is deprecated. It was replaced with the set of types at the bottom
   // to report private or public host IP address.
-  kIceCandidatePairHostHost = 0,
+  kIceCandidatePairHostHost [[deprecated]] = 0,
   kIceCandidatePairHostSrflx = 1,
   kIceCandidatePairHostRelay = 2,
   kIceCandidatePairHostPrflx = 3,
@@ -175,6 +175,17 @@ enum RtcpMuxPolicyUsage {
   kRtcpMuxPolicyUsageMax
 };
 
+// Metrics for RTCRtpHeaderEncryptionPolicy (which enables cryptex).
+// https://w3c.github.io/webrtc-extensions/#rtp-header-extension-encryption
+enum CryptexPolicyUsage {
+  kCryptexPolicyUsageDisabled = 0,  // Non-spec.
+  kCryptexPolicyUsageNegotiate = 1,
+  // Policy was `negotiate` and it was negotiated at session level.
+  kCryptexPolicyUsageNegotiated = 2,
+  kCryptexPolicyUsageRequire = 3,
+  kCryptexPolicyUsageMax
+};
+
 // Metrics for SDP munging.
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused. Keep in (loose) sync with
@@ -201,10 +212,19 @@ enum SdpMungingType {
   kRtcpMux = 30,
   kIceOptionsTrickle = 31,
   kIceCandidateCount = 32,
+  kBundle = 33,
+  kBandwidth = 34,
+  kSframe = 35,
+  kMsidStream = 36,
+  kMsidTrack = 37,
+  kIceOptionsRemoved = 38,
+  kRejected = 39,
   // RTP header extension munging.
   kRtpHeaderExtensionRemoved = 40,
   kRtpHeaderExtensionAdded = 41,
   kRtpHeaderExtensionModified = 42,
+  kCryptex = 43,
+  kRtcpXrRcvrRtt = 44,
   // Audio-related munging.
   kAudioCodecsRemoved = 60,
   kAudioCodecsAdded = 61,
@@ -231,6 +251,10 @@ enum SdpMungingType {
   kVideoCodecsAddedWithRawPacketization = 87,
   kVideoCodecsModifiedWithRawPacketization = 88,
   kVideoCodecsRtcpReducedSize = 89,
+  // DataChannel-related munging.
+  kDataChannelSctpInit = 100,
+  kDataChannelMaxMessageSize = 101,
+  kDataChannelSctpPort = 102,
   kMaxValue,
 };
 
@@ -241,6 +265,18 @@ enum class SdpMungingOutcome {
   kAccepted = 0,
   kRejected = 1,
   kMaxValue = kRejected,
+};
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum SdpBandwidthCategory {
+  kSdpBandwidthParseFailure = 0,
+  kSdpBandwidthNegativeOne = 1,
+  kSdpBandwidthZero = 2,
+  kSdpBandwidthSmall = 3,  // 1 to INT_MAX/1000
+  kSdpBandwidthLarge = 4,  // INT_MAX/1000 + 1 to INT_MAX
+  kSdpBandwidthNegative = 5,
+  kSdpBandwidthMax
 };
 
 // When adding new metrics please consider using the style described in

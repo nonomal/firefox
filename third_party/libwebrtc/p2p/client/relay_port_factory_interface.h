@@ -11,17 +11,18 @@
 #ifndef P2P_CLIENT_RELAY_PORT_FACTORY_INTERFACE_H_
 #define P2P_CLIENT_RELAY_PORT_FACTORY_INTERFACE_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 #include "api/environment/environment.h"
 #include "api/local_network_access_permission.h"
 #include "api/packet_socket_factory.h"
+#include "api/task_queue/task_queue_base.h"
 #include "p2p/base/port.h"
 #include "p2p/base/port_allocator.h"
 #include "rtc_base/async_packet_socket.h"
 #include "rtc_base/network.h"
-#include "rtc_base/thread.h"
 
 namespace webrtc {
 class TurnCustomizer;
@@ -33,13 +34,14 @@ namespace webrtc {
 // A struct containing arguments to RelayPortFactory::Create()
 struct CreateRelayPortArgs {
   Environment env;
-  Thread* network_thread;
+  TaskQueueBase* network_thread;
   PacketSocketFactory* socket_factory;
   const Network* network;
   const ProtocolAddress* server_address;
   const RelayServerConfig* config;
   std::string username;
   std::string password;
+  std::string content_name;
   TurnCustomizer* turn_customizer = nullptr;
   // Relative priority of candidates from this TURN server in relation
   // to the candidates from other servers. Required because ICE priorities
@@ -47,6 +49,7 @@ struct CreateRelayPortArgs {
   int relative_priority = 0;
   LocalNetworkAccessPermissionFactoryInterface* lna_permission_factory =
       nullptr;
+  uint64_t ice_tiebreaker = 0;
 };
 
 // A factory for creating RelayPort's.

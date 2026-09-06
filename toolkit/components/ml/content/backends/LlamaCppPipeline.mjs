@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+// @ts-nocheck - TODO - Remove this to type check this file.
+
 /**
  * @import {ProgressAndStatusCallbackParams} from "../../content/Utils.sys.mjs"
  */
@@ -65,11 +67,20 @@ export class LlamaCppPipeline {
   generator = null;
   #options = {};
   #errorFactory = null;
+  #metrics = [];
 
   constructor(generator, options, errorFactory) {
+    /** @type {LlamaRunner} */
     this.generator = generator;
     this.#errorFactory = errorFactory;
     this.#options = options;
+  }
+
+  #metricsSnapShot({ name, snapshot = {} }) {
+    if (!("when" in snapshot)) {
+      snapshot.when = ChromeUtils.now();
+    }
+    this.#metrics.push({ name, ...snapshot });
   }
 
   static async initialize(
@@ -93,7 +104,7 @@ export class LlamaCppPipeline {
     } = {},
     errorFactory
   ) {
-    let startInitTime = performance.now();
+    let startInitTime = ChromeUtils.now();
 
     const modelFilePath = (
       await mlEngineWorker.getModelFile({
@@ -149,6 +160,14 @@ export class LlamaCppPipeline {
       modelFilePath,
     };
 
+    let opfsStart = ChromeUtils.now();
+    const modelBlob = await (await OPFS.getFileHandle(modelFilePath)).getFile();
+    ChromeUtils.addProfilerMarker(
+      "MLEngine:llama.cpp",
+      { startTime: opfsStart },
+      `Retrieve model file from OPFS`
+    );
+
     const generator = new LlamaRunner();
 
     await generator.initialize(
@@ -161,12 +180,24 @@ export class LlamaCppPipeline {
           nCtx: numContext,
         },
       },
-      await (await OPFS.getFileHandle(modelFilePath)).getFile()
+      modelBlob
     );
 
-    lazy.console.debug("Init time", performance.now() - startInitTime);
+    lazy.console.debug("Init time", ChromeUtils.now() - startInitTime);
 
-    return new LlamaCppPipeline(generator, options, errorFactory);
+    ChromeUtils.addProfilerMarker(
+      "MLEngine:llama.cpp",
+      { startTime: startInitTime },
+      `Initialize: ${modelId}, ctx=${numContext}, threads=${options.n_threads}/${options.n_threads_decoding}`
+    );
+
+    const pipeline = new LlamaCppPipeline(generator, options, errorFactory);
+    pipeline.#metricsSnapShot({
+      name: "initializationStart",
+      snapshot: { when: startInitTime },
+    });
+    pipeline.#metricsSnapShot({ name: "initializationEnd" });
+    return pipeline;
   }
 
   /**
@@ -210,11 +241,15 @@ export class LlamaCppPipeline {
     port = null
   ) {
     try {
-      let startTime = performance.now();
       let endPromptTime = null;
-      let startPromptTime = startTime;
-      let startDecodingTime = null;
 
+      const metrics = { runTimestamps: [] };
+      const snapshot = (name, when = ChromeUtils.now()) => {
+        metrics.runTimestamps.push({ name, when });
+      };
+
+      let inputTokens = 0;
+      let outputTokens = 0;
       let output = "";
 
       lazy.console.error("Running this.generator.createGenerationStream");
@@ -223,9 +258,18 @@ export class LlamaCppPipeline {
 
       if (Array.isArray(prompt)) {
         lazy.console.error("received prompt", prompt);
+        let formatChatStart = ChromeUtils.now();
         formattedPrompt = await this.generator.formatChat({ messages: prompt });
+        ChromeUtils.addProfilerMarker(
+          "MLEngine:llama.cpp",
+          { startTime: formatChatStart },
+          `Format chat messages`
+        );
         lazy.console.error("formated prompt ", formattedPrompt);
       }
+
+      const inferenceStartTime = ChromeUtils.now();
+      snapshot("runStart", inferenceStartTime);
 
       const stream = this.generator.createGenerationStream({
         prompt: formattedPrompt,
@@ -241,19 +285,25 @@ export class LlamaCppPipeline {
         stopOnEndOfGenerationTokens,
       });
 
+      let chunkStartTime = ChromeUtils.now();
+      let tokenCount = 0;
       for await (const chunk of stream) {
         const isPrompt = chunk.phase == "prompt";
 
         if (isPrompt && chunk.isPhaseCompleted) {
-          endPromptTime = performance.now();
-        } else if (!startDecodingTime) {
-          startDecodingTime = performance.now();
+          endPromptTime = ChromeUtils.now();
+        }
+
+        if (isPrompt) {
+          inputTokens += chunk.tokens.length;
+        } else {
+          outputTokens += chunk.tokens.length;
         }
 
         if (skipPrompt && isPrompt) {
           continue;
         }
-        output += chunk;
+        output += chunk.piece ?? "";
         port?.postMessage({
           tokens: chunk.tokens,
           ok: true,
@@ -272,13 +322,31 @@ export class LlamaCppPipeline {
           type: Progress.ProgressType.INFERENCE,
           statusText: Progress.ProgressStatusText.IN_PROGRESS,
         });
+        tokenCount += chunk.tokens.length;
+        ChromeUtils.addProfilerMarker(
+          "MLEngine:llama.cpp",
+          chunkStartTime,
+          `Generate ${chunk.tokens.length} tokens`
+        );
+        chunkStartTime = ChromeUtils.now();
       }
 
-      const endTime = performance.now();
-      lazy.console.debug("Decoding time", endTime - startDecodingTime);
-      lazy.console.debug("Prompt time", endPromptTime - startPromptTime);
-      lazy.console.debug("Overall time", endTime - startTime);
+      const endTime = ChromeUtils.now();
+      snapshot("runEnd", endTime);
+      const prefillEnd = endPromptTime ?? inferenceStartTime;
+      const inferenceTime = endTime - inferenceStartTime;
+      const decodingTime = endTime - prefillEnd;
+      const timeToFirstToken = prefillEnd - inferenceStartTime;
+      lazy.console.debug("Decoding time", decodingTime);
+      lazy.console.debug("Time to first token", timeToFirstToken);
+      lazy.console.debug("Overall time", inferenceTime);
       lazy.console.debug("Generated", output);
+
+      ChromeUtils.addProfilerMarker(
+        "MLEngine:llama.cpp",
+        { startTime: inferenceStartTime },
+        `Prompt generation (${tokenCount} tokens generated)`
+      );
 
       port?.postMessage({ done: true, finalOutput: output, ok: true });
 
@@ -293,7 +361,27 @@ export class LlamaCppPipeline {
         statusText: Progress.ProgressStatusText.DONE,
       });
 
-      return { done: true, finalOutput: output, ok: true, metrics: [] };
+      return {
+        done: true,
+        finalOutput: output,
+        ok: true,
+        metrics: {
+          runTimestamps: [...this.#metrics, ...metrics.runTimestamps],
+          inputTokens,
+          outputTokens,
+          inferenceTime,
+          decodingTime,
+          timeToFirstToken,
+          tokensPerSecond:
+            decodingTime > 0 && outputTokens > 0
+              ? outputTokens / (decodingTime / 1000)
+              : undefined,
+          timePerOutputToken:
+            outputTokens > 0 && decodingTime > 0
+              ? decodingTime / outputTokens
+              : undefined,
+        },
+      };
     } catch (error) {
       const backendError = this.#errorFactory(error);
       port?.postMessage({ done: true, ok: false, error: backendError });

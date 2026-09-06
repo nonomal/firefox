@@ -12,28 +12,28 @@ import androidx.fragment.app.Fragment
 import androidx.navigation.fragment.navArgs
 import org.mozilla.fenix.R
 import org.mozilla.fenix.databinding.FragmentTrackingProtectionBlockingBinding
-import org.mozilla.fenix.ext.settings
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
+import org.mozilla.fenix.ext.requireComponents
 import org.mozilla.fenix.ext.showToolbar
 import org.mozilla.fenix.utils.Settings
 
 /**
- * A screen that displays a read-only list of the types of trackers and scripts
- * that are being blocked by a specific tracking protection mode (Standard, Strict, or Custom).
+ * A screen that displays a read-only list of the types of trackers and scripts that are being blocked by a specific
+ * tracking protection mode (Standard, Strict, or Custom).
  *
- * This fragment receives the [TrackingProtectionMode] as a navigation argument and adjusts the
- * visibility of the tracker categories based on the selected mode and its current settings.
- * For example, in "Standard" mode, it shows a default set of blocked categories, while in
- * "Custom" mode, it reflects the user's specific choices.
+ * This fragment receives the [TrackingProtectionMode] as a navigation argument and adjusts the visibility of the
+ * tracker categories based on the selected mode and its current settings. For example, in "Standard" mode, it shows a
+ * default set of blocked categories, while in "Custom" mode, it reflects the user's specific choices.
  */
-class TrackingProtectionBlockingFragment : Fragment(R.layout.fragment_tracking_protection_blocking) {
+class TrackingProtectionBlockingFragment :
+    Fragment(R.layout.fragment_tracking_protection_blocking), SystemInsetsPaddedFragment {
 
     private val args: TrackingProtectionBlockingFragmentArgs by navArgs()
 
-    internal var settingsProvider: () -> Settings = { requireContext().settings() }
+    internal var settingsProvider: () -> Settings = { requireComponents.settings }
     private val settings: Settings by lazy { settingsProvider() }
 
-    @VisibleForTesting
-    internal lateinit var binding: FragmentTrackingProtectionBlockingBinding
+    @VisibleForTesting internal lateinit var binding: FragmentTrackingProtectionBlockingBinding
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -46,8 +46,8 @@ class TrackingProtectionBlockingFragment : Fragment(R.layout.fragment_tracking_p
     }
 
     /**
-     * Sets the title and description for the "Cookies" category based on whether the
-     * "Total Cookie Protection" feature is enabled.
+     * Sets the title and description for the "Cookies" category based on whether the "Total Cookie Protection" feature
+     * is enabled.
      */
     @VisibleForTesting
     internal fun setTotalCookieProtectionText() {
@@ -58,8 +58,8 @@ class TrackingProtectionBlockingFragment : Fragment(R.layout.fragment_tracking_p
     }
 
     /**
-     * Updates the visibility of the tracker category views on the screen based on the selected
-     * tracking protection mode and its current configuration.
+     * Updates the visibility of the tracker category views on the screen based on the selected tracking protection mode
+     * and its current configuration.
      *
      * - In **Standard** mode, all categories are shown except for "Tracking content".
      * - In **Strict** mode, all categories are shown.
@@ -79,16 +79,11 @@ class TrackingProtectionBlockingFragment : Fragment(R.layout.fragment_tracking_p
             }
 
             TrackingProtectionMode.CUSTOM -> {
-                binding.categoryFingerprinters.isVisible =
-                    settings.blockFingerprintersInCustomTrackingProtection
-                binding.categoryCryptominers.isVisible =
-                    settings.blockCryptominersInCustomTrackingProtection
-                binding.categoryCookies.isVisible =
-                    settings.blockCookiesInCustomTrackingProtection
-                binding.categoryTrackingContent.isVisible =
-                    settings.blockTrackingContentInCustomTrackingProtection
-                binding.categoryRedirectTrackers.isVisible =
-                    settings.blockRedirectTrackersInCustomTrackingProtection
+                binding.categoryFingerprinters.isVisible = settings.blockFingerprintersInCustomTrackingProtection
+                binding.categoryCryptominers.isVisible = settings.blockCryptominersInCustomTrackingProtection
+                binding.categoryCookies.isVisible = settings.blockCookiesInCustomTrackingProtection
+                binding.categoryTrackingContent.isVisible = settings.blockTrackingContentInCustomTrackingProtection
+                binding.categoryRedirectTrackers.isVisible = settings.blockRedirectTrackersInCustomTrackingProtection
                 binding.categorySuspectedFingerprinters.isVisible =
                     settings.blockSuspectedFingerprintersInCustomTrackingProtection
             }

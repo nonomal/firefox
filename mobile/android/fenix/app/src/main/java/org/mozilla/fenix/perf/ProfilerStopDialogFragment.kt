@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.fragment.app.DialogFragment
@@ -26,8 +27,8 @@ import org.mozilla.fenix.R
 import org.mozilla.fenix.theme.FirefoxTheme
 
 /**
- * Dialog fragment for stopping profiling sessions. The dialog uses the [ProfilerViewModel]
- * to manage the state of the profiler.
+ * Dialog fragment for stopping profiling sessions. The dialog uses the [ProfilerViewModel] to manage the state of the
+ * profiler.
  */
 class ProfilerStopDialogFragment : DialogFragment() {
 
@@ -43,7 +44,6 @@ class ProfilerStopDialogFragment : DialogFragment() {
 
     override fun onDismiss(dialog: DialogInterface) {
         profilerViewModel.resetUiState()
-        profilerViewModel.updateProfilerActiveStatus()
         super.onDismiss(dialog)
         if (activity is StopProfilerActivity) {
             activity?.finish()
@@ -55,13 +55,12 @@ class ProfilerStopDialogFragment : DialogFragment() {
         val uiState by viewModel.uiState.collectAsState()
         val context = LocalContext.current
 
-        val toastMessage: String? = when (val state = uiState) {
-            is ProfilerUiState.ShowToast ->
-                stringResource(state.messageResId) + state.extra
-            is ProfilerUiState.Error ->
-                stringResource(state.messageResId) + state.errorDetails
-            else -> null
-        }
+        val toastMessage: String? =
+            when (val state = uiState) {
+                is ProfilerUiState.ShowToast -> stringResource(state.messageResId) + state.extra
+                is ProfilerUiState.Error -> stringResource(state.messageResId) + state.errorDetails
+                else -> null
+            }
 
         LaunchedEffect(uiState) {
             when (uiState) {
@@ -85,10 +84,11 @@ class ProfilerStopDialogFragment : DialogFragment() {
                 if (uiState !is ProfilerUiState.Gathering && uiState !is ProfilerUiState.Stopping) {
                     this@ProfilerStopDialogFragment.dismiss()
                 }
-            },
+            }
         ) {
             when (uiState) {
-                is ProfilerUiState.Idle, is ProfilerUiState.Running -> {
+                is ProfilerUiState.Idle,
+                is ProfilerUiState.Running -> {
                     UrlWarningCard(
                         onStopAndSave = { viewModel.stopProfilerAndSave() },
                         onStopWithoutSaving = { viewModel.stopProfilerWithoutSaving() },
@@ -106,25 +106,35 @@ class ProfilerStopDialogFragment : DialogFragment() {
             }
         }
     }
+}
 
-    @Composable
-    private fun UrlWarningCard(
-        onStopAndSave: () -> Unit,
-        onStopWithoutSaving: () -> Unit,
+@Composable
+private fun UrlWarningCard(
+    onStopAndSave: () -> Unit,
+    onStopWithoutSaving: () -> Unit,
+) {
+    BaseProfilerDialogContent(
+        titleText = stringResource(R.string.profiler_url_warning),
+        negativeActionText = stringResource(R.string.profiler_start_cancel),
+        onNegativeAction = onStopWithoutSaving,
+        positiveActionText = stringResource(R.string.profiler_as_url),
+        onPositiveAction = onStopAndSave,
     ) {
-        BaseProfilerDialogContent(
-            titleText = stringResource(R.string.profiler_url_warning),
-            negativeActionText = stringResource(R.string.profiler_start_cancel),
-            onNegativeAction = onStopWithoutSaving,
-            positiveActionText = stringResource(R.string.profiler_as_url),
-            onPositiveAction = onStopAndSave,
-        ) {
-            Text(
-                text = stringResource(R.string.profiler_url_warning_explained),
-                color = FirefoxTheme.colors.textPrimary,
-                fontWeight = FontWeight.Medium,
-                fontSize = 15.sp,
-            )
-        }
+        Text(
+            text = stringResource(R.string.profiler_url_warning_explained),
+            fontWeight = FontWeight.Medium,
+            fontSize = 15.sp,
+        )
+    }
+}
+
+@Composable
+@PreviewLightDark
+private fun UrlWarningCardPreview() {
+    FirefoxTheme {
+        UrlWarningCard(
+            onStopAndSave = {},
+            onStopWithoutSaving = {},
+        )
     }
 }

@@ -1,22 +1,22 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef DMABufSurface_h__
-#define DMABufSurface_h__
+#ifndef DMABufSurface_h_
+#define DMABufSurface_h_
+
+#include <stdint.h>
 
 #include <functional>
-#include <stdint.h>
-#include "mozilla/widget/va_drmcommon.h"
+
 #include "GLTypes.h"
 #include "ImageContainer.h"
-#include "nsISupportsImpl.h"
-#include "mozilla/gfx/Types.h"
 #include "mozilla/Mutex.h"
+#include "mozilla/gfx/Types.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
 #include "mozilla/widget/DMABufFormats.h"
+#include "mozilla/widget/va_drmcommon.h"
+#include "nsISupportsImpl.h"
 
 typedef void* EGLImageKHR;
 typedef void* EGLSyncKHR;
@@ -114,8 +114,12 @@ class DMABufSurface {
   virtual bool Serialize(
       mozilla::layers::SurfaceDescriptor& aOutDescriptor) = 0;
 
+  // WidthAligned/HeightAligned is size of buffer while
+  // Width/Height is size of actual content.
   virtual int GetWidth(int aPlane = 0) = 0;
   virtual int GetHeight(int aPlane = 0) = 0;
+  virtual int GetWidthAligned(int aPlane = 0) = 0;
+  virtual int GetHeightAligned(int aPlane = 0) = 0;
   virtual mozilla::gfx::SurfaceFormat GetFormat() = 0;
 
   virtual bool CreateTexture(mozilla::gl::GLContext* aGLContext,
@@ -147,21 +151,46 @@ class DMABufSurface {
       mozilla::layers::Image::BuildSdbFlags aFlags,
       const std::function<mozilla::layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
-  virtual mozilla::gfx::YUVColorSpace GetYUVColorSpace() {
-    return mozilla::gfx::YUVColorSpace::Default;
-  };
+  void SetYUVColorSpace(mozilla::gfx::YUVColorSpace aColorSpace) {
+    mColorSpace = aColorSpace;
+  }
+  mozilla::gfx::YUVColorSpace GetYUVColorSpace() { return mColorSpace; }
+  void SetColorPrimaries(mozilla::gfx::ColorSpace2 aColorPrimaries) {
+    mColorPrimaries = aColorPrimaries;
+  }
+  void SetTransferFunction(mozilla::gfx::TransferFunction aTransferFunction) {
+    mTransferFunction = aTransferFunction;
+  }
+  mozilla::gfx::TransferFunction GetTransferFunction() {
+    return mTransferFunction;
+  }
+  bool IsHDRSurface() {
+    return mTransferFunction == mozilla::gfx::TransferFunction::PQ ||
+           mTransferFunction == mozilla::gfx::TransferFunction::HLG;
+  }
+
+  void SetHDRMetadata(mozilla::gfx::HDRMetadata aHDRMetadata) {
+    mHDRMetadata = aHDRMetadata;
+  }
+
+  mozilla::gfx::HDRMetadata GetHDRMetadata() { return mHDRMetadata; }
 
   bool IsFullRange() { return mColorRange == mozilla::gfx::ColorRange::FULL; };
   void SetColorRange(mozilla::gfx::ColorRange aColorRange) {
     mColorRange = aColorRange;
   };
-  virtual bool IsHDRSurface() { return false; }
 
   void FenceSet();
   void FenceWait();
+  static void FenceWait(RefPtr<mozilla::gl::GLContext> aGL,
+                        RefPtr<mozilla::gfx::FileHandleWrapper> aSyncFd);
   void FenceDelete();
+  static void FenceDelete(RefPtr<mozilla::gl::GLContext> aGL, EGLSyncKHR aSync);
+  void FenceDeleteLocked(const mozilla::MutexAutoLock& aProofOfLock)
+      MOZ_REQUIRES(mSurfaceLock);
 
   void MaybeSemaphoreWait(GLuint aGlTexture);
+  void SetSemaphoreFd(int aDuppedRawFd, bool aIsSyncFd = false);
 
   // Set and get a global surface UID. The UID is shared across process
   // and it's used to track surface lifetime in various parts of rendering
@@ -210,7 +239,7 @@ class DMABufSurface {
 
 #ifdef MOZ_LOGGING
   virtual void Clear(unsigned int aValue) {};
-  virtual void DumpToFile(const char* pFile) {};
+  virtual void DumpToFile(const char* pFile) = 0;
 #endif
 
 #ifdef MOZ_WAYLAND
@@ -248,7 +277,9 @@ class DMABufSurface {
   // Export global ref count object by file descriptor.
   int GlobalRefCountExport();
 
-  void ReleaseDMABuf();
+  // Returns true if the mem was actually released as it can be called
+  // for empty surface too.
+  [[nodiscard]] bool ReleaseDMABuf();
 
 #ifdef MOZ_LOGGING
   void* MapInternal(uint32_t aX, uint32_t aY, uint32_t aWidth, uint32_t aHeight,
@@ -259,7 +290,7 @@ class DMABufSurface {
       mozilla::widget::DMABufDeviceLock* aDeviceLock, int aPlane) = 0;
 
   bool OpenFileDescriptors(mozilla::widget::DMABufDeviceLock* aDeviceLock);
-  void CloseFileDescriptors();
+  bool CloseFileDescriptors();
 
   nsresult ReadIntoBuffer(mozilla::gl::GLContext* aGLContext, uint8_t* aData,
                           int32_t aStride, const mozilla::gfx::IntSize& aSize,
@@ -293,6 +324,7 @@ class DMABufSurface {
   RefPtr<mozilla::gfx::FileHandleWrapper> mSyncFd;
   EGLSyncKHR mSync;
   RefPtr<mozilla::gfx::FileHandleWrapper> mSemaphoreFd;
+  bool mSemaphoreFdIsSyncFd = false;
   // mGL is tied to textures/eglimages created over dmabuf and it's null for
   // dmabuf without textures/eglimages.
   RefPtr<mozilla::gl::GLContext> mGL;
@@ -318,6 +350,14 @@ class DMABufSurface {
   mozilla::Mutex mSurfaceLock MOZ_UNANNOTATED;
 
   mozilla::gfx::ColorRange mColorRange = mozilla::gfx::ColorRange::LIMITED;
+
+  mozilla::gfx::YUVColorSpace mColorSpace =
+      mozilla::gfx::YUVColorSpace::Default;
+  mozilla::gfx::ColorSpace2 mColorPrimaries =
+      mozilla::gfx::ColorSpace2::UNKNOWN;
+  mozilla::gfx::TransferFunction mTransferFunction =
+      mozilla::gfx::TransferFunction::Default;
+  mozilla::gfx::HDRMetadata mHDRMetadata{};
 };
 
 class DMABufSurfaceRGBA final : public DMABufSurface {
@@ -341,6 +381,9 @@ class DMABufSurfaceRGBA final : public DMABufSurface {
 
   int GetWidth(int aPlane = 0) override { return mWidth; };
   int GetHeight(int aPlane = 0) override { return mHeight; };
+  int GetWidthAligned(int aPlane = 0) override { return mWidth; };
+  int GetHeightAligned(int aPlane = 0) override { return mHeight; };
+
   mozilla::gfx::SurfaceFormat GetFormat() override;
   bool HasAlpha();
 
@@ -376,10 +419,10 @@ class DMABufSurfaceRGBA final : public DMABufSurface {
 #endif
 
   DMABufSurfaceRGBA();
-
- private:
   DMABufSurfaceRGBA(const DMABufSurfaceRGBA&) = delete;
   DMABufSurfaceRGBA& operator=(const DMABufSurfaceRGBA&) = delete;
+
+ private:
   ~DMABufSurfaceRGBA();
 
   bool Create(mozilla::gl::GLContext* aGLContext, int aWidth, int aHeight,
@@ -412,6 +455,9 @@ class DMABufSurfaceRGBA final : public DMABufSurface {
 
 class DMABufSurfaceYUV final : public DMABufSurface {
  public:
+  DMABufSurfaceYUV(const DMABufSurfaceYUV&) = delete;
+  DMABufSurfaceYUV& operator=(const DMABufSurfaceYUV&) = delete;
+
   static already_AddRefed<DMABufSurfaceYUV> CreateYUVSurface(
       const VADRMPRIMESurfaceDescriptor& aDesc, int aWidth, int aHeight);
   static already_AddRefed<DMABufSurfaceYUV> CopyYUVSurface(
@@ -431,6 +477,11 @@ class DMABufSurfaceYUV final : public DMABufSurface {
 
   int GetWidth(int aPlane = 0) override { return mWidth[aPlane]; }
   int GetHeight(int aPlane = 0) override { return mHeight[aPlane]; }
+
+  int GetWidthAligned(int aPlane = 0) override { return mWidthAligned[aPlane]; }
+  int GetHeightAligned(int aPlane = 0) override {
+    return mHeightAligned[aPlane];
+  }
   mozilla::gfx::SurfaceFormat GetFormat() override;
 
   // Get hardware compatible format for SW decoded one.
@@ -440,6 +491,10 @@ class DMABufSurfaceYUV final : public DMABufSurface {
 
   bool CreateTexture(mozilla::gl::GLContext* aGLContext,
                      int aPlane = 0) override;
+  bool CreateTextureViaCopyYUV(mozilla::gl::GLContext* aGLContext,
+                               int aPlane = 0);
+  bool CreateTextureViaCopyP010(mozilla::gl::GLContext* aGLContext,
+                                int aPlane = 0);
   void ReleaseTextures() override;
 
   void ReleaseSurface() override;
@@ -452,23 +507,6 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   int GetTextureCount() override;
   bool HoldsTexture() override;
 
-  void SetYUVColorSpace(mozilla::gfx::YUVColorSpace aColorSpace) {
-    mColorSpace = aColorSpace;
-  }
-  mozilla::gfx::YUVColorSpace GetYUVColorSpace() override {
-    return mColorSpace;
-  }
-  void SetColorPrimaries(mozilla::gfx::ColorSpace2 aColorPrimaries) {
-    mColorPrimaries = aColorPrimaries;
-  }
-  void SetTransferFunction(mozilla::gfx::TransferFunction aTransferFunction) {
-    mTransferFunction = aTransferFunction;
-  }
-  bool IsHDRSurface() override {
-    return mColorPrimaries == mozilla::gfx::ColorSpace2::BT2020 &&
-           (mTransferFunction == mozilla::gfx::TransferFunction::PQ ||
-            mTransferFunction == mozilla::gfx::TransferFunction::HLG);
-  }
   void SetWPChromaLocation(uint32_t aWPChromaLocation) {
     mWPChromaLocation = aWPChromaLocation;
   }
@@ -486,9 +524,11 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   wl_buffer* CreateWlBuffer() override;
 #endif
 
+#ifdef MOZ_LOGGING
+  void DumpToFile(const char* pFile) override;
+#endif
+
  private:
-  DMABufSurfaceYUV(const DMABufSurfaceYUV&) = delete;
-  DMABufSurfaceYUV& operator=(const DMABufSurfaceYUV&) = delete;
   ~DMABufSurfaceYUV();
 
   bool Create(const mozilla::layers::SurfaceDescriptor& aDesc) override;
@@ -526,12 +566,6 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   EGLImageKHR mEGLImage[DMABUF_BUFFER_PLANES];
   GLuint mTexture[DMABUF_BUFFER_PLANES];
   uint64_t mBufferModifiers[DMABUF_BUFFER_PLANES];
-  mozilla::gfx::YUVColorSpace mColorSpace =
-      mozilla::gfx::YUVColorSpace::Default;
-  mozilla::gfx::ColorSpace2 mColorPrimaries =
-      mozilla::gfx::ColorSpace2::UNKNOWN;
-  mozilla::gfx::TransferFunction mTransferFunction =
-      mozilla::gfx::TransferFunction::Default;
   // Chroma location in wp_color_representation_surface_v1_chroma_location
   // format.
   uint32_t mWPChromaLocation = 0;
